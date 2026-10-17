@@ -146,6 +146,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
             ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED,
+            ComfortSettings.DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
         settings.getPreferenceStore().setDefault(

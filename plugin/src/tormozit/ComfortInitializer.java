@@ -55,6 +55,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR,
             ComfortSettings.DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR);
         store.setDefault(
+            ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED,
+            ComfortSettings.DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED);
+        store.setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
         store.setDefault(

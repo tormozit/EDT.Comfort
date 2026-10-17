@@ -18,14 +18,21 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.dialogs.IPageChangedListener;
+import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.preference.PreferenceConverter;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.TextAttribute;
 import org.eclipse.jface.text.TextPresentation;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentListener;
+import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextPresentationListener;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CaretEvent;
+import org.eclipse.swt.custom.CaretListener;
+import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.RGB;
@@ -41,6 +48,8 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.AbstractDecoratedTextEditorPreferenceConstants;
 import org.eclipse.xtext.ide.editor.syntaxcoloring.IHighlightedPositionAcceptor;
 import org.eclipse.xtext.ide.editor.syntaxcoloring.ISemanticHighlightingCalculator;
 import org.eclipse.xtext.resource.XtextResource;
@@ -49,6 +58,7 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.syntaxcoloring.AttributedPosition;
 import org.eclipse.xtext.ui.editor.syntaxcoloring.HighlightingPresenter;
 import org.eclipse.xtext.ui.editor.syntaxcoloring.HighlightingReconciler;
+import org.eclipse.xtext.ui.editor.syntaxcoloring.TextAttributeProvider;
 import org.eclipse.xtext.util.CancelIndicator;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -96,6 +106,7 @@ public final class BslEditorHighlightingHook implements IStartup
                     || ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR.equals(prop)
                     || ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_ENABLED.equals(prop)
                     || ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR.equals(prop)
+                    || ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED.equals(prop)
                     || ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(prop))
                 {
                     PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
@@ -528,11 +539,218 @@ public final class BslEditorHighlightingHook implements IStartup
             putTextAttribute(attributes,
                 BslServerCallHighlightingConfiguration.KEYWORD_MEMBER_NAME_ID,
                 new TextAttribute(null, null, org.eclipse.swt.SWT.NONE, null));
+            if (attributeProvider instanceof TextAttributeProvider provider
+                && reconciler instanceof HighlightingReconciler hr)
+                registerQueryStyles(provider, attributes, resolveSourceViewer(hr));
         }
         catch (Exception e)
         {
             Global.log(TAG, "registerStyle failed: " + e.getMessage()); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Стили запроса в литерале (issue #817): цвет и начертание — из стилей редактора
+     * запроса ({@code Ql_*}, их отдаёт штатный {@code QlInBslTextAttributeProvider}),
+     * фон — фон редактора, слегка смещённый к чёрному (светлая тема) или к белому (тёмная).
+     * Промежутки между токенами — цветом строки BSL.
+     */
+    private static void registerQueryStyles(TextAttributeProvider provider, HashMap<String, TextAttribute> attributes,
+        XtextSourceViewer viewer)
+    {
+        StyledText text = viewer == null ? null : viewer.getTextWidget();
+        if (text == null || text.isDisposed())
+            return;
+        boolean dark = ThemeAwareColors.isDarkTheme();
+        RGB editorBackground = text.getBackground().getRGB();
+        Color background = new Color(text.getDisplay(), dark
+            ? blend(editorBackground, new RGB(255, 255, 255), 0.08)
+            : blend(editorBackground, new RGB(0, 0, 0), 0.04));
+        Color defaultForeground = text.getForeground();
+        QueryCurrentLine.install(viewer, text, background);
+
+        TextAttribute stringAttribute = provider.getAttribute(QUERY_FALLBACK_BSL_IDS.get("Ql_Strings")); //$NON-NLS-1$
+        putTextAttribute(attributes, BslServerCallHighlightingConfiguration.QUERY_TEXT_ID,
+            withBackground(stringAttribute, null, defaultForeground, background));
+        for (String qlId : BslServerCallHighlightingConfiguration.QUERY_TOKEN_QL_IDS)
+        {
+            TextAttribute fallback = provider.getAttribute(QUERY_FALLBACK_BSL_IDS.get(qlId));
+            putTextAttribute(attributes, BslServerCallHighlightingConfiguration.queryTokenId(qlId),
+                withBackground(provider.getAttribute(qlId), fallback, defaultForeground, background));
+        }
+    }
+
+    /**
+     * Стиль BSL на случай, когда стили редактора запроса ещё недоступны
+     * ({@code QlTextAttributeProvider.INSTANCE} не создан до первого открытия редактора запроса).
+     */
+    private static final Map<String, String> QUERY_FALLBACK_BSL_IDS = Map.of(
+        "Ql_Keywords", "BSL_Keywords", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Function", "Builtin function", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Parameters", "BSL_Pragmas", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Comment", "Comment", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Strings", "Strings", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Operators", "Operators", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Brackets", "Brackets", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_SplitterQuery", "Operators", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Numbers", "Numbers", //$NON-NLS-1$ //$NON-NLS-2$
+        "Ql_Others", "Others"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /** Цвет непустой: при {@code null} StyleRange взял бы цвет строки из лексической раскраски. */
+    private static TextAttribute withBackground(TextAttribute attribute, TextAttribute fallback,
+        Color defaultForeground, Color background)
+    {
+        TextAttribute source = attribute != null && attribute.getForeground() != null ? attribute : fallback;
+        Color foreground = source != null && source.getForeground() != null ? source.getForeground() : defaultForeground;
+        int style = source != null ? source.getStyle() : SWT.NONE;
+        return new TextAttribute(foreground, background, style, source != null ? source.getFont() : null);
+    }
+
+    /**
+     * Фон запроса задан в {@link StyleRange} и перекрывает подсветку текущей строки:
+     * {@code CursorLinePainter} рисует её фоном строки ({@code LineBackground}), а фон
+     * диапазона в SWT всегда сильнее. На строке каретки фон запроса заменяется цветом
+     * текущей строки — при применении представления и при переходе каретки на другую строку.
+     */
+    private static final class QueryCurrentLine implements ITextPresentationListener, CaretListener
+    {
+        private static final String KEY = "tormozit.queryCurrentLine"; //$NON-NLS-1$
+        private final XtextSourceViewer viewer;
+        private final StyledText text;
+        private Color queryBackground;
+        private int widgetLine = -1;
+
+        private QueryCurrentLine(XtextSourceViewer viewer, StyledText text)
+        {
+            this.viewer = viewer;
+            this.text = text;
+        }
+
+        static void install(XtextSourceViewer viewer, StyledText text, Color queryBackground)
+        {
+            QueryCurrentLine instance;
+            if (text.getData(KEY) instanceof QueryCurrentLine existing)
+                instance = existing;
+            else
+            {
+                QueryCurrentLine created = new QueryCurrentLine(viewer, text);
+                text.setData(KEY, created);
+                text.addCaretListener(created);
+                text.addDisposeListener(event -> viewer.removeTextPresentationListener(created));
+                instance = created;
+            }
+            instance.queryBackground = queryBackground;
+            // Xtext может переустановить свой HighlightingPresenter при смене ввода — держим слушатель последним.
+            viewer.removeTextPresentationListener(instance);
+            viewer.addTextPresentationListener(instance);
+            instance.widgetLine = text.getLineAtOffset(text.getCaretOffset());
+        }
+
+        /** Представление в координатах модели: строка каретки — по модельному офсету. */
+        @Override
+        public void applyTextPresentation(TextPresentation presentation)
+        {
+            Color lineColor = currentLineColor();
+            IDocument document = viewer.getDocument();
+            if (lineColor == null || queryBackground == null || document == null)
+                return;
+            IRegion line;
+            try
+            {
+                line = document.getLineInformationOfOffset(viewer.getSelectedRange().x);
+            }
+            catch (BadLocationException e)
+            {
+                return;
+            }
+            List<StyleRange> replacements = new ArrayList<>();
+            Iterator<StyleRange> ranges = presentation.getAllStyleRangeIterator();
+            while (ranges.hasNext())
+            {
+                StyleRange range = ranges.next();
+                StyleRange clipped = clip(range, line.getOffset(), line.getOffset() + line.getLength());
+                if (clipped != null && queryBackground.equals(range.background))
+                {
+                    clipped.background = lineColor;
+                    replacements.add(clipped);
+                }
+            }
+            if (!replacements.isEmpty())
+                presentation.replaceStyleRanges(replacements.toArray(new StyleRange[0]));
+        }
+
+        /** Событие виджета — координаты виджета. */
+        @Override
+        public void caretMoved(CaretEvent event)
+        {
+            int line = text.getLineAtOffset(event.caretOffset);
+            if (line == widgetLine)
+                return;
+            Color lineColor = currentLineColor();
+            if (lineColor != null && queryBackground != null)
+            {
+                recolor(widgetLine, lineColor, queryBackground);
+                recolor(line, queryBackground, lineColor);
+            }
+            widgetLine = line;
+        }
+
+        private void recolor(int line, Color from, Color to)
+        {
+            if (line < 0 || line >= text.getLineCount())
+                return;
+            int start = text.getOffsetAtLine(line);
+            int end = start + text.getLine(line).length();
+            if (end <= start)
+                return;
+            StyleRange[] ranges = text.getStyleRanges(start, end - start);
+            List<StyleRange> result = new ArrayList<>(ranges.length);
+            boolean changed = false;
+            for (StyleRange range : ranges)
+            {
+                StyleRange clipped = clip(range, start, end);
+                if (clipped == null)
+                    continue;
+                if (from.equals(clipped.background))
+                {
+                    clipped.background = to;
+                    changed = true;
+                }
+                result.add(clipped);
+            }
+            if (changed)
+                text.replaceStyleRanges(start, end - start, result.toArray(new StyleRange[0]));
+        }
+
+        private static StyleRange clip(StyleRange range, int start, int end)
+        {
+            int from = Math.max(range.start, start);
+            int to = Math.min(range.start + range.length, end);
+            if (to <= from)
+                return null;
+            StyleRange clipped = (StyleRange)range.clone();
+            clipped.start = from;
+            clipped.length = to - from;
+            return clipped;
+        }
+
+        /** Цвет подсветки текущей строки редактора; {@code null}, если подсветка выключена. */
+        private Color currentLineColor()
+        {
+            IPreferenceStore store = EditorsUI.getPreferenceStore();
+            if (!store.getBoolean(AbstractDecoratedTextEditorPreferenceConstants.EDITOR_CURRENT_LINE))
+                return null;
+            return new Color(text.getDisplay(), PreferenceConverter.getColor(store,
+                AbstractDecoratedTextEditorPreferenceConstants.EDITOR_CURRENT_LINE_COLOR));
+        }
+    }
+
+    private static RGB blend(RGB base, RGB target, double ratio)
+    {
+        return new RGB(
+            (int)Math.round(base.red + (target.red - base.red) * ratio),
+            (int)Math.round(base.green + (target.green - base.green) * ratio),
+            (int)Math.round(base.blue + (target.blue - base.blue) * ratio));
     }
 
     private static void putServerCallStyle(HashMap<String, TextAttribute> attributes, String id, String colorStr,
@@ -966,7 +1184,7 @@ public final class BslEditorHighlightingHook implements IStartup
                     resource, acceptor, cancelIndicator);
             }
 
-            calculate("comfort", new BslEditorHighlighting(), resource, acceptor, cancelIndicator); //$NON-NLS-1$
+            calculate("comfort", new BslEditorHighlighting(delegate), resource, acceptor, cancelIndicator); //$NON-NLS-1$
         }
 
         private void calculate(String phase, ISemanticHighlightingCalculator calculator,

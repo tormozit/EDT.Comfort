@@ -71,6 +71,8 @@ final class ComfortVisibleSettings
             "Подсвечивать создаваемые переменные", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR, //$NON-NLS-1$
             "Цвет создаваемых переменных:", Kind.THEME_COLOR), //$NON-NLS-1$
+        new Setting("Редактор кода", ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED, //$NON-NLS-1$
+            "Синтаксическая раскраска запросов в модуле", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED, //$NON-NLS-1$
             "Отображать начало конструкции в её конце", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES, //$NON-NLS-1$

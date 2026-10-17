@@ -99,6 +99,16 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, parent);
         indentUnderCheckbox(implicitVariableColorField, parent);
 
+        BooleanFieldEditor queryLiteralField = new BooleanFieldEditor(
+            ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED),
+            parent);
+        addField(queryLiteralField);
+        setFieldTooltip(queryLiteralField,
+            "Раскрашивать текст запроса в строковом литерале модуля цветами редактора запроса и выделять его фоном.\n" //$NON-NLS-1$
+            + "Текстом запроса считается многострочный литерал, первое слово которого — ВЫБРАТЬ (SELECT) или УНИЧТОЖИТЬ (DROP).", //$NON-NLS-1$
+            parent);
+
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             ComfortVisibleSettings.label(ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED),

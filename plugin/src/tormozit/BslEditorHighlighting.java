@@ -1,7 +1,9 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
@@ -14,6 +16,7 @@ import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.util.CancelIndicator;
+import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.bsl.common.Symbols;
 import com._1c.g5.v8.dt.bsl.model.Block;
@@ -29,6 +32,7 @@ import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 
 /**
@@ -55,6 +59,14 @@ import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 public final class BslEditorHighlighting
     implements ISemanticHighlightingCalculator
 {
+    /** Штатный калькулятор EDT: из него берётся лексер запроса в BSL-строке. */
+    private final Object nativeCalculator;
+
+    BslEditorHighlighting(Object nativeCalculator)
+    {
+        this.nativeCalculator = nativeCalculator;
+    }
+
     @Override
     public void provideHighlightingFor(XtextResource resource, IHighlightedPositionAcceptor acceptor,
         CancelIndicator cancelIndicator)
@@ -74,6 +86,8 @@ public final class BslEditorHighlighting
             highlightServerCalls(root, acceptor, cancelIndicator);
         if (implicitVars && !isCanceled(cancelIndicator))
             highlightImplicitVariableCreations(root, acceptor, cancelIndicator);
+        if (ComfortSettings.isQueryLiteralHighlightingEnabled() && !isCanceled(cancelIndicator))
+            QueryLiterals.highlight(nativeCalculator, root, acceptor, cancelIndicator);
     }
 
     /**
@@ -337,8 +351,214 @@ public final class BslEditorHighlighting
         }
     }
 
-    private boolean isCanceled(CancelIndicator cancelIndicator)
+    private static boolean isCanceled(CancelIndicator cancelIndicator)
     {
         return cancelIndicator != null && cancelIndicator.isCanceled();
+    }
+
+    /**
+     * Раскраска текстов запросов в строковых литералах (issue #817): многострочный
+     * литерал, первое слово которого {@code ВЫБРАТЬ}/{@code SELECT} или
+     * {@code УНИЧТОЖИТЬ}/{@code DROP}, разбирается
+     * штатным лексером EDT «запрос в BSL-строке» ({@code QlInBslTokenHighlighting}).
+     * Его экземпляр внедрён в поле {@code qlInBslTokenHighlighting} штатного
+     * {@code BslSemanticHighlightingCalculator}, но штатный вызов
+     * ({@code computeStringLiteralHighlighting}) в EDT не используется. Позиции не
+     * пересекаются: токены — {@link BslServerCallHighlightingConfiguration#queryTokenId},
+     * промежутки (кавычки, «|», пробелы) —
+     * {@link BslServerCallHighlightingConfiguration#QUERY_TEXT_ID}; у всех стилей общий фон.
+     */
+    private static final class QueryLiterals
+    {
+        private static final String TAG = "QueryLiteralHL"; //$NON-NLS-1$
+        private static final String LEXER_FIELD = "qlInBslTokenHighlighting"; //$NON-NLS-1$
+        private static final String QL_BSL_UI_BUNDLE = "com._1c.g5.v8.dt.ql.bsl.ui"; //$NON-NLS-1$
+        private static final String LEXER_CLASS =
+            "com._1c.g5.v8.dt.ql.bsl.ui.token.highlighting.impl.QlInBslTokenHighlighting"; //$NON-NLS-1$
+        /** Id, который лексер отдаёт токенам без своего цвета (ключевые слова, знаки). */
+        private static final String UNMAPPED_ID = Activator.PLUGIN_ID + ".query.unmapped"; //$NON-NLS-1$
+        private static final String OTHERS_ID = "Ql_Others"; //$NON-NLS-1$
+
+        private static volatile Object fallbackLexer;
+        private static volatile boolean failureLogged;
+
+        static void highlight(Object nativeCalculator, EObject root, IHighlightedPositionAcceptor acceptor,
+            CancelIndicator cancelIndicator)
+        {
+            Object lexer = null;
+            java.lang.reflect.Method update = null;
+            java.lang.reflect.Method start = null;
+            TreeIterator<EObject> iterator = root.eAllContents();
+            while (iterator.hasNext())
+            {
+                if (isCanceled(cancelIndicator))
+                    return;
+                if (!(iterator.next() instanceof StringLiteral literal))
+                    continue;
+                INode node = NodeModelUtils.findActualNodeFor(literal);
+                if (node == null)
+                    continue;
+                int offset = node.getOffset();
+                int end = node.getEndOffset();
+                String text = node.getRootNode().getText();
+                if (end > text.length() || end - offset < 3 || text.charAt(offset) != '"')
+                    continue;
+                String content = text.substring(offset + 1,
+                    text.charAt(end - 1) == '"' ? end - 1 : end);
+                if (content.indexOf('\n') < 0 || !startsWithQueryWord(content))
+                    continue;
+                if (lexer == null)
+                {
+                    lexer = resolveLexer(nativeCalculator);
+                    if (lexer == null)
+                        return;
+                    try
+                    {
+                        update = lexer.getClass().getMethod("updateSourceData", String.class, int.class); //$NON-NLS-1$
+                        start = lexer.getClass().getMethod("startHighlighting", //$NON-NLS-1$
+                            IHighlightedPositionAcceptor.class, String.class);
+                    }
+                    catch (ReflectiveOperationException e)
+                    {
+                        logFailure("methods missing", e); //$NON-NLS-1$
+                        return;
+                    }
+                }
+                List<int[]> tokens = new ArrayList<>();
+                List<String> ids = new ArrayList<>();
+                try
+                {
+                    synchronized (lexer)
+                    {
+                        update.invoke(lexer, content, Integer.valueOf(offset + 1));
+                        start.invoke(lexer, (IHighlightedPositionAcceptor)(tokenOffset, length, tokenIds) -> {
+                            tokens.add(new int[] { tokenOffset, length });
+                            ids.add(tokenIds.length > 0 ? tokenIds[0] : UNMAPPED_ID);
+                        }, UNMAPPED_ID);
+                    }
+                }
+                catch (ReflectiveOperationException | RuntimeException e)
+                {
+                    logFailure("lexer failed", e); //$NON-NLS-1$
+                    return;
+                }
+                acceptLiteral(text, offset, end, tokens, ids, acceptor);
+            }
+        }
+
+        /** Первое слово текста (после пробелов, «|» и комментариев) — ВЫБРАТЬ/SELECT или УНИЧТОЖИТЬ/DROP. */
+        private static boolean startsWithQueryWord(String content)
+        {
+            int i = 0;
+            int length = content.length();
+            while (i < length)
+            {
+                char c = content.charAt(i);
+                if (Character.isWhitespace(c) || c == '|')
+                    i++;
+                else if (c == '/' && i + 1 < length && content.charAt(i + 1) == '/')
+                {
+                    int lineEnd = content.indexOf('\n', i);
+                    if (lineEnd < 0)
+                        return false;
+                    i = lineEnd + 1;
+                }
+                else
+                    break;
+            }
+            return startsWithWord(content, i, "ВЫБРАТЬ") || startsWithWord(content, i, "SELECT") //$NON-NLS-1$ //$NON-NLS-2$
+                || startsWithWord(content, i, "УНИЧТОЖИТЬ") || startsWithWord(content, i, "DROP"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static boolean startsWithWord(String content, int from, String word)
+        {
+            int to = from + word.length();
+            return to <= content.length() && content.regionMatches(true, from, word, 0, word.length())
+                && (to == content.length() || !Character.isLetterOrDigit(content.charAt(to))
+                    && content.charAt(to) != '_');
+        }
+
+        /** Токены — стилями запроса, промежутки между ними — стилем текста запроса. */
+        private static void acceptLiteral(String text, int offset, int end, List<int[]> tokens, List<String> ids,
+            IHighlightedPositionAcceptor acceptor)
+        {
+            int position = offset;
+            for (int i = 0; i < tokens.size(); i++)
+            {
+                int tokenOffset = tokens.get(i)[0];
+                int tokenEnd = Math.min(end, tokenOffset + tokens.get(i)[1]);
+                if (tokenOffset < position || tokenEnd <= tokenOffset)
+                    continue;
+                String qlId = qlId(text, tokenOffset, tokenEnd, ids.get(i));
+                if (qlId == null)
+                    continue;
+                if (tokenOffset > position)
+                    acceptor.addPosition(position, tokenOffset - position,
+                        BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
+                acceptor.addPosition(tokenOffset, tokenEnd - tokenOffset,
+                    BslServerCallHighlightingConfiguration.queryTokenId(qlId));
+                position = tokenEnd;
+            }
+            if (end > position)
+                acceptor.addPosition(position, end - position, BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
+        }
+
+        /**
+         * Стиль токена. Лексер даёт свой цвет литералам, числам, параметрам,
+         * комментариям и «;», знакам и именам — {@code Ql_Others}, ключевым словам и
+         * прочим знакам — переданный id без цвета. Пробелы и «|» — текст литерала ({@code null}).
+         */
+        private static String qlId(String text, int from, int to, String id)
+        {
+            char first = text.charAt(from);
+            if (Character.isWhitespace(first) || first == '|' && to - from == 1)
+                return null;
+            if (!OTHERS_ID.equals(id) && !UNMAPPED_ID.equals(id))
+                return id;
+            if (Character.isLetterOrDigit(first) || first == '_')
+                return UNMAPPED_ID.equals(id) ? "Ql_Keywords" : OTHERS_ID; //$NON-NLS-1$
+            return first == '(' || first == ')' ? "Ql_Brackets" : "Ql_Operators"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * Экземпляр из поля штатного калькулятора; если поля нет (другая версия EDT) —
+         * собственный экземпляр того же класса из бандла {@code ql.bsl.ui}.
+         */
+        private static Object resolveLexer(Object nativeCalculator)
+        {
+            Object lexer = Global.getField(nativeCalculator, LEXER_FIELD);
+            if (lexer != null)
+                return lexer;
+            Object fallback = fallbackLexer;
+            if (fallback != null)
+                return fallback;
+            try
+            {
+                Bundle bundle = Platform.getBundle(QL_BSL_UI_BUNDLE);
+                if (bundle == null)
+                {
+                    logFailure("bundle " + QL_BSL_UI_BUNDLE + " missing", null); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                fallback = bundle.loadClass(LEXER_CLASS).getDeclaredConstructor().newInstance();
+                fallbackLexer = fallback;
+                return fallback;
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                logFailure("lexer instance failed", e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private static void logFailure(String message, Throwable e)
+        {
+            if (failureLogged)
+                return;
+            failureLogged = true;
+            Throwable cause = e != null && e.getCause() != null ? e.getCause() : e;
+            Global.log(TAG, "[!] " + message //$NON-NLS-1$
+                + (cause == null ? "" : ": " + cause.getClass().getSimpleName() + " " + cause.getMessage())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
     }
 }

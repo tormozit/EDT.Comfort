@@ -23,6 +23,17 @@ public final class BslServerCallHighlightingConfiguration
     public static final String IMPLICIT_VARIABLE_ID = Activator.PLUGIN_ID + ".implicitVariable"; //$NON-NLS-1$
     /** Слово-ключ в роли имени члена ({@code Запрос.Выполнить()}) — обычный текст, не ключевое слово. */
     public static final String KEYWORD_MEMBER_NAME_ID = Activator.PLUGIN_ID + ".keywordMemberName"; //$NON-NLS-1$
+    /** Текст запроса в литерале вне токенов (кавычки, «|», пробелы) — цвет строки на фоне запроса. */
+    public static final String QUERY_TEXT_ID = Activator.PLUGIN_ID + ".query.text"; //$NON-NLS-1$
+    /** Идентификаторы стилей редактора запроса, которыми красятся токены запроса в литерале. */
+    public static final String[] QUERY_TOKEN_QL_IDS = { "Ql_Keywords", "Ql_Function", "Ql_Parameters", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "Ql_Comment", "Ql_Strings", "Ql_Operators", "Ql_Brackets", "Ql_SplitterQuery", "Ql_Numbers", "Ql_Others" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+
+    /** Стиль токена запроса в литерале: цвет стиля {@code qlId} редактора запроса на фоне запроса. */
+    public static String queryTokenId(String qlId)
+    {
+        return Activator.PLUGIN_ID + ".query." + qlId; //$NON-NLS-1$
+    }
 
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
     private static final String BSL_HIGHLIGHTING_CONFIGURATION =

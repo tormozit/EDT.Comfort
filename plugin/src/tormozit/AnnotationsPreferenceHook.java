@@ -2,6 +2,7 @@ package tormozit;
 
 import java.lang.reflect.Array;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -9,6 +10,7 @@ import java.util.WeakHashMap;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferencePage;
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StructuredViewer;
@@ -106,6 +108,7 @@ public final class AnnotationsPreferenceHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        OccurrencePrefsTrace.install();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -459,6 +462,70 @@ public final class AnnotationsPreferenceHook implements IStartup
         if (section == null)
             section = top.addNewSection(SETTINGS_SECTION);
         return section;
+    }
+
+    /**
+     * Временная диагностика: кто сбрасывает настройки аннотации «Вхождения» в тестовой среде.
+     * Тема {@code annotations-occurrence-prefs}: значения при старте и каждое изменение
+     * ключа со словом «occurrence» в хранилище {@code org.eclipse.ui.editors} со стеком.
+     */
+    private static final class OccurrencePrefsTrace
+    {
+        private static final String TOPIC = "annotations-occurrence-prefs"; //$NON-NLS-1$
+
+        private OccurrencePrefsTrace()
+        {
+        }
+
+        static void install()
+        {
+            try
+            {
+                IPreferenceStore store = EditorsUI.getPreferenceStore();
+                dumpInitial(store, "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation"); //$NON-NLS-1$
+                dumpInitial(store, "org.eclipse.xtext.ui.editor.declarationAnnotation"); //$NON-NLS-1$
+                store.addPropertyChangeListener(event ->
+                {
+                    String key = event.getProperty();
+                    if (key == null || !key.toLowerCase(Locale.ROOT).contains("occurrence")) //$NON-NLS-1$
+                        return;
+                    Global.tempLogException(TOPIC, "CHANGE " + key + ": " + event.getOldValue() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " -> " + event.getNewValue() + " (default=" + store.getDefaultString(key) //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", isDefault=" + store.isDefault(key) + ", thread=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + Thread.currentThread().getName() + ")", new Throwable("stack")); //$NON-NLS-1$ //$NON-NLS-2$
+                });
+                Global.tempLog(TOPIC, "listener installed"); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(TOPIC, "install failed", e); //$NON-NLS-1$
+            }
+        }
+
+        private static void dumpInitial(IPreferenceStore store, String annotationType)
+        {
+            AnnotationPreference preference = EditorsUI.getAnnotationPreferenceLookup()
+                .getAnnotationPreference(annotationType);
+            if (preference == null)
+            {
+                Global.tempLog(TOPIC, "INIT " + annotationType + ": no AnnotationPreference"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String[] keys = { preference.getVerticalRulerPreferenceKey(), preference.getOverviewRulerPreferenceKey(),
+                preference.getTextPreferenceKey(), preference.getHighlightPreferenceKey(),
+                preference.getTextStylePreferenceKey(), preference.getColorPreferenceKey(),
+                preference.getIsGoToNextNavigationTargetKey() };
+            StringBuilder line = new StringBuilder("INIT ").append(annotationType); //$NON-NLS-1$
+            for (String key : keys)
+            {
+                if (key == null)
+                    continue;
+                line.append("; ").append(key).append('=').append(store.getString(key)) //$NON-NLS-1$
+                    .append(" (default=").append(store.getDefaultString(key)) //$NON-NLS-1$
+                    .append(store.isDefault(key) ? ", isDefault)" : ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Global.tempLog(TOPIC, line.toString());
+        }
     }
 
     private static final class Debug

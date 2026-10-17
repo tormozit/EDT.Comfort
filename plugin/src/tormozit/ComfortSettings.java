@@ -270,6 +270,15 @@ public final class ComfortSettings
     /** Цвет создаваемых переменных по умолчанию — RGB(0,80,80). */
     public static final String DEFAULT_IMPLICIT_VARIABLE_HIGHLIGHTING_COLOR = "0,80,80"; //$NON-NLS-1$
 
+    // ---- Query text highlighting in string literals ----
+
+    /** Ключ: синтаксическая раскраска текстов запросов в строковых литералах модуля. */
+    public static final String PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED =
+        "comfort.queryLiteralHighlighting.enabled"; //$NON-NLS-1$
+
+    /** Раскраска запросов в литералах включена по умолчанию. */
+    public static final boolean DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED = true;
+
     // ---- Bracket content hint ----
 
     /** Ключ: включён ли показ содержимого открывающей конструкции у закрывающей. */
@@ -1213,6 +1222,15 @@ public final class ComfortSettings
     }
 
     // ---- Implicit variable highlighting accessors ----
+
+    /** Раскраска текстов запросов в строковых литералах включена. */
+    public static boolean isQueryLiteralHighlightingEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED);
+    }
 
     /** Подсветка создаваемых переменных включена. */
     public static boolean isImplicitVariableHighlightingEnabled()
