@@ -481,6 +481,7 @@ public final class BslEditorHoverHook implements IStartup
             public IInformationControl createInformationControl(org.eclipse.swt.widgets.Shell parent)
             {
                 IInformationControl control = delegate.createInformationControl(parent);
+                IrBslHoverHtml.installHtmlDecoration(control);
                 String text = text();
                 if (text != null && control instanceof org.eclipse.jface.text.IInformationControlExtension4 ext)
                     ext.setStatusText(text);
@@ -492,6 +493,8 @@ public final class BslEditorHoverHook implements IStartup
             {
                 boolean reuse = delegate instanceof org.eclipse.jface.text.IInformationControlCreatorExtension ext
                     && ext.canReuse(control);
+                if (reuse)
+                    IrBslHoverHtml.installHtmlDecoration(control);
                 String text = text();
                 if (reuse && text != null
                     && control instanceof org.eclipse.jface.text.IInformationControlExtension4 ext4)
@@ -546,7 +549,7 @@ public final class BslEditorHoverHook implements IStartup
                 linked = html;
             String injected = ParamHintHtmlModifier.injectMemberSeeLinks(linked, block);
             String result = injected != null ? injected : linked;
-            return result.equals(html) ? info : result;
+            return result.equals(html) ? info : IrBslHoverHtml.withHtml(info, result);
         }
         catch (Throwable ex)
         {
@@ -601,17 +604,6 @@ public final class BslEditorHoverHook implements IStartup
     private static final class MethodDefinitionLink
     {
         private static final String FUNCTION = "comfortOpenMethodDefinition";
-        private static final Map<String, java.lang.ref.WeakReference<Object>> documentationPages =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-        static String registerDocumentation(Object descriptor)
-        {
-            documentationPages.entrySet().removeIf(entry -> entry.getValue().get() == null);
-            String token = "documentation:" + java.util.UUID.randomUUID();
-            documentationPages.put(token, new java.lang.ref.WeakReference<>(descriptor));
-            return token;
-        }
-
         private static final Map<String, Runnable> formHandlerActions =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -651,33 +643,6 @@ public final class BslEditorHoverHook implements IStartup
                                     if (!shell.isDisposed())
                                         shell.setVisible(false);
                                     action.run();
-                                });
-                                return Boolean.TRUE;
-                            }
-                            if (encoded.startsWith("documentation:"))
-                            {
-                                java.lang.ref.WeakReference<Object> reference = documentationPages.get(encoded);
-                                Object descriptor = reference == null ? null : reference.get();
-                                if (descriptor == null)
-                                    return Boolean.FALSE;
-                                display.asyncExec(() -> {
-                                    ClassLoader loader = descriptor.getClass().getClassLoader();
-                                    try
-                                    {
-                                        Class<?> viewUtil = Class.forName(
-                                            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistViewUtil",
-                                            true, loader);
-                                        Object view = Global.invoke(viewUtil, "showOrGetShowedView");
-                                        Object panel = Global.invoke(view, "getDescriptionPanel");
-                                        Object targetBrowser = Global.invoke(panel, "getBrowser");
-                                        Global.invokeVoid(targetBrowser, "openPage", descriptor);
-                                        if (targetBrowser != null && !shell.isDisposed())
-                                            shell.setVisible(false);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        // Документация не открылась — подсказка остаётся как есть.
-                                    }
                                 });
                                 return Boolean.TRUE;
                             }
@@ -748,13 +713,14 @@ public final class BslEditorHoverHook implements IStartup
                         IrBslTextHoverWrapper wrapper =
                             new IrBslTextHoverWrapper(existing.delegate, existing.editor, false);
                         wrapper.prepareHoverDecorations(viewer, region, info);
-                        // Замыкание сохраняет и descriptor синтакс-помощника: реестр ссылок
-                        // хранит его слабо, а подсказка должна владеть им до закрытия.
                         return control -> {
                             String html = IrBslHoverHtml.readHtml(info);
                             String decorated = wrapper.applyHoverDecorations(html);
                             if (!decorated.equals(html))
+                            {
+                                IrBslHoverHtml.withHtml(info, decorated);
                                 IrBslHoverHtml.applyHtmlToControl(control, decorated);
+                            }
                         };
                     }
         }
@@ -800,7 +766,6 @@ public final class BslEditorHoverHook implements IStartup
         /** «: Конструктор()» с меню для свойства или параметра под указателем (issue 828). */
         private volatile String lastMemberSeeLinksHtml;
         private volatile String lastPlatformAvailabilityHtml;
-        private volatile Object lastDocumentationDescriptor;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
 
@@ -823,7 +788,7 @@ public final class BslEditorHoverHook implements IStartup
             if (info == null)
                 return null;
             if (IrBslHoverHtml.isBslBrowserInput(info))
-                return IrBslHoverHtml.readHtml(info);
+                return IrBslHoverHtml.readDisplayHtml(info);
             return info instanceof String text ? text : info.toString();
         }
 
@@ -861,9 +826,9 @@ public final class BslEditorHoverHook implements IStartup
                     return null;
                 });
             }
-            catch (RuntimeException e)
+            catch (RuntimeException ignored)
             {
-                Global.tempLogException("bsl-return-compute-cost", "hover refresh failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                // Пересчёт не удался — подсказка покажет то, что есть в модели.
             }
         }
 
@@ -892,6 +857,20 @@ public final class BslEditorHoverHook implements IStartup
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
             final int offset = hoverRegion.getOffset();
+            if (ParamHintHtmlModifier.needsMemberDocumentationRecovery(info)
+                && textViewer.getDocument() instanceof IXtextDocument document)
+            {
+                final Object baseDocumentation = info;
+                Object recovered = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                {
+                    if (resource == null)
+                        return baseDocumentation;
+                    EObject source = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+                    return ParamHintHtmlModifier.recoverMemberDocumentation(baseDocumentation, source, resource);
+                });
+                if (recovered != null)
+                    info = recovered;
+            }
             BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
             prepareHoverDecorations(textViewer, hoverRegion, info);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
@@ -921,7 +900,7 @@ public final class BslEditorHoverHook implements IStartup
             String directive = resolveHoverDirective(region.getOffset());
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(region);
-            lastMethodLink = resolveMethodLink(region, info);
+            lastMethodLink = resolveMethodLink(region);
             lastDefinedTypeLinks = resolveDefinedTypeLinks(IrBslHoverHtml.readHtml(info));
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
             lastMemberSeeLinksHtml = resolveMemberSeeLinksHtml(textViewer, region);
@@ -1083,7 +1062,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             String html = IrBslHoverHtml.readHtml(info);
             String modified = applyHoverDecorations(html);
-            return modified.equals(html) ? info : modified;
+            return modified.equals(html) ? info : IrBslHoverHtml.withHtml(info, modified);
         }
 
         private String applyHoverDecorations(String html)
@@ -1128,19 +1107,11 @@ public final class BslEditorHoverHook implements IStartup
                 var links = BslStructureInsertCommentTypes.seeLinksAt(textViewer, region.getOffset());
                 if (links.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                     return null;
-                String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
+                return ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
                     MethodDefinitionLink::registerFormHandler);
-                // #region agent log
-                Global.tempLog("see-links-diag", "block links=" + links.size() + " len=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (block == null ? "null" : block.length())); //$NON-NLS-1$
-                // #endregion
-                return block;
             }
             catch (Throwable ex)
             {
-                // #region agent log
-                Global.tempLogException("see-links-diag", "block failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return null;
             }
         }
@@ -1221,9 +1192,10 @@ public final class BslEditorHoverHook implements IStartup
                 String modified = applyHoverDecorations(html);
                 if (!modified.equals(html))
                 {
+                    Object decoratedInput = IrBslHoverHtml.withHtml(baseInput, modified);
                     IrBslHoverHtml.applyHtmlToControl(control, modified);
                     if (control.hasDelayedInputChangeListener())
-                        control.notifyDelayedInputChange(modified);
+                        control.notifyDelayedInputChange(decoratedInput);
                     return;
                 }
                 if (control.hasDelayedInputChangeListener())
@@ -1231,59 +1203,9 @@ public final class BslEditorHoverHook implements IStartup
             });
         }
 
-        private String resolveEventDeclarationLink(XtextResource resource, EObject object, IRegion region,
-            Object browserInput, org.eclipse.xtext.resource.IResourceServiceProvider provider)
-        {
-            if (resource == null || provider == null || resource.getParseResult() == null)
-                return null;
-            com._1c.g5.v8.dt.bsl.model.Method method = null;
-            for (EObject current = object; current != null; current = current.eContainer())
-                if (current instanceof com._1c.g5.v8.dt.bsl.model.Method candidate)
-                {
-                    method = candidate;
-                    break;
-                }
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
-                region.getOffset());
-            if (method == null || leaf == null || !method.getName().equalsIgnoreCase(leaf.getText()))
-                return null;
-            try
-            {
-                ClassLoader loader = browserInput.getClass().getClassLoader();
-                Class<?> providerClass = Class.forName(
-                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider", true, loader);
-                Object documentationProvider = provider.get(providerClass);
-                // Тот же выбор события, что в BslDocumentationProvider.getDocByModelMethod.
-                Object resolved = Global.invoke(documentationProvider, "getEventsFromModelMethod", method);
-                if (!(resolved instanceof List<?> events) || events.isEmpty()
-                    || !(events.get(0) instanceof com._1c.g5.v8.dt.mcore.Event event))
-                    return null;
-                Object page = Global.invoke(browserInput, "getViewPage");
-                if (page == null)
-                    return null;
-                Object descriptor = Global.newInstance(
-                    "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor",
-                    loader, page, documentationProvider);
-                if (descriptor == null)
-                    return null;
-                lastDocumentationDescriptor = descriptor;
-                lastMethodName = event.getNameRu();
-                if (lastMethodName == null || lastMethodName.isBlank()
-                    || !IrBslHoverHtml.readHtml(browserInput).contains(lastMethodName))
-                    lastMethodName = event.getName();
-                String token = MethodDefinitionLink.registerDocumentation(descriptor);
-                return "<a class=\"comfort-method-definition\" href=\"#\" onclick=\""
-                    + "comfortOpenMethodDefinition('" + token + "');return false;\">";
-            }
-            catch (Exception ex)
-            {
-                return null;
-            }
-        }
-        private String resolveMethodLink(IRegion region, Object browserInput)
+        private String resolveMethodLink(IRegion region)
         {
             lastMethodName = null;
-            lastDocumentationDescriptor = null;
             if (!(editor.getDocument() instanceof IXtextDocument document))
                 return null;
             return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
@@ -1307,7 +1229,7 @@ public final class BslEditorHoverHook implements IStartup
                     : org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
                         .getResourceServiceProvider(resource.getURI());
                 if (access == null)
-                    return resolveEventDeclarationLink(resource, object, region, browserInput, provider);
+                    return null;
                 com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer computer = provider == null
                     ? null : provider.get(com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class);
                 List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> entries =
@@ -1342,34 +1264,6 @@ public final class BslEditorHoverHook implements IStartup
                             if (opener != null)
                                 opener.open(target, true);
                         }));
-                    }
-                    else if (feature instanceof com._1c.g5.v8.dt.mcore.Method
-                        || feature instanceof com._1c.g5.v8.dt.mcore.Event
-                        || (feature instanceof com._1c.g5.v8.dt.mcore.Property
-                            && !(feature instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)))
-                    {
-                        Object page = Global.invoke(browserInput, "getViewPage");
-                        if (page == null || provider == null)
-                            continue;
-                        try
-                        {
-                            ClassLoader loader = browserInput.getClass().getClassLoader();
-                            Class<?> providerClass = Class.forName(
-                                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider",
-                                true, loader);
-                            Object documentationProvider = provider.get(providerClass);
-                            Object descriptor = Global.newInstance(
-                                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor",
-                                loader, page, documentationProvider);
-                            if (descriptor == null)
-                                continue;
-                            lastDocumentationDescriptor = descriptor;
-                            uri = MethodDefinitionLink.registerDocumentation(descriptor);
-                        }
-                        catch (Exception ex)
-                        {
-                            continue;
-                        }
                     }
                     else
                         continue;
@@ -1758,10 +1652,11 @@ public final class BslEditorHoverHook implements IStartup
             IXtextBrowserInformationControl control = resolved.control;
             if (control == null || !resolved.visible)
                 return false;
+            Object decoratedInput = IrBslHoverHtml.withHtml(control.getInput(), mergedHtml);
             if (!IrBslHoverHtml.applyHtmlToControl(control, mergedHtml))
                 return false;
             if (control.hasDelayedInputChangeListener())
-                control.notifyDelayedInputChange(mergedHtml);
+                control.notifyDelayedInputChange(decoratedInput);
             return true;
         }
 
@@ -1965,6 +1860,7 @@ public final class BslEditorHoverHook implements IStartup
                     }
                     else if (baseReset)
                     {
+                        IrBslHoverHtml.withHtml(control.getInput(), merged);
                         IrBslHoverHtml.applyHtmlToControl(control, merged);
                         IrBslHoverDebug.log("html restored offset=" + offset); //$NON-NLS-1$
                     }

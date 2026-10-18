@@ -127,28 +127,16 @@ public final class BslDocCommentTypeMerge
     {
         if (comment == null)
             return;
-        String cn = comment.getClass().getName();
-        if (!TARGET_COMMENT.equals(cn))
-            return;
-        long started = System.nanoTime();
-        int parameters = 0;
-        int returns = 0;
         try
         {
-            parameters = collectInParameters(comment);
-            returns = collectInReturn(comment);
+            String cn = comment.getClass().getName();
+            if (!TARGET_COMMENT.equals(cn))
+                return;
+            collectInParameters(comment);
+            collectInReturn(comment);
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-comment-cost", "merge", t); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        finally
-        {
-            Global.tempLog("bsl-comment-cost", "merge id=" //$NON-NLS-1$ //$NON-NLS-2$
-                + Integer.toHexString(System.identityHashCode(comment))
-                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
-                + " parameters=" + parameters + " returns=" + returns //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
     }
 

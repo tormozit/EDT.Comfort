@@ -104,6 +104,7 @@ import com._1c.g5.v8.dt.bsl.model.DateLiteral;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
@@ -255,6 +256,8 @@ public final class ParamHintHtmlModifier
             Browser browser = IrBslHoverHtml.findControlBrowser(shell);
             if (browser == null || browser.isDisposed())
                 return;
+
+            IrBslHoverHtml.installHtmlDecorationForBrowser(browser);
 
             LinkedModeParamHintCloser.ensureInstalled();
             StockParamNumberClampFix.ensureInstalled();
@@ -756,7 +759,7 @@ public final class ParamHintHtmlModifier
         if (window != null && window.getActivePage() != null
             && window.getActivePage().getActivePart() != null)
             site = window.getActivePage().getActivePart().getSite();
-        return new PreparedParamHint(handler, site);
+        return new PreparedParamHint(handler, site, inspectExpressionStart(viewer));
     }
 
     static final class PreparedParamHint
@@ -764,11 +767,13 @@ public final class ParamHintHtmlModifier
         private final Object handler;
         private final org.eclipse.ui.IWorkbenchSite site;
         private Object info;
+        private final int expressionStart;
 
-        private PreparedParamHint(Object handler, org.eclipse.ui.IWorkbenchSite site)
+        private PreparedParamHint(Object handler, org.eclipse.ui.IWorkbenchSite site, int expressionStart)
         {
             this.handler = handler;
             this.site = site;
+            this.expressionStart = expressionStart;
         }
 
         void compute(XtextResource resource, int caret)
@@ -785,6 +790,19 @@ public final class ParamHintHtmlModifier
                     forceComputeExpressionTypes(resource, params.get(0), invocation);
             }
             info = stockParameterInfo(handler, resource, caret);
+            if (info == null || !hasParamInfoPages(info))
+            {
+                try
+                {
+                    RecoveredParamHint recovered = recoverParamHint(resource, caret, expressionStart,
+                        Global.getField(handler, "documentation"), //$NON-NLS-1$
+                        Global.getField(handler, "languageProvider")); //$NON-NLS-1$
+                    info = recovered != null ? recovered.info : null;
+                }
+                catch (Exception | LinkageError ex)
+                {
+                }
+            }
             Global.tempLog("param-hint-info", "computed caret=" + caret + " info=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + (info != null ? info.getClass().getName() : "null")); //$NON-NLS-1$
         }
@@ -1360,6 +1378,441 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    static boolean needsMemberDocumentationRecovery(Object input)
+    {
+        if (!IrBslHoverHtml.isBslBrowserInput(input))
+            return false;
+        Object group = Global.getField(input, "pageGroup"); //$NON-NLS-1$
+        for (Object page : BslSyntaxAssist.pagesOf(group))
+        {
+            Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
+            if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
+                || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
+                return true;
+        }
+        return false;
+    }
+
+    /** Один запасной источник страниц для боковой подсказки и подсказки при наведении. */
+    static Object recoverMemberDocumentation(Object input, EObject source, Resource contextResource)
+    {
+        if (source == null || !needsMemberDocumentationRecovery(input))
+            return input;
+        Object group = Global.getField(input, "pageGroup"); //$NON-NLS-1$
+        try
+        {
+            List<EObject> members = new ArrayList<>();
+            collectDocumentationMembers(source, members);
+            Object provider = BslSyntaxAssist.documentationProvider();
+            String language = BslSyntaxAssist.language();
+            List<Object> recovered = new ArrayList<>();
+            if (contextResource == null)
+                contextResource = source instanceof ProposalElement proposal && proposal.getModel() != null
+                    ? proposal.getModel().eResource() : source.eResource();
+            Global.tempLog("property-documentation", "error page source=" + source.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " members=" + members.size()); //$NON-NLS-1$
+            for (EObject member : members)
+            {
+                List<Object> memberPages = new ArrayList<>();
+                if (member instanceof Method method)
+                {
+                    FindMissSupport.collectContentAssistPages(Global.invoke(provider,
+                        "getHoverDocumentationPages", method, language), memberPages); //$NON-NLS-1$
+                    if (memberPages.isEmpty())
+                        FindMissSupport.collectCaPagesFromMethodPlatformId(provider, method, language, memberPages);
+                    if (memberPages.isEmpty())
+                        FindMissSupport.collectCaFromViewDocumentation(provider, method, language, memberPages);
+                }
+                else if (member instanceof com._1c.g5.v8.dt.mcore.Property property)
+                    memberPages.addAll(recoverPropertyDocumentation(provider, property, contextResource, language));
+                if (memberPages.isEmpty())
+                    return input;
+                recovered.addAll(memberPages);
+            }
+            if (recovered.isEmpty())
+            {
+                return input;
+            }
+            // Конструктор группы и setIndex подтверждены в bsl-ui/*.javap.txt.
+            Object replacement = group.getClass().getConstructor(List.class, String.class)
+                .newInstance(recovered, BslSyntaxAssist.searchQueryOf(group));
+            Global.setFieldForce(input, "pageGroup", replacement); //$NON-NLS-1$
+            Global.invoke(input, "setIndex", Integer.valueOf(0)); //$NON-NLS-1$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLogException("property-documentation", "member recovery failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return input;
+    }
+
+    /** Только потерявшая код копия платформенного типа; исходную модель не меняем. */
+    private static List<Object> recoverPropertyDocumentation(Object provider,
+        com._1c.g5.v8.dt.mcore.Property property, Resource contextResource, String language)
+    {
+        Type owner = EcoreUtil2.getContainerOfType(property, Type.class);
+        Global.tempLog("property-documentation", "recover property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " code=" + property.getCode() + " owner=" + (owner == null ? null : owner.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " ownerCode=" + (owner == null ? null : owner.getCode()) //$NON-NLS-1$
+            + " context=" + (contextResource == null ? null : contextResource.getURI())); //$NON-NLS-1$
+        if (owner == null || owner.getCode() != -1 || contextResource == null
+            || property instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)
+            return List.of();
+        try
+        {
+            // getTypeItemCode в EDT ищет исходный платформенный тип через тот же API.
+            // Ресурс берём у исходного выражения: копия типа может не иметь ресурса.
+            Object item = Global.invoke(provider, "getTypeItemByName", owner.getName(), contextResource); //$NON-NLS-1$
+            if (item instanceof EObject object && object.eIsProxy())
+                item = org.eclipse.emf.ecore.util.EcoreUtil.resolve(object, contextResource);
+            if (!(item instanceof Type platformType) || platformType.getCode() <= 0
+                || platformType.getContextDef() == null)
+            {
+                Global.tempLog("property-documentation", "platform type unavailable"); //$NON-NLS-1$ //$NON-NLS-2$
+                return List.of();
+            }
+            for (com._1c.g5.v8.dt.mcore.Property candidate : platformType.getContextDef().allProperties())
+            {
+                if (property.getName() == null || candidate.getName() == null
+                    || !property.getName().equalsIgnoreCase(candidate.getName()))
+                    continue;
+                Object group = Global.invoke(provider, "getHoverDocumentationPages", candidate, language); //$NON-NLS-1$
+                List<Object> pages = new ArrayList<>();
+                for (Object page : BslSyntaxAssist.pagesOf(group))
+                {
+                    Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
+                    if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
+                        || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
+                    {
+                        Global.tempLog("property-documentation", "canonical documentation failed typeCode=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + platformType.getCode() + " propertyCode=" + candidate.getCode()); //$NON-NLS-1$
+                        return List.of();
+                    }
+                    pages.add(page);
+                }
+                Global.tempLog("property-documentation", "canonical typeCode=" + platformType.getCode() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " propertyCode=" + candidate.getCode() + " pages=" + pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                return pages;
+            }
+            Global.tempLog("property-documentation", "canonical property not found"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLogException("property-documentation", "recovery failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return List.of();
+    }
+
+    private static void collectDocumentationMembers(EObject source, List<EObject> members)
+    {
+        if (source instanceof ProposalElement proposal)
+        {
+            for (EObject element : proposal.getList())
+                collectDocumentationMembers(element, members);
+        }
+        else if (source instanceof Method || source instanceof com._1c.g5.v8.dt.mcore.Property)
+        {
+            if (!members.contains(source))
+                members.add(source);
+        }
+        else if (source instanceof ParamSet && source.eContainer() instanceof Method method)
+        {
+            collectDocumentationMembers(method, members);
+        }
+        else if (source instanceof FeatureAccess access && source.eResource() instanceof XtextResource resource)
+        {
+            Environmental owner = EcoreUtil2.getContainerOfType(access, Environmental.class);
+            IResourceServiceProvider rsp = resource.getURI() != null
+                ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI()) : null;
+            DynamicFeatureAccessComputer computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
+            if (owner != null && computer != null)
+            {
+                for (FeatureEntry entry : computer.resolveObject(access, owner.environments()))
+                {
+                    if (entry.getFeature() instanceof Method || entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Property)
+                        collectDocumentationMembers(entry.getFeature(), members);
+                }
+            }
+        }
+        else if (source instanceof Invocation invocation && invocation.getMethodAccess() != null)
+        {
+            collectDocumentationMembers(invocation.getMethodAccess(), members);
+        }
+    }
+
+    /** Сбор страниц при промахе EDT; работает внутри уже открытого чтения модели. */
+    private static RecoveredParamHint recoverParamHint(XtextResource resource, int caret,
+        int expressionStart, Object documentation, Object languageProvider) throws Exception
+    {
+        // Дальше — запасной сбор при промахе EDT.
+        CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
+        if (siteInfo == null)
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        if (expressionStart >= 0 && siteInfo.methodAccessEnd < expressionStart)
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"wrapperCall\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"methodEnd\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
+                    + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        ContentAssistSessionReloader.logLinkedMode("miss.site", "{\"owner\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + (siteInfo.owner != null && siteInfo.owner.eClass() != null
+                ? siteInfo.owner.eClass().getName() : "null") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"first\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
+            + ",\"last\":" + siteInfo.callEnd //$NON-NLS-1$
+            + ",\"seps\":" + siteInfo.separatorOffsets + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
+        // поиск по каретке давал вложенный вызов, начинающийся ровно у неё,
+        // и подсказка расходилась с границами.
+        Invocation invocation = siteInfo.owner instanceof Invocation own ? own : null;
+        // «Новый Тип(…)» — это OperatorStyleCreator, а не Invocation. Без
+        // отдельной ветки для него findInvocationNear уходил вверх по дереву и
+        // подсказка показывалась по ВНЕШНЕМУ вызову: для
+        // «ВнешнийМетод(Новый Массив(|))» — по ВнешнийМетод.
+        OperatorStyleCreator ctorOwner =
+            siteInfo.owner instanceof OperatorStyleCreator osc ? osc : null;
+        EObject resolved = siteInfo.owner;
+        if (invocation == null && ctorOwner == null)
+        {
+            EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+            resolved = helper.resolveContainedElementAt(resource, caret);
+            invocation = findInvocationNear(resolved);
+        }
+        if (ctorOwner == null && (invocation == null || invocation.getMethodAccess() == null))
+        {
+            String resolvedName = resolved != null && resolved.eClass() != null
+                ? resolved.eClass().getName() : "null"; //$NON-NLS-1$
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"noInvocation\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"resolved\":\"" + ContentAssistDebug.jsonEscapeForLog(resolvedName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        FeatureAccess methodAccess = invocation != null ? invocation.getMethodAccess() : null;
+        IResourceServiceProvider rsp = resource.getURI() != null
+            ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                resource.getURI())
+            : null;
+        Object computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
+        Environmental envOwner = EcoreUtil2.getContainerOfType(methodAccess,
+            Environmental.class);
+        Object environments = envOwner != null ? envOwner.environments() : null;
+        // Конструктору ни computer, ни environments не нужны: сигнатуры лежат
+        // прямо в типе (Type.getCtors), как и у штатного обработчика.
+        if (ctorOwner == null && (computer == null || environments == null))
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"noComputer\"}"); //$NON-NLS-1$
+            return null;
+        }
+
+        Object documentationLocal = documentation;
+        Object languageProviderLocal = languageProvider;
+        if (documentationLocal == null && rsp != null)
+        {
+            try
+            {
+                Class<?> docClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"); //$NON-NLS-1$
+                documentationLocal = rsp.get(docClass);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        if (languageProviderLocal == null && rsp != null)
+        {
+            try
+            {
+                Class<?> langClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider"); //$NON-NLS-1$
+                languageProviderLocal = rsp.get(langClass);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+        if (documentationLocal == null)
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"noDoc\"}"); //$NON-NLS-1$
+            return null;
+        }
+        String lang = asString(Global.invoke(languageProviderLocal, "getLanguage")); //$NON-NLS-1$
+        if (lang == null || lang.isBlank())
+            lang = "ru"; //$NON-NLS-1$
+
+        List<Object> caPages = new ArrayList<>();
+        int paramSize = 0;
+        int maxParam = 0;
+        List<?> entries;
+        if (ctorOwner != null)
+        {
+            // Как штатный computeDocumentationInformation для feature типа Type:
+            // страницы берутся у каждого Ctor типа, размеры — из его параметров.
+            Type ctorType = ctorOwner.getType();
+            EList<Ctor> ctors = ctorType != null ? ctorType.getCtors() : null;
+            if (ctors == null || ctors.isEmpty())
+            {
+                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                    "{\"reason\":\"noCtors\",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ContentAssistDebug.jsonEscapeForLog(String.valueOf(
+                            ctorType != null ? Global.invoke(ctorType, "getName") : null)) //$NON-NLS-1$
+                        + "\"}"); //$NON-NLS-1$
+                return null;
+            }
+            for (Ctor ctorDef : ctors)
+            {
+                if (ctorDef == null)
+                    continue;
+                int n = ctorDef.getParams() != null ? ctorDef.getParams().size() : 0;
+                if (n > paramSize)
+                    paramSize = n;
+                if (n > maxParam)
+                    maxParam = n;
+                if (ctorDef.getMaxParams() > maxParam)
+                    maxParam = ctorDef.getMaxParams();
+                Object group = Global.invoke(documentationLocal,
+                    "getHoverDocumentationPages", ctorDef, lang); //$NON-NLS-1$
+                FindMissSupport.collectContentAssistPages(group, caPages);
+            }
+            entries = Collections.emptyList();
+        }
+        else
+        {
+            Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
+                methodAccess, environments);
+            if (!(plain instanceof List<?> resolvedEntries) || resolvedEntries.isEmpty())
+            {
+                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                    "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
+                return null;
+            }
+            entries = resolvedEntries;
+        }
+        for (Object entry : entries)
+        {
+            Object feature = entry instanceof FeatureEntry fe
+                ? fe.getFeature()
+                : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
+            if (!(feature instanceof Method method))
+                continue;
+            Object group = Global.invoke(documentationLocal, "getHoverDocumentationPages", //$NON-NLS-1$
+                method, lang);
+            int before = caPages.size();
+            FindMissSupport.collectContentAssistPages(group, caPages);
+            // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
+            // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
+            if (caPages.size() == before)
+                FindMissSupport.collectCaPagesFromMethodPlatformId(documentationLocal,
+                    method, lang, caPages);
+            if (caPages.size() == before)
+                FindMissSupport.recoverCaPagesFromErrorGroup(documentationLocal, group,
+                    lang, caPages);
+            if (caPages.size() == before)
+                FindMissSupport.collectCaFromViewDocumentation(documentationLocal, method,
+                    lang, caPages);
+            if (caPages.size() == before)
+            {
+                EList<ParamSet> setsDirect = method.getParamSet();
+                if (setsDirect != null)
+                {
+                    for (ParamSet set : setsDirect)
+                    {
+                        if (set == null)
+                            continue;
+                        Object setGroup = Global.invoke(documentationLocal,
+                            "getHoverDocumentationPages", set, lang); //$NON-NLS-1$
+                        FindMissSupport.collectContentAssistPages(setGroup, caPages);
+                        if (caPages.size() == before)
+                            FindMissSupport.recoverCaPagesFromErrorGroup(
+                                documentationLocal, setGroup, lang, caPages);
+                    }
+                }
+            }
+            if (caPages.size() == before)
+                FindMissSupport.collectSyntheticCaPages(documentationLocal, method, lang,
+                    caPages);
+            EList<ParamSet> sets = method.getParamSet();
+            if (sets != null)
+            {
+                for (ParamSet set : sets)
+                {
+                    if (set == null || set.getParams() == null)
+                        continue;
+                    int n = set.getParams().size();
+                    if (n > paramSize)
+                        paramSize = n;
+                    int max = set.getMaxParams();
+                    if (max > maxParam)
+                        maxParam = max;
+                    if (n > maxParam)
+                        maxParam = n;
+                }
+            }
+        }
+        if (caPages.isEmpty())
+        {
+            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
+                "{\"reason\":\"noPages\"}"); //$NON-NLS-1$
+            return null;
+        }
+
+        Class<?> infoClass = Class.forName(
+            "com._1c.g5.v8.dt.bsl.ui.contentassist.InvocationParametersHoverHandler$ParameterInfo"); //$NON-NLS-1$
+        java.lang.reflect.Constructor<?> ctor = infoClass.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        Object info = ctor.newInstance();
+        int paramNumber = paramNumberLikeEdt(siteInfo, caret);
+        if (paramNumber < 0)
+            paramNumber = 0;
+        if (paramSize > 0 && paramNumber >= paramSize)
+            paramNumber = paramSize - 1;
+        Global.setFieldForce(info, "pages", caPages); //$NON-NLS-1$
+        Global.setFieldForce(info, "paramNumber", Integer.valueOf(paramNumber)); //$NON-NLS-1$
+        Global.setFieldForce(info, "paramSize", Integer.valueOf(paramSize)); //$NON-NLS-1$
+        Global.setFieldForce(info, "maxParam", Integer.valueOf(maxParam)); //$NON-NLS-1$
+        // commaPosition == null → штатный CustomCaretListener закрывает подсказку;
+        // пустой список → он же всегда считает первый параметр (issue 437).
+        Global.setFieldForce(info, "commaPosition", //$NON-NLS-1$
+            new ArrayList<>(siteInfo.separatorOffsets));
+        Global.setFieldForce(info, "initialOffset", //$NON-NLS-1$
+            Integer.valueOf(siteInfo.initialOffset));
+        Global.setFieldForce(info, "firstAvailablePosition", //$NON-NLS-1$
+            Integer.valueOf(siteInfo.methodAccessEnd));
+        Global.setFieldForce(info, "lastAvailablePosition", //$NON-NLS-1$
+            Integer.valueOf(siteInfo.callEnd));
+
+        return new RecoveredParamHint(info, documentationLocal, languageProviderLocal,
+            caPages, paramNumber, siteInfo);
+    }
+
+    private static final class RecoveredParamHint
+    {
+        final Object info;
+        final Object documentation;
+        final Object languageProvider;
+        final List<Object> pages;
+        final int paramNumber;
+        final CallSiteInfo siteInfo;
+
+        RecoveredParamHint(Object info, Object documentation, Object languageProvider,
+            List<Object> pages, int paramNumber, CallSiteInfo siteInfo)
+        {
+            this.info = info;
+            this.documentation = documentation;
+            this.languageProvider = languageProvider;
+            this.pages = pages;
+            this.paramNumber = paramNumber;
+            this.siteInfo = siteInfo;
+        }
+    }
+
     static boolean tryOpenParamHintForViewer(ITextViewer viewer)
     {
         try
@@ -1436,250 +1889,11 @@ public final class ParamHintHtmlModifier
                         + (stockInfo == null ? "noInfo" : "noPages") //$NON-NLS-1$ //$NON-NLS-2$
                         + "\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
 
-                // Дальше — запасной сбор при промахе EDT.
-                CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
-                if (siteInfo == null)
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                RecoveredParamHint recovered = recoverParamHint(resource, caret, expressionStart,
+                    documentation, languageProvider);
+                if (recovered == null)
                     return Boolean.FALSE;
-                }
-                if (expressionStart >= 0 && siteInfo.methodAccessEnd < expressionStart)
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"wrapperCall\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"methodEnd\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
-                            + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return Boolean.FALSE;
-                }
-                ContentAssistSessionReloader.logLinkedMode("miss.site", "{\"owner\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (siteInfo.owner != null && siteInfo.owner.eClass() != null
-                        ? siteInfo.owner.eClass().getName() : "null") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret //$NON-NLS-1$
-                    + ",\"first\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
-                    + ",\"last\":" + siteInfo.callEnd //$NON-NLS-1$
-                    + ",\"seps\":" + siteInfo.separatorOffsets + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
-                // поиск по каретке давал вложенный вызов, начинающийся ровно у неё,
-                // и подсказка расходилась с границами.
-                Invocation invocation = siteInfo.owner instanceof Invocation own ? own : null;
-                // «Новый Тип(…)» — это OperatorStyleCreator, а не Invocation. Без
-                // отдельной ветки для него findInvocationNear уходил вверх по дереву и
-                // подсказка показывалась по ВНЕШНЕМУ вызову: для
-                // «ВнешнийМетод(Новый Массив(|))» — по ВнешнийМетод.
-                OperatorStyleCreator ctorOwner =
-                    siteInfo.owner instanceof OperatorStyleCreator osc ? osc : null;
-                EObject resolved = siteInfo.owner;
-                if (invocation == null && ctorOwner == null)
-                {
-                    EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-                    resolved = helper.resolveContainedElementAt(resource, caret);
-                    invocation = findInvocationNear(resolved);
-                }
-                if (ctorOwner == null && (invocation == null || invocation.getMethodAccess() == null))
-                {
-                    String resolvedName = resolved != null && resolved.eClass() != null
-                        ? resolved.eClass().getName() : "null"; //$NON-NLS-1$
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noInvocation\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"resolved\":\"" + ContentAssistDebug.jsonEscapeForLog(resolvedName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return Boolean.FALSE;
-                }
-                FeatureAccess methodAccess = invocation != null ? invocation.getMethodAccess() : null;
-                IResourceServiceProvider rsp = resource.getURI() != null
-                    ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
-                        resource.getURI())
-                    : null;
-                Object computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
-                Environmental envOwner = EcoreUtil2.getContainerOfType(methodAccess,
-                    Environmental.class);
-                Object environments = envOwner != null ? envOwner.environments() : null;
-                // Конструктору ни computer, ни environments не нужны: сигнатуры лежат
-                // прямо в типе (Type.getCtors), как и у штатного обработчика.
-                if (ctorOwner == null && (computer == null || environments == null))
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noComputer\"}"); //$NON-NLS-1$
-                    return Boolean.FALSE;
-                }
-
-                Object documentationLocal = documentation;
-                Object languageProviderLocal = languageProvider;
-                if (documentationLocal == null && rsp != null)
-                {
-                    try
-                    {
-                        Class<?> docClass = Class.forName(
-                            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"); //$NON-NLS-1$
-                        documentationLocal = rsp.get(docClass);
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
-                }
-                if (languageProviderLocal == null && rsp != null)
-                {
-                    try
-                    {
-                        Class<?> langClass = Class.forName(
-                            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider"); //$NON-NLS-1$
-                        languageProviderLocal = rsp.get(langClass);
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
-                }
-                if (documentationLocal == null)
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noDoc\"}"); //$NON-NLS-1$
-                    return Boolean.FALSE;
-                }
-                String lang = asString(Global.invoke(languageProviderLocal, "getLanguage")); //$NON-NLS-1$
-                if (lang == null || lang.isBlank())
-                    lang = "ru"; //$NON-NLS-1$
-
-                List<Object> caPages = new ArrayList<>();
-                int paramSize = 0;
-                int maxParam = 0;
-                List<?> entries;
-                if (ctorOwner != null)
-                {
-                    // Как штатный computeDocumentationInformation для feature типа Type:
-                    // страницы берутся у каждого Ctor типа, размеры — из его параметров.
-                    Type ctorType = ctorOwner.getType();
-                    EList<Ctor> ctors = ctorType != null ? ctorType.getCtors() : null;
-                    if (ctors == null || ctors.isEmpty())
-                    {
-                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                            "{\"reason\":\"noCtors\",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(
-                                    ctorType != null ? Global.invoke(ctorType, "getName") : null)) //$NON-NLS-1$
-                                + "\"}"); //$NON-NLS-1$
-                        return Boolean.FALSE;
-                    }
-                    for (Ctor ctorDef : ctors)
-                    {
-                        if (ctorDef == null)
-                            continue;
-                        int n = ctorDef.getParams() != null ? ctorDef.getParams().size() : 0;
-                        if (n > paramSize)
-                            paramSize = n;
-                        if (n > maxParam)
-                            maxParam = n;
-                        if (ctorDef.getMaxParams() > maxParam)
-                            maxParam = ctorDef.getMaxParams();
-                        Object group = Global.invoke(documentationLocal,
-                            "getHoverDocumentationPages", ctorDef, lang); //$NON-NLS-1$
-                        FindMissSupport.collectContentAssistPages(group, caPages);
-                    }
-                    entries = Collections.emptyList();
-                }
-                else
-                {
-                    Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
-                        methodAccess, environments);
-                    if (!(plain instanceof List<?> resolvedEntries) || resolvedEntries.isEmpty())
-                    {
-                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                            "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
-                        return Boolean.FALSE;
-                    }
-                    entries = resolvedEntries;
-                }
-                for (Object entry : entries)
-                {
-                    Object feature = entry instanceof FeatureEntry fe
-                        ? fe.getFeature()
-                        : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
-                    if (!(feature instanceof Method method))
-                        continue;
-                    Object group = Global.invoke(documentationLocal, "getHoverDocumentationPages", //$NON-NLS-1$
-                        method, lang);
-                    int before = caPages.size();
-                    FindMissSupport.collectContentAssistPages(group, caPages);
-                    // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
-                    // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
-                    if (caPages.size() == before)
-                        FindMissSupport.collectCaPagesFromMethodPlatformId(documentationLocal,
-                            method, lang, caPages);
-                    if (caPages.size() == before)
-                        FindMissSupport.recoverCaPagesFromErrorGroup(documentationLocal, group,
-                            lang, caPages);
-                    if (caPages.size() == before)
-                        FindMissSupport.collectCaFromViewDocumentation(documentationLocal, method,
-                            lang, caPages);
-                    if (caPages.size() == before)
-                    {
-                        EList<ParamSet> setsDirect = method.getParamSet();
-                        if (setsDirect != null)
-                        {
-                            for (ParamSet set : setsDirect)
-                            {
-                                if (set == null)
-                                    continue;
-                                Object setGroup = Global.invoke(documentationLocal,
-                                    "getHoverDocumentationPages", set, lang); //$NON-NLS-1$
-                                FindMissSupport.collectContentAssistPages(setGroup, caPages);
-                                if (caPages.size() == before)
-                                    FindMissSupport.recoverCaPagesFromErrorGroup(
-                                        documentationLocal, setGroup, lang, caPages);
-                            }
-                        }
-                    }
-                    if (caPages.size() == before)
-                        FindMissSupport.collectSyntheticCaPages(documentationLocal, method, lang,
-                            caPages);
-                    EList<ParamSet> sets = method.getParamSet();
-                    if (sets != null)
-                    {
-                        for (ParamSet set : sets)
-                        {
-                            if (set == null || set.getParams() == null)
-                                continue;
-                            int n = set.getParams().size();
-                            if (n > paramSize)
-                                paramSize = n;
-                            int max = set.getMaxParams();
-                            if (max > maxParam)
-                                maxParam = max;
-                            if (n > maxParam)
-                                maxParam = n;
-                        }
-                    }
-                }
-                if (caPages.isEmpty())
-                {
-                    ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                        "{\"reason\":\"noPages\"}"); //$NON-NLS-1$
-                    return Boolean.FALSE;
-                }
-
-                Class<?> infoClass = Class.forName(
-                    "com._1c.g5.v8.dt.bsl.ui.contentassist.InvocationParametersHoverHandler$ParameterInfo"); //$NON-NLS-1$
-                java.lang.reflect.Constructor<?> ctor = infoClass.getDeclaredConstructor();
-                ctor.setAccessible(true);
-                Object info = ctor.newInstance();
-                int paramNumber = paramNumberLikeEdt(siteInfo, caret);
-                if (paramNumber < 0)
-                    paramNumber = 0;
-                if (paramSize > 0 && paramNumber >= paramSize)
-                    paramNumber = paramSize - 1;
-                Global.setFieldForce(info, "pages", caPages); //$NON-NLS-1$
-                Global.setFieldForce(info, "paramNumber", Integer.valueOf(paramNumber)); //$NON-NLS-1$
-                Global.setFieldForce(info, "paramSize", Integer.valueOf(paramSize)); //$NON-NLS-1$
-                Global.setFieldForce(info, "maxParam", Integer.valueOf(maxParam)); //$NON-NLS-1$
-                // commaPosition == null → штатный CustomCaretListener закрывает подсказку;
-                // пустой список → он же всегда считает первый параметр (issue 437).
-                Global.setFieldForce(info, "commaPosition", //$NON-NLS-1$
-                    new ArrayList<>(siteInfo.separatorOffsets));
-                Global.setFieldForce(info, "initialOffset", //$NON-NLS-1$
-                    Integer.valueOf(siteInfo.initialOffset));
-                Global.setFieldForce(info, "firstAvailablePosition", //$NON-NLS-1$
-                    Integer.valueOf(siteInfo.methodAccessEnd));
-                Global.setFieldForce(info, "lastAvailablePosition", //$NON-NLS-1$
-                    Integer.valueOf(siteInfo.callEnd));
-
+                Object info = recovered.info;
                 boolean realHandlerClass = PARAM_HOVER_HANDLER_CLASS.equals(
                     handlerRef.getClass().getName());
                 boolean shown = showParamInfoViaHandler(handlerRef, viewer, info, site,
@@ -1687,8 +1901,9 @@ public final class ParamHintHtmlModifier
                 boolean viaHandler = shown;
                 if (!shown)
                 {
-                    shown = showParamHintControlDirect(viewer, documentationLocal,
-                        languageProviderLocal, site, caPages, paramNumber, siteInfo);
+                    shown = showParamHintControlDirect(viewer, recovered.documentation,
+                        recovered.languageProvider, site, recovered.pages, recovered.paramNumber,
+                        recovered.siteInfo);
                 }
                 return Boolean.valueOf(shown);
             });
@@ -3714,9 +3929,8 @@ public final class ParamHintHtmlModifier
     }
 
     /**
-     * EDT оборачивает href в {@code ?u=}. Ссылки {@code IPageReference} уже содержат
-     * такую оболочку, поэтому Browser передаёт {@code ?u=?u=…}; для resolver'а
-     * внутренний префикс не является частью пути документации.
+     * Снимает оставшиеся оболочки {@code ?u=} с адреса, уже полученного обработчиком
+     * клика. В HTML исходный href сохраняется, как в PageUtil EDT.
      */
     private static String normalizeNestedBrowserLink(String link)
     {
@@ -4336,15 +4550,6 @@ public final class ParamHintHtmlModifier
      */
     static String injectMemberSeeLinks(String html, String block)
     {
-        // #region agent log
-        Global.tempLog("see-links-diag", "inject html=" + (html == null ? "null" : html.length()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " block=" + (block == null ? "null" : block.length()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " hasEntry=" + (html != null && html.contains(PARAM_ENTRY_CLASS)) //$NON-NLS-1$
-            + (html != null && html.contains(PARAM_ENTRY_CLASS)
-                ? " around=" + html.substring(Math.max(0, html.indexOf(PARAM_ENTRY_CLASS) - 300), //$NON-NLS-1$
-                    Math.min(html.length(), html.indexOf(PARAM_ENTRY_CLASS) + 200)).replace('\n', ' ').replace('\r', ' ')
-                : "")); //$NON-NLS-1$
-        // #endregion
         // Уже есть элемент записи (подсказка параметров или вставленный блок) — не вставляем. Ищем
         // сам элемент, а не имя класса: стиль ссылок (withLinkStyle у ссылки на имя в заголовке)
         // кладёт в <head> «span.comfort-param-entry{…}», и конструктор не вставлялся (18.10 10:44).
@@ -4362,12 +4567,7 @@ public final class ParamHintHtmlModifier
         int closing = html.indexOf("&gt;", headingStart); //$NON-NLS-1$
         if (closing > headingStart && closing < headingEnd)
             insertAt = closing;
-        String result = html.substring(0, insertAt) + block + html.substring(insertAt);
-        // #region agent log
-        Global.tempLog("member-see-desc", "before=" + html.replace('\n', ' ').replace('\r', ' ') //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + " | block=" + block.replace('\n', ' ')); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return withLinkStyle(result);
+        return withLinkStyle(html.substring(0, insertAt) + block + html.substring(insertAt));
     }
 
     /**
@@ -6405,10 +6605,9 @@ public final class ParamHintHtmlModifier
                 String href = asString(Global.invoke(typeRef, "getHref")); //$NON-NLS-1$
                 if (href != null && !href.isBlank())
                 {
-                    // IPageReference уже возвращает адрес для обработчика EDT в
-                    // виде ?u=… . Вставка его в href даёт Browser второй ?u=…
-                    // и превращает путь в несуществующий. В HTML нужна сама ссылка.
-                    href = normalizeNestedBrowserLink(href);
+                    // Как PageUtil.generateReferenceShortHtml: адрес IPageReference
+                    // переносится в HTML без декодирования. Префикс ?u= и кодирование
+                    // нужны LocationListener EDT; снимаем их только при клике.
                     sb.append("<a href=\""); //$NON-NLS-1$
                     sb.append(escapeHtmlAttr(href));
                     sb.append("\">"); //$NON-NLS-1$

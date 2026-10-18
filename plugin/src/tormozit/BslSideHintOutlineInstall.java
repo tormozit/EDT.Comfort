@@ -392,9 +392,10 @@ public final class BslSideHintOutlineInstall
                     BslSideHintDebug.step("ir skip", "element changed method=" + methodName); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
-                String baseHtml = IrBslHoverHtml.readHtml(baseInput);
+                String baseHtml = IrBslHoverHtml.readDisplayHtml(baseInput);
                 String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
-                presenter.updateHint(new BslItemSideHint(merged, creator, sourceOffset));
+                presenter.updateHint(new BslItemSideHint(
+                    IrBslHoverHtml.withHtml(baseInput, merged), creator, sourceOffset));
                 BslSideHintDebug.log("ir enriched method=" + methodName + " len=" + irHtml.length()); //$NON-NLS-1$ //$NON-NLS-2$
             });
         });
@@ -667,7 +668,7 @@ public final class BslSideHintOutlineInstall
         {
 
             pendingHint = hint;
-            setCustomInformationControlCreator(hint.getControlCreator());
+            setCustomInformationControlCreator(IrBslHoverHtml.wrapCreator(hint.getControlCreator()));
             IInformationControl control = getInternalAccessor().getCurrentInformationControl();
             if (control == null)
             {
@@ -680,6 +681,7 @@ public final class BslSideHintOutlineInstall
             }
 
             Object input = hint.getControlInput();
+            IrBslHoverHtml.installHtmlDecoration(control);
             if (input instanceof String html)
             {
                 // Обогащённый HTML-строкой: setInput(String) бросает InstanceOf-ассерт в Xtext-контроле
@@ -902,7 +904,7 @@ public final class BslSideHintOutlineInstall
                 area = fallbackSubjectArea();
             if (area == null)
                 return;
-            setCustomInformationControlCreator(hint.getControlCreator());
+            setCustomInformationControlCreator(IrBslHoverHtml.wrapCreator(hint.getControlCreator()));
             setInformation(hint.getControlInput(), area);
         }
 

@@ -471,20 +471,11 @@ public final class BslDocCommentComputedTypes
             // Только готовое: модуль цели ещё не считался — штатный тип без слияния.
             String key = methodLabel(methodObject);
             List<?> computed = cachedReturnTypes(key, methodObject);
-            // #region agent log
-            if (computed == null || computed.isEmpty())
-            {
-                Global.tempLog("bsl-cache-miss", "key=" + versionKey(key, methodObject) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " versions=" + versionsByLabel.get(key) //$NON-NLS-1$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            }
-            // #endregion
             if (computed != null && !computed.isEmpty())
                 fillReturnSection(comment, computed, methodObject);
         }
-        catch (Throwable failure)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-return-fill", "afterParseTemplateComment failed", failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return comment;
     }
@@ -642,37 +633,6 @@ public final class BslDocCommentComputedTypes
     }
 
     /**
-     * Собирает секцию «Возвращаемое значение» из рассчитанных типов.
-     * <p>
-     * Сборку делает сам EDT — {@code TypeSection.fill(типы, описание, русскиеИмена, контекст)}.
-     * Это его штатный перевод рассчитанных {@code TypeItem} в определения типов: он же
-     * расставляет номера строк, раскрывает типы элементов коллекций и переносит свойства
-     * контекста полями. Своя сборка этих же структур давала определения, которые дальше не
-     * разбирались.
-     * <p>
-     * Признак русских имён подбирается попыткой: при неверном значении {@code fill} молча
-     * выбрасывает типы, у которых нет имени на нужном языке, и секция остаётся пустой.
-     */
-    // #region agent log
-    /** Временная диагностика шторма: глубина стека и вложенность разбора ссылок «см.». */
-    private static String nestingDiagnostics()
-    {
-        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        int linkFrames = 0;
-        int parseFrames = 0;
-        for (StackTraceElement frame : stack)
-        {
-            String name = frame.getMethodName();
-            if ("computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
-                linkFrames++;
-            else if ("afterParseTemplateComment".equals(name)) //$NON-NLS-1$
-                parseFrames++;
-        }
-        return "depth=" + stack.length + " linkFrames=" + linkFrames + " hookFrames=" + parseFrames; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-    // #endregion
-
-    /**
      * Все рассчитанные типы и их свойства уже есть в объявленной секции возврата: дописывать
      * нечего. Имя типа сравнивается и английское, и русское — в шапке пишут «Структура».
      */
@@ -821,11 +781,22 @@ public final class BslDocCommentComputedTypes
         }
     }
 
+    /**
+     * Собирает секцию «Возвращаемое значение» из рассчитанных типов.
+     * <p>
+     * Сборку делает сам EDT — {@code TypeSection.fill(типы, описание, русскиеИмена, контекст)}.
+     * Это его штатный перевод рассчитанных {@code TypeItem} в определения типов: он же
+     * расставляет номера строк, раскрывает типы элементов коллекций и переносит свойства
+     * контекста полями. Своя сборка этих же структур давала определения, которые дальше не
+     * разбирались.
+     * <p>
+     * Признак русских имён подбирается попыткой: при неверном значении {@code fill} молча
+     * выбрасывает типы, у которых нет имени на нужном языке, и секция остаётся пустой.
+     */
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
         if (!(comment instanceof BslDocumentationComment documentation))
             return;
-        long sectionStarted = System.nanoTime();
         List<TypeItem> items = new ArrayList<>();
         for (Object raw : computed)
         {
@@ -843,27 +814,16 @@ public final class BslDocCommentComputedTypes
         // сам на себя — сборка висела в рекурсии fill глубже 1000 кадров (дамп 18.10).
         if (existing != null && addsNothingToDeclared(items, existing))
             return;
-        Global.tempLog("bsl-return-fill", "guard.begin target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
-            + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
-            + " classes=" + items.stream().map(item -> item.getClass().getName()).toList()); //$NON-NLS-1$
-        boolean unsafe = isCyclicOrHuge(items);
-        Global.tempLog("bsl-return-fill", "guard.end target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
-            + " unsafe=" + unsafe + " elapsedNs=" + (System.nanoTime() - sectionStarted)); //$NON-NLS-1$ //$NON-NLS-2$
-        if (unsafe)
-        {
-            // #region agent log
-            Global.tempLog("bsl-property-fill-cost", "skip cyclic target=" + methodLabel(context)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+        if (isCyclicOrHuge(items))
             return;
-        }
         ReturnSection returnSection = existing != null ? existing : new ReturnSection(documentation, 0);
         TypeSection typeSection = new TypeSection(returnSection, 0);
 
-        fillTypeSection(typeSection, items, true, context);
+        typeSection.fill(items, "", true, context); //$NON-NLS-1$
         int count = typeSection.getTypeDefinitions().size();
         if (count == 0)
         {
-            fillTypeSection(typeSection, items, false, context);
+            typeSection.fill(items, "", false, context); //$NON-NLS-1$
             count = typeSection.getTypeDefinitions().size();
         }
         if (count == 0)
@@ -878,62 +838,27 @@ public final class BslDocCommentComputedTypes
         catch (Throwable ignored)
         {
         }
-        long descriptionsStarted = System.nanoTime();
         // Описания полей — только текст для подсказок. Комментарий, разобранный сборкой, в
         // подсказки не попадает (EDT разбирает его заново на каждое обращение), а сборка
         // держит блокировку проекта, и первое нажатие клавиши после сохранения ждёт её конца.
         boolean inBuild = isBuildThread();
-        boolean cached = false;
         try
         {
             if (!inBuild)
-                cached = BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items,
+                BslStructureInsertCommentTypes.fillPropertyDescriptions(typeSection, items,
                     computed, methodLabel(context), context);
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-property-fill-cost", "fill target=" + methodLabel(context), t); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        finally
-        {
-            Global.tempLog("bsl-property-fill-cost", "fill target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
-                + " commentId=" + Integer.toHexString(System.identityHashCode(comment)) //$NON-NLS-1$
-                + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
-                + " types=" + items.size() + " definitions=" + count //$NON-NLS-1$ //$NON-NLS-2$
-                + " inBuild=" + inBuild + " cached=" + cached //$NON-NLS-1$ //$NON-NLS-2$
-                + " " + nestingDiagnostics() //$NON-NLS-1$
-                + " sectionFillNs=" + (descriptionsStarted - sectionStarted) //$NON-NLS-1$
-                + " elapsedNs=" + (System.nanoTime() - descriptionsStarted) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
         // Объединение и отсев — после выравнивания мест и описаний: они адресуют поля по
         // индексам и кэшируют эти пути по форме полной секции.
         mergeSameTypeDefinitions(typeSection);
-        if (existing != null && !dropDeclaredFields(typeSection, existing, methodLabel(context)))
+        if (existing != null && !dropDeclaredFields(typeSection, existing))
             return;
         returnSection.addTypeSection(typeSection);
         if (existing == null)
             documentation.setReturnSection(returnSection);
-    }
-
-    /** Безусловная временная диагностика: ошибка fill раньше исчезала в catch разбора. */
-    private static void fillTypeSection(TypeSection section, List<TypeItem> items, boolean russian,
-        EObject context)
-    {
-        long started = System.nanoTime();
-        boolean completed = false;
-        Global.tempLog("bsl-return-fill", "native.begin target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
-            + " russian=" + russian); //$NON-NLS-1$
-        try
-        {
-            section.fill(items, "", russian, context); //$NON-NLS-1$
-            completed = true;
-        }
-        finally
-        {
-            Global.tempLog("bsl-return-fill", "native.end target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
-                + " completed=" + completed + " elapsedNs=" + (System.nanoTime() - started)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     /**
@@ -969,7 +894,7 @@ public final class BslDocCommentComputedTypes
         }
         catch (UnsupportedOperationException e)
         {
-            Global.tempLogException("bsl-declared-dedupe", "merge readonly", e); //$NON-NLS-1$ //$NON-NLS-2$
+            // Список EDT неизменяемый — оставляем секцию как есть.
         }
     }
 
@@ -983,7 +908,7 @@ public final class BslDocCommentComputedTypes
      *
      * @return {@code false}, если в рассчитанной секции не осталось ничего нового
      */
-    private static boolean dropDeclaredFields(TypeSection computed, ReturnSection declared, String label)
+    private static boolean dropDeclaredFields(TypeSection computed, ReturnSection declared)
     {
         java.util.Map<String, java.util.Set<String>> declaredFields = new java.util.HashMap<>();
         for (TypeSection section : declared.getReturnTypes())
@@ -1000,9 +925,6 @@ public final class BslDocCommentComputedTypes
                         names.add(field.getName().toLowerCase(java.util.Locale.ROOT));
             }
         }
-        int droppedFields = 0;
-        int droppedTypes = 0;
-        int keptFields = 0;
         try
         {
             var definitions = computed.getTypeDefinitions();
@@ -1013,36 +935,19 @@ public final class BslDocCommentComputedTypes
                 java.util.Set<String> names = type == null ? null
                     : declaredFields.get(type.toLowerCase(java.util.Locale.ROOT));
                 if (names == null)
-                {
-                    keptFields += definition.getFieldDefinitionExtension().size();
                     continue;
-                }
                 var fields = definition.getFieldDefinitionExtension();
-                int before = fields.size();
                 fields.removeIf(field -> field.getName() != null
                     && names.contains(field.getName().toLowerCase(java.util.Locale.ROOT)));
-                droppedFields += before - fields.size();
-                keptFields += fields.size();
                 // Тот же тип без новых полей ничего не добавляет к объявленному.
                 if (fields.isEmpty() && definition.getContainTypes().isEmpty())
-                {
                     iterator.remove();
-                    droppedTypes++;
-                }
             }
-            // #region agent log
-            Global.tempLog("bsl-declared-dedupe", "target=" + label //$NON-NLS-1$ //$NON-NLS-2$
-                + " declaredTypes=" + declaredFields.keySet() //$NON-NLS-1$
-                + " droppedFields=" + droppedFields + " droppedTypes=" + droppedTypes //$NON-NLS-1$ //$NON-NLS-2$
-                + " keptTypes=" + definitions.size() + " keptFields=" + keptFields //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
             return !definitions.isEmpty();
         }
         catch (UnsupportedOperationException e)
         {
             // Список EDT неизменяемый — оставляем секцию как есть.
-            Global.tempLogException("bsl-declared-dedupe", "readonly target=" + label, e); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
         }
     }
@@ -1091,14 +996,8 @@ public final class BslDocCommentComputedTypes
     {
         if (module == null || module.eIsProxy() || !isExtendedTypesEnabled(resolveProject(module)))
             return java.util.Set.of();
-        long started = System.nanoTime();
         boolean build = isBuildThread();
-        int functions = 0;
-        int remembered = 0;
         java.util.Set<String> changed = new java.util.HashSet<>();
-        // #region agent log
-        List<String> changedKeys = new ArrayList<>();
-        // #endregion
         boolean selfReferenced = false;
         try
         {
@@ -1113,7 +1012,6 @@ public final class BslDocCommentComputedTypes
             {
                 if (!isFunction(method))
                     continue;
-                functions++;
                 String label = methodLabel(method);
                 String key = versionKey(label, method);
                 CachedReturn previous = typeCacheByKey.get(key);
@@ -1131,25 +1029,15 @@ public final class BslDocCommentComputedTypes
                 // запись привязана к тексту функции, так что для другого текста она и так не найдётся.
                 if (types == null || types.isEmpty())
                     continue;
-                String signature = typeSignature(types);
-                long hash = signatureHash(signature);
+                long hash = signatureHash(typeSignature(types));
                 // Изменение — новая версия текста или смена самого типа при том же тексте: тип
                 // зависит и от вызываемых функций (правка ключа в «Яйцо» меняет тип «Новый123…»).
                 // Ложная смена теперь стоит только ленивого пересчёта одного метода при
                 // автодополнении, а не второго прохода по всем ссылающимся (было 29 с, 18.10 02:13).
                 // Сравнение — только со своей стороной (сборка или редактор), см. CachedReturn.
                 if ((previous == null || previous.hash(build) != hash) && method.getName() != null)
-                {
                     changed.add(method.getName().toLowerCase(java.util.Locale.ROOT));
-                    // #region agent log
-                    if (changedKeys.size() < 10)
-                        changedKeys.add(key.substring(key.lastIndexOf('#')) + "/versions=" //$NON-NLS-1$
-                            + (versionsByLabel.containsKey(label) ? versionsByLabel.get(label).size() : 0)
-                            + (changedKeys.size() < 3 ? " type=" + signature : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                }
                 putVersion(label, key, CachedReturn.with(previous, types, build, hash));
-                remembered++;
             }
             if (!changed.isEmpty())
             {
@@ -1158,39 +1046,14 @@ public final class BslDocCommentComputedTypes
                 // Тип функции сменился — запасы членов автодополнения у точек могут держать прежний.
                 bumpTypesGeneration();
             }
-            // #region agent log
-            logTypeStates(module);
-            // #endregion
         }
-        catch (Throwable t)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("bsl-return-compute-cost", "remember failed module=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (module.eResource() == null ? "?" : module.eResource().getURI()), t); //$NON-NLS-1$
-        }
-        finally
-        {
-            // #region agent log
-            Global.tempLog("bsl-return-compute-cost", "remember module=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (module.eResource() == null ? "?" : module.eResource().getURI()) //$NON-NLS-1$
-                + " functions=" + functions + " remembered=" + remembered //$NON-NLS-1$ //$NON-NLS-2$
-                + " changed=" + changed.size() + " selfReferenced=" + selfReferenced //$NON-NLS-1$ //$NON-NLS-2$
-                + " changedNames=" + changed.stream().limit(10).toList() //$NON-NLS-1$
-                + " changedKeys=" + changedKeys //$NON-NLS-1$
-                + " resourceSet=" + (module.eResource() == null || module.eResource().getResourceSet() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                    : Integer.toHexString(System.identityHashCode(module.eResource().getResourceSet())))
-                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
+            // Запомнить не удалось — слияние для этого расчёта останется без новых типов.
         }
         return selfReferenced ? changed : java.util.Set.of();
     }
 
-    /**
-     * Методы модуля, в тексте которых (документирующий комментарий над методом и тело с
-     * боковыми комментариями) есть «см. …» на одну из {@code names}. Именно их тип зависит от
-     * слитого типа изменившейся функции, а штатный частичный расчёт их не пересчитывает: он
-     * берёт только вызывающих.
-     */
     /**
      * Ссылается ли метод «см.» на одну из {@code names}: текст узла метода вместе с прилегающими
      * скрытыми (документирующий комментарий над ним) и телом. Без текста всего модуля — это
@@ -1202,6 +1065,12 @@ public final class BslDocCommentComputedTypes
         return node != null && !names.isEmpty() && referencesAny(node.getText(), names);
     }
 
+    /**
+     * Методы модуля, в тексте которых (документирующий комментарий над методом и тело с
+     * боковыми комментариями) есть «см. …» на одну из {@code names}. Именно их тип зависит от
+     * слитого типа изменившейся функции, а штатный частичный расчёт их не пересчитывает: он
+     * берёт только вызывающих.
+     */
     static List<Method> methodsReferencing(com._1c.g5.v8.dt.bsl.model.Module module, java.util.Set<String> names)
     {
         List<Method> result = new ArrayList<>();
@@ -1238,70 +1107,9 @@ public final class BslDocCommentComputedTypes
         return start;
     }
 
-    // #region agent log
-    /** Временно: сигнатуры возврата функций и NORMAL/LIGHT параметров методов небольшого модуля. */
-    static void logTypeStates(com._1c.g5.v8.dt.bsl.model.Module module)
-    {
-        try
-        {
-            if (module == null || module.allMethods().size() > 50)
-                return;
-            Resource resource = module.eResource();
-            for (Method method : module.allMethods())
-            {
-                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(method, "environments"); //$NON-NLS-1$
-                StringBuilder line = new StringBuilder("method=").append(method.getName()) //$NON-NLS-1$
-                    .append(" methodId=").append(Integer.toHexString(System.identityHashCode(method))) //$NON-NLS-1$
-                    .append(" resourceId=").append(Integer.toHexString(System.identityHashCode(resource))) //$NON-NLS-1$
-                    .append(" resourceSetId=").append(resource == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                        : Integer.toHexString(System.identityHashCode(resource.getResourceSet())));
-                CachedReturn cached = typeCacheByKey.get(versionKey(methodLabel(method), method));
-                if (cached != null)
-                    line.append(" cached=").append(signatureOrNull(cached.types())) //$NON-NLS-1$
-                        .append(" buildHash=").append(Long.toHexString(cached.buildHash())) //$NON-NLS-1$
-                        .append(" editorHash=").append(Long.toHexString(cached.editorHash())); //$NON-NLS-1$
-                Object returnState = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
-                if (returnState != null)
-                    line.append(" return{NORMAL=") //$NON-NLS-1$
-                        .append(signatureOrNull(typesFromReturnProvider(returnState, "NORMAL", envs))) //$NON-NLS-1$
-                        .append(" LIGHT=") //$NON-NLS-1$
-                        .append(signatureOrNull(typesFromReturnProvider(returnState, "LIGHT", envs))) //$NON-NLS-1$
-                        .append('}');
-                for (var param : method.getFormalParams())
-                {
-                    line.append(" var:").append(param.getName()).append("{NORMAL=") //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(signatureOrNull(typesFromReturnProvider(param.getTypeStateProvider(), "NORMAL", envs))) //$NON-NLS-1$
-                        .append(" LIGHT=") //$NON-NLS-1$
-                        .append(signatureOrNull(typesFromReturnProvider(param.getTypeStateProvider(), "LIGHT", envs))) //$NON-NLS-1$
-                        .append('}');
-                }
-                int index = 0;
-                for (Object collector : method.getFinalInParamState())
-                {
-                    line.append(" param").append(index++).append("{NORMAL=") //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(signatureOrNull(typesFromReturnProvider(collector, "NORMAL", envs))) //$NON-NLS-1$
-                        .append(" LIGHT=") //$NON-NLS-1$
-                        .append(signatureOrNull(typesFromReturnProvider(collector, "LIGHT", envs))) //$NON-NLS-1$
-                        .append('}');
-                }
-                Global.tempLog("bsl-type-states", line.append(" thread=") //$NON-NLS-1$ //$NON-NLS-2$
-                    .append(Thread.currentThread().getName()).toString());
-            }
-        }
-        catch (Throwable t)
-        {
-            Global.tempLogException("bsl-type-states", "log failed", t); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    private static String signatureOrNull(List<?> types)
-    {
-        return types == null ? "none" : "[" + typeSignature(types) + "]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-    // #endregion
-
-    /** Имена типов и их свойств — чтобы сравнивать тип по сути, а не по объектам. */
     /**
+     * Имена типов и их свойств — чтобы сравнивать тип по сути, а не по объектам.
+     * <p>
      * Без учёта порядка: имя типа и отсортированные поля, варианты — тоже по порядку имён.
      * Порядок вариантов между расчётами разный, и от него сигнатура «плавала».
      */

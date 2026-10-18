@@ -932,12 +932,6 @@ public final class LongOperationNotifyHook implements IStartup
         }
     }
 
-    /** Переход из диагностики к строке штатного журнала — общий путь с уведомлениями об ошибках. */
-    static void openLogEntry(String message, long timeMs)
-    {
-        openErrorLog(new ErrorRef(message, "", timeMs)); //$NON-NLS-1$
-    }
-
     /**
      * Активирует окно EDT, открывает штатный журнал ошибок (Error Log) и выделяет в нём
      * строку первой подсчитанной ошибки.

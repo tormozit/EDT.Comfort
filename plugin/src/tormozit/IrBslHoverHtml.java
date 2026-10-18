@@ -1,7 +1,14 @@
 // IrBslHoverHtml.java
 package tormozit;
 
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+
+import org.eclipse.jface.internal.text.html.BrowserInformationControl;
 import org.eclipse.jface.text.IInformationControl;
+import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.IInformationControlCreatorExtension;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -22,7 +29,140 @@ public final class IrBslHoverHtml
     private static volatile java.lang.reflect.Method addStyleToHtmlMethod;
     private static volatile java.lang.reflect.Method defaultLanguageMethod;
 
+    /** Представление отдельно от объекта EDT: ссылки и история используют исходный input. */
+    private static final Map<Object, HtmlDecoration> HTML_DECORATIONS =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    private static final String DECORATION_LISTENER_MARK = "tormozit.bslHtmlDecorationListener"; //$NON-NLS-1$
+
     private IrBslHoverHtml() {}
+
+    /** Возвращает тот же объект EDT; для чистого HTML из ИР сохраняет строковый путь. */
+    public static Object withHtml(Object input, String html)
+    {
+        if (!isBslBrowserInput(input))
+            return html;
+        HTML_DECORATIONS.put(input, new HtmlDecoration(Global.invoke(input, "getIndex"), html)); //$NON-NLS-1$
+        return input;
+    }
+
+    /** HTML предыдущего оформителя, когда несколько дополнений строятся последовательно. */
+    public static String readDisplayHtml(Object input)
+    {
+        String html = decoratedHtml(input);
+        return html != null ? html : readHtml(input);
+    }
+
+    private static String decoratedHtml(Object input)
+    {
+        HtmlDecoration decoration = HTML_DECORATIONS.get(input);
+        return decoration != null
+            && java.util.Objects.equals(decoration.index, Global.invoke(input, "getIndex")) //$NON-NLS-1$
+                ? decoration.html : null;
+    }
+
+    /** setInput уже сохранил исходный объект и уведомляет слушателей после Browser.setText. */
+    public static void installHtmlDecoration(IInformationControl control)
+    {
+        if (!(control instanceof BrowserInformationControl information))
+            return;
+        Browser browser = findControlBrowser(control);
+        if (browser == null || browser.isDisposed())
+            return;
+        if (browser.getData(DECORATION_LISTENER_MARK) == null)
+        {
+            browser.setData(DECORATION_LISTENER_MARK, Boolean.TRUE);
+            information.addInputChangeListener(input -> applyHtmlDecoration(information, browser, input));
+            applyHtmlDecoration(information, browser, information.getInput());
+        }
+    }
+
+    private static void applyHtmlDecoration(BrowserInformationControl control, Browser browser, Object input)
+    {
+        if (browser.isDisposed() || control.getInput() != input)
+            return;
+        String html = decoratedHtml(input);
+        if (html != null)
+        {
+            browser.setText(html);
+        }
+    }
+
+    /** Также охватывает штатный фокусируемый control, созданный самим JFace. */
+    static void installHtmlDecorationForBrowser(Browser browser)
+    {
+        if (HTML_DECORATIONS.isEmpty() || browser == null || browser.isDisposed())
+            return;
+        Object webBrowser = Global.getField(browser, "webBrowser"); //$NON-NLS-1$
+        Object listeners = Global.getField(webBrowser, "locationListeners"); //$NON-NLS-1$
+        if (listeners instanceof org.eclipse.swt.browser.LocationListener[] array)
+            for (org.eclipse.swt.browser.LocationListener listener : array)
+            {
+                Object bsl = listener;
+                if (bsl != null && !bsl.getClass().getName().endsWith("BslLocationListener")) //$NON-NLS-1$
+                    bsl = Global.getField(bsl, "val$listener"); //$NON-NLS-1$
+                if (bsl == null || !bsl.getClass().getName().endsWith("BslLocationListener")) //$NON-NLS-1$
+                    continue;
+                Object control = Global.getField(bsl, "control"); //$NON-NLS-1$
+                if (control instanceof IInformationControl information)
+                    installHtmlDecoration(information);
+            }
+    }
+
+    public static IInformationControlCreator wrapCreator(IInformationControlCreator creator)
+    {
+        return creator == null || creator instanceof HtmlDecorationCreator
+            ? creator : new HtmlDecorationCreator(creator);
+    }
+
+    private static final class HtmlDecoration
+    {
+        final Object index;
+        final String html;
+
+        HtmlDecoration(Object index, String html)
+        {
+            this.index = index;
+            this.html = html;
+        }
+    }
+
+    private static final class HtmlDecorationCreator
+        implements IInformationControlCreator, IInformationControlCreatorExtension
+    {
+        private final IInformationControlCreator delegate;
+
+        HtmlDecorationCreator(IInformationControlCreator delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public IInformationControl createInformationControl(org.eclipse.swt.widgets.Shell parent)
+        {
+            IInformationControl control = delegate.createInformationControl(parent);
+            installHtmlDecoration(control);
+            return control;
+        }
+
+        @Override
+        public boolean canReuse(IInformationControl control)
+        {
+            boolean reuse = delegate instanceof IInformationControlCreatorExtension extension
+                && extension.canReuse(control);
+            if (reuse)
+                installHtmlDecoration(control);
+            return reuse;
+        }
+
+        @Override
+        public boolean canReplace(IInformationControlCreator creator)
+        {
+            IInformationControlCreator other = creator instanceof HtmlDecorationCreator decorated
+                ? decorated.delegate : creator;
+            return delegate instanceof IInformationControlCreatorExtension extension
+                && extension.canReplace(other);
+        }
+    }
 
     public static boolean isBslBrowserInput(Object info)
     {

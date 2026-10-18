@@ -150,33 +150,19 @@ public final class BslDocCommentDescriptionFix
         String cn = commentObj.getClass().getName();
         if (!TARGET_COMMENT.equals(cn))
             return;
-        long started = System.nanoTime();
-        long normalizedAt;
-        int moved = 0;
         try
         {
-            moved = normalize(commentObj);
+            normalize(commentObj);
         }
         catch (Throwable t)
         {
-            Global.tempLogException("bsl-comment-cost", "normalize", t); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        normalizedAt = System.nanoTime();
         try
         {
             TypeSectionLinkRepair.repair(commentObj);
         }
         catch (Throwable t)
         {
-            Global.tempLogException("bsl-comment-cost", "repair", t); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        finally
-        {
-            Global.tempLog("bsl-comment-cost", "description id=" //$NON-NLS-1$ //$NON-NLS-2$
-                + Integer.toHexString(System.identityHashCode(commentObj))
-                + " normalizeNs=" + (normalizedAt - started) //$NON-NLS-1$
-                + " repairNs=" + (System.nanoTime() - normalizedAt) //$NON-NLS-1$
-                + " moved=" + moved + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

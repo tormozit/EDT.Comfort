@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.util.Arrays;
 
 import org.eclipse.core.databinding.observable.map.IMapChangeListener;
 import org.eclipse.core.databinding.observable.map.IObservableMap;
@@ -27,21 +26,17 @@ public final class FormatStringDialogHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog("format-string-dialog", "earlyStartup"); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() ->
         {
             Display display = Display.getDefault();
             if (display.isDisposed())
                 return;
-            Global.tempLog("format-string-dialog", "install Show filter"); //$NON-NLS-1$ //$NON-NLS-2$
             display.addFilter(SWT.Show, event ->
             {
                 if (!(event.widget instanceof Shell shell) || shell.isDisposed()
                     || shell.getData(PATCHED_KEY) != null)
                     return;
                 Object dialog = shell.getData();
-                Global.tempLog("format-string-dialog", "Show: title=" + shell.getText() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", dialog=" + (dialog == null ? "null" : dialog.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                 if (dialog == null || !DIALOG_CLASS.equals(dialog.getClass().getName()))
                     return;
                 attach(shell, dialog);
@@ -52,15 +47,11 @@ public final class FormatStringDialogHook implements IStartup
     @SuppressWarnings("unchecked")
     private static void attach(Shell shell, Object dialog)
     {
-        Global.tempLog("format-string-dialog", "attach: " + dialog.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         // FormatStringDialog.fillDateTab(): df — именно DATE_FORMAT, не DATE_LOCAL_FORMAT.
         Object field = Global.getField(dialog, "df"); //$NON-NLS-1$
         Object values = Global.getField(dialog, "valueMap"); //$NON-NLS-1$
         if (!(field instanceof ComboViewer viewer) || !(values instanceof IObservableMap<?, ?>))
-        {
-            Global.tempLog("format-string-dialog", "Не найдены df/valueMap: " + dialog.getClass().getName()); //$NON-NLS-1$
             return;
-        }
         IObservableMap<FormatStringParameter, String> map =
             (IObservableMap<FormatStringParameter, String>)values;
         addFullDateFormat(viewer, dialog);
@@ -84,15 +75,11 @@ public final class FormatStringDialogHook implements IStartup
     private static void addFullDateFormat(ComboViewer viewer, Object dialog)
     {
         Combo combo = viewer.getCombo();
-        Global.tempLog("format-string-dialog", "addFullDateFormat: disposed=" + combo.isDisposed()); //$NON-NLS-1$ //$NON-NLS-2$
         if (combo.isDisposed())
             return;
         // Штатные конвертеры ожидают Pair[]: first — формат, second — надпись в списке.
         if (!(viewer.getInput() instanceof Pair<?, ?>[] items))
-        {
-            Global.tempLog("format-string-dialog", "Неожиданный input списка форматов: " + viewer.getInput()); //$NON-NLS-1$
             return;
-        }
         for (Pair<?, ?> item : items)
             if (FULL_DATE_FORMAT.equals(item.first))
                 return;
@@ -101,10 +88,7 @@ public final class FormatStringDialogHook implements IStartup
         Object value = Global.invoke(dialog, "getComboValues", //$NON-NLS-1$
             "'" + FULL_DATE_FORMAT + "'", FormatStringParameter.DATE_FORMAT); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(value instanceof Pair<?, ?>[] variants) || variants.length != 1)
-        {
-            Global.tempLog("format-string-dialog", "Не получено представление полной даты: " + value); //$NON-NLS-1$
             return;
-        }
         String text = combo.getText();
         Point textSelection = combo.getSelection();
         ISelection selection = viewer.getSelection();
@@ -115,7 +99,5 @@ public final class FormatStringDialogHook implements IStartup
         viewer.setSelection(selection);
         combo.setText(text);
         combo.setSelection(textSelection);
-        Global.tempLog("format-string-dialog", "items=" + Arrays.toString(combo.getItems()) //$NON-NLS-1$ //$NON-NLS-2$
-            + ", text=" + combo.getText()); //$NON-NLS-1$
     }
 }

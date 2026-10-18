@@ -26,9 +26,6 @@ import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
-import org.eclipse.swt.SWT;
-import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.EcoreUtil2;
@@ -156,128 +153,6 @@ public final class BslStructureInsertCommentTypes
         };
         job.setSystem(true);
         job.schedule();
-        WaitWindowDiagnostics.install();
-    }
-
-    /** Временная диагностика окна ожидания Eclipse; поведение операций не меняет. */
-    private static final class WaitWindowDiagnostics
-    {
-        private static final String TOPIC = "workspace-wait"; //$NON-NLS-1$
-        private static final String SESSION_KEY = "tormozit.waitWindowDiagnostics"; //$NON-NLS-1$
-        private static final AtomicBoolean installed = new AtomicBoolean();
-
-        static void install()
-        {
-            if (!installed.compareAndSet(false, true))
-                return;
-            Global.tempLog(TOPIC, "install.request"); //$NON-NLS-1$
-            Display display = PlatformUI.getWorkbench().getDisplay();
-            display.asyncExec(() ->
-            {
-                if (display.isDisposed())
-                    return;
-                display.addFilter(SWT.Show, event ->
-                {
-                    if (event.widget instanceof Shell shell && !shell.isDisposed())
-                        observe(shell);
-                });
-                Global.tempLog(TOPIC, "install.done"); //$NON-NLS-1$
-                for (Shell shell : display.getShells())
-                    if (!shell.isDisposed() && shell.isVisible())
-                        observe(shell);
-            });
-        }
-
-        private static void observe(Shell shell)
-        {
-            Object owner = shell.getData();
-            String ownerClass = owner == null ? "null" : owner.getClass().getName(); //$NON-NLS-1$
-            Global.tempLog(TOPIC, "shell.show title=" + shell.getText() + " owner=" + ownerClass); //$NON-NLS-1$ //$NON-NLS-2$
-            // Window.createShell сохраняет диалог в Shell.data. При закрытии EDT
-            // также показывает ProgressMonitorJobsDialog и его подклассы.
-            boolean observed = "org.eclipse.ui.internal.progress.BlockedJobsDialog".equals(ownerClass) //$NON-NLS-1$
-                || owner instanceof org.eclipse.jface.dialogs.ProgressMonitorDialog;
-            if (!observed || shell.getData(SESSION_KEY) != null)
-                return;
-            Session session = new Session(shell.getText());
-            shell.setData(SESSION_KEY, session);
-            shell.addListener(SWT.Hide, event -> session.close());
-            shell.addListener(SWT.Dispose, event -> session.close());
-            session.start();
-        }
-
-        private static final class Session
-        {
-            private final long id = System.nanoTime();
-            private final String title;
-            private final AtomicBoolean closed = new AtomicBoolean();
-            private final java.util.Timer timer = new java.util.Timer("ComfortWaitWindowDiagnostics", true); //$NON-NLS-1$
-
-            Session(String title)
-            {
-                this.title = title;
-            }
-
-            void start()
-            {
-                Global.tempLog(TOPIC, "window.open id=" + id + " title=" + title); //$NON-NLS-1$ //$NON-NLS-2$
-                timer.scheduleAtFixedRate(new java.util.TimerTask()
-                {
-                    @Override
-                    public void run()
-                    {
-                        sample();
-                    }
-                }, 0, 1000);
-            }
-
-            void close()
-            {
-                if (!closed.compareAndSet(false, true))
-                    return;
-                timer.cancel();
-                Global.tempLog(TOPIC, "window.close id=" + id + " elapsedNs=" + (System.nanoTime() - id)); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-
-            private void sample()
-            {
-                try
-                {
-                    StringBuilder text = new StringBuilder("sample id=").append(id) //$NON-NLS-1$
-                        .append(" elapsedNs=").append(System.nanoTime() - id).append('\n'); //$NON-NLS-1$
-                    for (Job job : Job.getJobManager().find(null))
-                    {
-                        var rule = job.getRule();
-                        text.append("job state=").append(job.getState()).append(" name=") //$NON-NLS-1$ //$NON-NLS-2$
-                            .append(job.getName()).append(" rule=") //$NON-NLS-1$
-                            .append(rule == null ? "null" : rule.getClass().getName()) //$NON-NLS-1$
-                            .append('\n');
-                    }
-                    java.lang.management.ThreadInfo[] threads =
-                        java.lang.management.ManagementFactory.getThreadMXBean().dumpAllThreads(true, true);
-                    for (java.lang.management.ThreadInfo thread : threads)
-                    {
-                        text.append("thread=").append(thread.getThreadId()).append(' ') //$NON-NLS-1$
-                            .append(thread.getThreadName()).append(" state=").append(thread.getThreadState()) //$NON-NLS-1$
-                            .append(" waitsFor=").append(thread.getLockInfo()) //$NON-NLS-1$
-                            .append(" owner=").append(thread.getLockOwnerId()).append(' ') //$NON-NLS-1$
-                            .append(thread.getLockOwnerName()).append('\n');
-                        for (StackTraceElement frame : thread.getStackTrace())
-                            text.append("  at ").append(frame).append('\n'); //$NON-NLS-1$
-                        for (java.lang.management.MonitorInfo monitor : thread.getLockedMonitors())
-                            text.append("  locked ").append(monitor).append(" depth=") //$NON-NLS-1$ //$NON-NLS-2$
-                                .append(monitor.getLockedStackDepth()).append('\n');
-                        for (java.lang.management.LockInfo lock : thread.getLockedSynchronizers())
-                            text.append("  synchronizer ").append(lock).append('\n'); //$NON-NLS-1$
-                    }
-                    Global.tempLog(TOPIC, text.toString());
-                }
-                catch (Throwable t)
-                {
-                    Global.tempLogException(TOPIC, "sample failed id=" + id, t); //$NON-NLS-1$
-                }
-            }
-        }
     }
 
     /**
@@ -578,8 +453,6 @@ public final class BslStructureInsertCommentTypes
         Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
         if (lock == null)
             return;
-        long started = System.nanoTime();
-        String what = null;
         try
         {
             boolean whole;
@@ -600,7 +473,6 @@ public final class BslStructureInsertCommentTypes
             }
             if (whole)
             {
-                what = "module"; //$NON-NLS-1$
                 onRecompute.accept("Пересчёт типов модуля…"); //$NON-NLS-1$
                 ComfortTreeTypeSystem.SecondPassProgress progress = new ComfortTreeTypeSystem.SecondPassProgress(module, 0);
                 try
@@ -641,7 +513,6 @@ public final class BslStructureInsertCommentTypes
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), dependencies);
             if (!dependencies.isEmpty())
             {
-                what = method.getName();
                 onRecompute.accept("Пересчёт типов: " + method.getName() + "…"); //$NON-NLS-1$ //$NON-NLS-2$
                 ComfortTreeTypeSystem.SecondPassProgress progress =
                     new ComfortTreeTypeSystem.SecondPassProgress(module, dependencies.size());
@@ -668,7 +539,7 @@ public final class BslStructureInsertCommentTypes
                     progress.finish();
                 }
                 if (!done)
-                    // Подставить метод не удалось (в логе причина) — пометку не снимаем.
+                    // Подставить метод не удалось — пометку не снимаем.
                     return;
             }
             synchronized (stale)
@@ -676,18 +547,9 @@ public final class BslStructureInsertCommentTypes
                 stale.refreshed.put(key, version);
             }
         }
-        catch (RuntimeException | LinkageError e)
+        catch (RuntimeException | LinkageError ignored)
         {
-            Global.tempLogException("bsl-return-compute-cost", "refreshTypesForAssist failed", e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        finally
-        {
-            // #region agent log
-            if (what != null)
-                Global.tempLog("bsl-return-compute-cost", "assist refresh " + what //$NON-NLS-1$ //$NON-NLS-2$
-                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
+            // Пересчёт не удался — список посчитается по тому, что есть в модели.
         }
     }
 
@@ -959,20 +821,9 @@ public final class BslStructureInsertCommentTypes
     private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
         EObject context)
     {
-        long started = System.nanoTime();
         Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), context);
-        long resolvedAt = System.nanoTime();
         if (module == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
-        {
-            Global.tempLog("bsl-property-description-cost", "source uri=" + source.getModuleUri() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + source.getMethodName() + " offset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                + " property=" + property.getName() //$NON-NLS-1$
-                + " outcome=" + (module == null ? "noModule" : "disabled") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " methodsScanned=0 resolveNs=" + (resolvedAt - started) //$NON-NLS-1$
-                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
             return null;
-        }
         // Внутри разбора комментария (commentFieldDescription) наш же хук возврата собирает
         // секцию и спрашивает описания снова — не входим повторно и не кэшируем пустое.
         if (COMMENT_FIELD_PARSE.get() != null)
@@ -982,7 +833,7 @@ public final class BslStructureInsertCommentTypes
         // Кэш привязан к исходному Resource и сбрасывается Xtext при его изменении.
         String key = "tormozit.bslPropertySourceDescription\n" + PropertyDescriptions.key(property); //$NON-NLS-1$
         return PROPERTY_SOURCE_DESCRIPTIONS.get(key, module.eResource(),
-            () -> readPropertySourceDescription(property, source, module, started, resolvedAt));
+            () -> readPropertySourceDescription(property, source, module));
     }
 
     private static final OnChangeEvictingCache PROPERTY_SOURCE_DESCRIPTIONS = new OnChangeEvictingCache();
@@ -1000,8 +851,7 @@ public final class BslStructureInsertCommentTypes
      * «ДобавлятьПанельБыстрыхОтборов2» из «Яйцо» через «см. Новый123…» не показывалось).
      * Берём одноимённое свойство из рассчитанного типа функции с его настоящим местом создания.
      */
-    private static String originalPropertyDescription(Property property, Method function, Module module,
-        long started, long resolvedAt)
+    private static String originalPropertyDescription(Property property, Method function, Module module)
     {
         java.util.Set<String> visited = ORIGINAL_DESCRIPTION_VISITED.get();
         boolean owner = visited == null;
@@ -1017,7 +867,7 @@ public final class BslStructureInsertCommentTypes
             for (OriginalProperty original : originalProperties(property, function, module))
             {
                 String description = readPropertySourceDescription(original.property(), original.source(),
-                    original.module(), started, resolvedAt);
+                    original.module());
                 if (description != null)
                     return description;
             }
@@ -1098,72 +948,52 @@ public final class BslStructureInsertCommentTypes
     }
 
     private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
-        Module module, long started, long resolvedAt)
+        Module module)
     {
-        int methodsScanned = 0;
-        String outcome = "failed"; //$NON-NLS-1$
-        try
+        Block block = module;
+        if (source.getMethodName() != null && !source.getMethodName().isEmpty())
         {
-            Block block = module;
-            if (source.getMethodName() != null && !source.getMethodName().isEmpty())
+            block = null;
+            for (Method method : module.allMethods())
             {
-                block = null;
-                for (Method method : module.allMethods())
+                if (source.getMethodName().equalsIgnoreCase(method.getName()))
                 {
-                    methodsScanned++;
-                    if (source.getMethodName().equalsIgnoreCase(method.getName()))
-                    {
-                        block = method;
-                        break;
-                    }
+                    block = method;
+                    break;
                 }
             }
-            ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
-            if (node == null)
-            {
-                outcome = block == null ? "noMethod" : "noNode"; //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            }
-            int offset = node.getTotalOffset() + source.getLocalOffset();
-            if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
-            {
-                outcome = "offsetOutsideNode"; //$NON-NLS-1$
-                return null;
-            }
-            var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
-            EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
-            Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
-            if (invocation == null && block instanceof Method method)
-            {
-                // Свойство по полю документирующего комментария: «* Поле - Тип - описание».
-                String description = commentFieldDescription(property, source, method, module);
-                if (description == null)
-                    description = originalPropertyDescription(property, method, module, started, resolvedAt);
-                PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
-                outcome = description == null ? "noCommentField" : "foundCommentField"; //$NON-NLS-1$ //$NON-NLS-2$
-                return description;
-            }
-            if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
-            {
-                outcome = invocation == null ? "noInvocation" : "differentKey"; //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            }
-            Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
-            List<String> lines = sideCommentLines(statement);
-            String description = sideCommentDescription(lines);
+        }
+        ICompositeNode node = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+        if (node == null)
+        {
+            return null;
+        }
+        int offset = node.getTotalOffset() + source.getLocalOffset();
+        if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
+        {
+            return null;
+        }
+        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+        Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
+        if (invocation == null && block instanceof Method method)
+        {
+            // Свойство по полю документирующего комментария: «* Поле - Тип - описание».
+            String description = commentFieldDescription(property, source, method, module);
+            if (description == null)
+                description = originalPropertyDescription(property, method, module);
             PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
-            outcome = description == null ? "noDescription" : "found"; //$NON-NLS-1$ //$NON-NLS-2$
             return description;
         }
-        finally
+        if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
         {
-            Global.tempLog("bsl-property-description-cost", "source uri=" + source.getModuleUri() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + source.getMethodName() + " offset=" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                + " property=" + property.getName() + " outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
-                + " methodsScanned=" + methodsScanned + " resolveNs=" + (resolvedAt - started) //$NON-NLS-1$ //$NON-NLS-2$
-                + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            return null;
         }
+        Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
+        List<String> lines = sideCommentLines(statement);
+        String description = sideCommentDescription(lines);
+        PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
+        return description;
     }
 
     /**
@@ -1230,9 +1060,6 @@ public final class BslStructureInsertCommentTypes
         }
         catch (Throwable ignored)
         {
-            // #region agent log
-            Global.tempLogException("see-links-diag", "propertySeeLinks failed " + property.getName(), ignored); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return List.of();
         }
         finally
@@ -1245,12 +1072,6 @@ public final class BslStructureInsertCommentTypes
         java.util.Set<String> seen, List<PropertySeeLink> result, java.util.Set<String> visited)
     {
         Method method = methodNamed(module, source.getMethodName());
-        // #region agent log
-        Global.tempLog("see-links-diag", "collect property=" + property.getName() + " " + describeSource(property) //$NON-NLS-1$ //$NON-NLS-2$
-            + " method=" + (method == null ? "null" : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " invocation=" + (method != null && invocationAtSource(source, method) != null) //$NON-NLS-1$
-            + " found=" + result.size()); //$NON-NLS-1$
-        // #endregion
         if (method == null)
             return;
         // Как readPropertySourceDescription: вызов в месте создания → боковой комментарий,
@@ -1261,13 +1082,6 @@ public final class BslStructureInsertCommentTypes
             return;
         }
         TypeSection.FieldDefinition field = commentField(property, source, method, module);
-        // #region agent log
-        Global.tempLog("see-links-diag", "  field=" + (field != null) + " originals=" //$NON-NLS-1$ //$NON-NLS-2$
-            + originalProperties(property, method, module).stream()
-                .map(o -> o.source().getMethodName() + "@" + o.source().getLocalOffset()).toList() //$NON-NLS-1$
-            + " cachedTypes=" + (BslDocCommentComputedTypes.cachedTypesFor(method) == null ? "null" : "yes") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " visited=" + visited); //$NON-NLS-1$
-        // #endregion
         int before = result.size();
         if (field != null)
         {
@@ -1287,15 +1101,6 @@ public final class BslStructureInsertCommentTypes
                 collectPropertySeeLinks(original.property(), original.source(), original.module(), seen, result,
                     visited);
     }
-
-    // #region agent log
-    private static String describeSource(Property property)
-    {
-        return property instanceof DerivedProperty derived && derived.getSource() instanceof BslDerivedPropertySource source
-            ? "src=" + source.getMethodName() + "@" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
-            : "src=" + property.getClass().getSimpleName(); //$NON-NLS-1$
-    }
-    // #endregion
 
     private static Method methodNamed(Module module, String name)
     {
@@ -1645,7 +1450,8 @@ public final class BslStructureInsertCommentTypes
         @Override
         public IInformationControlCreator getHoverControlCreator()
         {
-            return delegate instanceof ITextHoverExtension extension ? extension.getHoverControlCreator() : null;
+            return delegate instanceof ITextHoverExtension extension
+                ? IrBslHoverHtml.wrapCreator(extension.getHoverControlCreator()) : null;
         }
     }
 
@@ -1798,9 +1604,6 @@ public final class BslStructureInsertCommentTypes
     static PropertySourceTarget propertySourceUriAt(Resource resource, int offset)
     {
         Property property = propertyAt(resource, offset);
-        Global.tempLog("property-source-navigation", "resolve offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-            + " property=" + (property == null ? "null" : property.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " source=" + (property == null ? "null" : describeSource(property))); //$NON-NLS-1$ //$NON-NLS-2$
         return propertySourceUriFor(property, resource);
     }
 
@@ -1819,13 +1622,10 @@ public final class BslStructureInsertCommentTypes
         try
         {
             PropertySourceTarget exact = exactSourceTarget(property, source, module, new java.util.HashSet<>());
-            Global.tempLog("property-source-navigation", "target property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " exact=" + exact + " fallback=" + EcoreUtil.getURI(method)); //$NON-NLS-1$ //$NON-NLS-2$
             return exact != null ? exact : new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0);
         }
-        catch (Throwable failure)
+        catch (Throwable ignored)
         {
-            Global.tempLogException("property-source-navigation", "resolve failed", failure); //$NON-NLS-1$ //$NON-NLS-2$
             return new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0);
         }
         finally
@@ -1893,16 +1693,12 @@ public final class BslStructureInsertCommentTypes
     /** Общее открытие места создания свойства из команды и обеих подсказок. */
     static void openPropertySource(PropertySourceTarget target)
     {
-        Global.tempLog("property-source-navigation", "open target=" + target); //$NON-NLS-1$ //$NON-NLS-2$
         IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(target.uri().trimFragment());
         org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
             : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
         if (opener == null)
-        {
-            Global.tempLog("property-source-navigation", "open no opener"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         if (target.offset() < 0)
         {
             opener.open(target.uri(), true);
@@ -1910,8 +1706,6 @@ public final class BslStructureInsertCommentTypes
         }
         // Без выделения метода: иначе в историю попадёт и его имя, хотя переход — на свойство.
         org.eclipse.ui.IEditorPart part = opener.open(target.uri(), false);
-        Global.tempLog("property-source-navigation", "opened part=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (part == null ? "null" : part.getClass().getName())); //$NON-NLS-1$
         if (part instanceof org.eclipse.ui.texteditor.ITextEditor textEditor)
             textEditor.selectAndReveal(target.offset(), target.length());
     }
@@ -1982,25 +1776,13 @@ public final class BslStructureInsertCommentTypes
             List<PropertySeeLink> links = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
                 Property property = Boolean.TRUE.equals(isExtendedTypesEnabled(resource))
                     ? propertyAt(resource, offset) : null;
-                // #region agent log
-                Global.tempLog("see-links-diag", "at offset=" + offset + " property=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (property == null ? "null" : property.getName() + " " + describeSource(property)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                // #endregion
                 return property == null ? List.<PropertySeeLink>of()
                     : propertySeeLinks(property, resource.getContents().get(0));
             });
-            // #region agent log
-            Global.tempLog("see-links-diag", "at offset=" + offset + " peek=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (links == null ? "null(busy)" : String.valueOf(links.size()))); //$NON-NLS-1$
-            // #endregion
             return links != null ? links : List.of();
         }
         catch (Throwable ignored)
         {
-            // #region agent log
-            Global.tempLogException("see-links-diag", "at offset=" + offset + " failed", ignored); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return List.of();
         }
     }
@@ -3015,16 +2797,10 @@ public final class BslStructureInsertCommentTypes
             // Отменяем и штатный первый проход, а не только своё дополнение к нему.
             CancelIndicator shutdownAware = () -> isCanceled(cancelIndicator) || isWorkbenchClosing();
             boolean scopeOwner = beginExportVarsScope();
-            // #region agent log — завершается ли полный расчёт типов модуля (пустые члены после «.»)
-            long started = System.nanoTime();
-            String outcome = "ok"; //$NON-NLS-1$
-            // #endregion
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
             try
             {
-                Global.tempLog("bsl-type-system-shutdown", "enter closing=" + isWorkbenchClosing() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
                 if (isWorkbenchClosing())
                     throw new org.eclipse.core.runtime.OperationCanceledException();
                 installTypeSystemInScope(module, shutdownAware);
@@ -3033,13 +2809,6 @@ public final class BslStructureInsertCommentTypes
                 if (isWorkbenchClosing())
                     throw new org.eclipse.core.runtime.OperationCanceledException();
                 complete = !isCanceled(shutdownAware);
-            }
-            catch (RuntimeException | Error t)
-            {
-                // #region agent log
-                outcome = "throw " + t.getClass().getSimpleName(); //$NON-NLS-1$
-                // #endregion
-                throw t;
             }
             finally
             {
@@ -3051,88 +2820,8 @@ public final class BslStructureInsertCommentTypes
                         INCOMPLETE_RESOURCES.add(resource);
                 }
                 endExportVarsScope(scopeOwner);
-                // #region agent log
-                Global.tempLog("bsl-type-system-shutdown", "exit outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
-                    + " complete=" + complete + " closing=" + isWorkbenchClosing() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
-                logInstallTypeSystem(module, shutdownAware, started, outcome);
-                // #endregion
             }
         }
-
-        // #region agent log
-        private static void logInstallTypeSystem(Module module, CancelIndicator cancelIndicator,
-            long started, String outcome)
-        {
-            try
-            {
-                URI uri = module == null ? null : EcoreUtil.getURI(module);
-                Resource resource = module == null ? null : module.eResource();
-                String probe = ""; //$NON-NLS-1$
-                if (uri != null && uri.toString().contains("УправлениеДоступомСлужебный") //$NON-NLS-1$
-                    && !module.eIsProxy())
-                {
-                    probe = " ОписаниеУзла=none"; //$NON-NLS-1$
-                    for (Method method : module.allMethods())
-                        if ("ОписаниеУзла".equalsIgnoreCase(method.getName())) //$NON-NLS-1$
-                        {
-                            Object collector = BslDocCommentDescriptionFix
-                                .invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
-                            probe = " ОписаниеУзла{" + (collector == null ? "noCollector" //$NON-NLS-1$ //$NON-NLS-2$
-                                : ContentAssistSessionReloader.finalReturnSizes(collector)) + "}"; //$NON-NLS-1$
-                            break;
-                        }
-                }
-                Global.tempLog("install-type-system", "module=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (uri == null ? "null" : uri.trimFragment().lastSegment() + "@" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (uri.segmentCount() > 3 ? uri.segment(uri.segmentCount() - 2) : "?")) //$NON-NLS-1$
-                    + " outcome=" + outcome //$NON-NLS-1$
-                    + " canceled=" + (cancelIndicator != null && cancelIndicator.isCanceled()) //$NON-NLS-1$
-                    + " resourceSet=" + (resource == null || resource.getResourceSet() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                        : Integer.toHexString(System.identityHashCode(resource.getResourceSet())))
-                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
-                    + probe + " parse=" + parseKind(resource) //$NON-NLS-1$
-                    + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                    + " caller=" + shortCallerStack()); //$NON-NLS-1$
-            }
-            catch (Throwable t)
-            {
-                Global.tempLogException("install-type-system", "log failed", t); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        /** Вид текущего разбора: полный или частичный и по какому методу (кто сбросил расчёт — 18.10 10:11). */
-        private static String parseKind(Resource resource)
-        {
-            if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext) || xtext.getParseResult() == null)
-                return "none"; //$NON-NLS-1$
-            Object parse = xtext.getParseResult();
-            Object method = Global.invoke(parse, "getReparseMethod"); //$NON-NLS-1$
-            return parse.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(parse)) //$NON-NLS-1$
-                + (method instanceof Method m ? "/" + m.getName() : ""); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        /** Кадры стека без JDK и без самого расчёта: кто запросил установку типов. */
-        private static String shortCallerStack()
-        {
-            StringBuilder out = new StringBuilder();
-            int kept = 0;
-            for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-            {
-                String cls = frame.getClassName();
-                if (cls.startsWith("java.") || cls.startsWith("jdk.") || cls.startsWith("sun.") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    || cls.endsWith("ComfortTreeTypeSystem") || cls.contains("logInstallTypeSystem")) //$NON-NLS-1$ //$NON-NLS-2$
-                    continue;
-                if (out.length() > 0)
-                    out.append(" < "); //$NON-NLS-1$
-                out.append(cls.substring(cls.lastIndexOf('.') + 1)).append('.').append(frame.getMethodName())
-                    .append(':').append(frame.getLineNumber());
-                if (++kept >= 18)
-                    break;
-            }
-            return out.toString();
-        }
-        // #endregion
 
         /**
          * Ресурсы модулей, чей последний полный расчёт отменён или упал. Отменённый расчёт
@@ -3163,14 +2852,10 @@ public final class BslStructureInsertCommentTypes
                     try
                     {
                         restoreFull = substituteReparseMethod(partial, null);
-                        // #region agent log
-                        Global.tempLog("bsl-return-compute-cost", "forcedFull after incomplete thread=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + Thread.currentThread().getName());
-                        // #endregion
                     }
-                    catch (IllegalStateException e)
+                    catch (IllegalStateException ignored)
                     {
-                        Global.tempLogException("bsl-return-compute-cost", "forcedFull failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Поле разбора недоступно — остаётся частичный расчёт.
                     }
                 }
             }
@@ -3229,10 +2914,6 @@ public final class BslStructureInsertCommentTypes
                 // Полный переразбор: повторный штатный расчёт всего модуля. Готовые состояния тела
                 // он не пересоздаёт (параметр в теле оставался без слияния, лог 18.10: «Структура.»
                 // — 0 членов), поэтому NORMAL сначала сбрасывается.
-                // #region agent log
-                Global.tempLog("bsl-return-compute-cost", "secondPass full thread=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + Thread.currentThread().getName());
-                // #endregion
                 SecondPassProgress progress = new SecondPassProgress(module, 0);
                 try
                 {
@@ -3260,9 +2941,6 @@ public final class BslStructureInsertCommentTypes
             // прохода подставляется ссылающийся. Полный расчёт модуля здесь не годится — на модуле
             // БСП это ~20 с на правку.
             List<Method> dependents = BslDocCommentComputedTypes.methodsReferencing(module, changed);
-            // #region agent log
-            long started = System.nanoTime();
-            // #endregion
             SecondPassProgress progress = new SecondPassProgress(module, dependents.size());
             try
             {
@@ -3279,9 +2957,9 @@ public final class BslStructureInsertCommentTypes
                     {
                         restore = substituteReparseMethod(partial, dependent);
                     }
-                    catch (IllegalStateException e)
+                    catch (IllegalStateException ignored)
                     {
-                        Global.tempLogException("bsl-return-compute-cost", "secondPass skipped", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Поле разбора недоступно — ссылающиеся методы останутся с прежним типом.
                         return;
                     }
                     try
@@ -3312,19 +2990,12 @@ public final class BslStructureInsertCommentTypes
                 // Запас членов автодополнения у точки посчитан по прежним состояниям.
                 BslDocCommentComputedTypes.bumpTypesGeneration();
             }
-            // #region agent log
-            Global.tempLog("bsl-return-compute-cost", "secondPass partial dependents=" + dependents.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
         }
 
         private static boolean stopSecondPass(CancelIndicator cancelIndicator)
         {
             boolean canceled = isCanceled(cancelIndicator);
             boolean closing = isWorkbenchClosing();
-            Global.tempLog("bsl-second-pass-shutdown", "check canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
-                + " closing=" + closing + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
             return canceled || closing;
         }
 
@@ -3422,15 +3093,15 @@ public final class BslStructureInsertCommentTypes
                     {
                         field.set(xtext, current);
                     }
-                    catch (ReflectiveOperationException e)
+                    catch (ReflectiveOperationException ignored)
                     {
-                        Global.tempLogException("bsl-return-compute-cost", "restore parseResult failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Поле только что записывалось тем же способом — сюда не попадаем.
                     }
                 };
             }
-            catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+            catch (ReflectiveOperationException | RuntimeException | LinkageError ignored)
             {
-                Global.tempLogException("bsl-return-compute-cost", "temporary partial parse failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                // Поле разбора недоступно в этой версии EDT — пересчёт метода пропускается.
                 return null;
             }
         }
@@ -3631,9 +3302,9 @@ public final class BslStructureInsertCommentTypes
                     {
                         field.set(partial, previous);
                     }
-                    catch (ReflectiveOperationException e)
+                    catch (ReflectiveOperationException ignored)
                     {
-                        Global.tempLogException("bsl-return-compute-cost", "restore reparseMethod failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Поле только что записывалось тем же способом — сюда не попадаем.
                     }
                 };
             }

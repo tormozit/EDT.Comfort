@@ -115,7 +115,6 @@ public final class ContentAssistPopupUi
      */
     private static void applyRecomputeStatus(SourceViewer viewer, String status)
     {
-        String outcome;
         try
         {
             ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(viewer);
@@ -125,26 +124,18 @@ public final class ContentAssistPopupUi
             Shell shell = popup == null ? null : ContentAssistPopupSync.getProposalShell(popup);
             Composite bar = shell == null || shell.isDisposed() ? null : (Composite) shell.getData(BAR_DATA_KEY);
             Label contextLabel = bar == null || bar.isDisposed() ? null : (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
-            if (contextLabel != null && !contextLabel.isDisposed())
-            {
-                if (viewer != null)
-                    applyContextTypeLabel(contextLabel, viewer);
-                else
-                    // Редактор не найден — хотя бы не оставлять надпись о пересчёте.
-                    contextLabel.setText(status != null ? status : PARENT_PLACEHOLDER);
-                outcome = "applied viewer=" + (viewer != null); //$NON-NLS-1$
-            }
+            if (contextLabel == null || contextLabel.isDisposed())
+                return;
+            if (viewer != null)
+                applyContextTypeLabel(contextLabel, viewer);
             else
-                outcome = "noLabel assistant=" + (assistant != null) + " popup=" + (popup != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " shell=" + (shell != null && !shell.isDisposed() && shell.isVisible()) + " bar=" + (bar != null); //$NON-NLS-1$ //$NON-NLS-2$
+                // Редактор не найден — хотя бы не оставлять надпись о пересчёте.
+                contextLabel.setText(status != null ? status : PARENT_PLACEHOLDER);
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            outcome = "error " + e; //$NON-NLS-1$
+            // Окно списка закрылось или пересоздаётся — надпись обновится при следующем показе.
         }
-        // #region agent log
-        Global.tempLog("assist-recompute-status", "status=" + status + " " + outcome); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
     }
 
     private static void applyContextTypeLabel(Label contextLabel, SourceViewer viewer)
@@ -343,9 +334,6 @@ public final class ContentAssistPopupUi
 
     private static String resolveContextTypeLabel(SourceViewer viewer)
     {
-        // #region agent log
-        Global.tempLog("assist-context-label", "resolve viewer=" + System.identityHashCode(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (viewer == null || viewer.getDocument() == null)
         {
             return ""; //$NON-NLS-1$
@@ -406,9 +394,6 @@ public final class ContentAssistPopupUi
         String fromList = parentFromCurrentProposals();
         if (!fromList.isEmpty())
         {
-            // #region agent log
-            Global.tempLog("assist-context-label", "fromList dot=" + dot + " text=" + fromList); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             cachedContextLabelDot = dot;
             cachedContextLabelReceiver = receiver;
             cachedContextLabelText = fromList;
@@ -417,9 +402,6 @@ public final class ContentAssistPopupUi
         // Подпись второстепенна: readOnly модели на UI ждёт разрешение всех ссылок
         // (лог 16.10 23:39: ReceiverTypeLabel.resolve → waitAllBslResolveCrossReferencesJob).
         // publishMemberStock обновит подпись по готовому списку через updateContextTypeLabel.
-        // #region agent log
-        Global.tempLog("assist-context-label", "pendingList dot=" + dot + " receiver=" + receiver); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         cachedContextLabelDot = dot;
         cachedContextLabelReceiver = receiver;
         cachedContextLabelText = PARENT_PLACEHOLDER;

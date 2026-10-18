@@ -859,12 +859,10 @@ public class MoxelEditorHook implements IStartup
                 byte[] patched = transform(wovenClass.getBytes());
                 if (patched != null)
                     wovenClass.setBytes(patched);
-                Global.tempLog("moxel-fixed-scroll", "weave bundle=" + wovenClass.getBundleWiring().getBundle().getVersion()
-                    + " patched=" + (patched != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
-            catch (RuntimeException | LinkageError e)
+            catch (RuntimeException | LinkageError ignored)
             {
-                Global.tempLog("moxel-fixed-scroll", "weave failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                // Класс другой версии EDT — остаётся штатное поведение.
             }
         }
 

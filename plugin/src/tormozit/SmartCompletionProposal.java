@@ -1007,6 +1007,8 @@ public class SmartCompletionProposal implements
 
     private static String objectToSideHintString(Object info)
     {
+        if (IrBslHoverHtml.isBslBrowserInput(info))
+            return IrBslHoverHtml.readDisplayHtml(info);
         if (info instanceof String)
             return (String) info;
         if (info instanceof StyledString)
@@ -1019,13 +1021,13 @@ public class SmartCompletionProposal implements
     {
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         if (delegate instanceof IrCompletionProposal)
-            return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
-                assistant, delegate);
+            return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+                assistant, delegate));
         if (isEdtIrOverlapRow())
-            return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
-                assistant, delegate);
+            return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+                assistant, delegate));
         if (delegate instanceof ICompletionProposalExtension3 ext3)
-            return ext3.getInformationControlCreator();
+            return IrBslHoverHtml.wrapCreator(ext3.getInformationControlCreator());
         return null;
     }
 
@@ -1618,10 +1620,21 @@ public class SmartCompletionProposal implements
             }
             try
             {
-                if (delegate instanceof ICompletionProposalExtension5 ext5)
-                    return ext5.getAdditionalProposalInfo(
-                        monitor != null ? monitor : new NullProgressMonitor());
-                return delegate.getAdditionalProposalInfo();
+                Object info = delegate instanceof ICompletionProposalExtension5 ext5
+                    ? ext5.getAdditionalProposalInfo(monitor != null ? monitor : new NullProgressMonitor())
+                    : delegate.getAdditionalProposalInfo();
+                if (delegate instanceof ConfigurableCompletionProposal configurable
+                    && Global.getField(configurable, "additionalProposalInfo") instanceof EObject source) //$NON-NLS-1$
+                {
+                    if (!ParamHintHtmlModifier.needsMemberDocumentationRecovery(info))
+                        return info;
+                    SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+                    if (viewer != null && viewer.getDocument() instanceof IXtextDocument document)
+                        return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                            ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource));
+                    return ParamHintHtmlModifier.recoverMemberDocumentation(info, source, null);
+                }
+                return info;
             }
             catch (RuntimeException | StackOverflowError e)
             {
@@ -1796,7 +1809,7 @@ public class SmartCompletionProposal implements
             return baseInfo;
         String merged = reloader.getIrMergedHtml(cacheKey);
         if (merged != null && !merged.isEmpty())
-            return merged;
+            return IrBslHoverHtml.withHtml(baseInfo, merged);
         String irHtml = resolveActivationHtmlFromCache(reloader, cacheKey);
         if (irHtml != null && !irHtml.isEmpty())
         {
@@ -1804,9 +1817,9 @@ public class SmartCompletionProposal implements
             // уже обновлён через applyEdtListTypeFromIrActivation.
             if (IrBslHoverHtml.isBslBrowserInput(baseInfo))
             {
-                merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInfo), irHtml);
+                merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readDisplayHtml(baseInfo), irHtml);
                 reloader.putIrMergedHtml(cacheKey, merged);
-                return merged;
+                return IrBslHoverHtml.withHtml(baseInfo, merged);
             }
             return baseInfo;
         }

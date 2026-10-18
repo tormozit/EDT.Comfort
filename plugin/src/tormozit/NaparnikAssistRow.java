@@ -630,23 +630,13 @@ public final class NaparnikAssistRow
         if (!(viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document))
             return true;
         long started = System.nanoTime();
-        int busy = 0;
         while (gen == generation)
         {
             // tryReadOnly не ждёт блокировку: занято (идёт перевязка) — null.
             Boolean linked = document.tryReadOnly(resource ->
                 resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl ? bsl.isLinkedBatch() : Boolean.TRUE);
-            long waitedMs = (System.nanoTime() - started) / 1_000_000L;
-            if (Boolean.TRUE.equals(linked) || waitedMs >= LINK_WAIT_CAP_MS)
-            {
-                // #region agent log
-                Global.tempLog("naparnik-378", "awaitLinked linked=" + linked + " waitedMs=" + waitedMs //$NON-NLS-1$ //$NON-NLS-2$
-                    + " busyChecks=" + busy); //$NON-NLS-1$
-                // #endregion
+            if (Boolean.TRUE.equals(linked) || (System.nanoTime() - started) / 1_000_000L >= LINK_WAIT_CAP_MS)
                 return true;
-            }
-            if (linked == null)
-                busy++;
             try
             {
                 Thread.sleep(LINK_WAIT_STEP_MS);

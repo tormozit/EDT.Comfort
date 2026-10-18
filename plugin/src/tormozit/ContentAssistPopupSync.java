@@ -2419,6 +2419,7 @@ IInformationControlCreator creator = trace.creator;
     {
         if (controller == null || creator == null)
             return false;
+        creator = IrBslHoverHtml.wrapCreator(creator);
         try
         {
             Class<?> type = controller.getClass();
@@ -2532,6 +2533,16 @@ IInformationControlCreator creator = trace.creator;
             return true;
         }
         IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
+        if (browser != null)
+        {
+            Object popup = getPopupObject(assistant);
+            ICompletionProposal proposal = popup != null ? resolveProposalByDisplay(popup, null) : null;
+            // Только EDT-строка владеет объектом документации. HTML строки ИР не
+            // привязываем к input, оставшемуся в переиспользованном control.
+            if (proposal != null
+                && !(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof IrCompletionProposal))
+                IrBslHoverHtml.withHtml(browser.getInput(), displayHtml);
+        }
         boolean rawFullDoc = IrBslHoverHtml.isFullHtmlDocument(displayHtml);
         boolean applied = false;
         if (browser != null)

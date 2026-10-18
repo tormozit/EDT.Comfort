@@ -147,6 +147,8 @@ public final class ContentAssistManager
 
     private void applyPatchToBslEditor(BslXtextEditor editor)
     {
+        // Живые маркеры ошибок запросов в литералах (issue 837).
+        BslQueryLiteralSupport.attachMarkers(editor);
         if (!settings.isEnabled()) return;
 
         ISourceViewer viewer = editor.getInternalSourceViewer();

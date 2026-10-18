@@ -292,7 +292,15 @@ public final class BslEditorHyperlinkHook implements IStartup
     private static IHyperlink textLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
     {
         IHyperlink link = typeLink(editor, page, viewer, offset);
-        return link != null ? link : literalLink(editor, page, viewer, offset);
+        if (link == null)
+            link = literalLink(editor, page, viewer, offset);
+        if (link == null)
+        {
+            // Поля, псевдонимы, виртуальные таблицы в литерале-запросе — как в «Редакторе запроса».
+            IHyperlink query = BslQueryLiteralSupport.queryLink(editor, viewer, offset);
+            link = query == null ? null : new HistoryHyperlink(query, editor, page);
+        }
+        return link;
     }
 
     /**
@@ -742,17 +750,17 @@ public final class BslEditorHyperlinkHook implements IStartup
 
     private static final class HistoryHyperlink implements IHyperlink
     {
-        private final XtextHyperlink delegate;
+        private final IHyperlink delegate;
         private final String text;
         private final BslXtextEditor source;
         private final IWorkbenchPage page;
 
-        HistoryHyperlink(XtextHyperlink delegate, BslXtextEditor source, IWorkbenchPage page)
+        HistoryHyperlink(IHyperlink delegate, BslXtextEditor source, IWorkbenchPage page)
         {
             this(delegate, source, page, delegate.getHyperlinkText());
         }
 
-        HistoryHyperlink(XtextHyperlink delegate, BslXtextEditor source, IWorkbenchPage page, String text)
+        HistoryHyperlink(IHyperlink delegate, BslXtextEditor source, IWorkbenchPage page, String text)
         {
             this.delegate = delegate;
             this.text = text;

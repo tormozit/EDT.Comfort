@@ -1329,14 +1329,10 @@ public class ConfigSearchDialogHook implements IStartup
         private static Map<String, List<String>> captureCurrentObject()
         {
             IWorkbenchPage page = Global.getActivePage();
-            Global.tempLog("config-search-current-object", "capture part="
-                + (page != null ? page.getActivePart() : null));
             if (page == null || page.getActivePart() == null)
                 return Map.of();
             String ref = GetRef.getRefFromPart(page.getActivePart());
             IProject project = Global.getActiveProject(page.getActivePart(), false);
-            Global.tempLog("config-search-current-object", "capture ref=" + ref
-                + " project=" + (project != null ? project.getName() : null));
             if (ref == null || ref.isBlank() || project == null)
                 return Map.of();
             // Открытый модуль представляет объект-владелец вместе с его подчинёнными.

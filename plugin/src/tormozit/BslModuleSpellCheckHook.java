@@ -1067,6 +1067,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 return result;
             }
+            String content = null;
             for (ILeafNode leaf : root.getLeafNodes())
             {
                 if (monitor != null && monitor.isCanceled())
@@ -1084,8 +1085,17 @@ public final class BslModuleSpellCheckHook implements IStartup
                 LeafKind kind = classifyLeaf(leaf);
                 if (!checkIdentifiers)
                 {
-                    if (kind == LeafKind.IDENTIFIER || kind == LeafKind.STRING)
+                    if (kind == LeafKind.IDENTIFIER)
                         continue;
+                    // Литерал НСтр() — текст для пользователя, проверяется независимо от флажка.
+                    if (kind == LeafKind.STRING)
+                    {
+                        if (content == null)
+                            content = root.getText();
+                        // Текст корня — весь документ с позиции 0, getOffset() корня его не сдвигает.
+                        if (!ConfigSearchDialogHook.isInsideNStrLiteral(content, leafStart + 1))
+                            continue;
+                    }
                 }
                 String text = leaf.getText();
                 if (kind == LeafKind.IDENTIFIER)
@@ -3039,6 +3049,8 @@ public final class BslModuleSpellCheckHook implements IStartup
     static ICompletionProposal[] proposalsForAnnotation(Annotation annotation, ISourceViewer viewer,
         ICompletionProposal[] nonSpellingFallback)
     {
+        if (BslQueryLiteralSupport.isLiveQueryAnnotation(annotation))
+            return new ICompletionProposal[0];
         if (annotation instanceof SpellingAnnotation sa
             && sa.getSpellingProblem() instanceof ModuleProblem mp)
         {
@@ -4411,6 +4423,12 @@ public final class BslModuleSpellCheckHook implements IStartup
         Object propsObj = Global.getField(info, "proposals"); //$NON-NLS-1$
         if (!(annObj instanceof Annotation annotation))
             return -1;
+        // Живая отметка запроса (issue 837): исправлений нет, штатные по позиции — от хаба.
+        if (BslQueryLiteralSupport.isLiveQueryAnnotation(annotation))
+        {
+            Global.setFieldForce(info, "proposals", new ICompletionProposal[0]); //$NON-NLS-1$
+            return 0;
+        }
         ICompletionProposal[] merged = propsObj instanceof ICompletionProposal[] arr
             ? arr : new ICompletionProposal[0];
         ICompletionProposal[] fromMerged = withoutComfortSpellingProposals(merged);
