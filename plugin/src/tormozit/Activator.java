@@ -235,12 +235,13 @@ public class Activator extends AbstractUIPlugin
         private static final String CALLBACK = "tormozit.checkDiagnostics.record.notify"; //$NON-NLS-1$
         private static final String PENDING = "tormozit.checkDiagnostics.record.pending"; //$NON-NLS-1$
         private static final long INTERVAL_NS = 60_000_000_000L;
-        private static final java.util.concurrent.atomic.AtomicReference<Object[]> pending =
-            new java.util.concurrent.atomic.AtomicReference<>();
+        private static final java.util.concurrent.ConcurrentMap<String, Object[]> pending =
+            new java.util.concurrent.ConcurrentHashMap<>();
         private static final java.util.concurrent.atomic.AtomicBoolean posted =
             new java.util.concurrent.atomic.AtomicBoolean();
         private static volatile boolean running;
-        private static long lastToastNs;
+        private static final java.util.concurrent.ConcurrentMap<String, Long> lastToastNs =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
         static void install()
         {
@@ -252,22 +253,25 @@ public class Activator extends AbstractUIPlugin
                 properties.put(CALLBACK, (java.util.function.Consumer<Object[]>) CheckRecomputeNotifications::accept);
                 saved = properties.remove(PENDING);
             }
-            if (saved instanceof Object[] event)
-                accept(event);
+            if (saved instanceof java.util.Map<?, ?> events)
+                for (Object value : events.values())
+                    if (value instanceof Object[] event)
+                        accept(event);
         }
 
         static void stop()
         {
             running = false;
             System.getProperties().remove(CALLBACK);
-            pending.set(null);
+            pending.clear();
+            lastToastNs.clear();
         }
 
         private static void accept(Object[] event)
         {
             if (!running)
                 return;
-            pending.set(event);
+            pending.put(projectKey(event[3]), event);
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed() && posted.compareAndSet(false, true))
                 display.asyncExec(() -> showPending(display));
@@ -286,18 +290,42 @@ public class Activator extends AbstractUIPlugin
                 display.timerExec(500, () -> showPending(display));
                 return;
             }
-            Object[] event = pending.getAndSet(null);
             posted.set(false);
+            pending.forEach((key, event) -> {
+                if (pending.remove(key, event))
+                    showEvent(key, event);
+            });
+        }
+
+        private static String projectKey(Object source)
+        {
+            if (source instanceof org.eclipse.core.resources.IProject project)
+                return project.getName();
+            // DerivedDataManager.model и IBmModelManager.getProject подтверждены javap.
+            if (Global.getField(source, "model") instanceof com._1c.g5.v8.bm.integration.IBmModel model) //$NON-NLS-1$
+            {
+                IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+                var project = models != null ? models.getProject(model) : null;
+                if (project != null)
+                    return project.getName();
+            }
+            return source.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(source)); //$NON-NLS-1$
+        }
+
+        private static void showEvent(String projectKey, Object[] event)
+        {
             long now = System.nanoTime();
-            if (event == null || (lastToastNs != 0 && now - lastToastNs < INTERVAL_NS))
+            lastToastNs.entrySet().removeIf(entry -> now - entry.getValue().longValue() >= INTERVAL_NS);
+            Long last = lastToastNs.get(projectKey);
+            if (last != null && now - last.longValue() < INTERVAL_NS)
                 return;
             String logMessage = (String) event[0];
             long timeMs = ((Long) event[2]).longValue();
             var toast = ToastNotification.show("Полный пересчёт проверок", //$NON-NLS-1$
-                event[1] + ". Подробности — в журнале EDT.", 15_000, //$NON-NLS-1$
+                event[1] + ". Подробности — в журнале ошибок.", 15_000, //$NON-NLS-1$
                 () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
             if (toast != null)
-                lastToastNs = now;
+                lastToastNs.put(projectKey, Long.valueOf(now));
         }
     }
 

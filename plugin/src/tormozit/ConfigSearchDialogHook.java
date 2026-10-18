@@ -727,14 +727,14 @@ public class ConfigSearchDialogHook implements IStartup
         String strippedTitle = stripCountSuffix(titleLabel.getText()).trim();
         final String baseTitle = strippedTitle.isEmpty() ? OBJECT_TYPES_TITLE_RU : strippedTitle;
         final Button customScopeRadio = SearchScopeGroup.findScopeRadio(root,
-            "Пользовательская область", "Custom scope", "По настроенному отбору");
+            "Пользовательская область", "Custom scope", "Выбранные группы");
 
         // список «среди проектов»: счётчика в заголовке нет, только жирный шрифт
         final Label projectsLabel = Global.findControl(root, Label.class,
             lbl -> isScopeListTitle(lbl.getText(), PROJECTS_TITLE_RU, PROJECTS_TITLE_EN));
         final Table projectsTable = findScopeTable(root, PROJECTS_TITLE_RU, PROJECTS_TITLE_EN);
         final Button workspaceRadio = SearchScopeGroup.findScopeRadio(root,
-            "Рабочая область", "Workspace", "Вся рабочая область");
+            "Рабочая область", "Workspace", "Все объекты");
         Group scopeGroupFound = null;
         for (Composite c = workspaceRadio != null ? workspaceRadio.getParent() : null;
             c != null && c != root; c = c.getParent())
@@ -750,7 +750,7 @@ public class ConfigSearchDialogHook implements IStartup
         Runnable refresh = () -> {
             if (titleLabel.isDisposed() || typesTable.isDisposed())
                 return;
-            // списки действуют только при области «По настроенному отбору»
+            // списки действуют только при области «Выбранные группы»
             boolean customScope = customScopeRadio == null || customScopeRadio.isDisposed()
                 || customScopeRadio.getSelection();
             int checked = typesTable.getItemCount() > 0 ? countCheckedItems(typesTable) : 0;
@@ -759,7 +759,7 @@ public class ConfigSearchDialogHook implements IStartup
             if (projectsLabel != null && projectsTable != null && !projectsLabel.isDisposed()
                 && !projectsTable.isDisposed())
                 setGroupTitleBold(projectsLabel, customScope && countCheckedItems(projectsTable) > 0);
-            // «Область поиска» выделена, если выбран не первый вариант («Вся рабочая область»)
+            // «Область поиска» выделена, если выбран не первый вариант («Все объекты»)
             if (scopeGroup != null && !scopeGroup.isDisposed() && workspaceRadio != null
                 && !workspaceRadio.isDisposed())
                 setGroupTitleBold(scopeGroup, !workspaceRadio.getSelection());
@@ -1042,8 +1042,8 @@ public class ConfigSearchDialogHook implements IStartup
     /**
      * Доработка группы «Область поиска» страницы поиска по конфигурации (issue #420):
      * <ul>
-     *   <li>«Рабочая область» → «Вся рабочая область»;</li>
-     *   <li>«Пользовательская область» → «По настроенному отбору»;</li>
+     *   <li>«Рабочая область» → «Все объекты»;</li>
+     *   <li>«Пользовательская область» → «Выбранные группы»;</li>
      *   <li>добавлены варианты «Отобранное в навигаторе» (объекты, видимые в навигаторе с учётом
      *       активного отбора — фильтр по подсистемам / по набору) и «Активные наборы» (объекты
      *       активных наборов всех проектов). Они не привязаны к штатному {@code UiSearchScope}
@@ -1060,7 +1060,7 @@ public class ConfigSearchDialogHook implements IStartup
 
         enum ScopeMode
         {
-            NONE, NAVIGATOR, ACTIVE_SETS
+            NONE, NAVIGATOR, ACTIVE_SETS, CURRENT_OBJECT
         }
 
         /** Режим отбора Комфорт для следующего поиска (окно модальное — состояние стабильно). */
@@ -1070,6 +1070,8 @@ public class ConfigSearchDialogHook implements IStartup
          * ограничения нет (режим NONE или «Отобранное в навигаторе» без активного отбора).
          */
         private static volatile Map<String, List<String>> currentRefs;
+        /** Текущий объект фиксируется при открытии окна, до смены области поиска. */
+        private static Map<String, List<String>> currentObjectRefs = Map.of();
 
         private SearchScopeGroup()
         {
@@ -1100,11 +1102,14 @@ public class ConfigSearchDialogHook implements IStartup
                 return;
             radioRow.setData(PATCHED_KEY, Boolean.TRUE);
 
-            workspace.setText("Вся рабочая область");
-            custom.setText("По настроенному отбору");
+            workspace.setText("Все объекты");
+            custom.setText("Выбранные группы");
 
+            currentObjectRefs = captureCurrentObject();
             Button navigator = addRadio(radioRow, "Отобранное в навигаторе");
             Button activeSets = addRadio(radioRow, "Активные наборы");
+            Button currentObject = addRadio(radioRow, "Текущий объект");
+            currentObject.setEnabled(!currentObjectRefs.isEmpty());
             // все варианты области — в одну строку (было 3 колонки под штатные радио)
             if (radioRow.getLayout() instanceof GridLayout grid)
             {
@@ -1120,6 +1125,7 @@ public class ConfigSearchDialogHook implements IStartup
             Button[] nativeRadios = {workspace, custom,
                 findScopeRadio(pageControl, "Содержащие проекты", "Enclosing projects")};
 
+            Button[] comfortRadios = {navigator, activeSets, currentObject};
             for (Button nativeRadio : nativeRadios)
             {
                 if (nativeRadio == null)
@@ -1127,20 +1133,28 @@ public class ConfigSearchDialogHook implements IStartup
                 nativeRadio.addListener(SWT.Selection, e -> {
                     if (nativeRadio.getSelection())
                     {
-                        navigator.setSelection(false);
-                        activeSets.setSelection(false);
+                        for (Button comfortRadio : comfortRadios)
+                            comfortRadio.setSelection(false);
                         setMode(ScopeMode.NONE);
                         getDialogSettings().put(SCOPE_MODE_KEY, ScopeMode.NONE.name());
                     }
                 });
             }
             navigator.addListener(SWT.Selection,
-                e -> onComfortScope(navigator.getSelection(), navigator, activeSets, nativeRadios,
+                e -> onComfortScope(navigator.getSelection(), navigator, comfortRadios, nativeRadios,
                     searchData, ScopeMode.NAVIGATOR));
             activeSets.addListener(SWT.Selection,
-                e -> onComfortScope(activeSets.getSelection(), activeSets, navigator, nativeRadios,
+                e -> onComfortScope(activeSets.getSelection(), activeSets, comfortRadios, nativeRadios,
                     searchData, ScopeMode.ACTIVE_SETS));
 
+            currentObject.addListener(SWT.Selection,
+                e -> onComfortScope(currentObject.getSelection(), currentObject, comfortRadios,
+                    nativeRadios, searchData, ScopeMode.CURRENT_OBJECT));
+            setTooltip(currentObject,
+                "Искать в текущем объекте навигатора или редактора и во всех его подчинённых объектах"
+                    + Global.pluginSignForTooltip()
+                    + "\nТекущий объект: " + (currentObjectRefs.isEmpty() ? "не определён"
+                        : currentObjectRefs.values().iterator().next().get(0)));
             setTooltip(workspace, "Искать во всех проектах рабочей области");
             setTooltip(nativeRadios[2],
                 "Искать в проектах, содержащих текущий объект или открытый редактор");
@@ -1157,11 +1171,11 @@ public class ConfigSearchDialogHook implements IStartup
             Composite top = radioRow.getParent();
             if (top != null && !top.isDisposed())
                 top.layout(true, true);
-            restoreSavedMode(navigator, activeSets, nativeRadios, searchData);
+            restoreSavedMode(comfortRadios, nativeRadios, searchData);
         }
 
-        /** Восстановить выбранный ранее вариант «Отобранное в навигаторе» / «Активные наборы». */
-        private static void restoreSavedMode(Button navigator, Button activeSets,
+        /** Восстановить выбранную ранее дополнительную область поиска. */
+        private static void restoreSavedMode(Button[] comfortRadios,
             Button[] nativeRadios, Object searchData)
         {
             String saved = getDialogSettings().get(SCOPE_MODE_KEY);
@@ -1176,21 +1190,30 @@ public class ConfigSearchDialogHook implements IStartup
             }
             if (mode == ScopeMode.NONE)
                 return;
-            Button self = mode == ScopeMode.NAVIGATOR ? navigator : activeSets;
-            Button other = mode == ScopeMode.NAVIGATOR ? activeSets : navigator;
+            Button self = switch (mode)
+            {
+                case NAVIGATOR -> comfortRadios[0];
+                case ACTIVE_SETS -> comfortRadios[1];
+                case CURRENT_OBJECT -> comfortRadios[2];
+                default -> throw new IllegalStateException(mode.name());
+            };
+            if (!self.isEnabled())
+                return;
             final ScopeMode target = mode;
-            navigator.getDisplay().asyncExec(
-                () -> onComfortScope(true, self, other, nativeRadios, searchData, target));
+            self.getDisplay().asyncExec(
+                () -> onComfortScope(true, self, comfortRadios, nativeRadios, searchData, target));
         }
 
-        private static void onComfortScope(boolean selected, Button self, Button otherComfort,
+        private static void onComfortScope(boolean selected, Button self, Button[] comfortRadios,
             Button[] nativeRadios, Object searchData, ScopeMode mode)
         {
-            if (!selected || self.isDisposed())
+            if (!selected || self.isDisposed() || !self.isEnabled())
                 return;
             getDialogSettings().put(SCOPE_MODE_KEY, mode.name());
             broadenNativeScope(searchData);
-            otherComfort.setSelection(false);
+            for (Button comfortRadio : comfortRadios)
+                if (comfortRadio != self && !comfortRadio.isDisposed())
+                    comfortRadio.setSelection(false);
             // Штатная привязка после смены модели снова отметит нативное радио —
             // снимаем отметки и оставляем только наше уже после её отработки.
             Runnable fixVisual = () -> {
@@ -1201,8 +1224,9 @@ public class ConfigSearchDialogHook implements IStartup
                     if (nativeRadio != null && !nativeRadio.isDisposed())
                         nativeRadio.setSelection(false);
                 }
-                if (!otherComfort.isDisposed())
-                    otherComfort.setSelection(false);
+                for (Button comfortRadio : comfortRadios)
+                    if (comfortRadio != self && !comfortRadio.isDisposed())
+                        comfortRadio.setSelection(false);
                 self.setSelection(true);
                 // Программное восстановление отметок не посылает SWT.Selection.
                 // Обновляем оформление после окончательного выбора нашего варианта.
@@ -1302,8 +1326,27 @@ public class ConfigSearchDialogHook implements IStartup
             currentRefs = mode == ScopeMode.NONE ? null : buildRefs(mode);
         }
 
+        private static Map<String, List<String>> captureCurrentObject()
+        {
+            IWorkbenchPage page = Global.getActivePage();
+            Global.tempLog("config-search-current-object", "capture part="
+                + (page != null ? page.getActivePart() : null));
+            if (page == null || page.getActivePart() == null)
+                return Map.of();
+            String ref = GetRef.getRefFromPart(page.getActivePart());
+            IProject project = Global.getActiveProject(page.getActivePart(), false);
+            Global.tempLog("config-search-current-object", "capture ref=" + ref
+                + " project=" + (project != null ? project.getName() : null));
+            if (ref == null || ref.isBlank() || project == null)
+                return Map.of();
+            // Открытый модуль представляет объект-владелец вместе с его подчинёнными.
+            return Map.of(project.getName(), List.of(GetRef.stripLowValueModuleSuffix(ref)));
+        }
+
         private static Map<String, List<String>> buildRefs(ScopeMode mode)
         {
+            if (mode == ScopeMode.CURRENT_OBJECT)
+                return currentObjectRefs;
             if (mode == ScopeMode.NAVIGATOR)
                 return ObjectSetSubsystemsFilterBridge.visibleOwnerRefsByProject();
             Map<String, List<String>> result = new HashMap<>();
@@ -1859,7 +1902,8 @@ public class ConfigSearchDialogHook implements IStartup
         ClassLoader ifaceCL = iface.getClassLoader();
         if (ifaceCL == null)
             ifaceCL = cl;
-        SearchSetMembership membership = scopeRefs != null ? new SearchSetMembership(scopeRefs) : null;
+        SearchSetMembership membership = scopeRefs != null ? new SearchSetMembership(scopeRefs,
+            SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.CURRENT_OBJECT) : null;
         return Proxy.newProxyInstance(ifaceCL, new Class[] { iface },
             (proxy, method, args) ->
             {
@@ -2274,8 +2318,11 @@ public class ConfigSearchDialogHook implements IStartup
         private final Map<Long, Boolean> byTopObject = new HashMap<>();
         private final Map<String, List<String>> refsByProject;
 
-        SearchSetMembership(Map<String, List<String>> refsByProject)
+        private final boolean currentObject;
+
+        SearchSetMembership(Map<String, List<String>> refsByProject, boolean currentObject)
         {
+            this.currentObject = currentObject;
             this.refsByProject = refsByProject != null ? refsByProject : Map.of();
         }
 
@@ -2298,7 +2345,10 @@ public class ConfigSearchDialogHook implements IStartup
                 long topId = 0;
                 try
                 {
-                    topId = match.getMetadataTopObjectId();
+                    // Для подобъекта нельзя кэшировать решение на весь корневой объект:
+                    // соседние реквизиты и формы не входят в его область.
+                    topId = currentObject && match instanceof TextSearchModelMatch modelMatch
+                        ? modelMatch.getObjectId() : match.getMetadataTopObjectId();
                 }
                 catch (RuntimeException ignored)
                 {

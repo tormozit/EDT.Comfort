@@ -248,7 +248,7 @@ public final class Activator
                         ("full-check-scope".equals(phase) //$NON-NLS-1$
                             ? "Назначена полная перепроверка проекта " + event[1] //$NON-NLS-1$
                             : "Запрошен полный пересчёт производных данных") + ".\nПричина: " + reason, //$NON-NLS-1$ //$NON-NLS-2$
-                        Long.valueOf(System.currentTimeMillis())};
+                        Long.valueOf(System.currentTimeMillis()), event[1]};
                     Consumer<Object[]> consumer;
                     var properties = System.getProperties();
                     synchronized (properties)
@@ -257,7 +257,12 @@ public final class Activator
                         Consumer<Object[]> callback = (Consumer<Object[]>) properties.get(CALLBACK + ".notify"); //$NON-NLS-1$
                         consumer = callback;
                         if (consumer == null)
-                            properties.put(CALLBACK + ".pending", notification); //$NON-NLS-1$
+                        {
+                            @SuppressWarnings("unchecked")
+                            Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
+                                CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
+                            pending.put(event[1], notification);
+                        }
                     }
                     if (consumer != null)
                         consumer.accept(notification);
