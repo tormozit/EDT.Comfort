@@ -72,6 +72,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        CheckRecomputeNotifications.install();
         ContentAssistDebug.installModelResolutionWeaving(context);
         TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
@@ -214,6 +215,7 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        CheckRecomputeNotifications.stop();
         StaticFeatureAccessReplacement.stop();
         IRApplication.disconnectAll();
 
@@ -225,6 +227,78 @@ public class Activator extends AbstractUIPlugin
 
         instance = null;
         super.stop(context);
+    }
+
+    /** UI временной диагностики #2397; ранний бандл не зависит от Workbench. */
+    private static final class CheckRecomputeNotifications
+    {
+        private static final String CALLBACK = "tormozit.checkDiagnostics.record.notify"; //$NON-NLS-1$
+        private static final String PENDING = "tormozit.checkDiagnostics.record.pending"; //$NON-NLS-1$
+        private static final long INTERVAL_NS = 60_000_000_000L;
+        private static final java.util.concurrent.atomic.AtomicReference<Object[]> pending =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        private static final java.util.concurrent.atomic.AtomicBoolean posted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        private static volatile boolean running;
+        private static long lastToastNs;
+
+        static void install()
+        {
+            running = true;
+            Object saved;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                properties.put(CALLBACK, (java.util.function.Consumer<Object[]>) CheckRecomputeNotifications::accept);
+                saved = properties.remove(PENDING);
+            }
+            if (saved instanceof Object[] event)
+                accept(event);
+        }
+
+        static void stop()
+        {
+            running = false;
+            System.getProperties().remove(CALLBACK);
+            pending.set(null);
+        }
+
+        private static void accept(Object[] event)
+        {
+            if (!running)
+                return;
+            pending.set(event);
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed() && posted.compareAndSet(false, true))
+                display.asyncExec(() -> showPending(display));
+        }
+
+        private static void showPending(Display display)
+        {
+            if (!running || display.isDisposed())
+            {
+                posted.set(false);
+                return;
+            }
+            if (!org.eclipse.ui.PlatformUI.isWorkbenchRunning()
+                || org.eclipse.ui.PlatformUI.getWorkbench().getWorkbenchWindows().length == 0)
+            {
+                display.timerExec(500, () -> showPending(display));
+                return;
+            }
+            Object[] event = pending.getAndSet(null);
+            posted.set(false);
+            long now = System.nanoTime();
+            if (event == null || (lastToastNs != 0 && now - lastToastNs < INTERVAL_NS))
+                return;
+            String logMessage = (String) event[0];
+            long timeMs = ((Long) event[2]).longValue();
+            var toast = ToastNotification.show("Полный пересчёт проверок", //$NON-NLS-1$
+                event[1] + ". Подробности — в журнале EDT.", 15_000, //$NON-NLS-1$
+                () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
+            if (toast != null)
+                lastToastNs = now;
+        }
     }
 
     public static Activator getDefault()
