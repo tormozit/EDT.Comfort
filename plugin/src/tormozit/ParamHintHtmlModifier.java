@@ -4336,7 +4336,19 @@ public final class ParamHintHtmlModifier
      */
     static String injectMemberSeeLinks(String html, String block)
     {
-        if (html == null || block == null || block.isEmpty() || html.contains(PARAM_ENTRY_CLASS))
+        // #region agent log
+        Global.tempLog("see-links-diag", "inject html=" + (html == null ? "null" : html.length()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " block=" + (block == null ? "null" : block.length()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " hasEntry=" + (html != null && html.contains(PARAM_ENTRY_CLASS)) //$NON-NLS-1$
+            + (html != null && html.contains(PARAM_ENTRY_CLASS)
+                ? " around=" + html.substring(Math.max(0, html.indexOf(PARAM_ENTRY_CLASS) - 300), //$NON-NLS-1$
+                    Math.min(html.length(), html.indexOf(PARAM_ENTRY_CLASS) + 200)).replace('\n', ' ').replace('\r', ' ')
+                : "")); //$NON-NLS-1$
+        // #endregion
+        // Уже есть элемент записи (подсказка параметров или вставленный блок) — не вставляем. Ищем
+        // сам элемент, а не имя класса: стиль ссылок (withLinkStyle у ссылки на имя в заголовке)
+        // кладёт в <head> «span.comfort-param-entry{…}», и конструктор не вставлялся (18.10 10:44).
+        if (html == null || block == null || block.isEmpty() || html.contains("class=\"" + PARAM_ENTRY_CLASS)) //$NON-NLS-1$
             return null;
         int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
         if (heading < 0)
@@ -4351,16 +4363,30 @@ public final class ParamHintHtmlModifier
         if (closing > headingStart && closing < headingEnd)
             insertAt = closing;
         String result = html.substring(0, insertAt) + block + html.substring(insertAt);
-        // Цвета читаются из SWT, а подсказку считает фоновый поток TextViewerHoverManager.
+        // #region agent log
+        Global.tempLog("member-see-desc", "before=" + html.replace('\n', ' ').replace('\r', ' ') //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " | block=" + block.replace('\n', ' ')); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return withLinkStyle(result);
+    }
+
+    /**
+     * Добавляет стиль ссылок {@code comfort-param-link} (без подчёркивания, подчёркивание при наведении).
+     * Цвета читаются из SWT, а подсказку считает фоновый поток TextViewerHoverManager.
+     */
+    static String withLinkStyle(String html)
+    {
         Display display = Display.getDefault();
         String[] styled = new String[1];
-        final String withBlock = result;
         if (display.getThread() == Thread.currentThread())
-            styled[0] = useClickableParameterStyle(withBlock);
+            styled[0] = useClickableParameterStyle(html);
         else
-            display.syncExec(() -> styled[0] = useClickableParameterStyle(withBlock));
-        return styled[0] != null ? styled[0] : result;
+            display.syncExec(() -> styled[0] = useClickableParameterStyle(html));
+        return styled[0] != null ? styled[0] : html;
     }
+
+    /** Класс ссылки в стиле ссылки на конструктор в подсказке члена. */
+    static final String LINK_CLASS = PARAM_LINK_CLASS;
 
     /** Имена параметров и появляющееся при наведении меню действий. */
     private static String useClickableParameterStyle(String html)

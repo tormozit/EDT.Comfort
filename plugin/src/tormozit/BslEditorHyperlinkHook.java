@@ -4,10 +4,15 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.IExecutionListenerWithChecks;
+import org.eclipse.core.commands.IHandler;
+import org.eclipse.core.commands.NotEnabledException;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.common.NotDefinedException;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
@@ -57,7 +62,7 @@ import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * История переходов по ссылкам BSL-редактора (Ctrl+клик), issue 664.
- * Команды перехода к определению сохраняют штатные обработчики.
+ * Для свойств структуры и колонок команда ведёт туда же, куда ссылка в подсказке.
  * Дополнительно: переход по имени типа объекта метаданных в комментарии
  * (Ctrl+клик и команда «Перейти к определению»).
  * По Ctrl+наведению на объект метаданных предлагает его модули, issue 708.
@@ -85,11 +90,13 @@ public final class BslEditorHyperlinkHook implements IStartup
 
     /**
      * Команда «Перейти к определению» берёт свой экземпляр детектора (не из массива
-     * просмотрщика), поэтому ссылку на тип в комментарии для неё открываем здесь.
+     * просмотрщика). Для свойства подменяем обработчик одного вызова, как в LwtTextSaveHook;
+     * для ссылки на тип в комментарии сохраняем дополнение после штатного обработчика.
      */
-    private static final class OpenDeclarationListener implements IExecutionListener
+    private static final class OpenDeclarationListener implements IExecutionListenerWithChecks
     {
         private IHyperlink pending;
+        private PropertyDefinitionHandler propertyHandler;
 
         @Override
         public void preExecute(String commandId, ExecutionEvent event)
@@ -107,6 +114,16 @@ public final class BslEditorHyperlinkHook implements IStartup
                     return;
                 // getSelectedRange — координаты модели (не виджета), см. правило про folding.
                 int offset = viewer.getSelectedRange().x;
+                IHyperlink property = propertyLink(editor, page, viewer, offset);
+                if (property != null)
+                {
+                    Command command = event.getCommand();
+                    if (command.getHandler() instanceof PropertyDefinitionHandler)
+                        return;
+                    propertyHandler = new PropertyDefinitionHandler(command, property);
+                    command.setHandler(propertyHandler);
+                    return;
+                }
                 if (hasStockLinks(viewer, offset))
                     return;
                 pending = textLink(editor, page, viewer, offset);
@@ -114,12 +131,14 @@ public final class BslEditorHyperlinkHook implements IStartup
             catch (RuntimeException | LinkageError e)
             {
                 pending = null;
+                restorePropertyHandler(commandId);
             }
         }
 
         @Override
         public void postExecuteSuccess(String commandId, Object returnValue)
         {
+            restorePropertyHandler(commandId);
             IHyperlink link = pending;
             pending = null;
             if (link != null && OPEN_DECLARATION_COMMAND.equals(commandId))
@@ -129,13 +148,38 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override
         public void notHandled(String commandId, NotHandledException exception)
         {
+            restorePropertyHandler(commandId);
             pending = null;
         }
 
         @Override
         public void postExecuteFailure(String commandId, ExecutionException exception)
         {
+            restorePropertyHandler(commandId);
             pending = null;
+        }
+
+        @Override
+        public void notEnabled(String commandId, NotEnabledException exception)
+        {
+            restorePropertyHandler(commandId);
+            pending = null;
+        }
+
+        @Override
+        public void notDefined(String commandId, NotDefinedException exception)
+        {
+            restorePropertyHandler(commandId);
+            pending = null;
+        }
+
+        private void restorePropertyHandler(String commandId)
+        {
+            if (OPEN_DECLARATION_COMMAND.equals(commandId) && propertyHandler != null)
+            {
+                propertyHandler.restore();
+                propertyHandler = null;
+            }
         }
 
         private static boolean hasStockLinks(ITextViewer viewer, int offset)
@@ -152,6 +196,96 @@ public final class BslEditorHyperlinkHook implements IStartup
                     return true;
             }
             return false;
+        }
+    }
+
+    /** Один вызов команды: тот же адрес и открытие, что у обеих подсказок. */
+    private static final class PropertyDefinitionHandler extends AbstractHandler
+    {
+        private final Command command;
+        private final IHandler original;
+        private final IHyperlink link;
+
+        PropertyDefinitionHandler(Command command, IHyperlink link)
+        {
+            this.command = command;
+            this.original = command.getHandler();
+            this.link = link;
+        }
+
+        @Override
+        public Object execute(ExecutionEvent event)
+        {
+            try
+            {
+                link.open();
+                return null;
+            }
+            finally
+            {
+                restore();
+            }
+        }
+
+        void restore()
+        {
+            if (command.getHandler() == this)
+                command.setHandler(original);
+        }
+    }
+
+    /** Один и тот же переход для команды и Ctrl+клика на имени свойства. */
+    private static IHyperlink propertyLink(BslXtextEditor editor, IWorkbenchPage page,
+        ITextViewer viewer, int offset)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        try
+        {
+            return document.readOnly(resource ->
+            {
+                var target = BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
+                if (target == null || resource.getParseResult() == null)
+                    return null;
+                ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                return leaf == null || leaf.isHidden() ? null : new PropertyHyperlink(
+                    new Region(leaf.getOffset(), leaf.getLength()), target, editor, page);
+            });
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return null;
+        }
+    }
+
+    private static final class PropertyHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final BslStructureInsertCommentTypes.PropertySourceTarget target;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        PropertyHyperlink(IRegion region, BslStructureInsertCommentTypes.PropertySourceTarget target,
+            BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.target = target;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Перейти к определению свойства"; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                BslStructureInsertCommentTypes.openPropertySource(target);
+                scope.opened = true;
+            }
         }
     }
 
@@ -322,7 +456,10 @@ public final class BslEditorHyperlinkHook implements IStartup
             return links;
         try
         {
-            return document.readOnly(resource ->
+            // Вызов идёт в UI-потоке при наведении. Штатный readOnly BSL-документа ждёт все
+            // задания разрешения ссылок модуля (Job.join) и вешает UI на время долгого расчёта.
+            // tryReadOnly такого ожидания не делает: занято — остаются штатные ссылки.
+            IHyperlink[] extended = document.tryReadOnly(resource ->
             {
                 if (resource == null)
                     return links;
@@ -368,6 +505,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 }
                 return result.toArray(IHyperlink[]::new);
             });
+            return extended != null ? extended : links;
         }
         catch (RuntimeException | LinkageError e)
         {
@@ -556,6 +694,9 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override
         public IHyperlink[] detectHyperlinks(ITextViewer viewer, IRegion region, boolean multiple)
         {
+            IHyperlink property = region == null ? null : propertyLink(source, page, viewer, region.getOffset());
+            if (property != null)
+                return new IHyperlink[] { property };
             IHyperlink[] links = delegate.detectHyperlinks(viewer, region, multiple);
             if (links == null || links.length == 0)
             {

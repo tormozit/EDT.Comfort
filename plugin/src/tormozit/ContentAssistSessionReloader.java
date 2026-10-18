@@ -235,6 +235,8 @@ public final class ContentAssistSessionReloader
         org.eclipse.core.runtime.jobs.Job job;
         volatile boolean done;
         String ast;
+        /** Разбор, по которому считана подсказка, ещё не догнал текст документа. */
+        volatile boolean modelStale;
         boolean used;
 
         ParamHintPreparation(IXtextDocument document, int generation, int caret, long stamp,
@@ -931,6 +933,10 @@ boolean inLiteral = endCaret >= 0
             public void documentAboutToBeChanged(DocumentEvent event)
             {
                 prepareStockLinkedModeBeforeAssistInsert(event);
+                // До изменения: удаляемый текст ещё виден, по нему отличаем набор имени после
+                // точки от правки в другом месте модуля.
+                if (processor != null)
+                    processor.dropListCachesOnEditOutsideName(event);
                 if (inputJumpProbe != null)
                     inputJumpProbe.aboutToChange(event);
             }
@@ -1429,6 +1435,10 @@ boolean inLiteral = endCaret >= 0
                             if (resource != null && !obsolete.getAsBoolean())
                             {
                                 request.ast = describeInvocationAt(caret, doc, resource);
+                                // Чтение для автодополнения не ждёт догоняющего разбора: запятая
+                                // уже в тексте, но ещё не в AST — подсказка выделила бы прежний
+                                // параметр и так и осталась бы с ним.
+                                request.modelStale = isParseBehindDocument(resource, doc);
                                 Global.tempLog("param-hint-info", "ast gen=" + gen + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                                     + " description=" + request.ast + " model=" + describeModelState(doc) //$NON-NLS-1$ //$NON-NLS-2$
                                     + " around=" + SmartContentAssistProcessor.uiBlockAround(doc, caret)); //$NON-NLS-1$
@@ -1683,7 +1693,10 @@ boolean inLiteral = endCaret >= 0
             && (hintKind == '(' ? ownOpen : nodeEndCoversCaret(astAt, desiredCaret));
         if (hintKind == '(' && ownOpen && isQueryOperatorOpenParen(desiredCaret))
             astReady = true;
+        if (prepared.modelStale)
+            astReady = false;
         Global.tempLog("param-hint-poll", "check gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " stale=" + prepared.modelStale //$NON-NLS-1$
             + " caret=" + caret + " kind=" + hintKind + " ownOpen=" + ownOpen //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " callCovers=" + callCovers + " astReady=" + astReady + " ast=" + astAt); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // Разбор может догнать документ без изменения его stamp. Повторный опрос
@@ -1823,6 +1836,16 @@ boolean inLiteral = endCaret >= 0
             return resolved > 0;
         int entries = astSuffixInt(ast, "|entries:"); //$NON-NLS-1$
         return entries != 0;
+    }
+
+    /** Текст корневого узла разбора не совпадает с документом — AST отстаёт от ввода. */
+    private static boolean isParseBehindDocument(XtextResource resource, IDocument doc)
+    {
+        org.eclipse.xtext.parser.IParseResult parse = resource.getParseResult();
+        ICompositeNode root = parse != null ? parse.getRootNode() : null;
+        if (root == null)
+            return true;
+        return root.getTotalLength() != doc.getLength() || !root.getText().equals(doc.get());
     }
 
     private static boolean astHasCallNode(String ast)
@@ -6416,6 +6439,17 @@ if (!inLiteral)
         return viewer != null ? INSTALLED.get(viewer) : null;
     }
 
+    /** Сессия редактора, которому принадлежит процессор (только UI-поток). */
+    static ContentAssistSessionReloader forProcessor(SmartContentAssistProcessor processor)
+    {
+        if (processor == null)
+            return null;
+        for (ContentAssistSessionReloader reloader : INSTALLED.values())
+            if (reloader.processor == processor)
+                return reloader;
+        return null;
+    }
+
     /**
      * Взвести ворота показа (только с UI): таймер живёт, пока идёт фоновый расчёт, и
      * забирает результат сразу, как только скелет текста правильный. Ставится в такте
@@ -6530,6 +6564,16 @@ if (!inLiteral)
     public SmartContentAssistProcessor getProcessor()
     {
         return processor;
+    }
+
+    SourceViewer getViewer()
+    {
+        return viewer;
+    }
+
+    ContentAssistant getAssistant()
+    {
+        return assistant;
     }
 
     public IInformationControlCreator getAssistBrowserCreator()

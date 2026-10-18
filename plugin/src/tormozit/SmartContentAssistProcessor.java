@@ -2635,6 +2635,7 @@ return;
         ICompletionProposal[] result = EMPTY;
         try
         {
+            dropListCachesOnTypesChange();
             long stageStarted = System.nanoTime();
             Global.tempLog("assist-compute-stages", "impl.begin");
             result = computeCompletionProposalsImpl(viewer, offset);
@@ -5446,8 +5447,99 @@ return EMPTY;
         return true;
     }
 
+    /** Поколение типов, при котором заполнен {@link #fullListCache}. */
+    private int fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
+
+    /**
+     * Рассчитанные типы сменились (правка функции дала новый тип) — кэши списка, посчитанные
+     * при прежних, сбрасываются: Ctrl+Space после «Функция().» отдавал за 1 мс прежние члены,
+     * хотя EDT тип уже пересчитал (18.10 09:38, «…4» вместо «…3»). Сбрасывается только то,
+     * что посчитано при прежнем поколении: стирание всего подряд уничтожало свежий список
+     * автооткрытия, и окно не открывалось (18.10 09:41).
+     */
+    private void dropListCachesOnTypesChange()
+    {
+        int generation = BslDocCommentComputedTypes.typesGeneration();
+        boolean stock = memberStockFullList.length > 0 && memberStockTypesGeneration != generation;
+        boolean list = fullListCache.length > 0 && fullListCacheTypesGeneration != generation;
+        if (stock)
+            resetMemberStockFullList();
+        if (list)
+        {
+            assignFullListCache(EMPTY);
+            fullListComplete = false;
+        }
+        if (stock || list)
+            uiBlockLog("listCaches.typesChanged", "generation=" + generation //$NON-NLS-1$ //$NON-NLS-2$
+                + " stock=" + stock + " list=" + list); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Любая правка, кроме набора имени сразу после точки, сбрасывает кэши списка этой точки.
+     * Кэш привязан к смещению точки, а переименование той же длины в теле функции-получателя
+     * (выше или ниже вызова) смещение не двигает: «ОписаниеУзла().» отдавал члены до правки, пока
+     * EDT 4 с пересчитывал модуль БСП и не сменил поколение типов (18.10 10:00:38). Набор и
+     * удаление символов имени после точки (фильтр списка) кэш не трогают.
+     */
+    void dropListCachesOnEditOutsideName(DocumentEvent event)
+    {
+        if (event == null)
+            return;
+        int offset = event.getOffset();
+        boolean stock = memberStockFullListDot >= 0 && memberStockFullList.length > 0
+            && !isNameTypingAfterDot(event, memberStockFullListDot);
+        boolean list = fullListContextKey >= 0 && fullListCache.length > 0
+            && !isNameTypingAfterDot(event, fullListContextKey);
+        if (stock)
+            resetMemberStockFullList();
+        if (list)
+        {
+            assignFullListCache(EMPTY);
+            fullListComplete = false;
+        }
+        if (stock || list)
+            uiBlockLog("listCaches.editOutsideName", "off=" + offset + " stock=" + stock + " list=" + list); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /**
+     * Правка внутри имени, набираемого сразу после точки. Зовётся до изменения документа: от точки
+     * до конца заменяемого куска — только символы имени, и вставляются тоже только они.
+     */
+    private static boolean isNameTypingAfterDot(DocumentEvent event, int dot)
+    {
+        int offset = event.getOffset();
+        IDocument document = event.getDocument();
+        if (offset <= dot || document == null)
+            return false;
+        try
+        {
+            int end = offset + event.getLength();
+            if (end > document.getLength())
+                return false;
+            for (int i = dot + 1; i < end; i++)
+                if (!isNameChar(document.getChar(i)))
+                    return false;
+            String text = event.getText();
+            if (text != null)
+                for (int i = 0; i < text.length(); i++)
+                    if (!isNameChar(text.charAt(i)))
+                        return false;
+            return true;
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    private static boolean isNameChar(char c)
+    {
+        return c == '_' || Character.isLetterOrDigit(c);
+    }
+
     private void assignFullListCache(ICompletionProposal[] cache)
     {
+        fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
         fullListCachePrefix = ""; //$NON-NLS-1$
         ICompletionProposal[] stock = stripIrProposals(cache != null ? cache : EMPTY);
         if (irProposals.length > 0 && irSnapshotContextKey == fullListContextKey)
@@ -8685,11 +8777,48 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (!onUi)
                 resetDelegateAssistMode();
             KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
+            // Метод под кареткой, ссылающийся «см.» на функцию, тело которой правили после его
+            // расчёта, пересчитывается здесь — только он и только когда в нём нужен список.
+            // В UI-потоке — нет: там readOnly ждал бы задания разрешения ссылок.
+            if (!onUi && viewer != null && viewer.getDocument() instanceof IXtextDocument refreshDoc)
+            {
+                final int refreshOffset = off;
+                boolean[] shown = { false };
+                try
+                {
+                    refreshDoc.readOnly(resource ->
+                    {
+                        BslStructureInsertCommentTypes.refreshTypesForAssist(resource, refreshOffset, status ->
+                        {
+                            // Состояние — в нижней панели открытого списка вместо «Родитель: …».
+                            shown[0] = true;
+                            ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
+                        });
+                        return null;
+                    });
+                }
+                finally
+                {
+                    if (shown[0])
+                        ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
+                }
+            }
             // #region agent log
             uiBlockLog("model.stateAtCompute", "off=" + off + " " //$NON-NLS-1$ //$NON-NLS-2$
                 + ContentAssistSessionReloader.describeModelState(viewer != null ? viewer.getDocument() : null)
                 + " " + ContentAssistSessionReloader.describeReceiverBeforeDot( //$NON-NLS-1$
                     viewer != null ? viewer.getDocument() : null, off));
+            if (viewer != null && viewer.getDocument() instanceof IXtextDocument typeStatesDoc)
+            {
+                Global.tempLog("bsl-type-states", "--- assist off=" + off); //$NON-NLS-1$ //$NON-NLS-2$
+                typeStatesDoc.tryReadOnly(resource ->
+                {
+                    if (resource != null && !resource.getContents().isEmpty()
+                        && resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module typeStatesModule)
+                        BslDocCommentComputedTypes.logTypeStates(typeStatesModule);
+                    return null;
+                });
+            }
             // #endregion
             try
             {
@@ -8931,8 +9060,19 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             memberStockFullListComplete = false;
         }
         if (unwrapped.length > memberStockFullList.length)
+        {
             memberStockFullList = unwrapped;
+            memberStockTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
+        }
     }
+
+    /**
+     * Поколение рассчитанных типов ({@link BslDocCommentComputedTypes#typesGeneration}), при
+     * котором добыт {@link #memberStockFullList}. Запас привязан к точке, а слитый тип после
+     * «см. Функция» меняется от правки тела самой функции — в другом месте модуля: запас той же
+     * точки отдавал прежние члены («Кот13» после правки на «Кот12», лог 18.10 02:21).
+     */
+    private int memberStockTypesGeneration;
 
     /**
      * Ctrl+Space: запас членов, посчитанный до последнего переразбора, держит ссылки в
@@ -8947,6 +9087,77 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             return;
         uiBlockLog("memberStock.staleOnManual", "dot=" + dot + " n=" + memberStockFullList.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         resetMemberStockFullList();
+    }
+
+    /**
+     * Модуль не связан и после ожидания модели — связываем сами, тем же штатным вызовом, что
+     * сверка документа ({@code HandlyXtextDocument.PostReconcileProcessor} →
+     * {@code EcoreUtil2.resolveLazyCrossReferences}). Сразу после запуска EDT модуль БСП никто не
+     * связывал: три попытки по 1,5 с давали только шаблон «…», и окно оставалось пустым (18.10
+     * 10:59, {@code localResolved=false}, ни одной перевязки). Раньше это побочно делал запрос
+     * Напарника, теперь он ждёт связанный модуль сам.
+     */
+    private void linkModuleIfNeeded(ITextViewer viewer, IDocument doc, java.util.function.BooleanSupplier stale)
+    {
+        if (!(doc instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument xtext) || stale.getAsBoolean())
+            return;
+        xtext.readOnly(resource ->
+        {
+            if (!(resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl) || bsl.isLinkedBatch()
+                || stale.getAsBoolean())
+                return null;
+            ContentAssistPopupUi.setRecomputeStatus(viewer, this, "Связывание модуля…"); //$NON-NLS-1$
+            long started = System.nanoTime();
+            org.eclipse.xtext.EcoreUtil2.resolveLazyCrossReferences(resource, stale::getAsBoolean);
+            uiBlockLog("memberStock.link", "ms=" + (System.nanoTime() - started) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
+                + " linked=" + bsl.isLinkedBatch()); //$NON-NLS-1$
+            return null;
+        });
+    }
+
+    /**
+     * Видимое задание, пока список членов ждёт готовую модель модуля. Появляется через
+     * {@link #SHOW_DELAY_MS}: короткое ожидание не мелькает в «Ходе выполнения».
+     */
+    private static final class ModelWaitProgress extends Job
+    {
+        static final String STATUS = "Ожидание расчёта типов модуля…"; //$NON-NLS-1$
+        private static final long SHOW_DELAY_MS = 500;
+
+        private volatile boolean finished;
+
+        ModelWaitProgress()
+        {
+            super("Комфорт: список членов ждёт расчёт типов модуля"); //$NON-NLS-1$
+            setPriority(Job.SHORT);
+            schedule(SHOW_DELAY_MS);
+        }
+
+        void finish()
+        {
+            finished = true;
+            cancel();
+        }
+
+        @Override
+        protected IStatus run(IProgressMonitor monitor)
+        {
+            monitor.beginTask(STATUS, IProgressMonitor.UNKNOWN);
+            while (!finished && !monitor.isCanceled())
+            {
+                try
+                {
+                    Thread.sleep(100);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            monitor.done();
+            return Status.OK_STATUS;
+        }
     }
 
     /** Контекст первых предложений запаса устарел: смотрим несколько, не весь список. */
@@ -8967,6 +9178,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private boolean hasMemberStock(int dot)
     {
         return memberStockFullListDot == dot
+            && memberStockTypesGeneration == BslDocCommentComputedTypes.typesGeneration()
             && (memberStockFullListComplete
                 || memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE);
     }
@@ -9219,9 +9431,27 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         // Считать только по готовой модели: точка в ней есть, ссылки разрешены.
                         // Иначе штатный расчёт отдаёт один шаблон, а держит удержание и не
                         // пускает разбор (замер 15.10.2026 09:59: три попытки, 6 с).
-                        if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, probeOffset,
-                            () -> monitor.isCanceled() || memberStockBackgroundDot != dotContextKey
-                                || contextGen != memberStockContextGen))
+                        // Пока ждём, в списке и в «Ходе выполнения» видно, что идёт расчёт
+                        // модуля: на БСП после правки это 10–15 с, а пустое окно с
+                        // «Родитель: —» ничего не объясняло (18.10 10:55).
+                        ModelWaitProgress waitProgress = new ModelWaitProgress();
+                        ContentAssistPopupUi.setRecomputeStatus(viewer, SmartContentAssistProcessor.this,
+                            ModelWaitProgress.STATUS);
+                        boolean modelReady;
+                        try
+                        {
+                            java.util.function.BooleanSupplier stale = () -> monitor.isCanceled()
+                                || memberStockBackgroundDot != dotContextKey || contextGen != memberStockContextGen;
+                            modelReady = ContentAssistSessionReloader.waitModelReadyUpTo(doc, probeOffset, stale);
+                            if (modelReady)
+                                linkModuleIfNeeded(viewer, doc, stale);
+                        }
+                        finally
+                        {
+                            waitProgress.finish();
+                            ContentAssistPopupUi.setRecomputeStatus(viewer, SmartContentAssistProcessor.this, null);
+                        }
+                        if (!modelReady)
                         {
                             // Как отказ по устареванию в probeDelegateOnce: метку точки снимет
                             // общий выход ниже.

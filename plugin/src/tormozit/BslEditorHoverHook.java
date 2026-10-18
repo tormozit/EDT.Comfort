@@ -511,10 +511,10 @@ public final class BslEditorHoverHook implements IStartup
     }
 
     /**
-     * Боковая подсказка списка автодополнения (issue 828): тот же блок «: Конструктор()» с меню,
-     * что и в подсказке наведения. Возвращает исходное {@code info}, если добавлять нечего.
+     * Боковая подсказка списка: те же переход по имени свойства и блок «: Конструктор()»
+     * с меню, что и при наведении. Возвращает исходное {@code info}, если добавлять нечего.
      */
-    static Object decorateSideHintWithSeeLinks(Object info, org.eclipse.emf.ecore.EObject member,
+    static Object decorateSideHint(Object info, org.eclipse.emf.ecore.EObject member,
         ITextViewer viewer)
     {
         try
@@ -526,13 +526,75 @@ public final class BslEditorHoverHook implements IStartup
             String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
                 MethodDefinitionLink::registerFormHandler);
             String html = IrBslHoverHtml.readHtml(info);
-            String injected = ParamHintHtmlModifier.injectMemberSeeLinks(html, block);
-            return injected != null ? injected : info;
+            String linked = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                var property = BslStructureInsertCommentTypes.propertyForHint(member, resource);
+                var target = property == null ? null
+                    : BslStructureInsertCommentTypes.propertySourceUriFor(property, resource);
+                return target == null ? html : linkMemberHeading(html, property.getName(),
+                    propertySourceLink(target, action ->
+                    {
+                        var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                        var page = window == null ? null : window.getActivePage();
+                        var editor = page == null ? null : GetRef.getActiveBslEditor(page.getActivePart());
+                        if (editor != null)
+                            page.getNavigationHistory().markLocation(editor);
+                        action.run();
+                    }));
+            });
+            if (linked == null)
+                linked = html;
+            String injected = ParamHintHtmlModifier.injectMemberSeeLinks(linked, block);
+            String result = injected != null ? injected : linked;
+            return result.equals(html) ? info : result;
         }
         catch (Throwable ex)
         {
             return info;
         }
+    }
+
+    /** Общий обработчик ссылки на место создания свойства для обеих подсказок. */
+    private static String propertySourceLink(BslStructureInsertCommentTypes.PropertySourceTarget target,
+        java.util.function.Consumer<Runnable> navigate)
+    {
+        String token = MethodDefinitionLink.registerFormHandler(
+            () -> navigate.accept(() -> BslStructureInsertCommentTypes.openPropertySource(target)));
+        return "<span class=\"comfort-method-definition " + ParamHintHtmlModifier.LINK_CLASS
+            + "\" onclick=\"comfortOpenMethodDefinition('" + token + "');return false;\">";
+    }
+
+    /** Одинаковая ссылка в заголовке штатной и боковой подсказки. */
+    private static String linkMemberHeading(String html, String memberName, String openingTag)
+    {
+        if (html == null || memberName == null || openingTag == null
+            || html.contains("comfort-method-definition"))
+            return html;
+        int heading = html.indexOf("infocontrol-heading");
+        if (heading < 0)
+            heading = html.indexOf("contentassist-heading-content");
+        int headingStart = heading < 0 ? -1 : html.indexOf('>', heading);
+        int headingEnd = headingStart < 0 ? -1 : html.indexOf("</div>", headingStart);
+        if (headingEnd <= headingStart)
+            return html;
+        java.util.regex.Matcher text = java.util.regex.Pattern.compile(">([^<]*)<")
+            .matcher(html).region(headingStart, headingEnd + 1);
+        java.util.regex.Pattern namePattern = java.util.regex.Pattern.compile(
+            "(?iu)(?<![\\p{L}\\p{N}_])" + java.util.regex.Pattern.quote(memberName)
+                + "(?![\\p{L}\\p{N}_])");
+        while (text.find())
+        {
+            java.util.regex.Matcher name = namePattern.matcher(text.group(1));
+            if (!name.find())
+                continue;
+            int start = text.start(1) + name.start();
+            int end = text.start(1) + name.end();
+            boolean span = openingTag.startsWith("<span");
+            String result = html.substring(0, start) + openingTag
+                + html.substring(start, end) + (span ? "</span>" : "</a>") + html.substring(end);
+            return span ? ParamHintHtmlModifier.withLinkStyle(result) : result;
+        }
+        return html;
     }
 
     /** Мост клика без навигации браузера, как в подсказке параметров. */
@@ -778,6 +840,33 @@ public final class BslEditorHoverHook implements IStartup
                 : HoverAffordanceText.wrapCreator(delegateExt.getHoverControlCreator());
         }
 
+        /**
+         * Метод под указателем, ссылающийся «см.» на функцию, чей тип сменился после его расчёта,
+         * пересчитывается и перед подсказкой, а не только перед списком: при открытии модуля
+         * «см. НовыйБук» разрешается в той же перевязке до записи типа в кэш, и подсказка по
+         * «НовыйБук().Свойство» писала «Ничего не найдено» до первого списка членов (18.10 10:36).
+         * Только вне UI-потока: из UI {@code readOnly} ждал бы перевязку.
+         */
+        private static void refreshStaleTypesBeforeHover(ITextViewer textViewer, IRegion hoverRegion)
+        {
+            if (hoverRegion == null || org.eclipse.swt.widgets.Display.getCurrent() != null
+                || !(textViewer != null && textViewer.getDocument() instanceof IXtextDocument document))
+                return;
+            try
+            {
+                int offset = hoverRegion.getOffset();
+                document.readOnly(resource ->
+                {
+                    BslStructureInsertCommentTypes.refreshTypesForAssist(resource, offset, status -> {});
+                    return null;
+                });
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException("bsl-return-compute-cost", "hover refresh failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
@@ -794,6 +883,7 @@ public final class BslEditorHoverHook implements IStartup
             else
             {
             }
+            refreshStaleTypesBeforeHover(textViewer, hoverRegion);
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
@@ -1005,34 +1095,7 @@ public final class BslEditorHoverHook implements IStartup
                 result = IrBslHoverHtml.injectDirectiveIntoHtml(result, lastDirective);
             if (lastCreationSite)
                 result = IrBslHoverHtml.injectNewVariablePrefix(result);
-            if (lastMethodLink != null && lastMethodName != null
-                && !result.contains("comfort-method-definition"))
-            {
-                int heading = result.indexOf("infocontrol-heading");
-                if (heading < 0)
-                    heading = result.indexOf("contentassist-heading-content");
-                int headingStart = heading < 0 ? -1 : result.indexOf('>', heading);
-                int headingEnd = headingStart < 0 ? -1 : result.indexOf("</div>", headingStart);
-                if (headingEnd > headingStart)
-                {
-                    java.util.regex.Matcher text = java.util.regex.Pattern.compile(">([^<]*)<")
-                        .matcher(result).region(headingStart, headingEnd + 1);
-                    java.util.regex.Pattern namePattern = java.util.regex.Pattern.compile(
-                        "(?iu)(?<![\\p{L}\\p{N}_])" + java.util.regex.Pattern.quote(lastMethodName)
-                            + "(?![\\p{L}\\p{N}_])");
-                    while (text.find())
-                    {
-                        java.util.regex.Matcher name = namePattern.matcher(text.group(1));
-                        if (!name.find())
-                            continue;
-                        int start = text.start(1) + name.start();
-                        int end = text.start(1) + name.end();
-                        result = result.substring(0, start) + lastMethodLink
-                            + result.substring(start, end) + "</a>" + result.substring(end);
-                        break;
-                    }
-                }
-            }
+            result = linkMemberHeading(result, lastMethodName, lastMethodLink);
             String handlersHtml = lastFormHandlersHtml;
             if (handlersHtml != null && !result.contains("comfort-form-handlers"))
             {
@@ -1065,11 +1128,19 @@ public final class BslEditorHoverHook implements IStartup
                 var links = BslStructureInsertCommentTypes.seeLinksAt(textViewer, region.getOffset());
                 if (links.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                     return null;
-                return ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
+                String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
                     MethodDefinitionLink::registerFormHandler);
+                // #region agent log
+                Global.tempLog("see-links-diag", "block links=" + links.size() + " len=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (block == null ? "null" : block.length())); //$NON-NLS-1$
+                // #endregion
+                return block;
             }
             catch (Throwable ex)
             {
+                // #region agent log
+                Global.tempLogException("see-links-diag", "block failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 return null;
             }
         }
@@ -1263,8 +1334,15 @@ public final class BslEditorHoverHook implements IStartup
                     }
                     String uri;
                     if (sourceUri != null)
-                        uri = java.net.URLEncoder.encode(sourceUri.toString(),
-                            java.nio.charset.StandardCharsets.UTF_8);
+                    {
+                        org.eclipse.emf.common.util.URI target = sourceUri;
+                        uri = MethodDefinitionLink.registerFormHandler(() -> navigateFromSource(region, () -> {
+                            org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
+                                : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
+                            if (opener != null)
+                                opener.open(target, true);
+                        }));
+                    }
                     else if (feature instanceof com._1c.g5.v8.dt.mcore.Method
                         || feature instanceof com._1c.g5.v8.dt.mcore.Event
                         || (feature instanceof com._1c.g5.v8.dt.mcore.Property
@@ -1299,8 +1377,33 @@ public final class BslEditorHoverHook implements IStartup
                     return "<a class=\"comfort-method-definition\" href=\"#\" onclick=\""
                         + "comfortOpenMethodDefinition('" + uri + "');return false;\">";
                 }
-                return null;
+                // Свойство структуры: переход к месту его создания.
+                BslStructureInsertCommentTypes.PropertySourceTarget creation =
+                    BslStructureInsertCommentTypes.propertySourceUriAt(resource, region.getOffset());
+                if (creation == null)
+                    return null;
+                lastMethodName = access.getName();
+                return propertySourceLink(creation, action -> navigateFromSource(region, action));
             });
+        }
+
+        /** Сохраняет исходное слово для возврата из перехода по имени в подсказке. */
+        private void navigateFromSource(IRegion region, Runnable action)
+        {
+            ISourceViewer viewer = editor.getInternalSourceViewer();
+            if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+                return;
+            int start = region.getOffset();
+            int end = start + region.getLength();
+            if (start < 0 || end > viewer.getDocument().getLength())
+                return;
+            int caret = viewer.getTextWidget().getCaretOffset();
+            caret = viewer instanceof org.eclipse.jface.text.ITextViewerExtension5 extension
+                ? extension.widgetOffset2ModelOffset(caret) : viewer.getVisibleRegion().getOffset() + caret;
+            if (caret < start || caret > end)
+                editor.selectAndReveal(end, 0);
+            editor.getSite().getPage().getNavigationHistory().markLocation(editor);
+            action.run();
         }
 
         /**

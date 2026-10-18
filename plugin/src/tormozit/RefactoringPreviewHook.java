@@ -137,6 +137,7 @@ public final class RefactoringPreviewHook
      * RefactoringWizardDialog2 создаёт предпросмотр в обработчике кнопки перехода, после
      * фильтра Selection. Отложенный вызов может попасть во вложенный цикл расчёта изменений,
      * пока текущая страница ещё прежняя; окончание перехода отслеживает handleWizardControlHide.
+     * Это общий переход LTK: в том числе из ввода имени при переименовании BSL через Xtext.
      */
     private static void handleWizardButtonSelection(Event event)
     {
@@ -144,7 +145,6 @@ public final class RefactoringPreviewHook
             return;
         Shell shell = button.getShell();
         if (!isRefactoringWizardDialog(shell)
-            || !PreviewTablePane.isTextReplacementWizard(shell)
             || Boolean.TRUE.equals(shell.getData(ATTACH_PENDING_KEY)))
             return;
         shell.setData(ATTACH_PENDING_KEY, Boolean.TRUE);
@@ -168,7 +168,6 @@ public final class RefactoringPreviewHook
             return;
         Shell shell = control.getShell();
         if (!isRefactoringWizardDialog(shell)
-            || !PreviewTablePane.isTextReplacementWizard(shell)
             || !(shell.getData() instanceof IWizardContainer container))
             return;
         IWizardPage page = container.getCurrentPage();
@@ -204,6 +203,7 @@ public final class RefactoringPreviewHook
             return;
         if (!isPageOrShellShow(control, shell))
             return;
+        IndexFreshness.watch(shell);
         RefactoringWizardTitleHook.prepareRenameContext(shell);
         Marks.scheduleApply(shell, 0);
         scheduleAttach(shell, 0);
@@ -251,6 +251,19 @@ public final class RefactoringPreviewHook
         if (tree == null || tree.isDisposed())
             return false;
         markPageHandled(page);
+        try
+        {
+            // Корень страницы предпросмотра LTK: GridLayout с SashForm; подпись — под ним.
+            Composite sash = tree.getParent();
+            while (sash != null && !(sash instanceof org.eclipse.swt.custom.SashForm))
+                sash = sash.getParent();
+            if (sash != null)
+                IndexFreshness.installInRefactoring(sash.getParent(), shell);
+        }
+        catch (RuntimeException e)
+        {
+            // Вёрстка страницы могла измениться в новой версии EDT — подписи просто не будет.
+        }
         try
         {
             PreviewTablePane.install(treeViewer);

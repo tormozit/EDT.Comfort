@@ -78,10 +78,80 @@ public final class ContentAssistPopupUi
         }
     }
 
+    /**
+     * Пока идёт пересчёт типов метода под кареткой перед расчётом списка, вместо «Родитель: …»
+     * показывается он ({@code null} — нет пересчёта).
+     */
+    private static volatile String recomputeStatus;
+
+    /**
+     * Показать или снять ({@code null}) в нижней панели списка состояние пересчёта типов.
+     * Можно звать из любого потока: подпись обновляется в UI.
+     */
+    static void setRecomputeStatus(org.eclipse.jface.text.ITextViewer viewer, SmartContentAssistProcessor processor,
+        String status)
+    {
+        recomputeStatus = status;
+        // Фоновый расчёт автодополнения получает не сам редактор, а обёртку: прежняя проверка
+        // на SourceViewer молча выходила, и снятие надписи не доходило до окна (18.10 09:13 —
+        // «Пересчёт типов: …» висела после конца пересчёта).
+        org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            // «Активный» редактор в момент пересчёта не задан (сеанс ещё не открыт) — окно не
+            // находилось, подпись не менялась (18.10 09:58, assistant=false). Процессор знает свой.
+            ContentAssistSessionReloader own = ContentAssistSessionReloader.forProcessor(processor);
+            SourceViewer sourceViewer = own != null ? own.getViewer()
+                : viewer instanceof SourceViewer direct ? direct : ContentAssistSessionReloader.getActiveViewer();
+            applyRecomputeStatus(sourceViewer, status);
+        });
+    }
+
+    /**
+     * Окно ищется по редактору, а не по «активному» сеансу: из UI-потока тот находится, только
+     * пока сеанс помечен открытым, и подпись при пересчёте не появлялась (18.10 09:04).
+     */
+    private static void applyRecomputeStatus(SourceViewer viewer, String status)
+    {
+        String outcome;
+        try
+        {
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(viewer);
+            ContentAssistant assistant = reloader != null ? reloader.getAssistant()
+                : ContentAssistSessionReloader.getActiveAssistant();
+            Object popup = assistant == null ? null : ContentAssistPopupSync.getPopupObject(assistant);
+            Shell shell = popup == null ? null : ContentAssistPopupSync.getProposalShell(popup);
+            Composite bar = shell == null || shell.isDisposed() ? null : (Composite) shell.getData(BAR_DATA_KEY);
+            Label contextLabel = bar == null || bar.isDisposed() ? null : (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
+            if (contextLabel != null && !contextLabel.isDisposed())
+            {
+                if (viewer != null)
+                    applyContextTypeLabel(contextLabel, viewer);
+                else
+                    // Редактор не найден — хотя бы не оставлять надпись о пересчёте.
+                    contextLabel.setText(status != null ? status : PARENT_PLACEHOLDER);
+                outcome = "applied viewer=" + (viewer != null); //$NON-NLS-1$
+            }
+            else
+                outcome = "noLabel assistant=" + (assistant != null) + " popup=" + (popup != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " shell=" + (shell != null && !shell.isDisposed() && shell.isVisible()) + " bar=" + (bar != null); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            outcome = "error " + e; //$NON-NLS-1$
+        }
+        // #region agent log
+        Global.tempLog("assist-recompute-status", "status=" + status + " " + outcome); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+    }
+
     private static void applyContextTypeLabel(Label contextLabel, SourceViewer viewer)
     {
         String old = contextLabel.getText();
-        String text = resolveContextTypeLabel(viewer);
+        String status = recomputeStatus;
+        String text = status != null ? status : resolveContextTypeLabel(viewer);
         if (text == null)
             text = ""; //$NON-NLS-1$
         Composite bar = contextLabel.getParent();

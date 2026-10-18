@@ -560,6 +560,178 @@ public final class BslStructureInsertCommentTypes
             EXPORT_VARS_SCOPE.remove();
     }
 
+    /**
+     * Перед автодополнением: если метод под кареткой ссылается «см.» на функцию, сменившую
+     * версию после его последнего расчёта, — пересчитать только его (и его вызывающих) штатным
+     * частичным расчётом; если расчёт модуля был отменён — модуль целиком. Вызывать в фоновом
+     * потоке под {@code readOnly} документа: блокировка перевязки ресурса берётся здесь.
+     */
+    static void refreshTypesForAssist(Resource resource, int offset,
+        java.util.function.Consumer<String> onRecompute)
+    {
+        ComfortTreeTypeSystem.StaleTypes stale = resource == null ? null
+            : ComfortTreeTypeSystem.StaleTypes.BY_RESOURCE.get(resource);
+        if (stale == null || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
+            || resource.getContents().isEmpty() || !(resource.getContents().get(0) instanceof Module module)
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem tree))
+            return;
+        Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (lock == null)
+            return;
+        long started = System.nanoTime();
+        String what = null;
+        try
+        {
+            boolean whole;
+            synchronized (stale)
+            {
+                whole = stale.wholeModule;
+            }
+            // Отмена расчёта — обычное дело (связь со схемой отменяется вводом почти на каждой
+            // правке), а следующие расчёты состояния обычно уже вернули: полный пересчёт модуля
+            // (7,8 с в модуле БСП, лог 18.10 09:04) — только если у функции состояния правда нет.
+            if (whole && !hasFunctionWithoutState(module))
+            {
+                synchronized (stale)
+                {
+                    stale.wholeModule = false;
+                }
+                whole = false;
+            }
+            if (whole)
+            {
+                what = "module"; //$NON-NLS-1$
+                onRecompute.accept("Пересчёт типов модуля…"); //$NON-NLS-1$
+                ComfortTreeTypeSystem.SecondPassProgress progress = new ComfortTreeTypeSystem.SecondPassProgress(module, 0);
+                try
+                {
+                    ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+                    {
+                        tree.recomputeModuleFully(module, CancelIndicator.NullImpl);
+                        ModuleVariableStates.fix(module);
+                        BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                        return true;
+                    });
+                }
+                finally
+                {
+                    progress.finish();
+                }
+                ComfortTreeTypeSystem.StaleTypes.clear(resource);
+                BslDocCommentComputedTypes.bumpTypesGeneration();
+                return;
+            }
+            Method method = EcoreUtil2.getContainerOfType(
+                new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset),
+                Method.class);
+            if (method == null || method.getName() == null)
+                return;
+            String key = method.getName().toLowerCase(java.util.Locale.ROOT);
+            java.util.Set<String> names;
+            int version;
+            synchronized (stale)
+            {
+                version = stale.version;
+                if (Integer.valueOf(version).equals(stale.refreshed.get(key)))
+                    return;
+                names = new java.util.HashSet<>(stale.names);
+            }
+            List<Method> dependencies = new ArrayList<>();
+            collectStaleDependencies(module, method, names,
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), dependencies);
+            if (!dependencies.isEmpty())
+            {
+                what = method.getName();
+                onRecompute.accept("Пересчёт типов: " + method.getName() + "…"); //$NON-NLS-1$ //$NON-NLS-2$
+                ComfortTreeTypeSystem.SecondPassProgress progress =
+                    new ComfortTreeTypeSystem.SecondPassProgress(module, dependencies.size());
+                boolean done;
+                try
+                {
+                    done = ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+                    {
+                        for (Method dependency : dependencies)
+                        {
+                            progress.step(dependency.getName());
+                            if (!tree.recomputeDependent(module, dependency, CancelIndicator.NullImpl))
+                                return false;
+                            // Следующий метод должен разрешать «см.» уже по свежему возврату.
+                            BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                            BslDocCommentComputedTypes.bumpTypesGeneration();
+                            progress.stepDone();
+                        }
+                        return true;
+                    });
+                }
+                finally
+                {
+                    progress.finish();
+                }
+                if (!done)
+                    // Подставить метод не удалось (в логе причина) — пометку не снимаем.
+                    return;
+            }
+            synchronized (stale)
+            {
+                stale.refreshed.put(key, version);
+            }
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLogException("bsl-return-compute-cost", "refreshTypesForAssist failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            // #region agent log
+            if (what != null)
+                Global.tempLog("bsl-return-compute-cost", "assist refresh " + what //$NON-NLS-1$ //$NON-NLS-2$
+                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
+        }
+    }
+
+    /**
+     * Только зависимости текущего метода: сначала цели «см.» и обычных вызовов,
+     * затем потребитель. Пересчёт одной процедуры не обновляет готовые состояния вызываемых
+     * функций, поэтому цепочка «МояТЗ → Яйцо → НовыйБук → параметр процедуры» теряла тип таблицы.
+     */
+    private static boolean collectStaleDependencies(Module module, Method method, Set<String> names,
+        Set<Method> visited, List<Method> ordered)
+    {
+        if (!visited.add(method))
+            return ordered.contains(method);
+        Set<Method> dependencies = new java.util.LinkedHashSet<>();
+        for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+            if (invocation.getMethodAccess() instanceof StaticFeatureAccess access)
+                for (FeatureEntry entry : access.getFeatureEntries())
+                    if (entry.getFeature() instanceof Method called
+                        && EcoreUtil2.getContainerOfType(called, Module.class) == module)
+                        dependencies.add(called);
+        for (Method candidate : module.allMethods())
+            if (candidate.getName() != null && BslDocCommentComputedTypes.methodReferences(method,
+                Set.of(candidate.getName().toLowerCase(Locale.ROOT))))
+                dependencies.add(candidate);
+        boolean stale = BslDocCommentComputedTypes.methodReferences(method, names);
+        for (Method dependency : dependencies)
+            if (collectStaleDependencies(module, dependency, names, visited, ordered))
+                stale = true;
+        if (stale)
+            ordered.add(method);
+        return stale;
+    }
+
+    /** У какой-то функции модуля нет NORMAL-состояния возврата (его стёр отменённый расчёт). */
+    private static boolean hasFunctionWithoutState(Module module)
+    {
+        for (Method method : module.allMethods())
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function function
+                && (function.getFinalReturnState() == null
+                    || function.getFinalReturnState().get(TypeSystemMode.NORMAL) == null))
+                return true;
+        return false;
+    }
+
     static BslTreeTypeSystem peekTreeTypeSystem()
     {
         install();
@@ -581,77 +753,6 @@ public final class BslStructureInsertCommentTypes
         {
             return null;
         }
-    }
-
-    /** Досчёт метода с тем же контекстом BM, который требуется для разрешения ссылок EDT. */
-    static boolean lightInstallMethodTypeSystem(Method method, Variable gate)
-    {
-        Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-        BslTreeTypeSystem tree = peekTreeTypeSystem();
-        IProject project = projectOf(module);
-        if (module == null || tree == null || project == null)
-            return false;
-        // Досчёт EDT пересчитывает в облегчённом режиме и другие методы модуля. Внутри полной
-        // установки их NORMAL считает она сама, а LIGHT из досчёта неполон (ссылки на цель в
-        // нём отсечены защитой от рекурсии) и при чтении заслоняет NORMAL.
-        List<Runnable> withoutLight =
-            FULL_INSTALL_MODULES.contains(module) ? collectorsWithoutLight(module, method) : null;
-        boolean[] completed = { false };
-        runInTransaction(tree, project, context ->
-        {
-            tree.lightInstallingTypeSystem(module, method, gate, null, 0, context);
-            completed[0] = true;
-        });
-        if (withoutLight != null)
-            withoutLight.forEach(Runnable::run);
-        return completed[0];
-    }
-
-    /** Модули, которые сейчас проходят полный {@code installTypeSystem} ({@link ComfortTreeTypeSystem}). */
-    private static final java.util.Set<Module> FULL_INSTALL_MODULES =
-        java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
-
-    /**
-     * Владельцы состояний модуля без LIGHT, кроме цели досчёта: переменные и параметры,
-     * возврат функций, входные и выходные параметры методов. Каждый владелец снимает
-     * появившийся LIGHT; накопитель берётся в момент снятия — досчёт может завести его заново.
-     */
-    private static List<Runnable> collectorsWithoutLight(Module module, Method target)
-    {
-        List<Runnable> owners = new ArrayList<>();
-        for (Variable variable : EcoreUtil2.getAllContentsOfType(module, Variable.class))
-            if (EcoreUtil2.getContainerOfType(variable, Method.class) != target && lacksLight(variable.getTypeStateProvider()))
-                owners.add(() -> dropLight(variable.getTypeStateProvider()));
-        for (Method method : module.allMethods())
-        {
-            if (method == target)
-                continue;
-            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function function
-                && lacksLight(function.getFinalReturnState()))
-                owners.add(() -> dropLight(function.getFinalReturnState()));
-            if (method.getFinalInParamState().stream().allMatch(BslStructureInsertCommentTypes::lacksLight))
-                owners.add(() -> dropLight(method.getFinalInParamState()));
-            if (method.getFinalOutParamState().stream().allMatch(BslStructureInsertCommentTypes::lacksLight))
-                owners.add(() -> dropLight(method.getFinalOutParamState()));
-        }
-        return owners;
-    }
-
-    private static boolean lacksLight(VariableTypeStateProviderCollector collector)
-    {
-        return collector == null || collector.get(TypeSystemMode.LIGHT) == null;
-    }
-
-    private static void dropLight(VariableTypeStateProviderCollector collector)
-    {
-        if (!lacksLight(collector))
-            collector.removeMode(TypeSystemMode.LIGHT);
-    }
-
-    private static void dropLight(List<VariableTypeStateProviderCollector> collectors)
-    {
-        for (VariableTypeStateProviderCollector collector : collectors)
-            dropLight(collector);
     }
 
     /**
@@ -886,6 +987,116 @@ public final class BslStructureInsertCommentTypes
 
     private static final OnChangeEvictingCache PROPERTY_SOURCE_DESCRIPTIONS = new OnChangeEvictingCache();
 
+    /**
+     * Функции, пройденные {@link #originalPropertyDescription}: исходное свойство само может вести в другую
+     * функцию, а «см.» двух функций друг на друга замкнули бы обход. Живёт на время одного внешнего вызова.
+     */
+    private static final ThreadLocal<java.util.Set<String>> ORIGINAL_DESCRIPTION_VISITED = new ThreadLocal<>();
+
+    /**
+     * Свойство из слитого типа «см. Функция»: место его создания — функция и смещение 0 (поле
+     * секции, собранной нашим слиянием), а описание лежит у исходного свойства — в
+     * {@code Вставить} внутри другой функции, откуда пришла структура (18.10: «для списка» у
+     * «ДобавлятьПанельБыстрыхОтборов2» из «Яйцо» через «см. Новый123…» не показывалось).
+     * Берём одноимённое свойство из рассчитанного типа функции с его настоящим местом создания.
+     */
+    private static String originalPropertyDescription(Property property, Method function, Module module,
+        long started, long resolvedAt)
+    {
+        java.util.Set<String> visited = ORIGINAL_DESCRIPTION_VISITED.get();
+        boolean owner = visited == null;
+        if (owner)
+        {
+            visited = new java.util.HashSet<>();
+            ORIGINAL_DESCRIPTION_VISITED.set(visited);
+        }
+        try
+        {
+            if (!visited.add(functionKey(function, module)))
+                return null;
+            for (OriginalProperty original : originalProperties(property, function, module))
+            {
+                String description = readPropertySourceDescription(original.property(), original.source(),
+                    original.module(), started, resolvedAt);
+                if (description != null)
+                    return description;
+            }
+            return null;
+        }
+        finally
+        {
+            if (owner)
+                ORIGINAL_DESCRIPTION_VISITED.remove();
+        }
+    }
+
+    /** Ключ функции для обхода исходных свойств: модуль + имя без учёта регистра. */
+    private static String functionKey(Method function, Module module)
+    {
+        Resource resource = module.eResource();
+        return (resource == null ? "" : resource.getURI().trimFragment().toString()) //$NON-NLS-1$
+            + '#' + String.valueOf(function.getName()).toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** Исходное свойство слитого типа с его настоящим местом создания. */
+    private record OriginalProperty(Property property, BslDerivedPropertySource source, Module module)
+    {
+    }
+
+    /** Одноимённые свойства из рассчитанного типа функции, см. {@link #originalPropertyDescription}. */
+    private static List<OriginalProperty> originalProperties(Property property, Method function, Module module)
+    {
+        List<?> types = property.getName() == null ? null : BslDocCommentComputedTypes.cachedTypesFor(function);
+        if (types == null)
+            return List.of();
+        List<OriginalProperty> result = new ArrayList<>();
+        collectOriginalProperties(property, types, module,
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), result);
+        return result;
+    }
+
+    /** Вложенные структуры и колонки: TypeSection.fill раскрывает у таблицы свойства строки. */
+    private static void collectOriginalProperties(Property property, List<?> types, Module module,
+        Set<Type> visited, List<OriginalProperty> result)
+    {
+        for (Object item : types)
+        {
+            if (!(item instanceof Type type) || type.eIsProxy() || !visited.add(type))
+                continue;
+            Type owner = BslDocCommentComputedTypes.fillPropertyOwner(List.of(type), false);
+            if (owner == null || owner.getContextDef() == null)
+                continue;
+            for (Property candidate : owner.getContextDef().allProperties())
+            {
+                if (!(candidate instanceof DerivedProperty derived)
+                    || !(derived.getSource() instanceof BslDerivedPropertySource origin)
+                    || origin.getModuleUri() == null)
+                    continue;
+                if (candidate != property && property.getName().equalsIgnoreCase(candidate.getName()))
+                {
+                    Module originModule = moduleOf(module, URI.createURI(origin.getModuleUri()).trimFragment());
+                    if (originModule != null)
+                        result.add(new OriginalProperty(candidate, origin, originModule));
+                }
+                if (candidate.getTypeContainer() != null)
+                    collectOriginalProperties(property, candidate.getTypeContainer().allTypes(), module,
+                        visited, result);
+            }
+        }
+    }
+
+    /** Модуль по URI: тот же, что у свойства, или загруженный в его же наборе ресурсов. */
+    private static Module moduleOf(Module module, URI uri)
+    {
+        Resource resource = module.eResource();
+        if (resource != null && uri.equals(resource.getURI().trimFragment()))
+            return module;
+        Resource other = resource == null || resource.getResourceSet() == null ? null
+            : resource.getResourceSet().getResource(uri, false);
+        return other != null && !other.getContents().isEmpty() && other.getContents().get(0) instanceof Module found
+            ? found : null;
+    }
+
     private static String readPropertySourceDescription(Property property, BslDerivedPropertySource source,
         Module module, long started, long resolvedAt)
     {
@@ -926,6 +1137,8 @@ public final class BslStructureInsertCommentTypes
             {
                 // Свойство по полю документирующего комментария: «* Поле - Тип - описание».
                 String description = commentFieldDescription(property, source, method, module);
+                if (description == null)
+                    description = originalPropertyDescription(property, method, module, started, resolvedAt);
                 PropertyDescriptions.forModuleUri(URI.createURI(source.getModuleUri())).put(property, description);
                 outcome = description == null ? "noCommentField" : "foundCommentField"; //$NON-NLS-1$ //$NON-NLS-2$
                 return description;
@@ -1007,44 +1220,91 @@ public final class BslStructureInsertCommentTypes
         Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), context);
         if (module == null)
             return List.of();
-        Method method = null;
-        for (Method candidate : module.allMethods())
-            if (source.getMethodName().equalsIgnoreCase(candidate.getName()))
-            {
-                method = candidate;
-                break;
-            }
-        if (method == null)
-            return List.of();
         COMMENT_FIELD_PARSE.set(Boolean.TRUE);
         try
         {
             List<PropertySeeLink> result = new ArrayList<>();
-            java.util.Set<String> seen = new java.util.LinkedHashSet<>();
-            // Как readPropertySourceDescription: вызов в месте создания → боковой комментарий,
-            // нет вызова → поле документирующего комментария метода.
-            if (invocationAtSource(source, method) != null)
-                collectReturnSeeLinks(sideCommentReturnSection(property, source, method, module), method, seen, result);
-            else
-            {
-                TypeSection.FieldDefinition field = commentField(property, source, method, module);
-                if (field != null)
-                {
-                    collectSeeLinks(field.getDescription(), method, seen, result);
-                    for (TypeSection section : field.getTypeSections())
-                        collectSeeLinks(section, method, seen, result);
-                }
-            }
+            collectPropertySeeLinks(property, source, module, new java.util.LinkedHashSet<>(), result,
+                new java.util.HashSet<>());
             return result;
         }
         catch (Throwable ignored)
         {
+            // #region agent log
+            Global.tempLogException("see-links-diag", "propertySeeLinks failed " + property.getName(), ignored); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return List.of();
         }
         finally
         {
             COMMENT_FIELD_PARSE.remove();
         }
+    }
+
+    private static void collectPropertySeeLinks(Property property, BslDerivedPropertySource source, Module module,
+        java.util.Set<String> seen, List<PropertySeeLink> result, java.util.Set<String> visited)
+    {
+        Method method = methodNamed(module, source.getMethodName());
+        // #region agent log
+        Global.tempLog("see-links-diag", "collect property=" + property.getName() + " " + describeSource(property) //$NON-NLS-1$ //$NON-NLS-2$
+            + " method=" + (method == null ? "null" : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " invocation=" + (method != null && invocationAtSource(source, method) != null) //$NON-NLS-1$
+            + " found=" + result.size()); //$NON-NLS-1$
+        // #endregion
+        if (method == null)
+            return;
+        // Как readPropertySourceDescription: вызов в месте создания → боковой комментарий,
+        // нет вызова → поле документирующего комментария метода.
+        if (invocationAtSource(source, method) != null)
+        {
+            collectReturnSeeLinks(sideCommentReturnSection(property, source, method, module), method, seen, result);
+            return;
+        }
+        TypeSection.FieldDefinition field = commentField(property, source, method, module);
+        // #region agent log
+        Global.tempLog("see-links-diag", "  field=" + (field != null) + " originals=" //$NON-NLS-1$ //$NON-NLS-2$
+            + originalProperties(property, method, module).stream()
+                .map(o -> o.source().getMethodName() + "@" + o.source().getLocalOffset()).toList() //$NON-NLS-1$
+            + " cachedTypes=" + (BslDocCommentComputedTypes.cachedTypesFor(method) == null ? "null" : "yes") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " visited=" + visited); //$NON-NLS-1$
+        // #endregion
+        int before = result.size();
+        if (field != null)
+        {
+            collectSeeLinks(field.getDescription(), method, seen, result);
+            for (TypeSection section : field.getTypeSections())
+                collectSeeLinks(section, method, seen, result);
+            if (result.size() > before)
+                return;
+        }
+        // Ни вызова, ни ссылок в поле: свойство из слитого типа «см. Функция» — ссылки у исходного
+        // свойства, как в originalPropertyDescription (18.10: без «: Лук()» у «ДобавлятьПанельБыстрыхОтборов2»).
+        // Поле собранной слиянием секции «см.» не хранит: после пересчёта метода перед подсказкой
+        // свойство приходит оттуда, и конструктор пропадал (18.10 10:41, foundCommentField).
+        // Повтор функции — замкнутые друг на друга «см.», дальше не идём.
+        if (visited.add(functionKey(method, module)))
+            for (OriginalProperty original : originalProperties(property, method, module))
+                collectPropertySeeLinks(original.property(), original.source(), original.module(), seen, result,
+                    visited);
+    }
+
+    // #region agent log
+    private static String describeSource(Property property)
+    {
+        return property instanceof DerivedProperty derived && derived.getSource() instanceof BslDerivedPropertySource source
+            ? "src=" + source.getMethodName() + "@" + source.getLocalOffset() //$NON-NLS-1$ //$NON-NLS-2$
+            : "src=" + property.getClass().getSimpleName(); //$NON-NLS-1$
+    }
+    // #endregion
+
+    private static Method methodNamed(Module module, String name)
+    {
+        if (name == null || name.isEmpty())
+            return null;
+        for (Method candidate : module.allMethods())
+            if (name.equalsIgnoreCase(candidate.getName()))
+                return candidate;
+        return null;
     }
 
     private static void collectSeeLinks(TypeSection section, Method method, java.util.Set<String> seen,
@@ -1278,11 +1538,35 @@ public final class BslStructureInsertCommentTypes
         {
             text = descriptionText(section.getCurrentDescription());
             if (text == null)
-                text = descriptionText(section.getSourceDescription());
+                text = sourceDescriptionText(section.getSourceDescription());
             if (text != null)
                 return text;
         }
         return null;
+    }
+
+    /**
+     * Исходный текст раздела типов без ссылок «см. …»: ссылка — это сам тип, она уже стоит
+     * в заголовке подсказки конструктором «: Функция()» (issue 828). Остаток без букв и цифр
+     * (тире, скобка) описанием не считается.
+     */
+    private static String sourceDescriptionText(BslDocumentationComment.Description description)
+    {
+        if (description == null)
+            return null;
+        StringBuilder text = new StringBuilder();
+        for (Object part : description.getParts())
+        {
+            String piece = part instanceof TextPart textPart ? textPart.getText()
+                : part instanceof TagPart tag ? tag.getContent()
+                : null;
+            if (piece == null || piece.isBlank())
+                continue;
+            if (text.length() > 0)
+                text.append(' ');
+            text.append(piece.trim());
+        }
+        return text.codePoints().anyMatch(Character::isLetterOrDigit) ? text.toString() : null;
     }
 
     /** Текст описания поля: текст, ссылки «см. …» и теги — как написаны в комментарии. */
@@ -1355,7 +1639,7 @@ public final class BslStructureInsertCommentTypes
             // только в setSimpleLinkedMode. Контекст берём из расчёта списка.
             ITextViewer context = viewer != null ? viewer : proposalViewer;
             completePropertyHover(info, object, context);
-            return BslEditorHoverHook.decorateSideHintWithSeeLinks(info, object, context);
+            return BslEditorHoverHook.decorateSideHint(info, object, context);
         }
 
         @Override
@@ -1368,7 +1652,7 @@ public final class BslStructureInsertCommentTypes
     /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
     private static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
     {
-        if (!(object instanceof Property property) || viewer == null
+        if (object == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
         try
@@ -1376,6 +1660,10 @@ public final class BslStructureInsertCommentTypes
             // Как и остальные наши расчёты типов — только под флажком проекта.
             if (!Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyPeekAst(document,
                 BslStructureInsertCommentTypes::isExtendedTypesEnabled)))
+                return;
+            Property property = ContentAssistSessionReloader.readOnlyPeekAst(document,
+                resource -> propertyForHint(object, resource));
+            if (property == null)
                 return;
             String description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                 resource == null || resource.getContents().isEmpty()
@@ -1393,9 +1681,34 @@ public final class BslStructureInsertCommentTypes
             Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
             Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
         }
+    }
+
+    /** Один выбор свойства для прямого обращения и обёртки предложения автодополнения. */
+    static Property propertyForHint(EObject object, Resource resource)
+    {
+        List<? extends EObject> members = object instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement proposal
+            ? proposal.getList() : object == null ? List.of() : List.of(object);
+        return propertyForHint(members, resource);
+    }
+
+    private static Property propertyForHint(List<? extends EObject> members, Resource resource)
+    {
+        if (resource == null || !Boolean.TRUE.equals(isExtendedTypesEnabled(resource)))
+            return null;
+        Property first = null;
+        for (EObject member : members)
+        {
+            if (!(member instanceof Property property))
+                continue;
+            if (first == null)
+                first = property;
+            if (propertyDescription(property, resource.getContents().get(0)) != null)
+                return property;
+        }
+        return first;
     }
 
     /** Как EDT getDocByDerivedProperty, но прокси типов разрешаются в ресурсе редактора. */
@@ -1474,18 +1787,138 @@ public final class BslStructureInsertCommentTypes
             // без него у параметра с типом из «см. Функция» свойство не находится.
             : computer == null ? List.of()
                 : DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer, true);
-        EObject context = resource.getContents().isEmpty() ? null : resource.getContents().get(0);
-        Property first = null;
-        for (FeatureEntry entry : entries)
+        return propertyForHint(entries.stream().map(FeatureEntry::getFeature).toList(), resource);
+    }
+
+    /**
+     * Место создания свойства под указателем: ключ-литерал в {@code X.Вставить("Ключ", …)}
+     * или {@code Новый Структура("Ключ", …)}, поле комментария, иначе метод,
+     * по которому свойство создано. {@code null} — места нет.
+     */
+    static PropertySourceTarget propertySourceUriAt(Resource resource, int offset)
+    {
+        Property property = propertyAt(resource, offset);
+        Global.tempLog("property-source-navigation", "resolve offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " property=" + (property == null ? "null" : property.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " source=" + (property == null ? "null" : describeSource(property))); //$NON-NLS-1$ //$NON-NLS-2$
+        return propertySourceUriFor(property, resource);
+    }
+
+    /** Тот же переход для имени в боковой подсказке списка и в подсказке при наведении. */
+    static PropertySourceTarget propertySourceUriFor(Property property, Resource resource)
+    {
+        if (resource == null || !(property instanceof DerivedProperty derived)
+            || !(derived.getSource() instanceof BslDerivedPropertySource source)
+            || source.getModuleUri() == null || resource.getContents().isEmpty())
+            return null;
+        Module module = moduleFromSourceUri(URI.createURI(source.getModuleUri()), resource.getContents().get(0));
+        Method method = module == null ? null : methodNamed(module, source.getMethodName());
+        if (method == null)
+            return null;
+        COMMENT_FIELD_PARSE.set(Boolean.TRUE);
+        try
         {
-            if (!(entry.getFeature() instanceof Property property))
-                continue;
-            if (first == null)
-                first = property;
-            if (context != null && propertyDescription(property, context) != null)
-                return property;
+            PropertySourceTarget exact = exactSourceTarget(property, source, module, new java.util.HashSet<>());
+            Global.tempLog("property-source-navigation", "target property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " exact=" + exact + " fallback=" + EcoreUtil.getURI(method)); //$NON-NLS-1$ //$NON-NLS-2$
+            return exact != null ? exact : new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0);
         }
-        return first;
+        catch (Throwable failure)
+        {
+            Global.tempLogException("property-source-navigation", "resolve failed", failure); //$NON-NLS-1$ //$NON-NLS-2$
+            return new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0);
+        }
+        finally
+        {
+            COMMENT_FIELD_PARSE.remove();
+        }
+    }
+
+    /**
+     * Точное место: ключ в {@code Вставить} или литерале конструктора, иначе поле комментария (имя поля — по
+     * смещению места создания). Свойство из слитого типа «см. Функция» — у исходного свойства, как в
+     * {@link #collectPropertySeeLinks}. {@code null} — точного места нет.
+     */
+    private static PropertySourceTarget exactSourceTarget(Property property, BslDerivedPropertySource source,
+        Module module, java.util.Set<String> visited)
+    {
+        Method method = methodNamed(module, source.getMethodName());
+        if (method == null || property.getName() == null)
+            return null;
+        Invocation invocation = invocationAtSource(source, method);
+        if (invocation != null && property.getName().equalsIgnoreCase(insertedKey(invocation)))
+            return new PropertySourceTarget(EcoreUtil.getURI(invocation.getParams().get(0)), -1, 0);
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+        if (node != null)
+        {
+            // EDT createDerivedPropertySource сохраняет смещение самого ключа внутри
+            // строкового литерала, в том числе у Новый Структура("Первый,Второй").
+            // Проверяем актуальный текст: после переименования старый адрес не годится.
+            int keyOffset = node.getTotalOffset() + source.getLocalOffset();
+            if (keyOffset >= node.getTotalOffset() && keyOffset < node.getTotalEndOffset())
+            {
+                var leaf = NodeModelUtils.findLeafNodeAtOffset(node, keyOffset);
+                EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+                StringLiteral literal = EcoreUtil2.getContainerOfType(semantic, StringLiteral.class);
+                if (literal != null && leaf != null)
+                {
+                    String text = leaf.getText();
+                    int start = keyOffset - leaf.getOffset();
+                    int end = start + property.getName().length();
+                    if (start > 0 && end < text.length()
+                        && text.regionMatches(true, start, property.getName(), 0, property.getName().length())
+                        && (text.charAt(start - 1) == '"' || text.charAt(start - 1) == ','
+                            || Character.isWhitespace(text.charAt(start - 1)))
+                        && (text.charAt(end) == '"' || text.charAt(end) == ','
+                            || Character.isWhitespace(text.charAt(end))))
+                        return new PropertySourceTarget(EcoreUtil.getURI(literal), keyOffset,
+                            property.getName().length());
+                }
+            }
+        }
+        if (node != null && commentField(property, source, method, module) != null)
+            return new PropertySourceTarget(EcoreUtil.getURI(method), node.getTotalOffset() + source.getLocalOffset(),
+                property.getName().length());
+        if (visited.add(functionKey(method, module)))
+            for (OriginalProperty original : originalProperties(property, method, module))
+            {
+                PropertySourceTarget found = exactSourceTarget(original.property(), original.source(),
+                    original.module(), visited);
+                if (found != null)
+                    return found;
+            }
+        return null;
+    }
+
+    /** Общее открытие места создания свойства из команды и обеих подсказок. */
+    static void openPropertySource(PropertySourceTarget target)
+    {
+        Global.tempLog("property-source-navigation", "open target=" + target); //$NON-NLS-1$ //$NON-NLS-2$
+        IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE
+            .getResourceServiceProvider(target.uri().trimFragment());
+        org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
+            : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
+        if (opener == null)
+        {
+            Global.tempLog("property-source-navigation", "open no opener"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (target.offset() < 0)
+        {
+            opener.open(target.uri(), true);
+            return;
+        }
+        // Без выделения метода: иначе в историю попадёт и его имя, хотя переход — на свойство.
+        org.eclipse.ui.IEditorPart part = opener.open(target.uri(), false);
+        Global.tempLog("property-source-navigation", "opened part=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (part == null ? "null" : part.getClass().getName())); //$NON-NLS-1$
+        if (part instanceof org.eclipse.ui.texteditor.ITextEditor textEditor)
+            textEditor.selectAndReveal(target.offset(), target.length());
+    }
+
+    /** Куда вести ссылку на имя свойства; {@code offset < 0} — выделить сам объект по URI. */
+    record PropertySourceTarget(URI uri, int offset, int length)
+    {
     }
 
     /** Флажок «Расширенный расчёт типов» проекта модуля, открытого в редакторе. */
@@ -1549,13 +1982,25 @@ public final class BslStructureInsertCommentTypes
             List<PropertySeeLink> links = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
                 Property property = Boolean.TRUE.equals(isExtendedTypesEnabled(resource))
                     ? propertyAt(resource, offset) : null;
+                // #region agent log
+                Global.tempLog("see-links-diag", "at offset=" + offset + " property=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (property == null ? "null" : property.getName() + " " + describeSource(property)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                // #endregion
                 return property == null ? List.<PropertySeeLink>of()
                     : propertySeeLinks(property, resource.getContents().get(0));
             });
+            // #region agent log
+            Global.tempLog("see-links-diag", "at offset=" + offset + " peek=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (links == null ? "null(busy)" : String.valueOf(links.size()))); //$NON-NLS-1$
+            // #endregion
             return links != null ? links : List.of();
         }
         catch (Throwable ignored)
         {
+            // #region agent log
+            Global.tempLogException("see-links-diag", "at offset=" + offset + " failed", ignored); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return List.of();
         }
     }
@@ -1868,11 +2313,14 @@ public final class BslStructureInsertCommentTypes
         java.util.Map<String, List<Property>> properties =
             new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         for (Object item : types)
-            if (item instanceof Type type && type.getContextDef() != null
+            if (item instanceof Type type && !type.eIsProxy()
                 && (typeName.equals(McoreUtil.getTypeName(type))
                     || typeName.equals(McoreUtil.getTypeNameRu(type))))
             {
-                for (Property property : type.getContextDef().allProperties())
+                Type owner = BslDocCommentComputedTypes.fillPropertyOwner(List.of(type), false);
+                if (owner == null || owner.getContextDef() == null)
+                    continue;
+                for (Property property : owner.getContextDef().allProperties())
                 {
                     String name = property.getName();
                     if (name != null)
@@ -2131,18 +2579,9 @@ public final class BslStructureInsertCommentTypes
             {
                 try
                 {
-                    BslDocCommentComputedTypes.enableForceLightInstall();
-                    Collection<TypeItem> commentTypes;
-                    try
-                    {
-                        commentTypes = computeDeclareSideCommentTypes(declare, typeScope,
-                            scopeProvider, nameConverter, commentProvider, v8ProjectManager,
-                            oldFormat, context);
-                    }
-                    finally
-                    {
-                        BslDocCommentComputedTypes.disableForceLightInstall();
-                    }
+                    Collection<TypeItem> commentTypes = computeDeclareSideCommentTypes(declare,
+                        typeScope, scopeProvider, nameConverter, commentProvider, v8ProjectManager,
+                        oldFormat, context);
                     Environments envs = declare.environments();
                     for (ExplicitVariable variable : declare.getVariables())
                     {
@@ -2338,7 +2777,7 @@ public final class BslStructureInsertCommentTypes
                     // Описание без типа (// - …) тоже должно дойти до свойства.
                     fillProperty(invocation, key, commentTypes == null ? List.of() : commentTypes, description);
                 }
-                catch (Throwable ignored)
+                catch (Throwable failure)
                 {
                 }
             }
@@ -2572,15 +3011,28 @@ public final class BslStructureInsertCommentTypes
         @Override
         public void installTypeSystem(Module module, CancelIndicator cancelIndicator)
         {
+            // Сохранение редакторов при закрытии запускает AutoBuildJob без отмены.
+            // Отменяем и штатный первый проход, а не только своё дополнение к нему.
+            CancelIndicator shutdownAware = () -> isCanceled(cancelIndicator) || isWorkbenchClosing();
             boolean scopeOwner = beginExportVarsScope();
             // #region agent log — завершается ли полный расчёт типов модуля (пустые члены после «.»)
             long started = System.nanoTime();
             String outcome = "ok"; //$NON-NLS-1$
             // #endregion
-            boolean installOwner = module != null && FULL_INSTALL_MODULES.add(module);
+            Resource resource = module == null ? null : module.eResource();
+            boolean complete = false;
             try
             {
-                installTypeSystemInScope(module, cancelIndicator);
+                Global.tempLog("bsl-type-system-shutdown", "enter closing=" + isWorkbenchClosing() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                if (isWorkbenchClosing())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
+                installTypeSystemInScope(module, shutdownAware);
+                // Отмена штатного прохода может завершиться обычным return. При закрытии
+                // передаём отмену вызывающей сборке, чтобы она не приняла пустой результат.
+                if (isWorkbenchClosing())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
+                complete = !isCanceled(shutdownAware);
             }
             catch (RuntimeException | Error t)
             {
@@ -2591,11 +3043,19 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
-                if (installOwner)
-                    FULL_INSTALL_MODULES.remove(module);
+                if (resource != null)
+                {
+                    if (complete)
+                        INCOMPLETE_RESOURCES.remove(resource);
+                    else
+                        INCOMPLETE_RESOURCES.add(resource);
+                }
                 endExportVarsScope(scopeOwner);
                 // #region agent log
-                logInstallTypeSystem(module, cancelIndicator, started, outcome);
+                Global.tempLog("bsl-type-system-shutdown", "exit outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
+                    + " complete=" + complete + " closing=" + isWorkbenchClosing() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
+                logInstallTypeSystem(module, shutdownAware, started, outcome);
                 // #endregion
             }
         }
@@ -2631,16 +3091,576 @@ public final class BslStructureInsertCommentTypes
                     + " resourceSet=" + (resource == null || resource.getResourceSet() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
                         : Integer.toHexString(System.identityHashCode(resource.getResourceSet())))
                     + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
-                    + probe + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                    + probe + " parse=" + parseKind(resource) //$NON-NLS-1$
+                    + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                    + " caller=" + shortCallerStack()); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
                 Global.tempLogException("install-type-system", "log failed", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
+
+        /** Вид текущего разбора: полный или частичный и по какому методу (кто сбросил расчёт — 18.10 10:11). */
+        private static String parseKind(Resource resource)
+        {
+            if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext) || xtext.getParseResult() == null)
+                return "none"; //$NON-NLS-1$
+            Object parse = xtext.getParseResult();
+            Object method = Global.invoke(parse, "getReparseMethod"); //$NON-NLS-1$
+            return parse.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(parse)) //$NON-NLS-1$
+                + (method instanceof Method m ? "/" + m.getName() : ""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Кадры стека без JDK и без самого расчёта: кто запросил установку типов. */
+        private static String shortCallerStack()
+        {
+            StringBuilder out = new StringBuilder();
+            int kept = 0;
+            for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+            {
+                String cls = frame.getClassName();
+                if (cls.startsWith("java.") || cls.startsWith("jdk.") || cls.startsWith("sun.") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    || cls.endsWith("ComfortTreeTypeSystem") || cls.contains("logInstallTypeSystem")) //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                if (out.length() > 0)
+                    out.append(" < "); //$NON-NLS-1$
+                out.append(cls.substring(cls.lastIndexOf('.') + 1)).append('.').append(frame.getMethodName())
+                    .append(':').append(frame.getLineNumber());
+                if (++kept >= 18)
+                    break;
+            }
+            return out.toString();
+        }
         // #endregion
 
+        /**
+         * Ресурсы модулей, чей последний полный расчёт отменён или упал. Отменённый расчёт
+         * оставляет методы без состояний, а следующие частичные (правка тела) пересчитывают
+         * только переразобранный метод — остальные так и остаются пустыми (лог 18.10:
+         * `ОписаниеУзла` NORMAL=noProvider после отмены в Xtext Editor Reconciler, «ОписаниеУзла().»
+         * — 0 членов). Следующий расчёт такого модуля делается полным.
+         */
+        private static final java.util.Set<Resource> INCOMPLETE_RESOURCES = java.util.Collections
+            .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
         private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
+        {
+            Runnable restoreFull = null;
+            if (module.eResource() != null && INCOMPLETE_RESOURCES.contains(module.eResource()))
+            {
+                Object partial = partialParseResult(module);
+                if (partial != null && !BslDocCommentComputedTypes.isBuildThread())
+                {
+                    // Вне сборки — не здесь: полный расчёт в перевязке, синхронизации автодополнения
+                    // или связи со схемой сам отменяется вводом, и после каждой отмены следующий снова
+                    // полный — цепочка 3–5-секундных расчётов, автодополнение ждало 8 с (лог 18.10
+                    // 02:50). Модуль пересчитается целиком при следующем автодополнении в нём.
+                    StaleTypes.wholeModule(module.eResource());
+                }
+                else if (partial != null)
+                {
+                    try
+                    {
+                        restoreFull = substituteReparseMethod(partial, null);
+                        // #region agent log
+                        Global.tempLog("bsl-return-compute-cost", "forcedFull after incomplete thread=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + Thread.currentThread().getName());
+                        // #endregion
+                    }
+                    catch (IllegalStateException e)
+                    {
+                        Global.tempLogException("bsl-return-compute-cost", "forcedFull failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+            }
+            // Признак частичности снят на весь расчёт: и второй проход должен идти полным.
+            try
+            {
+                installTypeSystemPass(module, cancelIndicator);
+                secondPassIfNeeded(module, cancelIndicator);
+            }
+            finally
+            {
+                if (restoreFull != null)
+                    restoreFull.run();
+            }
+        }
+
+        private void secondPassIfNeeded(Module module, CancelIndicator cancelIndicator)
+        {
+            // Закрытие workbench само по себе не отменяет AutoBuildJob. Дополнительный
+            // проход при закрытии не нужен, а сохранение workspace ждёт его окончания.
+            if (stopSecondPass(cancelIndicator))
+                return;
+            // Единственный источник рассчитанных типов возврата для ссылок «см.»: сами мы
+            // модули не считаем — только запоминаем то, что EDT посчитал. Ссылки модуля на
+            // собственные функции EDT разрешил в этом же расчёте, до записи, — без слияния;
+            // если такие есть и тип изменился, модуль считается ещё раз (не больше одного).
+            // Отменённый расчёт недосчитан: его типы запомнились бы как «изменившиеся» и запустили
+            // бы полный второй проход, который сборке пришлось бы ждать (лог 18.10: сборка отменяет
+            // расчёт УправлениеДоступомСлужебный, remembered=160→67→0, второй проход 17 с, закрытие
+            // EDT ждёт сборку).
+            if (isCanceled(cancelIndicator))
+                return;
+            java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            if (stopSecondPass(cancelIndicator))
+                return;
+            Object partial = partialParseResult(module);
+            // Вне сборки второго прохода нет: тип самой изменённой функции посчитан первым проходом,
+            // а методы, ссылающиеся на неё «см.», только помечаются устаревшими и пересчитываются
+            // по одному — тот, где вызвано автодополнение ({@link #refreshTypesForAssist}). Пересчёт
+            // всех сразу — 25 с ожидания на правку в модуле БСП (лог 18.10), из своего задания он
+            // невозможен (EDT падает вне контекста перевязки). В сборке — сразу: её проверки идут
+            // следом и должны видеть слитые типы.
+            if (!BslDocCommentComputedTypes.isBuildThread())
+            {
+                if (!changed.isEmpty())
+                    StaleTypes.add(module.eResource(), changed);
+                else if (partial == null)
+                    // Полный расчёт без изменений: всё посчитано по свежему кэшу.
+                    StaleTypes.clear(module.eResource());
+                return;
+            }
+            if (changed.isEmpty())
+                return;
+            if (partial == null)
+            {
+                // Полный переразбор: повторный штатный расчёт всего модуля. Готовые состояния тела
+                // он не пересоздаёт (параметр в теле оставался без слияния, лог 18.10: «Структура.»
+                // — 0 членов), поэтому NORMAL сначала сбрасывается.
+                // #region agent log
+                Global.tempLog("bsl-return-compute-cost", "secondPass full thread=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + Thread.currentThread().getName());
+                // #endregion
+                SecondPassProgress progress = new SecondPassProgress(module, 0);
+                try
+                {
+                    for (Method method : module.allMethods())
+                        dropNormalStates(method);
+                    for (Variable variable : EcoreUtil2.getAllContentsOfType(module, Variable.class))
+                        dropNormal(variable.getTypeStateProvider());
+                    installTypeSystemPass(module, cancelIndicator);
+                    if (!isCanceled(cancelIndicator))
+                    {
+                        BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                        BslDocCommentComputedTypes.bumpTypesGeneration();
+                    }
+                }
+                finally
+                {
+                    progress.finish();
+                }
+                return;
+            }
+            // Частичный переразбор (правка тела метода): штатный расчёт берёт только
+            // переразобранный метод и его вызывающих (initFinalStateForMethod: isOnlyMethodReparse →
+            // getDependMethodsTree). Методы со ссылкой «см.» на изменённую функцию — не вызывающие,
+            // их тот же частичный расчёт проходит по одному: переразобранным методом на время
+            // прохода подставляется ссылающийся. Полный расчёт модуля здесь не годится — на модуле
+            // БСП это ~20 с на правку.
+            List<Method> dependents = BslDocCommentComputedTypes.methodsReferencing(module, changed);
+            // #region agent log
+            long started = System.nanoTime();
+            // #endregion
+            SecondPassProgress progress = new SecondPassProgress(module, dependents.size());
+            try
+            {
+                for (Method dependent : dependents)
+                {
+                    if (stopSecondPass(cancelIndicator))
+                        return;
+                    // Отмена в «Ходе выполнения»: оставшиеся методы сохраняют прежний слитый тип.
+                    if (progress.cancelRequestedByUser())
+                        break;
+                    progress.step(dependent.getName());
+                    Runnable restore;
+                    try
+                    {
+                        restore = substituteReparseMethod(partial, dependent);
+                    }
+                    catch (IllegalStateException e)
+                    {
+                        Global.tempLogException("bsl-return-compute-cost", "secondPass skipped", e); //$NON-NLS-1$ //$NON-NLS-2$
+                        return;
+                    }
+                    try
+                    {
+                        dropNormalStates(dependent);
+                        for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
+                            if (caller instanceof Method callerMethod)
+                                dropNormalStates(callerMethod);
+                        super.installTypeSystem(module, cancelIndicator);
+                        BslFormTypeContextEnrichment.enrichMethod(dependent);
+                        enrich(this, module, dependent);
+                    }
+                    finally
+                    {
+                        restore.run();
+                    }
+                    progress.stepDone();
+                }
+            }
+            finally
+            {
+                progress.finish();
+            }
+            ModuleVariableStates.fix(module);
+            if (!isCanceled(cancelIndicator))
+            {
+                BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                // Запас членов автодополнения у точки посчитан по прежним состояниям.
+                BslDocCommentComputedTypes.bumpTypesGeneration();
+            }
+            // #region agent log
+            Global.tempLog("bsl-return-compute-cost", "secondPass partial dependents=" + dependents.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
+        }
+
+        private static boolean stopSecondPass(CancelIndicator cancelIndicator)
+        {
+            boolean canceled = isCanceled(cancelIndicator);
+            boolean closing = isWorkbenchClosing();
+            Global.tempLog("bsl-second-pass-shutdown", "check canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
+                + " closing=" + closing + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+            return canceled || closing;
+        }
+
+        private static boolean isWorkbenchClosing()
+        {
+            return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
+        }
+
+        private static boolean isCanceled(CancelIndicator cancelIndicator)
+        {
+            return cancelIndicator != null && cancelIndicator.isCanceled();
+        }
+
+        /** Полный повторный расчёт модуля со сбросом NORMAL (вызывающий держит блокировку ресурса). */
+        void recomputeModuleFully(Module module, CancelIndicator cancelIndicator)
+        {
+            Object partial = partialParseResult(module);
+            Runnable restore = partial == null ? null : substituteReparseMethod(partial, null);
+            try
+            {
+                for (Method method : module.allMethods())
+                    dropNormalStates(method);
+                for (Variable variable : EcoreUtil2.getAllContentsOfType(module, Variable.class))
+                    dropNormal(variable.getTypeStateProvider());
+                installTypeSystemPass(module, cancelIndicator);
+            }
+            finally
+            {
+                if (restore != null)
+                    restore.run();
+            }
+        }
+
+        /**
+         * Пересчёт одного ссылающегося метода и его вызывающих штатным частичным расчётом
+         * (вызывающий держит блокировку ресурса).
+         *
+         * @return {@code false}, если подставить метод не удалось
+         */
+        boolean recomputeDependent(Module module, Method dependent, CancelIndicator cancelIndicator)
+        {
+            Object partial = partialParseResult(module);
+            Runnable restore = partial != null ? substituteReparseMethod(partial, dependent)
+                : installTemporaryPartialParse(module, dependent);
+            if (restore == null)
+                return false;
+            try
+            {
+                dropNormalStates(dependent);
+                for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
+                    if (caller instanceof Method callerMethod)
+                        dropNormalStates(callerMethod);
+                super.installTypeSystem(module, cancelIndicator);
+                BslFormTypeContextEnrichment.enrichMethod(dependent);
+                enrich(this, module, dependent);
+                return true;
+            }
+            finally
+            {
+                restore.run();
+            }
+        }
+
+        /**
+         * Модуль разобран полностью: ставим ресурсу временный штатный частичный результат разбора
+         * {@code new PartialParseResult(текущий, метод)} (конструктор публичный), чтобы штатный
+         * расчёт взял только этот метод и его вызывающих — как после правки тела. Полная перевязка
+         * разрешила «см.» до записи типа в кэш, и «готовыми» её состояния считать нельзя (18.10
+         * 09:18: пересчёт за 0 мс, параметр «Структура» остался Undefined).
+         *
+         * @return возврат прежнего результата разбора или {@code null}, если поставить не удалось
+         */
+        private static Runnable installTemporaryPartialParse(Module module, Method method)
+        {
+            Resource resource = module.eResource();
+            if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext))
+                return null;
+            try
+            {
+                org.eclipse.xtext.parser.IParseResult current = xtext.getParseResult();
+                if (current == null)
+                    return null;
+                Class<?> partialClass = Class.forName(
+                    "com._1c.g5.v8.dt.bsl.parser.antlr.PartialParseResult", true, //$NON-NLS-1$
+                    BslStructureInsertCommentTypes.class.getClassLoader());
+                Object temporary = partialClass
+                    .getConstructor(org.eclipse.xtext.parser.IParseResult.class, Method.class)
+                    .newInstance(current, method);
+                Field field = org.eclipse.xtext.resource.XtextResource.class.getDeclaredField("parseResult"); //$NON-NLS-1$
+                field.setAccessible(true);
+                field.set(xtext, temporary);
+                return () ->
+                {
+                    try
+                    {
+                        field.set(xtext, current);
+                    }
+                    catch (ReflectiveOperationException e)
+                    {
+                        Global.tempLogException("bsl-return-compute-cost", "restore parseResult failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                };
+            }
+            catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+            {
+                Global.tempLogException("bsl-return-compute-cost", "temporary partial parse failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        /**
+         * Функции модуля, сменившие версию после его последнего полного расчёта, — их «см.» в
+         * других методах разрешены по прежнему типу. Методы пересчитываются по одному, лениво:
+         * тот, в котором вызвано автодополнение ({@link #refreshTypesForAssist}).
+         */
+        private static final class StaleTypes
+        {
+            private static final java.util.Map<Resource, StaleTypes> BY_RESOURCE =
+                java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+            final java.util.Set<String> names = new java.util.HashSet<>();
+            /** Расчёт модуля отменён и мог оставить методы без состояний — пересчитать целиком. */
+            boolean wholeModule;
+            /** Растёт с каждым пополнением {@link #names}. */
+            int version;
+            /** Имя метода (нижний регистр) → {@link #version}, при которой он пересчитан. */
+            final java.util.Map<String, Integer> refreshed = new java.util.HashMap<>();
+
+            static void add(Resource resource, java.util.Set<String> changed)
+            {
+                if (resource == null)
+                    return;
+                StaleTypes stale = BY_RESOURCE.computeIfAbsent(resource, key -> new StaleTypes());
+                synchronized (stale)
+                {
+                    // Каждое изменение — новая версия, даже если имя функции уже в наборе: иначе
+                    // метод, пересчитанный после прошлой правки той же функции, считался свежим
+                    // (18.10 09:35 — «см.» не обновлялся).
+                    stale.names.addAll(changed);
+                    stale.version++;
+                }
+            }
+
+            static void wholeModule(Resource resource)
+            {
+                if (resource == null)
+                    return;
+                StaleTypes stale = BY_RESOURCE.computeIfAbsent(resource, key -> new StaleTypes());
+                synchronized (stale)
+                {
+                    stale.wholeModule = true;
+                }
+            }
+
+            static void clear(Resource resource)
+            {
+                if (resource != null)
+                    BY_RESOURCE.remove(resource);
+            }
+        }
+
+        /** Тот же порядок, что у {@code BslResource.linkBatched}: блокировка ресурса, уведомления выключены. */
+        private static boolean underLinkLock(Resource resource, Object lock, java.util.function.BooleanSupplier work)
+        {
+            synchronized (lock)
+            {
+                boolean deliver = resource.eDeliver();
+                resource.eSetDeliver(false);
+                try
+                {
+                    return work.getAsBoolean();
+                }
+                finally
+                {
+                    resource.eSetDeliver(deliver);
+                }
+            }
+        }
+
+        /**
+         * Видимое задание хода второго прохода. Сам проход идёт в чужом задании (перевязка,
+         * синхронизация автодополнения, сборка), и в «Ходе выполнения» видно только его штатное
+         * имя — непонятно, что ждём именно пересчёт типов. Задание ничего не считает и блокировок
+         * не держит; показывается, только если проход дольше {@link #SHOW_DELAY_MS}. Отмена в нём
+         * останавливает оставшиеся пересчёты ссылающихся методов.
+         */
+        private static final class SecondPassProgress extends Job
+        {
+            private static final long SHOW_DELAY_MS = 500;
+
+            private final String moduleName;
+            private final int total;
+            private volatile int done;
+            private volatile String current = ""; //$NON-NLS-1$
+            private volatile boolean finished;
+            private volatile boolean cancelRequested;
+
+            SecondPassProgress(Module module, int total)
+            {
+                super("Комфорт: пересчёт типов по ссылкам «см.»"); //$NON-NLS-1$
+                this.moduleName = moduleTitle(module);
+                this.total = total;
+                setPriority(Job.SHORT);
+                schedule(SHOW_DELAY_MS);
+            }
+
+            private static String moduleTitle(Module module)
+            {
+                Resource resource = module.eResource();
+                URI uri = resource == null ? null : resource.getURI();
+                if (uri == null || uri.segmentCount() < 2)
+                    return ""; //$NON-NLS-1$
+                // …/CommonModules/УправлениеДоступомСлужебный/Module.bsl
+                return uri.segment(uri.segmentCount() - 2);
+            }
+
+            void step(String methodName)
+            {
+                current = methodName == null ? "" : methodName; //$NON-NLS-1$
+            }
+
+            void stepDone()
+            {
+                done++;
+            }
+
+            /** Пользователь нажал «Отмена» в «Ходе выполнения». */
+            boolean cancelRequestedByUser()
+            {
+                return cancelRequested;
+            }
+
+            void finish()
+            {
+                finished = true;
+                // Не начатое задание просто снимается — короткий проход не мелькает.
+                cancel();
+            }
+
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                monitor.beginTask(moduleName, total > 0 ? total : IProgressMonitor.UNKNOWN);
+                int reported = 0;
+                while (!finished)
+                {
+                    if (monitor.isCanceled())
+                    {
+                        cancelRequested = true;
+                        return Status.CANCEL_STATUS;
+                    }
+                    if (total > 0)
+                    {
+                        int now = Math.min(done, total);
+                        if (now > reported)
+                        {
+                            monitor.worked(now - reported);
+                            reported = now;
+                        }
+                        monitor.subTask((Math.min(done + 1, total)) + " из " + total + ": " + current); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    try
+                    {
+                        Thread.sleep(100);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+                monitor.done();
+                return Status.OK_STATUS;
+            }
+        }
+
+        /** {@code PartialParseResult} ресурса модуля или {@code null}, если переразбор полный. */
+        private static Object partialParseResult(Module module)
+        {
+            Object parse = module.eResource() == null ? null : Global.invoke(module.eResource(), "getParseResult"); //$NON-NLS-1$
+            if (parse == null || !parse.getClass().getName().endsWith(".PartialParseResult")) //$NON-NLS-1$
+                return null;
+            return Global.invoke(parse, "getReparseMethod") != null ? parse : null; //$NON-NLS-1$
+        }
+
+        /**
+         * Подставляет переразобранный метод частичного разбора ({@code reparseMethod} — поле
+         * {@code final}, сеттера нет; от него штатный расчёт берёт набор пересчитываемых методов).
+         *
+         * @return возврат прежнего метода
+         * @throws IllegalStateException подставить не удалось
+         */
+        private static Runnable substituteReparseMethod(Object partial, Method method)
+        {
+            try
+            {
+                Field field = partial.getClass().getDeclaredField("reparseMethod"); //$NON-NLS-1$
+                field.setAccessible(true);
+                Object previous = field.get(partial);
+                field.set(partial, method);
+                return () ->
+                {
+                    try
+                    {
+                        field.set(partial, previous);
+                    }
+                    catch (ReflectiveOperationException e)
+                    {
+                        Global.tempLogException("bsl-return-compute-cost", "restore reparseMethod failed", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                };
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                throw new IllegalStateException("reparse method not substituted", e); //$NON-NLS-1$
+            }
+        }
+
+        /** NORMAL-состояния метода: его переменные и параметры, возврат, итоговые параметры. */
+        private static void dropNormalStates(Method method)
+        {
+            for (Variable variable : EcoreUtil2.getAllContentsOfType(method, Variable.class))
+                dropNormal(variable.getTypeStateProvider());
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function function)
+                dropNormal(function.getFinalReturnState());
+            method.getFinalInParamState().forEach(ComfortTreeTypeSystem::dropNormal);
+            method.getFinalOutParamState().forEach(ComfortTreeTypeSystem::dropNormal);
+        }
+
+        private static void dropNormal(VariableTypeStateProviderCollector collector)
+        {
+            if (collector != null && collector.get(TypeSystemMode.NORMAL) != null)
+                collector.removeMode(TypeSystemMode.NORMAL);
+        }
+
+        private void installTypeSystemPass(Module module, CancelIndicator cancelIndicator)
         {
             super.installTypeSystem(module, cancelIndicator);
             ModuleVariableStates.fix(module);
@@ -2675,6 +3695,25 @@ public final class BslStructureInsertCommentTypes
             ModuleVariableStates.fix(module);
             BslFormTypeContextEnrichment.enrichMethod(method);
             enrich(this, module, method);
+            dropStaleLightReturn(method);
+        }
+
+        /**
+         * Облегчённый проход переразобранной функции начинает её тип возврата со старого
+         * ({@code initFinalStateForMethod}: режим LIGHT, {@code method == getReparseMethod()} →
+         * {@code PartialParseResult.getOldReturnTypes()}) и добавляет к нему новый. А чтение
+         * типа ({@code TypesComputer}) берёт LIGHT раньше NORMAL: после правки тела
+         * {@code ОписаниеУзла().} показывал прежнее поле «ячс» вместе с новым «мус» (18.10 09:08).
+         * Снимаем LIGHT возврата — читается свежий NORMAL перевязки; приём тот же, что для
+         * пустого LIGHT у «см.».
+         */
+        private static void dropStaleLightReturn(Method method)
+        {
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function function
+                && function.getFinalReturnState() != null
+                && function.getFinalReturnState().get(TypeSystemMode.LIGHT) != null
+                && function.getFinalReturnState().get(TypeSystemMode.NORMAL) != null)
+                function.getFinalReturnState().removeMode(TypeSystemMode.LIGHT);
         }
     }
 }

@@ -37,10 +37,7 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.ReturnSection;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
-import com._1c.g5.v8.dt.bsl.model.BslFactory;
 import com._1c.g5.v8.dt.bsl.model.Method;
-import com._1c.g5.v8.dt.bsl.model.Variable;
-import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
@@ -85,8 +82,6 @@ public final class BslDocCommentComputedTypes
 
     private static final String TARGET_UTILS =
         "com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils"; //$NON-NLS-1$
-    private static final String COMMENT_CLASS =
-        "com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment"; //$NON-NLS-1$
     private static final String COMMENT_INTERNAL =
         "com/_1c/g5/v8/dt/bsl/documentation/comment/BslDocumentationComment"; //$NON-NLS-1$
     private static final String PARSE_METHOD = "parseTemplateComment"; //$NON-NLS-1$
@@ -103,8 +98,6 @@ public final class BslDocCommentComputedTypes
     private static final int MARK_BAN = 1;
     private static final int MARK_FORCE = 2;
 
-    /** Метод EDT, разрешающий ссылку «см. Метод» документирующего комментария. */
-    private static final String LINK_RESOLVE_METHOD = "computeTypesByLinkPart"; //$NON-NLS-1$
     private static final String SELF_INTERNAL = "tormozit/BslDocCommentComputedTypes"; //$NON-NLS-1$
     private static final String AFTER_PARSE_DESC =
         "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"; //$NON-NLS-1$
@@ -130,26 +123,6 @@ public final class BslDocCommentComputedTypes
     private static final AtomicBoolean installed = new AtomicBoolean();
 
     /**
-     * Методы, для которых расчёт типов уже идёт в этом потоке. Досчёт целевой функции
-     * запускается изнутри разбора, поэтому без такого списка взаимные ссылки
-     * ({@code Кодол} → {@code Конструктор} → {@code Кодол}) дают бесконечную рекурсию.
-     * Повторное обращение к методу из списка отсекается грубо — просто выходим.
-     */
-    private static final ThreadLocal<java.util.Set<Object>> computing =
-        ThreadLocal.withInitial(java.util.LinkedHashSet::new);
-
-    /**
-     * Идёт ли в этом потоке досчёт типов. Досчёт разбирает комментарии всех методов модуля,
-     * и каждый такой разбор попадает сюда снова — уже для другого метода, поэтому защита по
-     * объекту метода его не останавливает. Без этого флага один досчёт порождает столько же
-     * досчётов, сколько в модуле методов, и сборка проекта упирается в процессор.
-     */
-    private static final ThreadLocal<Boolean> lightInstalling = new ThreadLocal<>();
-
-    /** Досчёт целевого метода {@code см. …} вне стека {@code computeTypesByLinkPart}. */
-    private static final ThreadLocal<Boolean> forceLightInstall = new ThreadLocal<>();
-
-    /**
      * Флажок проекта по имени проекта. Чтение проектных параметров идёт через службу
      * параметров Eclipse с блокировками, а спрашивать флажок приходится на каждый разбор
      * комментария каждого метода — это заметная доля нагрузки при сборке. Пишет сюда только
@@ -170,41 +143,131 @@ public final class BslDocCommentComputedTypes
     private static final ThreadLocal<Integer> sideCommentMark = new ThreadLocal<>();
 
     /**
-     * Результат расчёта на метод. Ключ — {@code имя@URI}, не сам {@code EObject}:
-     * EDT при повторном разборе модуля подставляет новые объекты метода, и кэш по
-     * ссылке промахивался (лог: {@code afterLight Конструктор size=1}, затем
-     * {@code stillEmpty} на другом инстансе → {@code commentTypes=0} у {@code КэшАФВ}).
-     * Пустой результат не кэшируем.
+     * Рассчитанные EDT типы возврата функций. Пишет только {@link #rememberModuleReturnTypes} —
+     * после штатного полного расчёта модуля; сами мы модули не считаем. Досчёт цели «см.» из
+     * разбора ссылки (облегчённый или полный расчёт её модуля) запускал расчёт чужих модулей
+     * в чужих потоках — сборка, «Напарник», ForkJoin — и вешал EDT на БСП (18.10.2026).
      * <p>
-     * Запись годна, пока не изменился ресурс метода: рядом с типами лежит метка ресурса
-     * ({@link #resourceStamp}), после правки модуля она другая, и тип считается заново.
+     * Ключ — {@code имя@URI#метка текста функции} ({@link #versionKey}), не сам {@code EObject}:
+     * модуль живёт в разных наборах ресурсов (редактор, сборка, «Напарник»). Одинаковый текст
+     * функции делит запись, разный — хранится отдельно: со штампом файла несохранённый текст
+     * редактора и сохранённый у сборки перезаписывали друг друга, и редактор читал тип чужой
+     * версии (лог 18.10: «Котушок» вместо «Кот»).
      */
     private static final java.util.Map<String, CachedReturn> typeCacheByKey =
         new java.util.concurrent.ConcurrentHashMap<>();
 
-    private record CachedReturn(List<?> types, Object stamp)
+    /**
+     * Идёт {@link #rememberModuleReturnTypes} в этом потоке. Чтение типа функции разбирает её
+     * комментарий, и без этого флага хук подмешивал бы в него прошлую запись кэша: тип
+     * включал бы собственное слияние, сигнатура менялась бы на каждом расчёте, и модуль со
+     * ссылками на себя считался бы дважды при каждой перевязке (лог 18.10: `changed=1` на
+     * каждом расчёте `СтрогийКэш`, в т.ч. из автодополнения и подсказки).
+     */
+    private static final ThreadLocal<Boolean> remembering = new ThreadLocal<>();
+
+    /**
+     * {@code buildHash}/{@code editorHash} — 64-битные отпечатки {@link #typeSignature} у сборки и у
+     * редактора, {@code 0} — эта сторона текст ещё не считала. Для одного текста они получают
+     * разный тип (сборка — без {@code null{}}), и при общем отпечатке каждая перетирала другую:
+     * сборка всякий раз видела «изменились 47 функций» и делала полный второй проход (БСП, 18.10
+     * 10:02–10:04, 11 с на сборку). Каждая сторона сравнивает только со своим отпечатком.
+     */
+    private record CachedReturn(List<?> types, long buildHash, long editorHash)
     {
+        long hash(boolean build)
+        {
+            return build ? buildHash : editorHash;
+        }
+
+        static CachedReturn with(CachedReturn previous, List<?> types, boolean build, long hash)
+        {
+            long other = previous == null ? 0L : previous.hash(!build);
+            return build ? new CachedReturn(types, hash, other) : new CachedReturn(types, other, hash);
+        }
     }
 
-    /** Метка ресурса: один объект, пока Xtext не сбросил кэш ресурса при его изменении. */
-    private static final org.eclipse.xtext.util.OnChangeEvictingCache RESOURCE_STAMPS =
-        new org.eclipse.xtext.util.OnChangeEvictingCache();
-
-    private static Object resourceStamp(EObject method)
+    /** 64-битный FNV-1a: строку сигнатуры в кэше не держим, она бывает в килобайты. */
+    private static long signatureHash(String signature)
     {
-        Resource resource = method.eResource();
-        return resource == null ? null
-            : RESOURCE_STAMPS.get("tormozit.returnTypesStamp", resource, Object::new); //$NON-NLS-1$
+        long hash = 0xcbf29ce484222325L;
+        for (int i = 0; i < signature.length(); i++)
+        {
+            hash ^= signature.charAt(i);
+            hash *= 0x100000001b3L;
+        }
+        return hash == 0L ? 1L : hash;
     }
 
-    /** Типы из кэша, если ресурс метода с тех пор не менялся; иначе {@code null}. */
+    /**
+     * Растёт после пересчёта методов, ссылающихся «см.» на функцию с новой версией текста
+     * ({@link #bumpTypesGeneration}). По нему кэши автодополнения видят, что слитые типы сменились.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger TYPES_GENERATION =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    static int typesGeneration()
+    {
+        return TYPES_GENERATION.get();
+    }
+
+    static void bumpTypesGeneration()
+    {
+        TYPES_GENERATION.incrementAndGet();
+    }
+
+    /** Сколько версий текста одной функции держать (редактор, сборка, производные данные…). */
+    private static final int VERSIONS_PER_FUNCTION = 4;
+
+    /** {@code имя@URI} → ключи его версий в {@link #typeCacheByKey}, старые первыми. */
+    private static final java.util.Map<String, java.util.Deque<String>> versionsByLabel =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Метка версии — длина и хеш текста функции (узел модели: заголовок и тело). Текст функции,
+     * не модуля: модули БСП — до миллиона символов, а метка нужна на каждый разбор ссылки.
+     */
+    private static String versionKey(String label, EObject method)
+    {
+        var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.getNode(method);
+        if (node == null)
+            return label + "#?"; //$NON-NLS-1$
+        // Только сам метод, без прилегающих скрытых узлов (комментарии, пробелы): после
+        // частичного переразбора соседа они переходят от узла к узлу, и метка менялась без
+        // правки метода — второй проход по 19 методам на чужую правку (лог 18.10 02:28).
+        String text = node.getText();
+        int start = Math.max(0, Math.min(text.length(), node.getOffset() - node.getTotalOffset()));
+        int end = Math.max(start, Math.min(text.length(), start + node.getLength()));
+        text = text.substring(start, end);
+        return label + "#" + text.length() + ":" + Integer.toHexString(text.hashCode()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void putVersion(String label, String key, CachedReturn value)
+    {
+        typeCacheByKey.put(key, value);
+        java.util.Deque<String> versions = versionsByLabel.computeIfAbsent(label,
+            ignored -> new java.util.concurrent.ConcurrentLinkedDeque<>());
+        versions.remove(key);
+        versions.addLast(key);
+        while (versions.size() > VERSIONS_PER_FUNCTION)
+        {
+            String oldest = versions.pollFirst();
+            if (oldest != null)
+                typeCacheByKey.remove(oldest);
+        }
+    }
+
+    /** Рассчитанные типы возврата функции из кэша (для текущего текста) или {@code null}. */
+    static List<?> cachedTypesFor(EObject function)
+    {
+        return function == null ? null : cachedReturnTypes(methodLabel(function), function);
+    }
+
+    /** Типы из кэша для текущего текста функции; иначе {@code null}. */
     private static List<?> cachedReturnTypes(String cacheKey, EObject method)
     {
-        CachedReturn cached = typeCacheByKey.get(cacheKey);
-        if (cached == null)
-            return null;
-        Object stamp = resourceStamp(method);
-        return stamp != null && stamp == cached.stamp() ? cached.types() : null;
+        CachedReturn cached = typeCacheByKey.get(versionKey(cacheKey, method));
+        return cached == null ? null : cached.types();
     }
 
     /**
@@ -255,10 +318,6 @@ public final class BslDocCommentComputedTypes
         }
         return count;
     }
-
-    /** Защита от рекурсии полного {@code installTypeSystem} целевого модуля из {@code см.}. */
-    private static final java.util.Set<EObject> INSTALLING_TARGET_MODULE = java.util.Collections
-        .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
     private BslDocCommentComputedTypes() {}
 
@@ -400,45 +459,43 @@ public final class BslDocCommentComputedTypes
                 return comment;
             if (!isExtendedTypesEnabled(resolveProject(methodObject)))
                 return comment;
-            String cacheKey = methodLabel(methodObject);
-            List<?> computed = cachedReturnTypes(cacheKey, methodObject);
-            if (computed != null && !computed.isEmpty())
-            {
-                fillReturnSection(comment, computed, methodObject);
+            if (Boolean.TRUE.equals(remembering.get()))
                 return comment;
-            }
-            java.util.Set<Object> guard = computing.get();
-            if (!guard.add(methodObject))
+            // Только при разрешении ссылки «см.» из другого места. Разбор собственного комментария
+            // функции при расчёте её же типа возврата получал бы из кэша её прежний тип: тот
+            // попадал в тип функции, оттуда снова в кэш — петля, старый ключ структуры не уходил
+            // и у прямого вызова «Функция().» (18.10: «ДобавлятьПанельБыстрыхОтборов» после
+            // переименования в «…1»).
+            if (!resolvingDocLink())
                 return comment;
-            try
-            {
-                List<?> result = computeTypes(methodObject);
-                if (result == null || result.isEmpty())
-                {
-                    // Повторный промах: вдруг другой инстанс уже посчитал тот же метод.
-                    computed = cachedReturnTypes(cacheKey, methodObject);
-                    if (computed != null && !computed.isEmpty())
-                    {
-                        fillReturnSection(comment, computed, methodObject);
-                        return comment;
-                    }
-                    return comment;
-                }
-                computed = result;
-                typeCacheByKey.put(cacheKey, new CachedReturn(computed, resourceStamp(methodObject)));
-            }
-            finally
-            {
-                guard.remove(methodObject);
-            }
+            // Только готовое: модуль цели ещё не считался — штатный тип без слияния.
+            String key = methodLabel(methodObject);
+            List<?> computed = cachedReturnTypes(key, methodObject);
+            // #region agent log
             if (computed == null || computed.isEmpty())
-                return comment;
-            fillReturnSection(comment, computed, methodObject);
+            {
+                Global.tempLog("bsl-cache-miss", "key=" + versionKey(key, methodObject) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " versions=" + versionsByLabel.get(key) //$NON-NLS-1$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            }
+            // #endregion
+            if (computed != null && !computed.isEmpty())
+                fillReturnSection(comment, computed, methodObject);
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLogException("bsl-return-fill", "afterParseTemplateComment failed", failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return comment;
+    }
+
+    /** Разрешается ли сейчас ссылка «см. …» ({@code BslDocumentationComment.computeTypesByLinkPart}). */
+    private static boolean resolvingDocLink()
+    {
+        return StackWalker.getInstance().walk(frames -> frames.limit(16)
+            .anyMatch(frame -> "computeTypesByLinkPart".equals(frame.getMethodName()) //$NON-NLS-1$
+                && "com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment" //$NON-NLS-1$
+                    .equals(frame.getClassName())));
     }
 
     private static String methodLabel(EObject method)
@@ -596,6 +653,174 @@ public final class BslDocCommentComputedTypes
      * Признак русских имён подбирается попыткой: при неверном значении {@code fill} молча
      * выбрасывает типы, у которых нет имени на нужном языке, и секция остаётся пустой.
      */
+    // #region agent log
+    /** Временная диагностика шторма: глубина стека и вложенность разбора ссылок «см.». */
+    private static String nestingDiagnostics()
+    {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        int linkFrames = 0;
+        int parseFrames = 0;
+        for (StackTraceElement frame : stack)
+        {
+            String name = frame.getMethodName();
+            if ("computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
+                linkFrames++;
+            else if ("afterParseTemplateComment".equals(name)) //$NON-NLS-1$
+                parseFrames++;
+        }
+        return "depth=" + stack.length + " linkFrames=" + linkFrames + " hookFrames=" + parseFrames; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+    // #endregion
+
+    /**
+     * Все рассчитанные типы и их свойства уже есть в объявленной секции возврата: дописывать
+     * нечего. Имя типа сравнивается и английское, и русское — в шапке пишут «Структура».
+     */
+    private static boolean addsNothingToDeclared(List<TypeItem> items, ReturnSection declared)
+    {
+        java.util.Map<String, java.util.Set<String>> declaredFields = new java.util.HashMap<>();
+        for (TypeSection section : declared.getReturnTypes())
+            for (TypeSection.TypeDefinition definition : section.getTypeDefinitions())
+            {
+                if (definition.getTypeName() == null)
+                    continue;
+                java.util.Set<String> names = declaredFields.computeIfAbsent(
+                    definition.getTypeName().toLowerCase(java.util.Locale.ROOT), key -> new java.util.HashSet<>());
+                for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+                    if (field.getName() != null)
+                        names.add(field.getName().toLowerCase(java.util.Locale.ROOT));
+            }
+        for (TypeItem item : items)
+        {
+            java.util.Set<String> names = null;
+            for (String method : new String[] { "getNameRu", "getName" }) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                Object name = Global.invoke(item, method);
+                if (names == null && name instanceof String text)
+                    names = declaredFields.get(text.toLowerCase(java.util.Locale.ROOT));
+            }
+            if (names == null)
+                return false;
+            if (item instanceof com._1c.g5.v8.dt.mcore.Type type && !type.eIsProxy()
+                && type.getContextDef() != null && type.getContextDef().allProperties() != null)
+                // allProperties — как в TypeSection.fill: с унаследованными полями.
+                for (Object property : type.getContextDef().allProperties())
+                {
+                    Object name = Global.invoke(property, "getName"); //$NON-NLS-1$
+                    if (name instanceof String text && !names.contains(text.toLowerCase(java.util.Locale.ROOT)))
+                        return false;
+                }
+        }
+        return true;
+    }
+
+    /** Предел обхода вложенных типов: штатный fill разворачивает их все. */
+    private static final int MAX_NESTED_TYPES = 500;
+
+    /**
+     * Тип через свойства ссылается сам на себя (по цепочке вложенности) или вложенных типов
+     * больше {@link #MAX_NESTED_TYPES}: штатный {@code TypeSection.fill} на таком уйдёт в
+     * бесконечную или огромную рекурсию.
+     */
+    private static boolean isCyclicOrHuge(List<TypeItem> items)
+    {
+        int[] visited = { 0 };
+        boolean russian = items.stream().anyMatch(item ->
+            com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(item) != null);
+        return cyclicFrom(items, russian,
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), visited);
+    }
+
+    /**
+     * Тот же выбор владельца полей, что в TypeSection.fill (байткод бандла bsl.comment).
+     * EDT раскрывает BslDerivedPropertySource у любого Type, а не только ExtendedType.
+     * Проверка только ExtendedType пропускала рекурсию fill в 3844 кадра (18.10.2026).
+     */
+    static com._1c.g5.v8.dt.mcore.Type fillPropertyOwner(List<? extends TypeItem> items,
+        boolean russian)
+    {
+        com._1c.g5.v8.dt.mcore.Type owner = null;
+        for (TypeItem item : items)
+        {
+            String name = russian ? com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(item)
+                : com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(item);
+            if (name == null || item.eIsProxy()
+                || !(item instanceof com._1c.g5.v8.dt.mcore.Type type))
+                continue;
+            if (item instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType)
+            {
+                for (TypeItem element : type.getCollectionElementTypes().allTypes())
+                    if (element instanceof com._1c.g5.v8.dt.bsl.model.ExtendedType elementType
+                        && elementType.getContextDef() != null
+                        && elementType.getContextDef().getProperties().stream()
+                            .anyMatch(BslDocCommentComputedTypes::isFillProperty))
+                        owner = elementType;
+                continue;
+            }
+            String englishName = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(item);
+            if ("ValueTable".equals(englishName)) //$NON-NLS-1$
+            {
+                List<TypeItem> elements = type.getCollectionElementTypes().allTypes();
+                if (!elements.isEmpty() && "ValueTableRow".equals( //$NON-NLS-1$
+                    com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(elements.get(0)))
+                    && elements.get(0) instanceof com._1c.g5.v8.dt.mcore.Type row)
+                    type = row;
+            }
+            else if ("ValueTree".equals(englishName)) //$NON-NLS-1$
+            {
+                for (com._1c.g5.v8.dt.mcore.Property property : type.getContextDef().getProperties())
+                    if ("Rows".equals(property.getName())) //$NON-NLS-1$
+                    {
+                        List<TypeItem> rows = property.getTypes();
+                        if (!rows.isEmpty() && rows.get(0) instanceof com._1c.g5.v8.dt.mcore.Type rowsType)
+                        {
+                            List<TypeItem> elements = rowsType.getCollectionElementTypes().allTypes();
+                            if (!elements.isEmpty()
+                                && elements.get(0) instanceof com._1c.g5.v8.dt.mcore.Type row)
+                                type = row;
+                        }
+                        break;
+                    }
+            }
+            if (type.getContextDef() != null && type.getContextDef().allProperties().stream()
+                .anyMatch(BslDocCommentComputedTypes::isFillProperty))
+                owner = type;
+        }
+        return owner;
+    }
+
+    private static boolean isFillProperty(com._1c.g5.v8.dt.mcore.Property property)
+    {
+        return property instanceof com._1c.g5.v8.dt.mcore.DerivedProperty derived
+            && derived.getSource() instanceof com._1c.g5.v8.dt.bsl.model.BslDerivedPropertySource;
+    }
+
+    /** Считаем развёртывания секций, включая повтор одного поддерева в разных полях. */
+    private static boolean cyclicFrom(List<? extends TypeItem> items, boolean russian,
+        java.util.Set<Object> path, int[] visited)
+    {
+        if (++visited[0] > MAX_NESTED_TYPES)
+            return true;
+        com._1c.g5.v8.dt.mcore.Type owner = fillPropertyOwner(items, russian);
+        if (owner == null)
+            return false;
+        if (!path.add(owner))
+            return true;
+        try
+        {
+            for (com._1c.g5.v8.dt.mcore.Property property : owner.getContextDef().allProperties())
+                if (isFillProperty(property) && property.getName() != null && !property.getName().isEmpty()
+                    && !property.getTypeContainer().allTypes().isEmpty()
+                    && cyclicFrom(property.getTypeContainer().allTypes(), russian, path, visited))
+                    return true;
+            return false;
+        }
+        finally
+        {
+            path.remove(owner);
+        }
+    }
+
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
         if (!(comment instanceof BslDocumentationComment documentation))
@@ -613,14 +838,32 @@ public final class BslDocCommentComputedTypes
         // Объявленный возврат не замещаем, а дополняем: EDT объединяет все секции типов
         // возврата, поэтому своя секция просто встаёт рядом с написанной руками.
         ReturnSection existing = documentation.getReturnSection();
+        // До штатного fill: он разворачивает свойства вложенных типов без защиты от циклов, а
+        // слитый тип самоссылающейся структуры (ОписаниеУзла: поля «см. ОписаниеУзла») замкнут
+        // сам на себя — сборка висела в рекурсии fill глубже 1000 кадров (дамп 18.10).
+        if (existing != null && addsNothingToDeclared(items, existing))
+            return;
+        Global.tempLog("bsl-return-fill", "guard.begin target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
+            + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
+            + " classes=" + items.stream().map(item -> item.getClass().getName()).toList()); //$NON-NLS-1$
+        boolean unsafe = isCyclicOrHuge(items);
+        Global.tempLog("bsl-return-fill", "guard.end target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
+            + " unsafe=" + unsafe + " elapsedNs=" + (System.nanoTime() - sectionStarted)); //$NON-NLS-1$ //$NON-NLS-2$
+        if (unsafe)
+        {
+            // #region agent log
+            Global.tempLog("bsl-property-fill-cost", "skip cyclic target=" + methodLabel(context)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
         ReturnSection returnSection = existing != null ? existing : new ReturnSection(documentation, 0);
         TypeSection typeSection = new TypeSection(returnSection, 0);
 
-        typeSection.fill(items, "", true, context); //$NON-NLS-1$
+        fillTypeSection(typeSection, items, true, context);
         int count = typeSection.getTypeDefinitions().size();
         if (count == 0)
         {
-            typeSection.fill(items, "", false, context); //$NON-NLS-1$
+            fillTypeSection(typeSection, items, false, context);
             count = typeSection.getTypeDefinitions().size();
         }
         if (count == 0)
@@ -658,21 +901,162 @@ public final class BslDocCommentComputedTypes
                 + " computedId=" + Integer.toHexString(System.identityHashCode(computed)) //$NON-NLS-1$
                 + " types=" + items.size() + " definitions=" + count //$NON-NLS-1$ //$NON-NLS-2$
                 + " inBuild=" + inBuild + " cached=" + cached //$NON-NLS-1$ //$NON-NLS-2$
+                + " " + nestingDiagnostics() //$NON-NLS-1$
                 + " sectionFillNs=" + (descriptionsStarted - sectionStarted) //$NON-NLS-1$
                 + " elapsedNs=" + (System.nanoTime() - descriptionsStarted) //$NON-NLS-1$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         }
+        // Объединение и отсев — после выравнивания мест и описаний: они адресуют поля по
+        // индексам и кэшируют эти пути по форме полной секции.
+        mergeSameTypeDefinitions(typeSection);
+        if (existing != null && !dropDeclaredFields(typeSection, existing, methodLabel(context)))
+            return;
         returnSection.addTypeSection(typeSection);
         if (existing == null)
             documentation.setReturnSection(returnSection);
+    }
+
+    /** Безусловная временная диагностика: ошибка fill раньше исчезала в catch разбора. */
+    private static void fillTypeSection(TypeSection section, List<TypeItem> items, boolean russian,
+        EObject context)
+    {
+        long started = System.nanoTime();
+        boolean completed = false;
+        Global.tempLog("bsl-return-fill", "native.begin target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
+            + " russian=" + russian); //$NON-NLS-1$
+        try
+        {
+            section.fill(items, "", russian, context); //$NON-NLS-1$
+            completed = true;
+        }
+        finally
+        {
+            Global.tempLog("bsl-return-fill", "native.end target=" + methodLabel(context) //$NON-NLS-1$ //$NON-NLS-2$
+                + " completed=" + completed + " elapsedNs=" + (System.nanoTime() - started)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Тип возврата — часто несколько вариантов одного типа (структура из другой функции, затем
+     * {@code Вставить} — ещё вариант). Прямой вызов «Функция().» показывает объединение их
+     * полей, а при разборе секции EDT берёт из одноимённых определений первое — через «см.»
+     * терялись поля (18.10: «Типрыыыы», «РеквизитыСЧасовымиПоясами»). Поля одноимённых
+     * определений сводятся в первое, дубликаты определений удаляются.
+     */
+    private static void mergeSameTypeDefinitions(TypeSection section)
+    {
+        try
+        {
+            java.util.Map<String, TypeSection.TypeDefinition> first = new java.util.HashMap<>();
+            for (var iterator = section.getTypeDefinitions().iterator(); iterator.hasNext();)
+            {
+                TypeSection.TypeDefinition definition = iterator.next();
+                String type = definition.getTypeName();
+                if (type == null || !definition.getContainTypes().isEmpty())
+                    continue;
+                TypeSection.TypeDefinition target = first.putIfAbsent(type.toLowerCase(java.util.Locale.ROOT), definition);
+                if (target == null)
+                    continue;
+                java.util.Set<String> names = new java.util.HashSet<>();
+                for (TypeSection.FieldDefinition field : target.getFieldDefinitionExtension())
+                    if (field.getName() != null)
+                        names.add(field.getName().toLowerCase(java.util.Locale.ROOT));
+                for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+                    if (field.getName() != null && names.add(field.getName().toLowerCase(java.util.Locale.ROOT)))
+                        target.getFieldDefinitionExtension().add(field);
+                iterator.remove();
+            }
+        }
+        catch (UnsupportedOperationException e)
+        {
+            Global.tempLogException("bsl-declared-dedupe", "merge readonly", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Убирает из рассчитанной секции поля, которые объявленная секция возврата того же типа
+     * уже описывает. EDT выводит тип каждого поля со ссылкой «см. …» отдельным обходом, и
+     * множество посещённых методов копирует на каждое поле: повтор поля — повтор всего
+     * поддерева ссылок. Повтор на каждом уровне удваивает ветвление (самоссылающееся
+     * описание в БСП — {@code ОписаниеУзла} — давало десятки минут сборки). Новые типы и
+     * новые поля остаются — слияние «по коду + по комментарию» не меняется.
+     *
+     * @return {@code false}, если в рассчитанной секции не осталось ничего нового
+     */
+    private static boolean dropDeclaredFields(TypeSection computed, ReturnSection declared, String label)
+    {
+        java.util.Map<String, java.util.Set<String>> declaredFields = new java.util.HashMap<>();
+        for (TypeSection section : declared.getReturnTypes())
+        {
+            for (TypeSection.TypeDefinition definition : section.getTypeDefinitions())
+            {
+                String type = definition.getTypeName();
+                if (type == null)
+                    continue;
+                java.util.Set<String> names = declaredFields.computeIfAbsent(
+                    type.toLowerCase(java.util.Locale.ROOT), key -> new java.util.HashSet<>());
+                for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+                    if (field.getName() != null)
+                        names.add(field.getName().toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        int droppedFields = 0;
+        int droppedTypes = 0;
+        int keptFields = 0;
+        try
+        {
+            var definitions = computed.getTypeDefinitions();
+            for (var iterator = definitions.iterator(); iterator.hasNext();)
+            {
+                TypeSection.TypeDefinition definition = iterator.next();
+                String type = definition.getTypeName();
+                java.util.Set<String> names = type == null ? null
+                    : declaredFields.get(type.toLowerCase(java.util.Locale.ROOT));
+                if (names == null)
+                {
+                    keptFields += definition.getFieldDefinitionExtension().size();
+                    continue;
+                }
+                var fields = definition.getFieldDefinitionExtension();
+                int before = fields.size();
+                fields.removeIf(field -> field.getName() != null
+                    && names.contains(field.getName().toLowerCase(java.util.Locale.ROOT)));
+                droppedFields += before - fields.size();
+                keptFields += fields.size();
+                // Тот же тип без новых полей ничего не добавляет к объявленному.
+                if (fields.isEmpty() && definition.getContainTypes().isEmpty())
+                {
+                    iterator.remove();
+                    droppedTypes++;
+                }
+            }
+            // #region agent log
+            Global.tempLog("bsl-declared-dedupe", "target=" + label //$NON-NLS-1$ //$NON-NLS-2$
+                + " declaredTypes=" + declaredFields.keySet() //$NON-NLS-1$
+                + " droppedFields=" + droppedFields + " droppedTypes=" + droppedTypes //$NON-NLS-1$ //$NON-NLS-2$
+                + " keptTypes=" + definitions.size() + " keptFields=" + keptFields //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
+            return !definitions.isEmpty();
+        }
+        catch (UnsupportedOperationException e)
+        {
+            // Список EDT неизменяемый — оставляем секцию как есть.
+            Global.tempLogException("bsl-declared-dedupe", "readonly target=" + label, e); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
     }
 
     /**
      * Текущий поток выполняет сборку: задание сборки EDT ({@code Builds.BuildProjectJob})
      * относится к семейству ручной сборки, автосборка Eclipse — к своему.
      */
-    private static boolean isBuildThread()
+    static boolean isBuildThread()
     {
+        // Параллельную часть сборки штатный LightClusteringBuilderState ведёт в своём
+        // ForkJoinPool: задания у этих потоков нет, узнаются они только по имени.
+        if (Thread.currentThread().getName().startsWith("LCBuilderState")) //$NON-NLS-1$
+            return true;
         Job job = Job.getJobManager().currentJob();
         return job != null && (job.belongsTo(ResourcesPlugin.FAMILY_MANUAL_BUILD)
             || job.belongsTo(ResourcesPlugin.FAMILY_AUTO_BUILD));
@@ -692,105 +1076,317 @@ public final class BslDocCommentComputedTypes
         return BslDocCommentComputedTypes.class.getClassLoader();
     }
 
-    /** {@code TypesComputer.computeTypes(EObject, Environments)} для целевой функции. */
-    private static List<?> computeTypes(EObject target)
+    /**
+     * Запоминает рассчитанные EDT типы возврата всех функций модуля. Зовётся из
+     * {@code ComfortTreeTypeSystem.installTypeSystem} сразу после штатного полного расчёта —
+     * только чтение готовых состояний, без нового расчёта. Пустой результат удаляет запись:
+     * функция могла перестать что-либо возвращать.
+     *
+     * @return имена (в нижнем регистре) собственных функций модуля, чей тип только что
+     *     изменился и на которые модуль ссылается «см.»: эти ссылки EDT разрешил внутри того же
+     *     расчёта, до записи, — без слияния, и ссылающиеся методы надо пересчитать. Пусто —
+     *     пересчитывать нечего.
+     */
+    static java.util.Set<String> rememberModuleReturnTypes(com._1c.g5.v8.dt.bsl.model.Module module)
     {
+        if (module == null || module.eIsProxy() || !isExtendedTypesEnabled(resolveProject(module)))
+            return java.util.Set.of();
         long started = System.nanoTime();
-        long nativeNs = 0;
-        long lightNs = 0;
-        long fullNs = 0;
-        String phase = "resource"; //$NON-NLS-1$
-        List<?> result = null;
-        String label = methodLabel(target);
-        Global.tempLog("bsl-return-compute-cost", "begin call=" + started + " target=" + label //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " nestedLight=" + lightInstalling.get() + " forceLight=" + forceLightInstall.get() //$NON-NLS-1$ //$NON-NLS-2$
-            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        boolean build = isBuildThread();
+        int functions = 0;
+        int remembered = 0;
+        java.util.Set<String> changed = new java.util.HashSet<>();
+        // #region agent log
+        List<String> changedKeys = new ArrayList<>();
+        // #endregion
+        boolean selfReferenced = false;
         try
         {
-            Resource resource = target.eResource();
-            if (resource == null || resource.getURI() == null)
-                return null;
-            IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
-                .getResourceServiceProvider(resource.getURI());
-            if (rsp == null)
-                return null;
-            try
+            Resource resource = module.eResource();
+            IResourceServiceProvider rsp = resource == null || resource.getURI() == null ? null
+                : IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI());
+            Object computer = rsp == null ? null
+                : rsp.get(Class.forName(TYPES_COMPUTER, true, bslClassLoader()));
+            if (computer == null)
+                return java.util.Set.of();
+            for (Method method : module.allMethods())
             {
-                Class<?> computerClass = Class.forName(TYPES_COMPUTER, true, bslClassLoader());
-                Object computer = rsp.get(computerClass);
-                if (computer == null)
-                    return null;
-                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(target, "environments"); //$NON-NLS-1$
-                if (envs == null)
-                    return null;
-                phase = "native"; //$NON-NLS-1$
-                long nativeStarted = System.nanoTime();
-                result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
-                nativeNs = System.nanoTime() - nativeStarted;
-                if (result != null && !result.isEmpty())
-                    return result;
-                // TypesComputer может выбрать пустой LIGHT при уже готовом NORMAL.
-                // Читаем тот же результат, который брали после досчёта, до его запуска.
-                phase = "ready"; //$NON-NLS-1$
-                result = finalReturnTypes(target, envs);
-                if (result != null && !result.isEmpty())
-                    return result;
-                // Пусто — FinalReturnState ещё нет. lightInstall пишет в LIGHT; TypesComputer
-                // при !isLinkedBatch предпочитает LIGHT даже пустой — NORMAL после полного
-                // installTypeSystem тогда не виден. Поэтому после досчёта читаем NORMAL сами.
-                phase = "light"; //$NON-NLS-1$
-                long lightStarted = System.nanoTime();
-                boolean lit;
+                if (!isFunction(method))
+                    continue;
+                functions++;
+                String label = methodLabel(method);
+                String key = versionKey(label, method);
+                CachedReturn previous = typeCacheByKey.get(key);
+                List<?> types;
+                remembering.set(Boolean.TRUE);
                 try
                 {
-                    lit = lightInstallTypeSystem(target);
+                    types = readyReturnTypes(computer, method);
                 }
                 finally
                 {
-                    lightNs = System.nanoTime() - lightStarted;
+                    remembering.remove();
                 }
-                if (!lit)
-                    return result = finalReturnTypes(target, envs);
-                result = finalReturnTypes(target, envs);
-                if (result != null && !result.isEmpty())
-                    return result;
-                phase = "full"; //$NON-NLS-1$
-                long fullStarted = System.nanoTime();
-                boolean installedTarget;
-                try
+                // Пусто — не запоминаем и не считаем изменением: пустота бывает от недосчёта, а
+                // запись привязана к тексту функции, так что для другого текста она и так не найдётся.
+                if (types == null || types.isEmpty())
+                    continue;
+                String signature = typeSignature(types);
+                long hash = signatureHash(signature);
+                // Изменение — новая версия текста или смена самого типа при том же тексте: тип
+                // зависит и от вызываемых функций (правка ключа в «Яйцо» меняет тип «Новый123…»).
+                // Ложная смена теперь стоит только ленивого пересчёта одного метода при
+                // автодополнении, а не второго прохода по всем ссылающимся (было 29 с, 18.10 02:13).
+                // Сравнение — только со своей стороной (сборка или редактор), см. CachedReturn.
+                if ((previous == null || previous.hash(build) != hash) && method.getName() != null)
                 {
-                    installedTarget = installTargetModuleTypeSystem(target);
+                    changed.add(method.getName().toLowerCase(java.util.Locale.ROOT));
+                    // #region agent log
+                    if (changedKeys.size() < 10)
+                        changedKeys.add(key.substring(key.lastIndexOf('#')) + "/versions=" //$NON-NLS-1$
+                            + (versionsByLabel.containsKey(label) ? versionsByLabel.get(label).size() : 0)
+                            + (changedKeys.size() < 3 ? " type=" + signature : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                 }
-                finally
-                {
-                    fullNs = System.nanoTime() - fullStarted;
-                }
-                if (installedTarget)
-                {
-                    result = finalReturnTypes(target, envs);
-                    if (result != null && !result.isEmpty())
-                        return result;
-                    result = asTypeList(Global.invoke(computer, "computeTypes", target, envs)); //$NON-NLS-1$
-                    if (result != null && !result.isEmpty())
-                        return result;
-                }
-                return result;
+                putVersion(label, key, CachedReturn.with(previous, types, build, hash));
+                remembered++;
             }
-            catch (Throwable t)
+            if (!changed.isEmpty())
             {
-                Global.tempLogException("bsl-return-compute-cost", "compute failed target=" + label //$NON-NLS-1$ //$NON-NLS-2$
-                    + " phase=" + phase, t); //$NON-NLS-1$
-                return null;
+                var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.getNode(module);
+                selfReferenced = node != null && referencesAny(node.getText(), changed);
+                // Тип функции сменился — запасы членов автодополнения у точек могут держать прежний.
+                bumpTypesGeneration();
             }
+            // #region agent log
+            logTypeStates(module);
+            // #endregion
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("bsl-return-compute-cost", "remember failed module=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (module.eResource() == null ? "?" : module.eResource().getURI()), t); //$NON-NLS-1$
         }
         finally
         {
-            Global.tempLog("bsl-return-compute-cost", "end call=" + started + " target=" + label //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " phase=" + phase + " types=" + (result == null ? -1 : result.size()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " nativeNs=" + nativeNs + " lightNs=" + lightNs + " fullNs=" + fullNs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #region agent log
+            Global.tempLog("bsl-return-compute-cost", "remember module=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (module.eResource() == null ? "?" : module.eResource().getURI()) //$NON-NLS-1$
+                + " functions=" + functions + " remembered=" + remembered //$NON-NLS-1$ //$NON-NLS-2$
+                + " changed=" + changed.size() + " selfReferenced=" + selfReferenced //$NON-NLS-1$ //$NON-NLS-2$
+                + " changedNames=" + changed.stream().limit(10).toList() //$NON-NLS-1$
+                + " changedKeys=" + changedKeys //$NON-NLS-1$
+                + " resourceSet=" + (module.eResource() == null || module.eResource().getResourceSet() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                    : Integer.toHexString(System.identityHashCode(module.eResource().getResourceSet())))
                 + " elapsedNs=" + (System.nanoTime() - started) //$NON-NLS-1$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
         }
+        return selfReferenced ? changed : java.util.Set.of();
+    }
+
+    /**
+     * Методы модуля, в тексте которых (документирующий комментарий над методом и тело с
+     * боковыми комментариями) есть «см. …» на одну из {@code names}. Именно их тип зависит от
+     * слитого типа изменившейся функции, а штатный частичный расчёт их не пересчитывает: он
+     * берёт только вызывающих.
+     */
+    /**
+     * Ссылается ли метод «см.» на одну из {@code names}: текст узла метода вместе с прилегающими
+     * скрытыми (документирующий комментарий над ним) и телом. Без текста всего модуля — это
+     * проверка на каждый вызов автодополнения.
+     */
+    static boolean methodReferences(Method method, java.util.Set<String> names)
+    {
+        var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.getNode(method);
+        return node != null && !names.isEmpty() && referencesAny(node.getText(), names);
+    }
+
+    static List<Method> methodsReferencing(com._1c.g5.v8.dt.bsl.model.Module module, java.util.Set<String> names)
+    {
+        List<Method> result = new ArrayList<>();
+        var root = org.eclipse.xtext.nodemodel.util.NodeModelUtils.getNode(module);
+        if (root == null || names.isEmpty())
+            return result;
+        String text = root.getText();
+        for (Method method : module.allMethods())
+        {
+            var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.getNode(method);
+            if (node == null)
+                continue;
+            int end = Math.min(text.length(), node.getTotalEndOffset());
+            int start = commentBlockStart(text, Math.min(node.getOffset(), end));
+            if (start < end && referencesAny(text.substring(start, end), names))
+                result.add(method);
+        }
+        return result;
+    }
+
+    /** Начало строк «//» сразу над позицией {@code offset} (документирующий комментарий метода). */
+    private static int commentBlockStart(String text, int offset)
+    {
+        int lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+        int start = lineStart;
+        while (start > 0)
+        {
+            int previousEnd = start - 1;
+            int previousStart = text.lastIndexOf('\n', Math.max(0, previousEnd - 1)) + 1;
+            if (previousStart >= previousEnd || !text.substring(previousStart, previousEnd).trim().startsWith("//")) //$NON-NLS-1$
+                break;
+            start = previousStart;
+        }
+        return start;
+    }
+
+    // #region agent log
+    /** Временно: сигнатуры возврата функций и NORMAL/LIGHT параметров методов небольшого модуля. */
+    static void logTypeStates(com._1c.g5.v8.dt.bsl.model.Module module)
+    {
+        try
+        {
+            if (module == null || module.allMethods().size() > 50)
+                return;
+            Resource resource = module.eResource();
+            for (Method method : module.allMethods())
+            {
+                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(method, "environments"); //$NON-NLS-1$
+                StringBuilder line = new StringBuilder("method=").append(method.getName()) //$NON-NLS-1$
+                    .append(" methodId=").append(Integer.toHexString(System.identityHashCode(method))) //$NON-NLS-1$
+                    .append(" resourceId=").append(Integer.toHexString(System.identityHashCode(resource))) //$NON-NLS-1$
+                    .append(" resourceSetId=").append(resource == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                        : Integer.toHexString(System.identityHashCode(resource.getResourceSet())));
+                CachedReturn cached = typeCacheByKey.get(versionKey(methodLabel(method), method));
+                if (cached != null)
+                    line.append(" cached=").append(signatureOrNull(cached.types())) //$NON-NLS-1$
+                        .append(" buildHash=").append(Long.toHexString(cached.buildHash())) //$NON-NLS-1$
+                        .append(" editorHash=").append(Long.toHexString(cached.editorHash())); //$NON-NLS-1$
+                Object returnState = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
+                if (returnState != null)
+                    line.append(" return{NORMAL=") //$NON-NLS-1$
+                        .append(signatureOrNull(typesFromReturnProvider(returnState, "NORMAL", envs))) //$NON-NLS-1$
+                        .append(" LIGHT=") //$NON-NLS-1$
+                        .append(signatureOrNull(typesFromReturnProvider(returnState, "LIGHT", envs))) //$NON-NLS-1$
+                        .append('}');
+                for (var param : method.getFormalParams())
+                {
+                    line.append(" var:").append(param.getName()).append("{NORMAL=") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(signatureOrNull(typesFromReturnProvider(param.getTypeStateProvider(), "NORMAL", envs))) //$NON-NLS-1$
+                        .append(" LIGHT=") //$NON-NLS-1$
+                        .append(signatureOrNull(typesFromReturnProvider(param.getTypeStateProvider(), "LIGHT", envs))) //$NON-NLS-1$
+                        .append('}');
+                }
+                int index = 0;
+                for (Object collector : method.getFinalInParamState())
+                {
+                    line.append(" param").append(index++).append("{NORMAL=") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(signatureOrNull(typesFromReturnProvider(collector, "NORMAL", envs))) //$NON-NLS-1$
+                        .append(" LIGHT=") //$NON-NLS-1$
+                        .append(signatureOrNull(typesFromReturnProvider(collector, "LIGHT", envs))) //$NON-NLS-1$
+                        .append('}');
+                }
+                Global.tempLog("bsl-type-states", line.append(" thread=") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(Thread.currentThread().getName()).toString());
+            }
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("bsl-type-states", "log failed", t); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static String signatureOrNull(List<?> types)
+    {
+        return types == null ? "none" : "[" + typeSignature(types) + "]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+    // #endregion
+
+    /** Имена типов и их свойств — чтобы сравнивать тип по сути, а не по объектам. */
+    /**
+     * Без учёта порядка: имя типа и отсортированные поля, варианты — тоже по порядку имён.
+     * Порядок вариантов между расчётами разный, и от него сигнатура «плавала».
+     */
+    private static String typeSignature(List<?> types)
+    {
+        java.util.TreeSet<String> parts = new java.util.TreeSet<>();
+        for (Object item : types)
+        {
+            if (!(item instanceof TypeItem type))
+                continue;
+            java.util.TreeSet<String> fields = new java.util.TreeSet<>();
+            if (type instanceof com._1c.g5.v8.dt.mcore.Type withContext && !withContext.eIsProxy())
+            {
+                ContextDef contextDef = withContext.getContextDef();
+                // allProperties — как в TypeSection.fill: структура из вызванной функции лежит в
+                // родительской части, и её ключи getProperties не видел (правка ключа в «Яйцо» не
+                // меняла сигнатуру «Новый123…», 18.10 09:32).
+                if (contextDef != null && !contextDef.eIsProxy() && contextDef.allProperties() != null)
+                    for (Object property : contextDef.allProperties())
+                        fields.add(String.valueOf(Global.invoke(property, "getName"))); //$NON-NLS-1$
+            }
+            parts.add(Global.invoke(type, "getName") + "{" + String.join(",", fields) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        return String.join("", parts); //$NON-NLS-1$
+    }
+
+    /**
+     * Есть ли в тексте модуля «см. …» с последним сегментом из {@code names} (в нижнем регистре):
+     * {@code см. Функция} или {@code см. ОбщийМодуль.Функция}.
+     */
+    private static boolean referencesAny(String text, java.util.Set<String> names)
+    {
+        if (text == null || names.isEmpty())
+            return false;
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        int from = 0;
+        while ((from = lower.indexOf("см.", from)) >= 0) //$NON-NLS-1$
+        {
+            int index = from + 3;
+            while (index < lower.length() && lower.charAt(index) == ' ')
+                index++;
+            int start = index;
+            while (index < lower.length() && (Character.isLetterOrDigit(lower.charAt(index))
+                || lower.charAt(index) == '_' || lower.charAt(index) == '.'))
+                index++;
+            String chain = lower.substring(start, index);
+            if (chain.endsWith(".")) //$NON-NLS-1$
+                chain = chain.substring(0, chain.length() - 1);
+            if (names.contains(chain.substring(chain.lastIndexOf('.') + 1)))
+                return true;
+            from = Math.max(index, from + 3);
+        }
+        return false;
+    }
+
+    /**
+     * Готовые типы возврата функции: {@code TypesComputer.computeTypes}, затем NORMAL/LIGHT из
+     * {@code getFinalReturnState} (TypesComputer может выбрать пустой LIGHT при готовом NORMAL).
+     */
+    private static List<?> readyReturnTypes(Object computer, EObject function)
+    {
+        Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(function, "environments"); //$NON-NLS-1$
+        if (envs == null)
+            return null;
+        // Объединение штатного TypesComputer и всех вариантов NORMAL. TypesComputer схлопывает
+        // одноимённые варианты «Структура» (дедупликация по имени и URI) и отдаёт один — без
+        // структуры из вызванной функции; NORMAL без него терял поля, которые он видит (18.10:
+        // «РеквизитыСЧасовымиПоясами»). Поля одноимённых вариантов потом сводит
+        // mergeSameTypeDefinitions. Старый тип в LIGHT переразобранной функции снимает
+        // ComfortTreeTypeSystem.dropStaleLightReturn.
+        java.util.Set<Object> union = new java.util.LinkedHashSet<>();
+        List<?> computed = asTypeList(Global.invoke(computer, "computeTypes", function, envs)); //$NON-NLS-1$
+        if (computed != null)
+            union.addAll(computed);
+        try
+        {
+            Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(function, "getFinalReturnState"); //$NON-NLS-1$
+            List<?> normal = collector == null ? null : typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
+            if (normal != null)
+                union.addAll(normal);
+        }
+        catch (Exception ignored)
+        {
+        }
+        return union.isEmpty() ? null : new ArrayList<>(union);
     }
 
     private static List<?> asTypeList(Object result)
@@ -892,137 +1488,6 @@ public final class BslDocCommentComputedTypes
                     types.add(item);
             }
             return types;
-        }
-        return null;
-    }
-
-    /**
-     * Полный {@code installTypeSystem} модуля цели {@code см. …}, если light-проход
-     * не дал типов возврата (типично: ссылка из модуля формы на общий модуль).
-     */
-    private static boolean installTargetModuleTypeSystem(EObject target)
-    {
-        if (!resolvingDocLink() && !Boolean.TRUE.equals(forceLightInstall.get()))
-            return false;
-        Object moduleObj = containerOfType(target, "com._1c.g5.v8.dt.bsl.model.Module"); //$NON-NLS-1$
-        if (!(moduleObj instanceof EObject module) || module.eIsProxy())
-            return false;
-        if (!INSTALLING_TARGET_MODULE.add(module))
-            return false;
-        try
-        {
-            com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem tree =
-                BslStructureInsertCommentTypes.peekTreeTypeSystem();
-            if (tree == null)
-                return false;
-            BslStructureInsertCommentTypes.installTypeSystemNonInterruptable(tree,
-                (com._1c.g5.v8.dt.bsl.model.Module)module);
-            return true;
-        }
-        catch (Throwable ignored)
-        {
-            return false;
-        }
-        finally
-        {
-            INSTALLING_TARGET_MODULE.remove(module);
-        }
-    }
-
-    /**
-     * Досчёт типов одного метода штатным механизмом EDT
-     * {@code BslTreeTypeSystem.lightInstallingTypeSystem(Module, Method, Variable, Statement,
-     * int, BmOperationContext)} — тем же, которым пользуется автодополнение, когда тип нужен
-     * здесь и сейчас, а полный разбор модуля не закончен. Ограничения по экспортности у него
-     * нет: считается любой метод модуля.
-     * <p>
-     * <b>Зачем подставная переменная.</b> По байт-коду аргумент {@code variable} используется
-     * ровно в одном месте (BslTreeTypeSystem:337) — как условие
-     * {@code variable.getTypeStateProvider() != null} перед завершающим {@code computeAllState},
-     * который и заполняет состояние возврата. С {@code null} там NPE, и досчёт обрывается, не
-     * дойдя до расчёта. Поэтому передаём собственную несвязанную переменную с пустым
-     * накопителем состояний: модель EDT она не трогает, а ворота открывает.
-     * <p>
-     * Метода нет в интерфейсе {@code ITypeSystem}, поэтому зовётся рефлексией по конкретному
-     * классу: пропадёт в новой версии EDT — просто вернёмся к поведению без слияния.
-     * {@code BmOperationContext} передаём {@code null}; если EDT его потребует, отказ ловится
-     * и слияния не происходит.
-     *
-     * @return {@code true}, если досчёт выполнен
-     */
-    static void enableForceLightInstall()
-    {
-        forceLightInstall.set(Boolean.TRUE);
-    }
-
-    static void disableForceLightInstall()
-    {
-        forceLightInstall.remove();
-    }
-
-    private static boolean lightInstallTypeSystem(EObject target)
-    {
-        if (!resolvingDocLink() && !Boolean.TRUE.equals(forceLightInstall.get()))
-        {
-            // Рассчитанный тип нужен только там, где EDT разрешает ссылку «см. Метод»: именно
-            // там документирующий комментарий целевого метода пуст. Разбор комментария самого
-            // метода идёт для каждого метода каждого модуля, и досчёт в этих местах — обход
-            // всего модуля впустую, умноженный на число методов.
-            return false;
-        }
-        if (Boolean.TRUE.equals(lightInstalling.get()))
-        {
-            // Досчёт сам разбирает комментарии всех методов модуля, и каждый такой разбор
-            // просился бы досчитать себя: вложенность множится на число методов. Защита по
-            // одному методу (computing) этого не ловит — методы каждый раз разные.
-            return false;
-        }
-        lightInstalling.set(Boolean.TRUE);
-        try
-        {
-            if (!(target instanceof Method method))
-                return false;
-            Variable gate = BslFactory.eINSTANCE.createImplicitVariable();
-            gate.setTypeStateProvider(new VariableTypeStateProviderCollector());
-            return BslStructureInsertCommentTypes.lightInstallMethodTypeSystem(method, gate);
-        }
-        catch (Throwable t)
-        {
-            Global.tempLogException("bsl-return-compute-cost", //$NON-NLS-1$
-                "light failed target=" + methodLabel(target), t); //$NON-NLS-1$
-        }
-        finally
-        {
-            lightInstalling.remove();
-        }
-        return false;
-    }
-
-    /**
-     * Разрешается ли сейчас ссылка {@code см. Метод} документирующего комментария
-     * ({@code BslDocumentationComment.computeTypesByLinkPart}).
-     */
-    private static boolean resolvingDocLink()
-    {
-        return StackWalker.getInstance().walk(frames -> frames.limit(40)
-            .anyMatch(frame -> LINK_RESOLVE_METHOD.equals(frame.getMethodName())
-                && frame.getClassName().equals(COMMENT_CLASS)));
-    }
-
-    private static Object containerOfType(EObject object, String className)
-    {
-        try
-        {
-            Class<?> wanted = Class.forName(className, false, object.getClass().getClassLoader());
-            for (EObject current = object.eContainer(); current != null;
-                current = current.eContainer())
-            {
-                if (wanted.isInstance(current))
-                    return current;
-            }
-        }
-        catch (Throwable t)
-        {
         }
         return null;
     }
@@ -1162,10 +1627,76 @@ public final class BslDocCommentComputedTypes
         return touched.get() ? writer.toByteArray() : null;
     }
 
+    /** Слабые ключи не удерживают модель при отмене расчёта посреди оператора. */
+    private static final java.util.Map<Object, java.util.Map<Object, Boolean>> ASSIGNED_COLUMNS =
+        new java.util.WeakHashMap<>();
+
+    /** Наблюдаем только присваивания результата добавления колонки, без проверки версии EDT. */
+    public static void beforeColumnStatement(Object creator, Object statement)
+    {
+        if (statement instanceof com._1c.g5.v8.dt.bsl.model.SimpleStatement simple
+                && simple.getLeft() instanceof com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess
+                && simple.getRight() instanceof com._1c.g5.v8.dt.bsl.model.Invocation invocation
+                && invocation.getMethodAccess() instanceof com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess access
+                && access.getSource() instanceof com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess collection
+                && ("Колонки".equalsIgnoreCase(collection.getName()) || "Columns".equalsIgnoreCase(collection.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                && ("Добавить".equalsIgnoreCase(access.getName()) || "Add".equalsIgnoreCase(access.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    || "Вставить".equalsIgnoreCase(access.getName()) || "Insert".equalsIgnoreCase(access.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                && isExtendedTypesEnabled(invocation))
+        {
+            synchronized (ASSIGNED_COLUMNS)
+            {
+                ASSIGNED_COLUMNS.computeIfAbsent(creator, ignored -> new java.util.WeakHashMap<>())
+                    .put(invocation, Boolean.FALSE);
+            }
+        }
+    }
+
+    /** EDT сама выполнила штатный шаг для этого же вызова в текущем операторе. */
+    public static void columnExpansionProcessed(Object creator, Object invocation)
+    {
+        synchronized (ASSIGNED_COLUMNS)
+        {
+            var calls = ASSIGNED_COLUMNS.get(creator);
+            if (calls == null || !calls.containsKey(invocation))
+                return;
+            calls.put(invocation, Boolean.TRUE);
+        }
+    }
+
+    /** После всего оператора: восполняем только пропущенный EDT штатный шаг. */
+    public static void afterColumnStatement(Object creator, Object statement)
+    {
+        if (!(statement instanceof com._1c.g5.v8.dt.bsl.model.SimpleStatement simple)
+            || !(simple.getRight() instanceof com._1c.g5.v8.dt.bsl.model.Invocation))
+            return;
+        Boolean nativeProcessed;
+        synchronized (ASSIGNED_COLUMNS)
+        {
+            var calls = ASSIGNED_COLUMNS.get(creator);
+            nativeProcessed = calls == null ? null : calls.remove(simple.getRight());
+            if (calls != null && calls.isEmpty())
+                ASSIGNED_COLUMNS.remove(creator);
+        }
+        if (nativeProcessed == null)
+            return;
+        try
+        {
+            // Имя и параметры подтверждены CreatorTreeState.javap.txt в кэше бандла bsl-full.
+            if (!nativeProcessed && !Global.invokeVoid(creator,
+                "checkForExpandingStructureTypeContextDef", simple.getRight())) //$NON-NLS-1$
+                throw new IllegalStateException("Column expansion method unavailable"); //$NON-NLS-1$
+        }
+        catch (Throwable failure)
+        {
+        }
+    }
+
     /**
      * Инструментализация {@code CreatorTreeState}: в хвост
      * {@code isReplaceTypesByDocumentationComment} добавляется наш ответ, который умеет
      * отменить замещение при знаке {@code ^} в боковом комментарии.
+     * В обработке SimpleStatement наблюдаем штатное расширение колонок и восполняем пропуск.
      *
      * @return изменённый класс либо {@code null}, если вставки не было
      */
@@ -1181,6 +1712,53 @@ public final class BslDocCommentComputedTypes
                 String signature, String[] exceptions)
             {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (mv != null && "doInternalProcess".equals(name) //$NON-NLS-1$
+                    && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/bsl/model/SimpleStatement;") //$NON-NLS-1$
+                    && descriptor.endsWith(")V")) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitVarInsn(Opcodes.ALOAD, 0);
+                            visitVarInsn(Opcodes.ALOAD, 1);
+                            visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "beforeColumnStatement", //$NON-NLS-1$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "afterColumnStatement", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                if (mv != null && "checkForExpandingStructureTypeContextDef".equals(name) //$NON-NLS-1$
+                    && descriptor.equals("(Lcom/_1c/g5/v8/dt/bsl/model/Invocation;)V")) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "columnExpansionProcessed", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
                 if (mv == null || !REPLACE_METHOD.equals(name) || !descriptor.endsWith(")Z")) //$NON-NLS-1$
                     return mv;
                 final int contextSlot = (access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;

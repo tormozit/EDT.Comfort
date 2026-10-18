@@ -117,7 +117,7 @@ public final class NaparnikAssistRow
     private boolean completed;
     /** Текст ошибки последнего запроса; {@code null} — ошибки не было. */
     private String error;
-    private int generation;
+    private volatile int generation;
     private Object cancelSource;
     /** Непринятый остаток предложения целыми строками, переводы строк {@code \n}. */
     private String remaining = ""; //$NON-NLS-1$
@@ -612,10 +612,60 @@ public final class NaparnikAssistRow
         return words;
     }
 
+    /** Сколько ждать связывания модуля перед запросом контекста, потом — как раньше. */
+    private static final long LINK_WAIT_CAP_MS = 20_000;
+    private static final long LINK_WAIT_STEP_MS = 100;
+
+    /**
+     * Ждёт, пока модуль связан ({@code BslResource.isLinkedBatch}). Контекст Напарника
+     * ({@code getAiContext} → {@code Contexts.create} → {@code resolveLazyCrossReferences}) на
+     * несвязанном модуле сам запускает полную перевязку: на модуле БСП это 3,3 с лишнего
+     * расчёта типов среди перевязок EDT после правки, и список членов ждал их все (18.10 10:18:03).
+     * Перевязку после правки и так делает сверка редактора — дожидаемся её.
+     *
+     * @return {@code false} — запрос отменён, пока ждали
+     */
+    private boolean awaitModuleLinked(int gen)
+    {
+        if (!(viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document))
+            return true;
+        long started = System.nanoTime();
+        int busy = 0;
+        while (gen == generation)
+        {
+            // tryReadOnly не ждёт блокировку: занято (идёт перевязка) — null.
+            Boolean linked = document.tryReadOnly(resource ->
+                resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl ? bsl.isLinkedBatch() : Boolean.TRUE);
+            long waitedMs = (System.nanoTime() - started) / 1_000_000L;
+            if (Boolean.TRUE.equals(linked) || waitedMs >= LINK_WAIT_CAP_MS)
+            {
+                // #region agent log
+                Global.tempLog("naparnik-378", "awaitLinked linked=" + linked + " waitedMs=" + waitedMs //$NON-NLS-1$ //$NON-NLS-2$
+                    + " busyChecks=" + busy); //$NON-NLS-1$
+                // #endregion
+                return true;
+            }
+            if (linked == null)
+                busy++;
+            try
+            {
+                Thread.sleep(LINK_WAIT_STEP_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
     private void runRequest(int gen, Object vm, Object source, List<Word> words, Display display)
     {
         try
         {
+            if (!awaitModuleLinked(gen))
+                return;
             Object context = Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
             Object aiContext = context instanceof Optional<?> optional ? optional.orElse(null) : null;
             if (aiContext == null)
