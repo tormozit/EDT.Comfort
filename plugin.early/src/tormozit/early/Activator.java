@@ -228,6 +228,11 @@ public final class Activator
         static final String PROP_INITIALLY_COLLAPSED = "tormozit.bslFolding.initiallyCollapsed"; //$NON-NLS-1$
         private static final String FOLDING_STRUCTURE = "org.eclipse.xtext.ui.editor.folding.DefaultFoldingStructureProvider"; //$NON-NLS-1$
         static final String PROP_FOLDING_UPDATE = "tormozit.bslFolding.update"; //$NON-NLS-1$
+        static final String PROP_LITERAL_FOLDING = "tormozit.bslFolding.literals"; //$NON-NLS-1$
+        private static final String FOLDING_PREFERENCES =
+            "com._1c.g5.v8.dt.bsl.ui.folding.BslFoldingPreferencePage"; //$NON-NLS-1$
+        static final String PROP_FOLDING_PREFERENCES = "tormozit.bslFolding.preferences"; //$NON-NLS-1$
+        static final String PROP_INITIAL_FOLDING_PREFERENCES = "tormozit.bslFolding.initialPreferences"; //$NON-NLS-1$
         private static final String INITIALLY_COLLAPSED_DESC = "(Lorg/eclipse/emf/ecore/EObject;)Z"; //$NON-NLS-1$
         /**
          * Область вкладок воркбенча: штатная кнопка списка вкладок видна всегда, а не только при
@@ -347,7 +352,7 @@ public final class Activator
         private static final String READ_FOR_ASSIST_DESC =
             "(Lorg/eclipse/xtext/util/concurrent/IUnitOfWork;)Ljava/lang/Object;"; //$NON-NLS-1$
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
-            SUPPRESSION_PROVIDER, FOLDING_PROVIDER, FOLDING_STRUCTURE, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
+            SUPPRESSION_PROVIDER, FOLDING_PROVIDER, FOLDING_STRUCTURE, FOLDING_PREFERENCES, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
@@ -368,6 +373,12 @@ public final class Activator
         {
             System.getProperties().putIfAbsent(PROP_FOLDING_UPDATE,
                 (BiFunction<Object, Boolean, Boolean>) (provider, initialize) -> Boolean.FALSE);
+            System.getProperties().putIfAbsent(PROP_LITERAL_FOLDING,
+                (java.util.function.BiConsumer<Object, Object>) (document, acceptor) -> {});
+            System.getProperties().putIfAbsent(PROP_FOLDING_PREFERENCES,
+                (java.util.function.BiConsumer<Object, Object>) (page, parent) -> {});
+            System.getProperties().putIfAbsent(PROP_INITIAL_FOLDING_PREFERENCES,
+                (java.util.function.BiConsumer<Object, Object>) (page, parent) -> {});
             System.getProperties().putIfAbsent(PROP_SELECTION_INVALIDATE, (Consumer<Object>) page -> {});
             System.getProperties().putIfAbsent(PROP_SELECTION_OPERATION,
                 (BiFunction<Object, Runnable, Runnable>) (page, runnable) -> runnable);
@@ -1075,6 +1086,8 @@ public final class Activator
                 return transformMergeCommitCallback(bytes);
             if (FOLDING_PROVIDER.equals(className))
                 return transformFoldingProvider(bytes);
+            if (FOLDING_PREFERENCES.equals(className))
+                return transformFoldingPreferences(bytes);
             if (FOLDING_STRUCTURE.equals(className))
                 return transformFoldingStructure(bytes);
             if (TAB_FOLDER.equals(className))
@@ -1244,6 +1257,59 @@ public final class Activator
             return touched[0] == 1 ? writer.toByteArray() : null;
         }
 
+        /** Родитель штатных полей — local 4; добавляем поля до pack первой группы (javap EDT 22). */
+        private static byte[] transformFoldingPreferences(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] matches = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"createFieldEditors".equals(name) || !"()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        private String pendingProperty;
+
+                        @Override
+                        public void visitLdcInsn(Object value)
+                        {
+                            super.visitLdcInsn(value);
+                            if ("tryExceptEnabled".equals(value)) //$NON-NLS-1$
+                                pendingProperty = PROP_FOLDING_PREFERENCES;
+                            else if ("foldPreprocInitially".equals(value)) //$NON-NLS-1$
+                                pendingProperty = PROP_INITIAL_FOLDING_PREFERENCES;
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
+                            boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                            if (pendingProperty != null && opcode == Opcodes.INVOKEVIRTUAL && "addField".equals(name) //$NON-NLS-1$
+                                && "(Lorg/eclipse/jface/preference/FieldEditor;)V".equals(descriptor)) //$NON-NLS-1$
+                            {
+                                emitGetProperty(this, pendingProperty, "java/util/function/BiConsumer"); //$NON-NLS-1$
+                                pendingProperty = null;
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitVarInsn(Opcodes.ALOAD, 4);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                matches[0]++;
+                            }
+                        }
+                    };
+                }
+            }, 0);
+            System.setProperty(PROP_FOLDING_PREFERENCES + ".patch", "matches=" + matches[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            return matches[0] == 2 ? writer.toByteArray() : null;
+        }
+
         /** Кадры стека для условия начального сворачивания пересчитываются без загрузки EDT-классов. */
         private static byte[] transformFoldingProvider(byte[] bytes)
         {
@@ -1264,6 +1330,23 @@ public final class Activator
                     String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv != null && "computeCommentFolding".equals(name) //$NON-NLS-1$
+                        && ("(Lorg/eclipse/xtext/ui/editor/model/IXtextDocument;"
+                            + "Lorg/eclipse/xtext/ui/editor/folding/IFoldingRegionAcceptor;)V").equals(descriptor)) //$NON-NLS-1$
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                emitGetProperty(this, PROP_LITERAL_FOLDING, "java/util/function/BiConsumer"); //$NON-NLS-1$
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitVarInsn(Opcodes.ALOAD, 2);
+                                visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                touched[0] = true;
+                            }
+                        };
                     if (mv == null || !"isInitiallyCollapsed".equals(name) //$NON-NLS-1$
                         || !INITIALLY_COLLAPSED_DESC.equals(descriptor))
                         return mv;

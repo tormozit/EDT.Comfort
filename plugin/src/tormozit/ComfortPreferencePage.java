@@ -108,8 +108,8 @@ public class ComfortPreferencePage
             + "При выключенном флажке эти операции выполняются без проверок."; //$NON-NLS-1$
 
     private static final String SUPPRESS_MIN_PLATFORM_BUILD_TOOLTIP =
-            "Отключает требование ЕДТ к минимальной сборке внутри уже поддерживаемого релиза\n"
-            + "платформы (панель «Версии платформы», запуск клиента/сервера). Поддерживаемые\n"
+            "Отключает требование ЕДТ к минимальной сборке внутри уже поддерживаемого релиза "
+            + "платформы (панель «Версии платформы», запуск клиента/сервера). Поддерживаемые "
             + "релизы (major.minor) не меняются."; //$NON-NLS-1$
 
     private static final String THEME_AWARE_COLOR_TOOLTIP =
@@ -337,9 +337,9 @@ public class ComfortPreferencePage
         gd.horizontalSpan = 2;
         gd.verticalIndent = 8;
         link.setLayoutData(gd);
-        link.setToolTipText(
+        link.setToolTipText(TooltipText.wrap(link,
             "Файл spelling-comfort-common.dic в каталоге состояния плагина (все проекты).\n"
-            + "Лемма или лемма/флаг AOT. Проектный словарь — в Свойствах проекта → Комфорт."); //$NON-NLS-1$
+            + "Лемма или лемма/флаг AOT. Проектный словарь — в Свойствах проекта → Комфорт.")); //$NON-NLS-1$
         link.addListener(SWT.Selection, e ->
         {
             if (!"Общий пользовательский словарь".equals(e.text)) //$NON-NLS-1$
@@ -431,9 +431,9 @@ public class ComfortPreferencePage
         link.setLayoutData(linkGd);
         IProject project = getProject();
         link.setEnabled(project != null && project.isAccessible());
-        link.setToolTipText(
+        link.setToolTipText(TooltipText.wrap(link,
             "Открыть .comfort/spelling-comfort-project.dic в редакторе. "
-            + "После Save словарь подхватывается сразу."); //$NON-NLS-1$
+            + "После Save словарь подхватывается сразу.")); //$NON-NLS-1$
         link.addListener(SWT.Selection, e ->
         {
             if (!"Пользовательский словарь".equals(e.text)) //$NON-NLS-1$
@@ -510,8 +510,8 @@ public class ComfortPreferencePage
             navigatorGroup);
         addField(groupCommonModulesField);
         setFieldTooltip(groupCommonModulesField,
-            "Чисто визуально сворачивает семейства общих модулей с одинаковой основой имени\n"
-            + "(например ВариантыОтветов / ВариантыОтветовКлиент / ВариантыОтветовКлиентСервер)\n"
+            "Чисто визуально сворачивает семейства общих модулей с одинаковой основой имени "
+            + "(например ВариантыОтветов / ВариантыОтветовКлиент / ВариантыОтветовКлиентСервер) "
             + "в одну группу в дереве навигатора. Структура конфигурации не меняется.", //$NON-NLS-1$
             navigatorGroup);
 
@@ -522,7 +522,7 @@ public class ComfortPreferencePage
             navigatorGroup);
         addField(suffixes1Field);
         setFieldTooltip(suffixes1Field,
-            "Комбинируемые суффиксы хвоста имени. Могут идти цепочкой в любом количестве\n"
+            "Комбинируемые суффиксы хвоста имени. Могут идти цепочкой в любом количестве "
             + "(например Клиент + Сервер → …КлиентСервер, Клиент + ПовтИсп → …КлиентПовтИсп).", //$NON-NLS-1$
             navigatorGroup);
         stretchTextField(suffixes1Field.getTextControl(navigatorGroup));
@@ -534,7 +534,7 @@ public class ComfortPreferencePage
             navigatorGroup);
         addField(suffixes2Field);
         setFieldTooltip(suffixes2Field,
-            "Не более одного суффикса из набора в хвосте имени — в любой позиции относительно\n"
+            "Не более одного суффикса из набора в хвосте имени — в любой позиции относительно "
             + "элементов набора 1 (до, между или после): …СлужебныйКлиент, …КлиентСлужебныйСервер.", //$NON-NLS-1$
             navigatorGroup);
         stretchTextField(suffixes2Field.getTextControl(navigatorGroup));
@@ -545,10 +545,10 @@ public class ComfortPreferencePage
             navigatorGroup);
         addField(alphabeticCommonNodeField);
         setFieldTooltip(alphabeticCommonNodeField,
-            "Общие модули, Общие реквизиты, Роли, Подсистемы и другие папки внутри верхнего узла\n"
-            + "«Общие» показываются по алфавиту в деревьях конфигурации: навигаторе,\n"
-            + "сравнении конфигураций, итогах поиска по конфигурации,\n"
-            + "выборе объектов и составе подсистемы\n"
+            "Общие модули, Общие реквизиты, Роли, Подсистемы и другие папки внутри верхнего узла "
+            + "«Общие» показываются по алфавиту в деревьях конфигурации: навигаторе, "
+            + "сравнении конфигураций, итогах поиска по конфигурации, "
+            + "выборе объектов и составе подсистемы "
             + "вместо фиксированного порядка EDT.\n"
             + "Требует включённого флажка «Улучшать списки».", //$NON-NLS-1$
             navigatorGroup);
@@ -734,8 +734,8 @@ public class ComfortPreferencePage
             ctrlClickHost);
         addField(ctrlClickSelectWordField);
         setFieldTooltip(ctrlClickSelectWordField,
-            "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, —\n"
-            + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной\n"
+            "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, — "
+            + "если это слово ещё не выделено. Повторный клик (в том числе быстрый двойной "
             + "щелчок) работает штатно: в редакторе модуля — переход по гиперссылке.", //$NON-NLS-1$
             ctrlClickHost);
     }
@@ -799,7 +799,7 @@ public class ComfortPreferencePage
             stallHost);
         addField(stallField);
         setFieldTooltip(stallField,
-            "Пока флажок включён, плагин следит за зависаниями окна EDT (дольше 1 секунды)\n"
+            "Пока флажок включён, плагин следит за зависаниями окна EDT (дольше 1 секунды) "
             + "и записывает, какой код в это время занимал интерфейс.\n"
             + "Флажок сам отключается через минуту после включения и при перезапуске EDT.\n"
             + "При первом же зависании появится уведомление со ссылкой «Открыть файл» с записанными стеками.", //$NON-NLS-1$

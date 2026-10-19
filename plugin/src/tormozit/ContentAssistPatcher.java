@@ -169,7 +169,6 @@ return true;
             Object value = fProcessorsField.get(assistant);
             if (!(value instanceof java.util.Map<?, ?>))
             {
-                ContentAssistDebug.pipeline("popup.cachedProcessor.skip", "reason=noProcessorMap");
                 return false;
             }
             java.util.Map<String, Object> processors = (java.util.Map<String, Object>) value;
@@ -179,7 +178,6 @@ return true;
             processors.put(type, replacement);
             try
             {
-                ContentAssistDebug.pipeline("popup.cachedProcessor.begin", "type=" + type);
                 action.run();
             }
             finally
@@ -188,13 +186,11 @@ return true;
                     processors.remove(type);
                 else
                     processors.put(type, previous);
-                ContentAssistDebug.pipeline("popup.cachedProcessor.end", "type=" + type);
             }
             return true;
         }
         catch (Exception error)
         {
-            Global.tempLogException("assist-pipeline", "popup.cachedProcessor.failed", error);
             return false;
         }
     }

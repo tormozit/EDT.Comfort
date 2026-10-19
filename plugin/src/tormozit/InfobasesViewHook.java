@@ -191,7 +191,7 @@ public final class InfobasesViewHook implements IStartup
 
         if (searchBox instanceof SearchBox box && !box.isDisposed())
         {
-            box.setToolTipText(FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            box.setToolTipText(TooltipText.wrap(box, FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
             box.setMessage("Фильтр..."); //$NON-NLS-1$
             FilterInputBox.attachHistory(box, FilterInputBox.Scope.INFOBASES);
         }

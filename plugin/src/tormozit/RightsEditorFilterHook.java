@@ -434,8 +434,8 @@ public final class RightsEditorFilterHook implements IStartup
             searchBox.setData(VIEWER_KEY, viewer);
             searchBox.setData(HIGHLIGHT_KEY, highlights);
 
-            searchBox.setToolTipText(FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP
-                    + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            searchBox.setToolTipText(TooltipText.wrap(searchBox, FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP
+                    + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
             searchBox.setMinimumSearchTextLength(0);
             searchBox.setJobScheduleDelay(0);
             FilterInputBox.attachHistory(searchBox, historyScope(leaves));

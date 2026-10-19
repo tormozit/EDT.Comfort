@@ -86,6 +86,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             ParamHintHtmlModifier.install(Display.getDefault());
             MethodDefinitionLink.install(Display.getDefault());
+            MetadataTypeMenu.install(Display.getDefault());
 
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
@@ -262,6 +263,7 @@ public final class BslEditorHoverHook implements IStartup
         private final IInformationProvider delegate;
         private final SourceViewer sourceViewer;
         private volatile ITextHover lastAnnotationHover;
+        private volatile BslQueryLiteralSupport.QueryHover lastQueryHover;
 
         AnnotationAwareInformationProvider(IInformationProvider delegate, SourceViewer sourceViewer)
         {
@@ -272,7 +274,8 @@ public final class BslEditorHoverHook implements IStartup
         @Override
         public IRegion getSubject(ITextViewer textViewer, int offset)
         {
-            return delegate.getSubject(textViewer, offset);
+            IRegion queryRegion = BslQueryLiteralSupport.queryHoverRegion(textViewer, offset);
+            return queryRegion != null ? queryRegion : delegate.getSubject(textViewer, offset);
         }
 
         @Override
@@ -287,6 +290,7 @@ public final class BslEditorHoverHook implements IStartup
         public Object getInformation2(ITextViewer textViewer, IRegion subject)
         {
             lastAnnotationHover = null;
+            lastQueryHover = null;
             // Содержимое берём у того же hover-а, что работает под мышью: он уже
             // содержит и композит (аннотация раньше описания), и наш фильтр
             // предложений орфографии. Своя обёртка пропускается — её подавление
@@ -319,6 +323,14 @@ public final class BslEditorHoverHook implements IStartup
                     lastAnnotationHover = annotationHover;
                     return info;
                 }
+                BslXtextEditor editor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(textViewer);
+                BslQueryLiteralSupport.QueryHover queryHover =
+                    BslQueryLiteralSupport.queryHover(editor, textViewer, subject.getOffset());
+                if (queryHover != null)
+                {
+                    lastQueryHover = queryHover;
+                    return queryHover.info();
+                }
                 // Пусто — значит подсказка подавлена (комментарий, ключевое слово):
                 // при наведении мышью здесь тоже ничего не показывается.
                 if (info == null)
@@ -332,6 +344,9 @@ public final class BslEditorHoverHook implements IStartup
         @Override
         public org.eclipse.jface.text.IInformationControlCreator getInformationPresenterControlCreator()
         {
+            BslQueryLiteralSupport.QueryHover queryHover = lastQueryHover;
+            if (queryHover != null)
+                return HoverAffordanceText.wrapCreator(queryHover.creator());
             ITextHover annotationHover = lastAnnotationHover;
             if (annotationHover != null)
             {
@@ -474,7 +489,7 @@ public final class BslEditorHoverHook implements IStartup
 
             AffordanceCreator(org.eclipse.jface.text.IInformationControlCreator delegate)
             {
-                this.delegate = delegate;
+                this.delegate = IrBslHoverHtml.wrapCreator(delegate);
             }
 
             @Override
@@ -528,7 +543,8 @@ public final class BslEditorHoverHook implements IStartup
             var links = BslStructureInsertCommentTypes.seeLinksFor(member, viewer);
             String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
                 MethodDefinitionLink::registerFormHandler);
-            String html = IrBslHoverHtml.readHtml(info);
+            String html = MetadataTypeMenu.decorate(IrBslHoverHtml.readHtml(info), viewer,
+                SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer));
             String linked = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
             {
                 var property = BslStructureInsertCommentTypes.propertyForHint(member, resource);
@@ -549,7 +565,7 @@ public final class BslEditorHoverHook implements IStartup
                 linked = html;
             String injected = ParamHintHtmlModifier.injectMemberSeeLinks(linked, block);
             String result = injected != null ? injected : linked;
-            return result.equals(html) ? info : IrBslHoverHtml.withHtml(info, result);
+            return result.equals(IrBslHoverHtml.readHtml(info)) ? info : IrBslHoverHtml.withHtml(info, result);
         }
         catch (Throwable ex)
         {
@@ -768,6 +784,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastPlatformAvailabilityHtml;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
+        private volatile BslQueryLiteralSupport.QueryHover lastQueryHover;
 
         IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor, boolean suppressPointerHover)
         {
@@ -795,12 +812,17 @@ public final class BslEditorHoverHook implements IStartup
         @Override
         public IRegion getHoverRegion(ITextViewer textViewer, int offset)
         {
-            return delegate.getHoverRegion(textViewer, offset);
+            IRegion region = delegate.getHoverRegion(textViewer, offset);
+            IRegion queryRegion = BslQueryLiteralSupport.queryHoverRegion(textViewer, offset);
+            return queryRegion != null ? queryRegion : region;
         }
 
         @Override
         public org.eclipse.jface.text.IInformationControlCreator getHoverControlCreator()
         {
+            BslQueryLiteralSupport.QueryHover queryHover = lastQueryHover;
+            if (queryHover != null)
+                return HoverAffordanceText.wrapCreator(queryHover.creator());
             return delegateExt == null ? null
                 : HoverAffordanceText.wrapCreator(delegateExt.getHoverControlCreator());
         }
@@ -835,6 +857,18 @@ public final class BslEditorHoverHook implements IStartup
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
+            lastQueryHover = null;
+            if (hoverRegion != null && annotationTextAt(textViewer, hoverRegion) == null)
+            {
+                BslQueryLiteralSupport.QueryHover queryHover =
+                    BslQueryLiteralSupport.queryHover(editor, textViewer, hoverRegion.getOffset());
+                if (queryHover != null)
+                {
+                    cancelIrEnrichment();
+                    lastQueryHover = queryHover;
+                    return queryHover.info();
+                }
+            }
             if (suppressPointerHover)
             {
                 String reason = hoverSuppressionReason(textViewer, hoverRegion);
@@ -1090,7 +1124,9 @@ public final class BslEditorHoverHook implements IStartup
             String withSeeLinks = ParamHintHtmlModifier.injectMemberSeeLinks(result, lastMemberSeeLinksHtml);
             if (withSeeLinks != null)
                 result = withSeeLinks;
-            return PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml);
+            return MetadataTypeMenu.decorate(
+                PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml),
+                editor.getInternalSourceViewer(), editor);
         }
 
         /** Ищем имена только в тексте HTML, пропуская существующие ссылки, теги и скрипты. */

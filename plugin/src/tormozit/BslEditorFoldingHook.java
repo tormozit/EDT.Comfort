@@ -9,6 +9,9 @@ import java.util.function.Function;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.jface.preference.BooleanFieldEditor;
+import org.eclipse.jface.preference.FieldEditor;
+import org.eclipse.jface.preference.FieldEditorPreferencePage;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControlCreator;
@@ -29,6 +32,8 @@ import org.eclipse.jface.text.source.projection.ProjectionAnnotationModel;
 import org.eclipse.jface.text.source.projection.ProjectionViewer;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Button;
 
 import com._1c.g5.v8.dt.bsl.model.RegionPreprocessor;
 
@@ -50,6 +55,9 @@ public final class BslEditorFoldingHook
     /** Ключ функции; должен совпадать с {@code PROP_INITIALLY_COLLAPSED} в {@code tormozit.early.Activator}. */
     static final String PROP_INITIALLY_COLLAPSED = "tormozit.bslFolding.initiallyCollapsed"; //$NON-NLS-1$
     private static final String PROP_FOLDING_UPDATE = "tormozit.bslFolding.update"; //$NON-NLS-1$
+    private static final String PROP_LITERAL_FOLDING = "tormozit.bslFolding.literals"; //$NON-NLS-1$
+    private static final String PROP_FOLDING_PREFERENCES = "tormozit.bslFolding.preferences"; //$NON-NLS-1$
+    private static final String PROP_INITIAL_FOLDING_PREFERENCES = "tormozit.bslFolding.initialPreferences"; //$NON-NLS-1$
     private static final java.util.Map<Object, FoldingUpdate> updates = new java.util.WeakHashMap<>();
 
     private static final AtomicBoolean installed = new AtomicBoolean();
@@ -70,6 +78,7 @@ public final class BslEditorFoldingHook
         if (Boolean.TRUE.equals(viewer.getData(HOVER_MARKER)))
             return;
         viewer.setData(HOVER_MARKER, Boolean.TRUE);
+        viewer.getTextWidget().addPaintListener(event -> paintQueryIndices(viewer, event));
         viewer.addProjectionListener(new IProjectionListener()
         {
             @Override public void projectionEnabled()
@@ -79,6 +88,35 @@ public final class BslEditorFoldingHook
             }
             @Override public void projectionDisabled() {}
         });
+    }
+
+    /** Только видимые строки виджета; номера запросов рассчитаны вместе со свёртками. */
+    private static void paintQueryIndices(ProjectionViewer viewer, org.eclipse.swt.events.PaintEvent event)
+    {
+        IDocument document = viewer.getDocument();
+        var indices = BslQueryLiteralSupport.queryGroupIndices(document);
+        var widget = viewer.getTextWidget();
+        if (indices.isEmpty() || widget == null || widget.isDisposed())
+            return;
+        int top = widget.getLineIndex(Math.max(0, event.y));
+        int bottom = widget.getLineIndex(Math.max(0, Math.min(widget.getClientArea().height - 1,
+            event.y + event.height - 1)));
+        for (int line = top; line <= bottom; line++)
+        {
+            int modelLine = viewer.widgetLine2ModelLine(line);
+            String index = indices.get(modelLine);
+            if (index == null)
+                continue;
+            int lineStart = widget.getOffsetAtLine(line);
+            int lineEnd = lineStart + widget.getLine(line).length();
+            var location = widget.getLocationAtOffset(lineEnd);
+            // ProjectionSupport.ProjectionDrawingStrategy: маркер занимает среднюю ширину символа.
+            int markerWidth = modelLine + 1 < document.getNumberOfLines()
+                && viewer.modelLine2WidgetLine(modelLine + 1) == -1
+                ? (int) event.gc.getFontMetrics().getAverageCharacterWidth() + 1 : 0;
+            BracketContentHintPresenter.paintInlineHint(event.gc, widget,
+                lineEnd > lineStart ? lineEnd - 1 : -1, index, location.x + markerWidth, location.y);
+        }
     }
 
     /** Расчёт без блокировки UI; штатная замена аннотаций — только для той же версии текста. */
@@ -288,16 +326,13 @@ public final class BslEditorFoldingHook
         return Boolean.TRUE;
     }
 
-    /** Временная диагностика раскрытия свёрток; состояние модели не меняет. */
+    /** Временная диагностика изменений документа для свёрток. */
     private static final class FoldingTrace implements
-        org.eclipse.jface.text.source.IAnnotationModelListener,
-        org.eclipse.jface.text.source.IAnnotationModelListenerExtension,
         org.eclipse.jface.text.IDocumentListener
     {
         private static final String KEY = "tormozit.foldingTrace"; //$NON-NLS-1$
         private final ProjectionAnnotationModel model;
         private final IDocument document;
-        private final java.util.Map<Annotation, Boolean> states = new java.util.IdentityHashMap<>();
         private volatile String lastEdit = "none"; //$NON-NLS-1$
 
         private FoldingTrace(ProjectionAnnotationModel model, IDocument document)
@@ -314,7 +349,6 @@ public final class BslEditorFoldingHook
             {
                 if (trace.model == model && trace.document == viewer.getDocument())
                     return;
-                trace.model.removeAnnotationModelListener(trace);
                 trace.document.removeDocumentListener(trace);
             }
             if (model == null)
@@ -322,12 +356,10 @@ public final class BslEditorFoldingHook
             FoldingTrace trace = new FoldingTrace(model, viewer.getDocument());
             viewer.setData(KEY, trace);
             trace.document.addDocumentListener(trace);
-            model.addAnnotationModelListener(trace);
             if (previous == null)
                 viewer.getTextWidget().addDisposeListener(event -> {
                     if (viewer.getData(KEY) instanceof FoldingTrace current)
                     {
-                        current.model.removeAnnotationModelListener(current);
                         current.document.removeDocumentListener(current);
                     }
                 });
@@ -354,106 +386,9 @@ public final class BslEditorFoldingHook
                 ? stamped.getModificationStamp() : -1;
         }
 
-        @Override
-        public synchronized void modelChanged(org.eclipse.jface.text.source.IAnnotationModel changed)
-        {
-            StringBuilder details = new StringBuilder("reset model=") //$NON-NLS-1$
-                .append(System.identityHashCode(model));
-            states.clear();
-            Iterator<Annotation> iterator = model.getAnnotationIterator();
-            while (iterator.hasNext())
-            {
-                Annotation annotation = iterator.next();
-                record(details, " current", annotation, model.getPosition(annotation)); //$NON-NLS-1$
-            }
-            log(details);
-        }
-
-        @Override
-        public synchronized void modelChanged(org.eclipse.jface.text.source.AnnotationModelEvent event)
-        {
-            if (event.isWorldChange())
-            {
-                modelChanged(event.getAnnotationModel());
-                return;
-            }
-            StringBuilder details = new StringBuilder("event model=") //$NON-NLS-1$
-                .append(System.identityHashCode(model))
-                .append(" removed=").append(event.getRemovedAnnotations().length) //$NON-NLS-1$
-                .append(" added=").append(event.getAddedAnnotations().length) //$NON-NLS-1$
-                .append(" changed=").append(event.getChangedAnnotations().length); //$NON-NLS-1$
-            for (Annotation annotation : event.getRemovedAnnotations())
-            {
-                record(details, " remove", annotation, event.getPositionOfRemovedAnnotation(annotation)); //$NON-NLS-1$
-                states.remove(annotation);
-            }
-            for (Annotation annotation : event.getAddedAnnotations())
-                record(details, " add", annotation, model.getPosition(annotation)); //$NON-NLS-1$
-            for (Annotation annotation : event.getChangedAnnotations())
-                record(details, " change", annotation, model.getPosition(annotation)); //$NON-NLS-1$
-            log(details);
-        }
-
-        private void record(StringBuilder details, String kind, Annotation annotation, Position position)
-        {
-            if (annotation instanceof ProjectionAnnotation projection)
-            {
-                Boolean before = states.put(annotation, projection.isCollapsed());
-                details.append(kind).append(" id=").append(System.identityHashCode(annotation)) //$NON-NLS-1$
-                    .append(" collapsed=").append(before).append("->").append(projection.isCollapsed()) //$NON-NLS-1$ //$NON-NLS-2$
-                    .append(" range=").append(position == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                        : position.getOffset() + ":" + position.getLength()); //$NON-NLS-1$
-                if (position != null)
-                {
-                    try
-                    {
-                        int offset = position.getOffset();
-                        int line = document.getLineOfOffset(offset);
-                        int column = offset - document.getLineOffset(line);
-                        int from = Math.max(0, offset - 4);
-                        int length = Math.min(64, document.getLength() - from);
-                        details.append(" line=").append(line + 1).append(" column=").append(column) //$NON-NLS-1$ //$NON-NLS-2$
-                            .append(" around=").append(escaped(document.get(from, length))); //$NON-NLS-1$
-                    }
-                    catch (BadLocationException e)
-                    {
-                        details.append(" locationError=").append(e); //$NON-NLS-1$
-                    }
-                }
-            }
-        }
-
         private static String escaped(String text)
         {
             return text == null ? "null" : text.replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        }
-
-        private void log(StringBuilder details)
-        {
-            long before = stamp();
-            try
-            {
-                Object resource = Global.getField(document, "resource"); //$NON-NLS-1$
-                if (resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
-                {
-                    org.eclipse.xtext.parser.IParseResult parse = xtext.getParseResult();
-                    String modelText = parse == null || parse.getRootNode() == null
-                        ? null : parse.getRootNode().getText();
-                    details.append(" textMatch=").append(modelText != null && modelText.equals(document.get())) //$NON-NLS-1$
-                        .append(" modelLength=").append(modelText == null ? -1 : modelText.length()); //$NON-NLS-1$
-                }
-            }
-            catch (RuntimeException e)
-            {
-                details.append(" modelError=").append(e); //$NON-NLS-1$
-            }
-            details.append(" stampBefore=").append(before).append(" stampAfter=").append(stamp()) //$NON-NLS-1$ //$NON-NLS-2$
-                .append(" lastEdit={").append(lastEdit).append('}') //$NON-NLS-1$
-                .append(" updatePatch=").append(System.getProperty(PROP_FOLDING_UPDATE + ".patch")); //$NON-NLS-1$ //$NON-NLS-2$
-            details.append(" thread=").append(Thread.currentThread().getName()).append(" stack="); //$NON-NLS-1$ //$NON-NLS-2$
-            for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-                details.append(frame).append(" | "); //$NON-NLS-1$
-            Global.tempLog("folding-state", details.toString()); //$NON-NLS-1$
         }
     }
 
@@ -584,6 +519,74 @@ public final class BslEditorFoldingHook
             (Function<Object, Object>) BslEditorFoldingHook::isInitiallyCollapsed);
         System.getProperties().put(PROP_FOLDING_UPDATE,
             (java.util.function.BiFunction<Object, Boolean, Boolean>) BslEditorFoldingHook::requestFoldingUpdate);
+        System.getProperties().put(PROP_LITERAL_FOLDING,
+            (java.util.function.BiConsumer<Object, Object>) BslQueryLiteralSupport::addLiteralFolding);
+        System.getProperties().put(PROP_FOLDING_PREFERENCES,
+            (java.util.function.BiConsumer<Object, Object>) (page, parent) -> addFoldingPreferences(page, parent, false));
+        System.getProperties().put(PROP_INITIAL_FOLDING_PREFERENCES,
+            (java.util.function.BiConsumer<Object, Object>) (page, parent) -> addFoldingPreferences(page, parent, true));
+    }
+
+    /** Поля в обе штатные группы страницы сворачивания (#841). */
+    private static void addFoldingPreferences(Object page, Object fieldParent, boolean initially)
+    {
+        Global.tempLog("literal-folding-settings", "create page=" + page.getClass().getName() + " initially=" + initially); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!(page instanceof FieldEditorPreferencePage) || !(fieldParent instanceof Composite parent)
+            || parent.isDisposed() || Boolean.TRUE.equals(parent.getData(PROP_FOLDING_PREFERENCES)))
+            return;
+        try
+        {
+            var addField = FieldEditorPreferencePage.class.getDeclaredMethod("addField", FieldEditor.class); //$NON-NLS-1$
+            addField.setAccessible(true);
+            if (!initially)
+                for (var control : parent.getChildren())
+                    if (control instanceof Button button && button.getText().startsWith("Сворачивать ")) //$NON-NLS-1$
+                        button.setText("Группировать " + button.getText().substring("Сворачивать ".length())); //$NON-NLS-1$ //$NON-NLS-2$
+            String[] keys = initially
+                ? new String[] { ComfortSettings.PREF_FOLD_TEXT_LITERALS_INITIALLY }
+                : new String[] { ComfortSettings.PREF_FOLD_TEXT_LITERALS, ComfortSettings.PREF_FOLD_BATCH_QUERIES };
+            for (String key : keys)
+            {
+                var field = new FoldingFieldEditor(key, parent);
+                addField.invoke(page, field);
+                Global.tempLog("literal-folding-settings", "added " + key); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            parent.setData(PROP_FOLDING_PREFERENCES, Boolean.TRUE);
+        }
+        catch (ReflectiveOperationException | RuntimeException error)
+        {
+            Global.tempLogException("literal-folding-settings", "create", error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Штатные Apply/OK/Defaults страницы, хранилище и сохранение — Комфорта. */
+    private static final class FoldingFieldEditor extends BooleanFieldEditor
+    {
+        FoldingFieldEditor(String key, Composite parent)
+        {
+            super(key, ComfortVisibleSettings.label(key), parent);
+            // JFace initialize() сохраняет явно назначенное хранилище редактора поля.
+            setPreferenceStore(ComfortSettings.getInstance().getPreferenceStore());
+            var control = getDescriptionControl(parent);
+            String description = ComfortSettings.PREF_FOLD_BATCH_QUERIES.equals(key)
+                ? "Группировать отдельные запросы пакета по разделителю «;»."
+                : "От 20 строк."
+                    + (ComfortSettings.PREF_FOLD_TEXT_LITERALS_INITIALLY.equals(key)
+                        ? " Сворачивать при открытии модуля и по команде «Сбросить сворачиваемые группы». "
+                            + "Действует при включённой настройке «Группировать большой текстовый литерал»."
+                        : " Группировать литерал целиком, включая текст запроса.");
+            control.setToolTipText(TooltipText.wrap(control, description + " "
+                + "После изменения настройки выполните «Сбросить сворачиваемые группы» или переоткройте модуль."
+                + Global.pluginSignForTooltip()));
+        }
+
+        @Override
+        public void store()
+        {
+            super.store();
+            ComfortSettings.setAndSave(getPreferenceName(), getBooleanValue());
+            Global.tempLog("literal-folding-settings", "store " + getPreferenceName() + "=" + getBooleanValue()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
     }
 
     /** Вызов из вплетённого {@code isInitiallyCollapsed}: {@code element → TRUE/FALSE}. */

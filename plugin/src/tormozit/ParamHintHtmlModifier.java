@@ -400,8 +400,6 @@ public final class ParamHintHtmlModifier
                     boolean alreadyVisible = isParamHintAlreadyVisible();
                     ContentAssistSessionReloader.logLinkedMode("cmd.post", "{\"visible\":" //$NON-NLS-1$ //$NON-NLS-2$
                         + alreadyVisible + "}"); //$NON-NLS-1$
-                    // #region agent log
-                    // #endregion
                     // Синхронно и только при реальном промахе — без asyncExec (иначе
                     // подмена comfort→EDT через ~50мс в основном режиме).
                     if (!alreadyVisible)
@@ -2263,16 +2261,14 @@ public final class ParamHintHtmlModifier
      */
     static void repositionShownParamHint()
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.reposition", null))
-        {
-            Object handler = madeParamHoverHandler;
-            if (!isRealParamHoverHandler(handler)
-                || Global.getField(handler, "infoControl") == null) //$NON-NLS-1$
-                handler = resolveParamHoverHandlerForMiss();
-            if (isRealParamHoverHandler(handler))
-                repositionParamHintWhenReady(handler);
+        Object handler = madeParamHoverHandler;
+        if (!isRealParamHoverHandler(handler)
+            || Global.getField(handler, "infoControl") == null) //$NON-NLS-1$
+            handler = resolveParamHoverHandlerForMiss();
+        if (isRealParamHoverHandler(handler))
+            repositionParamHintWhenReady(handler);
 
-        }
+
     }
 
     static void repositionParamHintWhenReady(Object handler)
@@ -3325,26 +3321,24 @@ public final class ParamHintHtmlModifier
 
     public static boolean ensureParamHintShellGeometry(Shell shell, StyledText st)
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.geometry", null))
-        {
-            if (shell == null || shell.isDisposed())
-                return false;
-            // Сжали гиганта — прежнее положение считалось по гигантскому размеру и теперь
-            // недействительно: окно стоит под кареткой (штатный computeLocation не нашёл
-            // места сверху для гиганта). Переносим принудительно, не по признаку «далеко».
-            boolean shrunk = constrainParamHintShellIfGiant(shell);
-            boolean changed = shrunk;
-            if (st != null && !st.isDisposed())
-                changed |= relocateParamHintShellNearCaret(shell, st, shrunk);
-            else
-                changed |= relocateParamHintShellNearCaret(shell, shrunk);
-            // #region agent log
-            Global.tempLog("param-hint-geometry", "ensure shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
-                + " shrunk=" + shrunk + " changed=" + changed + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return changed;
+        if (shell == null || shell.isDisposed())
+            return false;
+        // Сжали гиганта — прежнее положение считалось по гигантскому размеру и теперь
+        // недействительно: окно стоит под кареткой (штатный computeLocation не нашёл
+        // места сверху для гиганта). Переносим принудительно, не по признаку «далеко».
+        boolean shrunk = constrainParamHintShellIfGiant(shell);
+        boolean changed = shrunk;
+        if (st != null && !st.isDisposed())
+            changed |= relocateParamHintShellNearCaret(shell, st, shrunk);
+        else
+            changed |= relocateParamHintShellNearCaret(shell, shrunk);
+        // #region agent log
+        Global.tempLog("param-hint-geometry", "ensure shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
+            + " shrunk=" + shrunk + " changed=" + changed + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        return changed;
 
-        }
+
     }
 
     /** Сжать shell подсказки, если он больше допустимого. Без продления size-guard. */
@@ -4487,34 +4481,32 @@ public final class ParamHintHtmlModifier
      */
     static String modifyHtml(String html, HoverContext ctx)
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.modifyHtml", null))
-        {
-            if (html == null || html.isEmpty())
-                return null;
+        if (html == null || html.isEmpty())
+            return null;
 
-            String result = html;
-            String withParen = modifyHeadingHtml(result, ctx);
-            if (withParen != null)
-                result = withParen;
+        String result = html;
+        String withParen = modifyHeadingHtml(result, ctx);
+        if (withParen != null)
+            result = withParen;
 
-            String withAutomaticOverflow = useAutomaticHorizontalOverflow(result);
-            if (withAutomaticOverflow != null)
-                result = withAutomaticOverflow;
+        String withAutomaticOverflow = useAutomaticHorizontalOverflow(result);
+        if (withAutomaticOverflow != null)
+            result = withAutomaticOverflow;
 
-            String withParameterLinks = useClickableParameterStyle(result);
-            if (withParameterLinks != null)
-                result = withParameterLinks;
+        String withParameterLinks = useClickableParameterStyle(result);
+        if (withParameterLinks != null)
+            result = withParameterLinks;
 
-            if (result.contains(COMFORT_META_MARKER) || result.contains("data-comfort=\"1\"")) //$NON-NLS-1$
-                return result.equals(html) ? null : result;
-
-            String withContent = modifyContentHtml(result, ctx);
-            if (withContent != null)
-                result = withContent;
-
+        if (result.contains(COMFORT_META_MARKER) || result.contains("data-comfort=\"1\"")) //$NON-NLS-1$
             return result.equals(html) ? null : result;
 
-        }
+        String withContent = modifyContentHtml(result, ctx);
+        if (withContent != null)
+            result = withContent;
+
+        return result.equals(html) ? null : result;
+
+
     }
 
     /**
@@ -4615,8 +4607,6 @@ public final class ParamHintHtmlModifier
             + "font-weight:normal;color:" + foreground + ";background:" + background //$NON-NLS-1$ //$NON-NLS-2$
             + ";border:1px solid " + headingPrefixColorHex() //$NON-NLS-1$
             + ";box-shadow:1px 2px 4px rgba(0,0,0,.25);}" //$NON-NLS-1$
-            + "span." + PARAM_ENTRY_CLASS + ":hover>span." + PARAM_MENU_CLASS //$NON-NLS-1$ //$NON-NLS-2$
-            + "{display:block;}" //$NON-NLS-1$
             + "span." + PARAM_MENU_ITEM_CLASS //$NON-NLS-1$
             + "{display:block;max-width:100%;box-sizing:border-box;overflow:hidden;" //$NON-NLS-1$
             + "text-overflow:ellipsis;padding:2px 7px;cursor:pointer;text-decoration:none;}" //$NON-NLS-1$
@@ -4624,11 +4614,40 @@ public final class ParamHintHtmlModifier
             + "{color:" + selectedForeground + ";background:" + selectedBackground + ";}" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + "</style>"; //$NON-NLS-1$
         String script = "<script>" //$NON-NLS-1$
+            + "window.comfortParamSelecting=false;" //$NON-NLS-1$
+            + "function comfortParamMenuBlocked(e){if(window.comfortParamSelecting)return true;" //$NON-NLS-1$
+            + "var s=window.getSelection();if(!s||s.isCollapsed)return false;" //$NON-NLS-1$
+            + "var sourceStart=document.createRange();sourceStart.selectNodeContents(e);" //$NON-NLS-1$
+            + "sourceStart.setEndBefore(e.lastElementChild);var sourceEnd=sourceStart.cloneRange();" //$NON-NLS-1$
+            + "sourceStart.collapse(true);sourceEnd.collapse(false);" //$NON-NLS-1$
+            + "for(var i=0;i<s.rangeCount;i++){var start=s.getRangeAt(i).cloneRange(),end=start.cloneRange();" //$NON-NLS-1$
+            + "start.collapse(true);end.collapse(false);" //$NON-NLS-1$
+            + "if(start.compareBoundaryPoints(0,sourceEnd)<0&&end.compareBoundaryPoints(0,sourceStart)>0)return true;}" //$NON-NLS-1$
+            + "return false;}" //$NON-NLS-1$
+            + "document.addEventListener('selectionchange',function(){" //$NON-NLS-1$
+            + "var menus=document.querySelectorAll('span." + PARAM_MENU_CLASS + "');" //$NON-NLS-1$ //$NON-NLS-2$
+            + "for(var i=0;i<menus.length;i++)if(comfortParamMenuBlocked(menus[i].parentNode))" //$NON-NLS-1$
+            + "menus[i].style.display='none';},true);" //$NON-NLS-1$
+            + "function comfortParamMenuTarget(e){for(var n=e.target;n&&n!==document;n=n.parentNode)" //$NON-NLS-1$
+            + "if(n.nodeType===1&&(' '+n.className+' ').indexOf(' " + PARAM_MENU_CLASS + " ')>=0)return true;" //$NON-NLS-1$ //$NON-NLS-2$
+            + "return false;}" //$NON-NLS-1$
+            + "function comfortTrackParamSelection(e){" //$NON-NLS-1$
+            + "if(!window.comfortParamSelecting&&comfortParamMenuTarget(e))return;" //$NON-NLS-1$
+            + "var down=!!(e.buttons&1);" //$NON-NLS-1$
+            + "if(window.comfortParamSelecting===down)return;window.comfortParamSelecting=down;" //$NON-NLS-1$
+            + "if(down){var menus=document.querySelectorAll('span." + PARAM_MENU_CLASS + "');" //$NON-NLS-1$ //$NON-NLS-2$
+            + "for(var i=0;i<menus.length;i++)menus[i].style.display='none';}}" //$NON-NLS-1$
+            + "['mousedown','mouseup','mousemove','mouseover'].forEach(function(t){" //$NON-NLS-1$
+            + "document.addEventListener(t,comfortTrackParamSelection,true);});" //$NON-NLS-1$
             + "function comfortShowParamMenu(e){var m=e.lastElementChild,g=4;" //$NON-NLS-1$
+            + "if(comfortParamMenuBlocked(e)){m.style.display='none';" //$NON-NLS-1$
+            + "return;}" //$NON-NLS-1$
+            + "m.style.fontSize=window.getComputedStyle(e).fontSize;" //$NON-NLS-1$
             + "m.style.display='block';m.style.left='0px';m.style.top='0px';" //$NON-NLS-1$
             + "var r=e.getBoundingClientRect(),w=m.offsetWidth,h=m.offsetHeight;" //$NON-NLS-1$
             + "m.style.left=Math.max(g,Math.min(r.left,window.innerWidth-w-g))+'px';" //$NON-NLS-1$
-            + "m.style.top=Math.max(g,Math.min(r.bottom,window.innerHeight-h-g))+'px';}" //$NON-NLS-1$
+            + "m.style.top=Math.max(g,Math.min(r.bottom,window.innerHeight-h-g))+'px';" //$NON-NLS-1$
+            + "}" //$NON-NLS-1$
             + "function comfortHideParamMenu(e){var m=e.lastElementChild;" //$NON-NLS-1$
             + "m.style.display='';m.style.left='';m.style.top='';}" //$NON-NLS-1$
             + "</script>"; //$NON-NLS-1$
@@ -4656,40 +4675,38 @@ public final class ParamHintHtmlModifier
      */
     static String modifyHeadingHtml(String html, HoverContext ctx)
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.modifyHeading", null))
-        {
-            if (html == null || html.isEmpty())
-                return null;
+        if (html == null || html.isEmpty())
+            return null;
 
-            String marker = "<span class=\"" + HEADING_CLASS + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
-            int spanStart = html.indexOf(marker);
-            if (spanStart < 0)
-                return null;
+        String marker = "<span class=\"" + HEADING_CLASS + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
+        int spanStart = html.indexOf(marker);
+        if (spanStart < 0)
+            return null;
 
-            int contentStart = spanStart + marker.length();
-            if (html.indexOf(HEADING_PREFIX_CLASS, contentStart) >= 0)
-                return null;
+        int contentStart = spanStart + marker.length();
+        if (html.indexOf(HEADING_PREFIX_CLASS, contentStart) >= 0)
+            return null;
 
-            int brPos = html.indexOf("<br>", contentStart); //$NON-NLS-1$
-            int firstParen = indexOfHeadingSignatureParen(html, contentStart);
-            if (firstParen < 0)
-                return null;
-            if (brPos >= 0 && brPos < firstParen)
-                return null;
+        int brPos = html.indexOf("<br>", contentStart); //$NON-NLS-1$
+        int firstParen = indexOfHeadingSignatureParen(html, contentStart);
+        if (firstParen < 0)
+            return null;
+        if (brPos >= 0 && brPos < firstParen)
+            return null;
 
-            int spanEnd = html.indexOf("</span>", contentStart); //$NON-NLS-1$
-            if (spanEnd >= 0 && firstParen > spanEnd)
-                return null;
+        int spanEnd = html.indexOf("</span>", contentStart); //$NON-NLS-1$
+        if (spanEnd >= 0 && firstParen > spanEnd)
+            return null;
 
-            String before = html.substring(contentStart, firstParen);
-            String rebuilt = rebuildHeadingPrefix(before, ctx);
-            String prefix = colorizeHeadingPrefix(rebuilt != null ? rebuilt : before);
-            String withParen = html.substring(0, contentStart) + prefix + "<br>(" //$NON-NLS-1$
-                + html.substring(firstParen + 1);
-            String withOptional = rewriteHeadingOptionalParams(withParen, ctx);
-            return withOptional != null ? withOptional : withParen;
+        String before = html.substring(contentStart, firstParen);
+        String rebuilt = rebuildHeadingPrefix(before, ctx);
+        String prefix = colorizeHeadingPrefix(rebuilt != null ? rebuilt : before);
+        String withParen = html.substring(0, contentStart) + prefix + "<br>(" //$NON-NLS-1$
+            + html.substring(firstParen + 1);
+        String withOptional = rewriteHeadingOptionalParams(withParen, ctx);
+        return withOptional != null ? withOptional : withParen;
 
-        }
+
     }
 
     /**
@@ -5359,180 +5376,178 @@ public final class ParamHintHtmlModifier
 
     static String modifyContentHtml(String html, HoverContext ctx)
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.modifyContent", null))
+        if (html == null || html.isEmpty())
+            return null;
+
+        int typeClassPos = indexOfClassAttribute(html, TYPE_CLASS);
+        if (typeClassPos < 0)
+            return null;
+
+        int typeDivStart = html.lastIndexOf("<div", typeClassPos); //$NON-NLS-1$
+        if (typeDivStart < 0)
+            return null;
+        int typeInnerStart = html.indexOf('>', typeClassPos);
+        if (typeInnerStart < 0)
+            return null;
+        typeInnerStart++;
+        int typeInnerEnd = html.indexOf("</div>", typeInnerStart); //$NON-NLS-1$
+        if (typeInnerEnd < 0)
+            return null;
+
+        String oldTypeInner = html.substring(typeInnerStart, typeInnerEnd);
+        // База — только типы (без «Тип:» / «Типы:»), со ссылками если есть
+        String typeBase = stripTypeLabel(stripComfortMeta(oldTypeInner));
+
+        String description = null;
+        String defaultDescription = null;
+        Boolean isOut = null;
+        String paramName = null;
+        Object paramContent = null;
+        boolean currentParam = false;
+        boolean virtualParam = false;
+
+        if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
+            && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
         {
-            if (html == null || html.isEmpty())
-                return null;
-
-            int typeClassPos = indexOfClassAttribute(html, TYPE_CLASS);
-            if (typeClassPos < 0)
-                return null;
-
-            int typeDivStart = html.lastIndexOf("<div", typeClassPos); //$NON-NLS-1$
-            if (typeDivStart < 0)
-                return null;
-            int typeInnerStart = html.indexOf('>', typeClassPos);
-            if (typeInnerStart < 0)
-                return null;
-            typeInnerStart++;
-            int typeInnerEnd = html.indexOf("</div>", typeInnerStart); //$NON-NLS-1$
-            if (typeInnerEnd < 0)
-                return null;
-
-            String oldTypeInner = html.substring(typeInnerStart, typeInnerEnd);
-            // База — только типы (без «Тип:» / «Типы:»), со ссылками если есть
-            String typeBase = stripTypeLabel(stripComfortMeta(oldTypeInner));
-
-            String description = null;
-            String defaultDescription = null;
-            Boolean isOut = null;
-            String paramName = null;
-            Object paramContent = null;
-            boolean currentParam = false;
-            boolean virtualParam = false;
-
-            if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
-                && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
+            Object page = ctx.pages.get(ctx.pageIndex);
+            virtualParam = extraUnknownParamCount(ctx, countPageParams(page)) > 0;
+            int highlight = currentParamHighlightIndex(ctx, countPageParams(page));
+            currentParam = highlight >= 0;
+            paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
+                Integer.valueOf(highlight)) : null;
+            if (paramContent != null)
             {
-                Object page = ctx.pages.get(ctx.pageIndex);
-                virtualParam = extraUnknownParamCount(ctx, countPageParams(page)) > 0;
-                int highlight = currentParamHighlightIndex(ctx, countPageParams(page));
-                currentParam = highlight >= 0;
-                paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
-                    Integer.valueOf(highlight)) : null;
-                if (paramContent != null)
+                paramName = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
+                Object sourceParameter = ParameterSeeLinks.parameter(ctx, paramName);
+                if (sourceParameter != null)
                 {
-                    paramName = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
-                    Object sourceParameter = ParameterSeeLinks.parameter(ctx, paramName);
-                    if (sourceParameter != null)
+                    paramContent = sourceParameter;
+                    typeBase = formatParamContentTypesHtml(sourceParameter);
+                }
+                defaultDescription = asString(Global.invoke(paramContent, "getDefaultDescription")); //$NON-NLS-1$
+                Object value = Global.invoke(paramContent, "getValue"); //$NON-NLS-1$
+                description = resolveParamDescription(value, ctx.method, paramName);
+                // Если в HTML типов нет <a>, пересобрать ссылки из IPageReference
+                if (!typeBase.contains("href")) //$NON-NLS-1$
+                {
+                    String linkedTypes = formatParamContentTypesHtml(paramContent);
+                    if (linkedTypes != null && !linkedTypes.isEmpty())
+                        typeBase = linkedTypes;
+                    else if (stripHtml(typeBase).isEmpty())
                     {
-                        paramContent = sourceParameter;
-                        typeBase = formatParamContentTypesHtml(sourceParameter);
-                    }
-                    defaultDescription = asString(Global.invoke(paramContent, "getDefaultDescription")); //$NON-NLS-1$
-                    Object value = Global.invoke(paramContent, "getValue"); //$NON-NLS-1$
-                    description = resolveParamDescription(value, ctx.method, paramName);
-                    // Если в HTML типов нет <a>, пересобрать ссылки из IPageReference
-                    if (!typeBase.contains("href")) //$NON-NLS-1$
-                    {
-                        String linkedTypes = formatParamContentTypesHtml(paramContent);
-                        if (linkedTypes != null && !linkedTypes.isEmpty())
-                            typeBase = linkedTypes;
-                        else if (stripHtml(typeBase).isEmpty())
-                        {
-                            String fallbackTypes = formatParamContentTypes(paramContent);
-                            if (fallbackTypes != null && !fallbackTypes.isEmpty())
-                                typeBase = escapeHtml(fallbackTypes);
-                        }
+                        String fallbackTypes = formatParamContentTypes(paramContent);
+                        if (fallbackTypes != null && !fallbackTypes.isEmpty())
+                            typeBase = escapeHtml(fallbackTypes);
                     }
                 }
-                isOut = resolveIsOut(ctx, paramName, paramContent);
             }
-
-            if (currentParam && (description == null || description.isEmpty()))
-                description = normalizeDescription(extractExpandedDescription(html));
-
-            if (virtualParam)
-            {
-                // Каретка стоит на несуществующем параметре (в заголовке он показан как «?»).
-                // Тип и описание в штатном HTML — от последнего формального параметра: EDT
-                // прижимает номер параметра к paramSize-1. К введённому значению они
-                // отношения не имеют, поэтому гасим их, а не оставляем как есть.
-                typeBase = ""; //$NON-NLS-1$
-                description = null;
-                defaultDescription = null;
-                isOut = null;
-            }
-
-            // #region agent log
-            Global.tempLog("param-hint-prefix", "page=" + ctxPageIndex(ctx) //$NON-NLS-1$
-                + " hl=" + highlightSafe(ctx) //$NON-NLS-1$
-                + " name=" + (paramName == null ? "-" : paramName) //$NON-NLS-1$
-                + " virt=" + virtualParam //$NON-NLS-1$
-                + " method=" + (ctx == null || ctx.method == null) //$NON-NLS-1$
-                + " pidx=" + (ctx == null ? -1 : ctx.paramIndex) //$NON-NLS-1$
-                + " isOut=" + isOut + " prefix=\"" + buildDirectionPrefix(isOut) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " caller=" + modifyContentCaller()); //$NON-NLS-1$
-            // #endregion
-            String directionPrefix = buildDirectionPrefix(isOut);
-            boolean copy = Boolean.TRUE.equals(isOut) && ctx != null && ctx.serverCall;
-            if (copy)
-                directionPrefix = "Вых. (копия) - "; //$NON-NLS-1$
-            if (Boolean.TRUE.equals(isOut) && ctx != null && paramName != null
-                && ctx.assignedParamNames.contains(paramName.toLowerCase(Locale.ROOT)))
-            {
-                RGB color = ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40));
-                String cssColor = String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
-                    color.red, color.green, color.blue);
-                directionPrefix = "Вых. (<span class=\"comfort-param-assigned\" style=\"color:" //$NON-NLS-1$
-                    + cssColor + "\">присвоение</span>" //$NON-NLS-1$
-                    + (copy ? ", копия" : "") + ") - "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-            String suffix = buildMetaSuffix(defaultDescription, description);
-            String seeLinks = !virtualParam && paramName != null
-                ? ParameterSeeLinks.html(ctx, paramName) : ""; //$NON-NLS-1$
-            // Единый вид с подсказкой члена: «<Типы : Конструктор()>».
-            String newTypeInner = directionPrefix
-                + (seeLinks.isEmpty() ? typeBase + suffix : "&lt;" + typeBase + seeLinks + "&gt;" + suffix); //$NON-NLS-1$ //$NON-NLS-2$
-            if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
-                return null;
-            boolean hasEnrichment = virtualParam
-                || !stripHtml(typeBase).isEmpty()
-                || !seeLinks.isEmpty()
-                || isOut != null
-                || (defaultDescription != null && !defaultDescription.isBlank())
-                || (description != null && !description.isBlank());
-            if (!hasEnrichment)
-                return null;
-
-            String typeOpen = html.substring(typeDivStart, typeInnerStart);
-            if (!typeOpen.contains(COMFORT_META_MARKER))
-            {
-                String replaced = replaceClassAttribute(typeOpen, TYPE_CLASS,
-                    TYPE_CLASS + " " + COMFORT_META_MARKER); //$NON-NLS-1$
-                if (replaced != null)
-                    typeOpen = replaced;
-                else
-                {
-                    int gt = typeOpen.lastIndexOf('>');
-                    if (gt >= 0)
-                        typeOpen = typeOpen.substring(0, gt) + " data-comfort=\"1\"" //$NON-NLS-1$
-                            + typeOpen.substring(gt);
-                }
-            }
-
-            StringBuilder out = new StringBuilder(html.length() + 64);
-            out.append(html, 0, typeDivStart);
-            out.append(typeOpen);
-            out.append(newTypeInner);
-            out.append("</div>"); //$NON-NLS-1$
-
-            int afterTypeDiv = typeInnerEnd + "</div>".length(); //$NON-NLS-1$
-            // Убирать пустой блок и описание, уже перенесённое в строку типа.
-            // Непустое описание, которое не удалось перенести, оставляем раскрываемым.
-            // На виртуальном параметре блок «Описание» тоже от последнего формального —
-            // убираем вместе с типом.
-            boolean inlinedDescription = description != null && !description.isBlank();
-            boolean emptyDescription = isEmptyParamDescription(paramContent);
-            int descClassPos = inlinedDescription || virtualParam || emptyDescription
-                ? indexOfClassAttribute(html, DESC_CLASS, afterTypeDiv)
-                : -1;
-            if (descClassPos >= 0)
-            {
-                int descDivStart = html.lastIndexOf("<div", descClassPos); //$NON-NLS-1$
-                int descDivEnd = findMatchingDivEnd(html, descDivStart);
-                if (descDivStart >= afterTypeDiv && descDivEnd > descDivStart)
-                {
-                    out.append(html, afterTypeDiv, descDivStart);
-                    out.append(html, descDivEnd, html.length());
-                    return out.toString();
-                }
-            }
-
-            out.append(html, afterTypeDiv, html.length());
-            return out.toString();
-
+            isOut = resolveIsOut(ctx, paramName, paramContent);
         }
+
+        if (currentParam && (description == null || description.isEmpty()))
+            description = normalizeDescription(extractExpandedDescription(html));
+
+        if (virtualParam)
+        {
+            // Каретка стоит на несуществующем параметре (в заголовке он показан как «?»).
+            // Тип и описание в штатном HTML — от последнего формального параметра: EDT
+            // прижимает номер параметра к paramSize-1. К введённому значению они
+            // отношения не имеют, поэтому гасим их, а не оставляем как есть.
+            typeBase = ""; //$NON-NLS-1$
+            description = null;
+            defaultDescription = null;
+            isOut = null;
+        }
+
+        // #region agent log
+        Global.tempLog("param-hint-prefix", "page=" + ctxPageIndex(ctx) //$NON-NLS-1$
+            + " hl=" + highlightSafe(ctx) //$NON-NLS-1$
+            + " name=" + (paramName == null ? "-" : paramName) //$NON-NLS-1$
+            + " virt=" + virtualParam //$NON-NLS-1$
+            + " method=" + (ctx == null || ctx.method == null) //$NON-NLS-1$
+            + " pidx=" + (ctx == null ? -1 : ctx.paramIndex) //$NON-NLS-1$
+            + " isOut=" + isOut + " prefix=\"" + buildDirectionPrefix(isOut) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " caller=" + modifyContentCaller()); //$NON-NLS-1$
+        // #endregion
+        String directionPrefix = buildDirectionPrefix(isOut);
+        boolean copy = Boolean.TRUE.equals(isOut) && ctx != null && ctx.serverCall;
+        if (copy)
+            directionPrefix = "Вых. (копия) - "; //$NON-NLS-1$
+        if (Boolean.TRUE.equals(isOut) && ctx != null && paramName != null
+            && ctx.assignedParamNames.contains(paramName.toLowerCase(Locale.ROOT)))
+        {
+            RGB color = ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40));
+            String cssColor = String.format(Locale.ROOT, "#%02X%02X%02X", //$NON-NLS-1$
+                color.red, color.green, color.blue);
+            directionPrefix = "Вых. (<span class=\"comfort-param-assigned\" style=\"color:" //$NON-NLS-1$
+                + cssColor + "\">присвоение</span>" //$NON-NLS-1$
+                + (copy ? ", копия" : "") + ") - "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        String suffix = buildMetaSuffix(defaultDescription, description);
+        String seeLinks = !virtualParam && paramName != null
+            ? ParameterSeeLinks.html(ctx, paramName) : ""; //$NON-NLS-1$
+        // Единый вид с подсказкой члена: «<Типы : Конструктор()>».
+        String newTypeInner = directionPrefix
+            + (seeLinks.isEmpty() ? typeBase + suffix : "&lt;" + typeBase + seeLinks + "&gt;" + suffix); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
+            return null;
+        boolean hasEnrichment = virtualParam
+            || !stripHtml(typeBase).isEmpty()
+            || !seeLinks.isEmpty()
+            || isOut != null
+            || (defaultDescription != null && !defaultDescription.isBlank())
+            || (description != null && !description.isBlank());
+        if (!hasEnrichment)
+            return null;
+
+        String typeOpen = html.substring(typeDivStart, typeInnerStart);
+        if (!typeOpen.contains(COMFORT_META_MARKER))
+        {
+            String replaced = replaceClassAttribute(typeOpen, TYPE_CLASS,
+                TYPE_CLASS + " " + COMFORT_META_MARKER); //$NON-NLS-1$
+            if (replaced != null)
+                typeOpen = replaced;
+            else
+            {
+                int gt = typeOpen.lastIndexOf('>');
+                if (gt >= 0)
+                    typeOpen = typeOpen.substring(0, gt) + " data-comfort=\"1\"" //$NON-NLS-1$
+                        + typeOpen.substring(gt);
+            }
+        }
+
+        StringBuilder out = new StringBuilder(html.length() + 64);
+        out.append(html, 0, typeDivStart);
+        out.append(typeOpen);
+        out.append(newTypeInner);
+        out.append("</div>"); //$NON-NLS-1$
+
+        int afterTypeDiv = typeInnerEnd + "</div>".length(); //$NON-NLS-1$
+        // Убирать пустой блок и описание, уже перенесённое в строку типа.
+        // Непустое описание, которое не удалось перенести, оставляем раскрываемым.
+        // На виртуальном параметре блок «Описание» тоже от последнего формального —
+        // убираем вместе с типом.
+        boolean inlinedDescription = description != null && !description.isBlank();
+        boolean emptyDescription = isEmptyParamDescription(paramContent);
+        int descClassPos = inlinedDescription || virtualParam || emptyDescription
+            ? indexOfClassAttribute(html, DESC_CLASS, afterTypeDiv)
+            : -1;
+        if (descClassPos >= 0)
+        {
+            int descDivStart = html.lastIndexOf("<div", descClassPos); //$NON-NLS-1$
+            int descDivEnd = findMatchingDivEnd(html, descDivStart);
+            if (descDivStart >= afterTypeDiv && descDivEnd > descDivStart)
+            {
+                out.append(html, afterTypeDiv, descDivStart);
+                out.append(html, descDivEnd, html.length());
+                return out.toString();
+            }
+        }
+
+        out.append(html, afterTypeDiv, html.length());
+        return out.toString();
+
+
     }
 
     /** Тот же выбор содержимого, что в PageUtil.generateSimpleHoverValueHtml EDT. */
@@ -5672,47 +5687,45 @@ public final class ParamHintHtmlModifier
 
         private static NativeDocumentation documentation(HoverContext ctx)
         {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.documentation", null))
-        {
-                Object key = pageAt(ctx);
-                if (key == null)
+            Object key = pageAt(ctx);
+            if (key == null)
+                return null;
+            NativeDocumentation cached = DOCUMENTATION.get(key);
+            if (cached != null)
+                return cached;
+            var method = documentedMethod(ctx);
+            if (method == null || ctx.parametersHover == null)
+                return null;
+            Object provider = Global.getField(ctx.parametersHover, "documentationProvider"); //$NON-NLS-1$
+            Object languageProvider = Global.getField(ctx.parametersHover, "languageProvider"); //$NON-NLS-1$
+            String language = asString(Global.invoke(languageProvider, "getLanguage")); //$NON-NLS-1$
+            DocumentationCapture capture = new DocumentationCapture(EcoreUtil.getURI(method));
+            DocumentationCapture previous = CAPTURE.get();
+            CAPTURE.set(capture);
+            try
+            {
+                // Готовые страницы строит сам EDT: типы параметра считаются в модуле объявления.
+                Object group = Global.invoke(provider, "getHoverDocumentationPages", method, //$NON-NLS-1$
+                    language != null ? language : "ru"); //$NON-NLS-1$
+                List<Object> pages = new ArrayList<>();
+                FindMissSupport.collectContentAssistPages(group, pages);
+                Global.tempLog("param-hint-documentation", "source=" + capture.methodUri //$NON-NLS-1$ //$NON-NLS-2$
+                    + " nativeComment=" + (capture.comment != null) + " pages=" + pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (pages.isEmpty())
                     return null;
-                NativeDocumentation cached = DOCUMENTATION.get(key);
-                if (cached != null)
-                    return cached;
-                var method = documentedMethod(ctx);
-                if (method == null || ctx.parametersHover == null)
-                    return null;
-                Object provider = Global.getField(ctx.parametersHover, "documentationProvider"); //$NON-NLS-1$
-                Object languageProvider = Global.getField(ctx.parametersHover, "languageProvider"); //$NON-NLS-1$
-                String language = asString(Global.invoke(languageProvider, "getLanguage")); //$NON-NLS-1$
-                DocumentationCapture capture = new DocumentationCapture(EcoreUtil.getURI(method));
-                DocumentationCapture previous = CAPTURE.get();
-                CAPTURE.set(capture);
-                try
-                {
-                    // Готовые страницы строит сам EDT: типы параметра считаются в модуле объявления.
-                    Object group = Global.invoke(provider, "getHoverDocumentationPages", method, //$NON-NLS-1$
-                        language != null ? language : "ru"); //$NON-NLS-1$
-                    List<Object> pages = new ArrayList<>();
-                    FindMissSupport.collectContentAssistPages(group, pages);
-                    Global.tempLog("param-hint-documentation", "source=" + capture.methodUri //$NON-NLS-1$ //$NON-NLS-2$
-                        + " nativeComment=" + (capture.comment != null) + " pages=" + pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
-                    if (pages.isEmpty())
-                        return null;
-                    NativeDocumentation result = new NativeDocumentation(capture.comment, pages.get(0));
-                    DOCUMENTATION.put(key, result);
-                    return result;
-                }
-                finally
-                {
-                    if (previous != null)
-                        CAPTURE.set(previous);
-                    else
-                        CAPTURE.remove();
-                }
+                NativeDocumentation result = new NativeDocumentation(capture.comment, pages.get(0));
+                DOCUMENTATION.put(key, result);
+                return result;
+            }
+            finally
+            {
+                if (previous != null)
+                    CAPTURE.set(previous);
+                else
+                    CAPTURE.remove();
+            }
 
-        }
+
     }
 
         static Object parameter(HoverContext ctx, String name)

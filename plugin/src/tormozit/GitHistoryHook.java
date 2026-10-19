@@ -2020,8 +2020,8 @@ public final class GitHistoryHook implements IStartup
 
         TableColumn statusCol = new TableColumn(table, SWT.LEFT, 3);
         statusCol.setText("Статус"); //$NON-NLS-1$
-        statusCol.setToolTipText("Статус изменения файла в коммите" + Global.pluginSignForTooltip() //$NON-NLS-1$
-            + ".\n+ добавлен или скопирован\n- удалён\n/ переименован\nпусто — изменён"); //$NON-NLS-1$
+        statusCol.setToolTipText(TooltipText.wrap(table, "Статус изменения файла в коммите" + Global.pluginSignForTooltip() //$NON-NLS-1$
+            + ".\n+ добавлен или скопирован\n- удалён\n/ переименован\nпусто — изменён")); //$NON-NLS-1$
         statusCol.setResizable(true);
         statusCol.setMoveable(true);
         statusCol.setWidth(24);

@@ -68,6 +68,7 @@ public final class IrBslHoverHtml
         Browser browser = findControlBrowser(control);
         if (browser == null || browser.isDisposed())
             return;
+        MetadataTypeMenu.installBrowser(browser);
         if (browser.getData(DECORATION_LISTENER_MARK) == null)
         {
             browser.setData(DECORATION_LISTENER_MARK, Boolean.TRUE);
@@ -110,6 +111,19 @@ public final class IrBslHoverHtml
 
     public static IInformationControlCreator wrapCreator(IInformationControlCreator creator)
     {
+        // При переходе мышью в подсказку JFace берёт не внешний creator,
+        // а этот presenter из HoverControlCreator (проверено в Xtext JAR).
+        // Слушатель нужен до первого setInput: на SWT.Show HTML уже загружен.
+        if (creator instanceof org.eclipse.xtext.ui.editor.hover.html.DefaultEObjectHoverProvider.HoverControlCreator)
+        {
+            Object presenter = Global.getField(creator, "fInformationPresenterControlCreator"); //$NON-NLS-1$
+            if (presenter instanceof IInformationControlCreator presenterCreator
+                && !(presenterCreator instanceof HtmlDecorationCreator))
+            {
+                Global.setFieldForce(creator, "fInformationPresenterControlCreator", //$NON-NLS-1$
+                    wrapCreator(presenterCreator));
+            }
+        }
         return creator == null || creator instanceof HtmlDecorationCreator
             ? creator : new HtmlDecorationCreator(creator);
     }

@@ -245,16 +245,86 @@ public final class BslEditorHyperlinkHook implements IStartup
             return document.readOnly(resource ->
             {
                 var target = BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
-                if (target == null || resource.getParseResult() == null)
+                if (resource.getParseResult() == null)
                     return null;
                 ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
-                return leaf == null || leaf.isHidden() ? null : new PropertyHyperlink(
-                    new Region(leaf.getOffset(), leaf.getLength()), target, editor, page);
+                if (leaf == null || leaf.isHidden())
+                    return null;
+                IRegion region = new Region(leaf.getOffset(), leaf.getLength());
+                if (target != null)
+                    return new PropertyHyperlink(region, target, editor, page);
+                return BslQueryResultTypes.isQueryFieldAt(resource, offset)
+                    ? new DeferredQueryPropertyHyperlink(region, document, offset, editor, page) : null;
             });
         }
         catch (RuntimeException | LinkageError failure)
         {
             return null;
+        }
+    }
+
+    /** Первый переход также запускает общий досчёт; UI-поток не разбирает запрос. */
+    private static final class DeferredQueryPropertyHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final IXtextDocument document;
+        private final int offset;
+        private final BslXtextEditor editor;
+        private final IWorkbenchPage page;
+
+        DeferredQueryPropertyHyperlink(IRegion region, IXtextDocument document, int offset,
+            BslXtextEditor editor, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.document = document;
+            this.offset = offset;
+            this.editor = editor;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Перейти к определению поля запроса"; }
+
+        @Override
+        public void open()
+        {
+            long stamp = ((org.eclipse.jface.text.IDocumentExtension4)document).getModificationStamp();
+            Global.tempLog("query-result-types", "navigation request offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
+            org.eclipse.core.runtime.jobs.Job job = org.eclipse.core.runtime.jobs.Job.create(
+                "Переход к определению поля запроса", monitor -> //$NON-NLS-1$
+                {
+                    try
+                    {
+                        var target = document.readOnly(resource ->
+                        {
+                            if (monitor.isCanceled() || !unchanged(stamp))
+                                return null;
+                            BslStructureInsertCommentTypes.refreshTypesForAssist(resource, offset, status -> {});
+                            return BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
+                        });
+                        Global.tempLog("query-result-types", "navigation offset=" + offset + " target=" + target); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        if (target != null && !monitor.isCanceled())
+                            Display.getDefault().asyncExec(() ->
+                            {
+                                if (unchanged(stamp) && editor.getInternalSourceViewer() != null
+                                    && editor.getInternalSourceViewer().getTextWidget() != null
+                                    && !editor.getInternalSourceViewer().getTextWidget().isDisposed())
+                                    new PropertyHyperlink(region, target, editor, page).open();
+                            });
+                    }
+                    catch (RuntimeException | LinkageError failure)
+                    {
+                        Global.tempLogException("query-result-types", "navigation", failure); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                });
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private boolean unchanged(long stamp)
+        {
+            return ((org.eclipse.jface.text.IDocumentExtension4)document).getModificationStamp() == stamp;
         }
     }
 
@@ -439,6 +509,24 @@ public final class BslEditorHyperlinkHook implements IStartup
         if (producer == null && type instanceof TypeSet)
             producer = org.eclipse.xtext.EcoreUtil2.getContainerOfType(type, MdObject.class);
         return producer;
+    }
+
+    /** Те же переходы, что у Ctrl-ссылки, для меню типа внутри подсказки. */
+    static IHyperlink[] metadataTypeLinks(TypeItem type, BslXtextEditor source)
+    {
+        return metadataObjectLinks(typeProducer(type), source);
+    }
+
+    /** Имя таблицы запроса ведёт к тому же объекту метаданных и его модулям. */
+    static IHyperlink[] metadataObjectLinks(MdObject target, BslXtextEditor source)
+    {
+        if (source == null || source.getSite() == null || source.getInternalSourceViewer() == null)
+            return new IHyperlink[0];
+        if (target == null)
+            return new IHyperlink[0];
+        IWorkbenchPage page = source.getSite().getPage();
+        return metadataLinks(source.getInternalSourceViewer(), new IHyperlink[] {
+            new TypeHyperlink(new Region(0, 0), "Объект", target, source, page) }, source, page);
     }
 
     private static ILeafNode commentLeaf(XtextResource resource, int offset)

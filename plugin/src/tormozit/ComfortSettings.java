@@ -317,6 +317,24 @@ public final class ComfortSettings
     /** По умолчанию ничего не сворачивается. */
     public static final String DEFAULT_AUTO_COLLAPSE_REGIONS = ""; //$NON-NLS-1$
 
+    public static final String PREF_FOLD_BATCH_QUERIES = "comfort.folding.batchQueries"; //$NON-NLS-1$
+    public static final String PREF_FOLD_TEXT_LITERALS = "comfort.folding.textLiterals"; //$NON-NLS-1$
+    public static final String PREF_FOLD_TEXT_LITERALS_INITIALLY = "comfort.folding.textLiteralsInitially"; //$NON-NLS-1$
+    static final int LARGE_TEXT_LITERAL_MIN_LINES = 20;
+
+    /** Новые группы включены по умолчанию, но не сворачиваются автоматически. */
+    public static boolean isLiteralFoldingEnabled(String key)
+    {
+        ComfortSettings settings = instance;
+        return settings == null || settings.preferenceStore.getBoolean(key);
+    }
+
+    public static boolean isTextLiteralInitiallyFolded()
+    {
+        ComfortSettings settings = instance;
+        return settings != null && settings.preferenceStore.getBoolean(PREF_FOLD_TEXT_LITERALS_INITIALLY);
+    }
+
     // ---- Indent guides (направляющие отступов) ----
 
     /** Префикс ключей направляющих отступов. */

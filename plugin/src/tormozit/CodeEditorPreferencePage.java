@@ -1,12 +1,16 @@
 package tormozit;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.preference.BooleanFieldEditor;
 import org.eclipse.jface.preference.IntegerFieldEditor;
 import org.eclipse.jface.preference.StringFieldEditor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 
 /** Страница «Параметры → Комфорт → Редактор кода». */
 public final class CodeEditorPreferencePage extends ComfortPreferencePage
@@ -95,15 +99,32 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         setFieldTooltip(implicitVariableColorField, IMPLICIT_VARIABLE_COLOR_TOOLTIP, parent);
         indentUnderCheckbox(implicitVariableColorField, parent);
 
+        Composite queryLiteralHost = new Composite(parent, SWT.NONE);
+        queryLiteralHost.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         BooleanFieldEditor queryLiteralField = new BooleanFieldEditor(
             ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED,
             ComfortVisibleSettings.label(ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED),
-            parent);
+            queryLiteralHost);
         addField(queryLiteralField);
         setFieldTooltip(queryLiteralField,
             "Раскрашивать текст запроса (литерал, начинающийся с ВЫБРАТЬ или УНИЧТОЖИТЬ) и подчёркивать в нём ошибки прямо при наборе.\n" //$NON-NLS-1$
             + "Отметки хаба проверки запросов в таких литералах заменяются живыми.", //$NON-NLS-1$
-            parent);
+            queryLiteralHost);
+
+        Link queryCheckLink = new Link(parent, SWT.NONE);
+        queryCheckLink.setText("<a>Настройка автопроверки</a>"); //$NON-NLS-1$
+        queryCheckLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        queryCheckLink.setToolTipText(TooltipText.wrap(queryCheckLink,
+            "Открыть настройку автопроверки запросов в модуле для активного проекта")); //$NON-NLS-1$
+        queryCheckLink.addListener(SWT.Selection, event ->
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IProject project = Global.getActiveProject(
+                window != null && window.getActivePage() != null ? window.getActivePage().getActivePart() : null,
+                true);
+            if (project != null)
+                ProblemViewHook.openCheckSettings(queryCheckLink.getShell(), project, "bsl-ql-hub"); //$NON-NLS-1$
+        });
 
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
@@ -111,8 +132,8 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
             parent);
         addField(bracketHintField);
         setFieldTooltip(bracketHintField,
-            "Показывать начало блочной конструкции (Процедура, Если, Пока, Для, Попытка, #Область, #Если)\n"
-            + "полупрозрачным текстом рядом с её закрывающим словом (КонецПроцедуры, КонецЕсли и т.д.),\n"
+            "Показывать начало блочной конструкции (Процедура, Если, Пока, Для, Попытка, #Область, #Если) "
+            + "полупрозрачным текстом рядом с её закрывающим словом (КонецПроцедуры, КонецЕсли и т.д.), "
             + "если конструкция занимает много видимых строк.", //$NON-NLS-1$
             parent);
 
@@ -124,8 +145,8 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         bracketHintMinLinesField.setValidRange(0, 10_000);
         addField(bracketHintMinLinesField);
         String bracketHintMinLinesTooltip =
-            "Минимальное количество ВИДИМЫХ строк (с учётом свёрнутых блоков) между началом\n"
-            + "и концом конструкции, при котором показывается подсказка. Если открывающая часть\n"
+            "Минимальное количество ВИДИМЫХ строк (с учётом свёрнутых блоков) между началом "
+            + "и концом конструкции, при котором показывается подсказка. Если открывающая часть "
             + "вообще не видна, подсказка показывается всегда."; //$NON-NLS-1$
         setFieldTooltip(bracketHintMinLinesField, bracketHintMinLinesTooltip, parent);
         Text bracketHintMinLinesText = bracketHintMinLinesField.getTextControl(parent);
@@ -148,7 +169,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         compileContextWidthField.setValidRange(0, 200);
         addField(compileContextWidthField);
         String compileContextWidthTooltip =
-            "Ширина в символах поля строки состояния, которое показывает условия препроцессора\n"
+            "Ширина в символах поля строки состояния, которое показывает условия препроцессора "
             + "и директиву компиляции для позиции каретки в модуле. 0 — не показывать."; //$NON-NLS-1$
         setFieldTooltip(compileContextWidthField, compileContextWidthTooltip, parent);
         Text compileContextWidthText = compileContextWidthField.getTextControl(parent);
@@ -166,7 +187,7 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         addField(autoCollapseRegionsField);
         String autoCollapseRegionsTooltip =
             "Имена областей (#Область) через запятую, например: АФВ, БСП.\n"
-            + "Такие области сворачиваются при открытии модуля и по команде\n"
+            + "Такие области сворачиваются при открытии модуля и по команде "
             + "«Сбросить сворачиваемые группы»."; //$NON-NLS-1$
         setFieldTooltip(autoCollapseRegionsField, autoCollapseRegionsTooltip, parent);
         Text autoCollapseRegionsText = autoCollapseRegionsField.getTextControl(parent);
@@ -189,9 +210,9 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
                 spellingIdentsHost);
             addField(spellingIdentsField);
             setFieldTooltip(spellingIdentsField,
-                "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)»)\n"
+                "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)») "
                 + "проверять в видимой области модуля имена (идентификаторы) и строковые литералы.\n"
-                + "Если выключено — проверяются только обычные слова в комментариях и литералы внутри НСтр();\n"
+                + "Если выключено — проверяются только обычные слова в комментариях и литералы внутри НСтр(); "
                 + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
                 spellingIdentsHost);
         }

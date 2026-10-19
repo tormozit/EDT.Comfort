@@ -762,8 +762,8 @@ public final class GitStagingFilterHook implements IStartup
             filterText.setData(PATCHED_KEY, Boolean.TRUE);
             FilterSession session = new FilterSession(view, filterText, stagedFilter, unstagedFilter);
             filterText.addListener(SWT.Modify, e -> session.onModify());
-            filterText.setToolTipText(
-                FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            filterText.setToolTipText(TooltipText.wrap(filterText,
+                FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
             FilterHistoryUi.wireKeyboard(filterText, HISTORY_SCOPE_ID);
             addHistoryButton(filterText);
 

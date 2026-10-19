@@ -32,5 +32,8 @@ public final class ComfortCheckIds
     /** {@code tormozit.checks.BslPreprocessorStraddleCheck} — {@code #Если}, разрывающая оператор. */
     public static final String BSL_PREPROCESSOR_STRADDLE = "comfort-bsl-preprocessor-straddle"; //$NON-NLS-1$
 
+    /** Неизвестное поле выборки с достоверно рассчитанной схемой запроса. */
+    public static final String BSL_QUERY_RESULT_FIELD = "comfort-bsl-query-result-field"; //$NON-NLS-1$
+
     private ComfortCheckIds() {}
 }

@@ -63,22 +63,6 @@ public final class BslXtextDocumentHook implements IStartup
     private static volatile long saveUiUntilMs;
     private static final AtomicBoolean uiInstalled = new AtomicBoolean();
 
-    // #region agent log
-    private static final AtomicBoolean DIAG_FIRST_READ_LOGGED = new AtomicBoolean();
-
-    /** Временная диагностика: итог вплетения раннего бандла в блокировщик документа. */
-    private static void logWeaveDiag(String where)
-    {
-        Global.tempLog("assist-weave", where + " lockerPatch=" + lockerPatch()); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    /** Однократно — из первого нашего чтения модели для автодополнения. */
-    static void logWeaveDiagOnce(String where)
-    {
-        if (DIAG_FIRST_READ_LOGGED.compareAndSet(false, true))
-            logWeaveDiag(where);
-    }
-
     /**
      * Наблюдатель раннего бандла: ожидание монитора ресурса и блокировки чтения во вплетённом
      * {@code readOnlyForContentAssist} (от 5 мс) и ошибки рефлексии.
@@ -87,13 +71,11 @@ public final class BslXtextDocumentHook implements IStartup
     {
         if (event.startsWith("lockDiag.")) //$NON-NLS-1$
         {
-            Global.tempLog("assist-lock-wait", event + " waitMs=" + ms); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         SmartContentAssistProcessor.uiBlockLog("modelSync.readLock", //$NON-NLS-1$
             event + " waitMs=" + ms + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
     }
-    // #endregion
 
     /** Итог вплетения раннего бандла: {@code woven wait=1 read=1}; {@code null} — класс через хук не проходил. */
     private static String lockerPatch()
@@ -112,7 +94,6 @@ public final class BslXtextDocumentHook implements IStartup
         // #region agent log
         System.getProperties().put(PROP_ASSIST_READ_OBSERVER,
             (BiConsumer<String, Long>) BslXtextDocumentHook::observeAssistRead);
-        logWeaveDiag("install"); //$NON-NLS-1$
         // #endregion
     }
 

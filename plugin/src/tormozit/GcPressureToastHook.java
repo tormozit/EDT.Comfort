@@ -108,7 +108,6 @@ public final class GcPressureToastHook implements IStartup
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException("assist-memory", "poll failed", e);
                 // пропускаем отсчёт — следующий через POLL_MS
             }
         }

@@ -14,7 +14,8 @@ import org.eclipse.swt.widgets.Display;
  * растягивается на весь экран и читается плохо. Поэтому любой текст подсказки, который плагин
  * ставит сам ({@code setToolTipText}), пропускается через {@link #wrap}: разбиение идёт по
  * пробелам, уже имеющиеся переносы сохраняются, ширина считается ФАКТИЧЕСКИМ шрифтом контрола,
- * а не по числу символов.
+ * а не по числу символов. Не вставлять переносы внутри предложений вручную:
+ * они сохраняются как смысловые границы и мешают автоматическому переносу по ширине.
  *
  * <p>Своих вариантов разбиения заводить не нужно: ширина у всех подсказок плагина одна.
  *
@@ -87,7 +88,7 @@ final class TooltipText
             int breakAt = maxPrefixWidth(gc, remaining, maxWidth);
             if (breakAt <= 0)
                 breakAt = 1;
-            int space = remaining.lastIndexOf(' ', breakAt - 1);
+            int space = remaining.lastIndexOf(' ', breakAt);
             if (space > 0)
                 breakAt = space;
             appendLine(out, remaining.substring(0, breakAt).trim());

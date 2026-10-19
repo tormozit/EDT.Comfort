@@ -73,7 +73,6 @@ public class Activator extends AbstractUIPlugin
         super.start(context);
         instance = this;
         CheckRecomputeNotifications.install();
-        ContentAssistDebug.installModelResolutionWeaving(context);
         TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
         FormEditorHook.installPreviewCallbacks();
@@ -84,6 +83,7 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentComputedTypes.installWeavingHook();
         BslDocCommentDescriptionFix.installWeavingHook();
         BslDocCommentTypeMerge.installWeavingHook();
+        BslQueryLiteralSupport.installCheckWeavingHook();
         BslEditorFoldingHook.install();
         BslFormTypeContextEnrichment.installWeavingHook();
         ConfigSearchDialogHook.installWeavingHook();
@@ -165,6 +165,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS,
             ComfortSettings.DEFAULT_AUTO_COLLAPSE_REGIONS);
         ComfortSettings.applyIndentGuideDefaults(settings.getPreferenceStore());
+        settings.getPreferenceStore().setDefault(ComfortSettings.PREF_FOLD_BATCH_QUERIES, true);
+        settings.getPreferenceStore().setDefault(ComfortSettings.PREF_FOLD_TEXT_LITERALS, true);
+        settings.getPreferenceStore().setDefault(ComfortSettings.PREF_FOLD_TEXT_LITERALS_INITIALLY, false);
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
             ComfortSettings.DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE);

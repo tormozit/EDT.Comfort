@@ -1161,8 +1161,8 @@ public final class FileSearchResultsHook implements IStartup
             boolean hasLines = !selectedReplaceableLines(tableViewer).isEmpty();
             replaceAll.setEnabled(canReplace);
             replaceSelected.setEnabled(canReplace && hasLines);
-            replaceSelected.setToolTipText((hasLines ? "Заменить текст вхождений выделенных строк"
-                : "Недоступно: не выделено ни одной незаменённой строки") + Global.pluginSignForTooltip());
+            replaceSelected.setToolTipText(TooltipText.wrap(tableViewer.getTable(), (hasLines ? "Заменить текст вхождений выделенных строк"
+                : "Недоступно: не выделено ни одной незаменённой строки") + Global.pluginSignForTooltip()));
         });
         // "Копировать" не добавляем — FormTableInteraction.install() сама добавляет
         // "Копировать\tCtrl+C" в это же меню (активная ячейка, см. createResultTable).

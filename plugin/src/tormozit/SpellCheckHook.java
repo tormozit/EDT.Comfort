@@ -884,6 +884,7 @@ public final class SpellCheckHook implements IStartup
     {
         if (control == null || control.isDisposed() || en == null || en.isEmpty())
             return;
+        en = TooltipText.wrap(control, en);
         String current = control.getToolTipText();
         if (current == null || current.isEmpty() || en.equals(current))
         {
@@ -892,7 +893,7 @@ public final class SpellCheckHook implements IStartup
         }
         if (current.contains(en))
             return;
-        control.setToolTipText(current + "\n\n" + en); //$NON-NLS-1$
+        control.setToolTipText(TooltipText.wrap(control, current + "\n\n" + en)); //$NON-NLS-1$
     }
 
     /** Расширить {@code GridData.widthHint} флажка под фактическую ширину текста. */
@@ -1146,7 +1147,7 @@ public final class SpellCheckHook implements IStartup
             applySpellingOriginalTooltip(userLabel, tip);
         Text userText = findUserDictionaryPathText(shell);
         if (userText != null && !userText.isDisposed())
-            userText.setToolTipText(tip);
+            userText.setToolTipText(TooltipText.wrap(userText, tip));
         excludeUserDictionaryDescriptionRow(caption);
     }
 
@@ -1320,12 +1321,12 @@ public final class SpellCheckHook implements IStartup
         pathGd.horizontalSpan = 2;
         pathGd.grabExcessHorizontalSpace = true;
         pathText.setLayoutData(pathGd);
-        pathText.setToolTipText(
+        pathText.setToolTipText(TooltipText.wrap(pathText,
             "Общий morph-словарь Comfort (лемма или лемма/флаг AOT).\n"
             + "Путь меняйте только если стандартный файл не устраивает "
             + "(по умолчанию — spelling-comfort-common.dic в stateLocation плагина).\n"
             + "Проектный словарь — Свойства проекта → Комфорт "
-            + "(.comfort/spelling-comfort-project.dic)."); //$NON-NLS-1$
+            + "(.comfort/spelling-comfort-project.dic).")); //$NON-NLS-1$
 
         Composite actions = new Composite(parent, SWT.NONE);
         actions.setData(COMFORT_DICT_ROW_KEY, "actions"); //$NON-NLS-1$
@@ -1376,11 +1377,11 @@ public final class SpellCheckHook implements IStartup
         abbrevGd.horizontalIndent = label.getLayoutData() instanceof GridData lgd
             ? lgd.horizontalIndent : 0;
         abbrevCheck.setLayoutData(abbrevGd);
-        abbrevCheck.setToolTipText(
-            "Не помечать как ошибку CamelCase-сокращения, если каждый сегмент\n"
+        abbrevCheck.setToolTipText(TooltipText.wrap(abbrevCheck,
+            "Не помечать как ошибку CamelCase-сокращения, если каждый сегмент "
             + "(кроме последнего) является префиксом слова из словаря.\n"
-            + "Например «ФизЛицо» (сокращение от «ФизическоеЛицо») не будет\n"
-            + "подчёркнуто, если «Физическое» есть в словаре." + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            + "Например «ФизЛицо» (сокращение от «ФизическоеЛицо») не будет "
+            + "подчёркнуто, если «Физическое» есть в словаре." + Global.pluginSignForTooltip())); //$NON-NLS-1$
         abbrevCheck.setSelection(
             ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations());
         abbrevCheck.addListener(SWT.Selection, e ->

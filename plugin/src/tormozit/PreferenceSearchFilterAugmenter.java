@@ -227,9 +227,9 @@ final class PreferenceSearchFilterAugmenter
         // Объясняет непривычную логику поиска прямо в подсказке поля —
         // без этого AND-по-словам и гранулярность "один контрол" выглядят
         // как баг, а не как задуманное поведение.
-        filterControl.setToolTipText(
+        filterControl.setToolTipText(TooltipText.wrap(filterControl,
                 "Ищет по названию и ключевым словам страниц, а также по текстам настроек внутри них. " //$NON-NLS-1$
-                + "Все слова запроса должны найтись в одном элементе."); //$NON-NLS-1$
+                + "Все слова запроса должны найтись в одном элементе.")); //$NON-NLS-1$
 
         Label glyph = FilterHistoryUi.createGlyphButton(buttonsRow, "⟳", ""); //$NON-NLS-1$ //$NON-NLS-2$
 

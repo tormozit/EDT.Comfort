@@ -211,7 +211,7 @@ final class FilterInputBox
         FilterInputBoxListNavigation.ensureSearchBoxStockKeyStripped(box);
         box.setLayoutData(opts.layoutData != null ? opts.layoutData : compactLayoutData());
         if (opts.tooltip != null)
-            box.setToolTipText(opts.tooltip + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            box.setToolTipText(TooltipText.wrap(box, opts.tooltip + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
         if (opts.message != null)
             box.setMessage(opts.message);
         box.setMinimumSearchTextLength(0);

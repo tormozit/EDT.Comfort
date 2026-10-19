@@ -81,6 +81,12 @@ final class ComfortVisibleSettings
             "Ширина индикатора условий компиляции", Kind.TEXT), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_AUTO_COLLAPSE_REGIONS, //$NON-NLS-1$
             "Автоматически сворачиваемые области", Kind.TEXT), //$NON-NLS-1$
+        new Setting("Встроенный язык → Сворачивание/Отображение участка кода", ComfortSettings.PREF_FOLD_TEXT_LITERALS, //$NON-NLS-1$
+            "Группировать большой текстовый литерал", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Встроенный язык → Сворачивание/Отображение участка кода", ComfortSettings.PREF_FOLD_BATCH_QUERIES, //$NON-NLS-1$
+            "Группировать запрос пакета", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Встроенный язык → Сворачивание/Отображение участка кода → Сворачивать автоматически", ComfortSettings.PREF_FOLD_TEXT_LITERALS_INITIALLY, //$NON-NLS-1$
+            "Большой текстовый литерал", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE, //$NON-NLS-1$
             "Проверять орфографию в идентификаторах в видимой области", Kind.FLAG), //$NON-NLS-1$
         new Setting("Направляющие отступов", ComfortSettings.PREF_INDENT_GUIDE_ENABLED, //$NON-NLS-1$

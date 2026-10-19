@@ -190,10 +190,10 @@ public class CompareConfigSearchDialogHook
 
         Button cbSearchAllRows = new Button(checkGroup, SWT.CHECK);
         cbSearchAllRows.setText("По всем строкам");
-        cbSearchAllRows.setToolTipText(
+        cbSearchAllRows.setToolTipText(TooltipText.wrap(cbSearchAllRows,
                 "Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк"
                         + ", исключая свойства добавленных/удаленных форм."
-                        + Global.pluginSignForTooltip());
+                        + Global.pluginSignForTooltip()));
         cbSearchAllRows.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
         boolean loadDetailed = settings.get(KEY_SEARCH_All_rows) == null ? true
                 : settings.getBoolean(KEY_SEARCH_All_rows);

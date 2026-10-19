@@ -944,8 +944,6 @@ boolean inLiteral = endCaret >= 0
             @Override
             public void documentChanged(DocumentEvent event)
             {
-                if (processor != null)
-                    processor.traceAssistInput(viewer, event);
                 long t0 = System.nanoTime();
                 noteDocumentChangedForValidation(event);
                 // #region agent log
@@ -993,19 +991,6 @@ boolean inLiteral = endCaret >= 0
                     long ms = (System.nanoTime() - t0) / 1_000_000L;
                     SmartContentAssistProcessor.uiBlockLog("doc.chg.exit", "ms=" + ms //$NON-NLS-1$ //$NON-NLS-2$
                         + " text=\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    ContentAssistDebug.perfEnd("assist.documentChanged", t0, //$NON-NLS-1$
-                        "{\"len\":" + (text == null ? 0 : text.length()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // Вставка предложения (несколько символов сразу) — момент истины для
-                    // LinkedMode: EDT ищет в карте DataEvent запись по вставленному тексту и,
-                    // не найдя, молча ничего не делает. Записываем, что там лежало.
-                    if (text != null && text.length() > 1 && event.getDocument() != null)
-                    {
-                        ContentAssistDebug.perfMark("linkedMode.insert", //$NON-NLS-1$
-                            "{\"off\":" + event.getOffset() //$NON-NLS-1$
-                                + ",\"text\":\"" + text.replace('"', '\'') + "\",\"map\":" //$NON-NLS-1$ //$NON-NLS-2$
-                                + BslDataEventGuard.describeRealMap(event.getDocument(), text)
-                                + "}"); //$NON-NLS-1$
-                    }
                 }
             }
         };
@@ -2264,137 +2249,128 @@ boolean inLiteral = endCaret >= 0
     private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt,
         ParamHintPreparation prepared)
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.show", null))
+        if (gen != paramHintPostGen.get())
+            return;
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        if (st == null || st.isDisposed())
+            return;
+        int caret = modelCaretOffset();
+        if (caret != desiredCaret)
         {
-            if (gen != paramHintPostGen.get())
-                return;
-            StyledText st = viewer != null ? viewer.getTextWidget() : null;
-            if (st == null || st.isDisposed())
-                return;
-            int caret = modelCaretOffset();
-            if (caret != desiredCaret)
+            logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
+        {
+            // Рядом с кареткой уже наша/нормальная — не дублируем.
+            // Далеко (навигатор) или поле выражения — сносим и открываем заново.
+            if (!isExpressionFieldViewer() && isParamHoverShellVisible())
             {
-                logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                paramHintPostGen.incrementAndGet();
+                logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
-            if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
+            removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
+            ParamHintHtmlModifier.dismissAllVisible();
+        }
+        ParamHoverProbe probe = new ParamHoverProbe();
+        try
+        {
+            boolean inspect = isExpressionFieldViewer();
+            boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
+            if (!inspect)
             {
-                // Рядом с кареткой уже наша/нормальная — не дублируем.
-                // Далеко (навигатор) или поле выражения — сносим и открываем заново.
-                if (!isExpressionFieldViewer() && isParamHoverShellVisible())
+                IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+                if (site != null && site.getPage() != null)
                 {
-                    paramHintPostGen.incrementAndGet();
-                    logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    return;
+                    if (bslEditor != null)
+                        site.getPage().activate(bslEditor);
+                    else
+                        site.getPage().activate(site.getPart());
                 }
-                removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
-                ParamHintHtmlModifier.dismissAllVisible();
             }
-            ParamHoverProbe probe = new ParamHoverProbe();
-            long tOpen = ContentAssistDebug.perfStart("paramHint.open"); //$NON-NLS-1$
+            if (!st.isFocusControl())
+                st.setFocus();
+            // Любые чужие окна (LinkedMode / промах с координатами в навигаторе) —
+            // до нашей команды, иначе получим два shell.
+            // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
+            // решён, а если снимать после показа, пользователь видит мигание — сначала
+            // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
+            forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
+            ParamHintHtmlModifier.dismissAllVisible();
+            boolean focused = st.isFocusControl();
+            Point caretDisp = null;
             try
             {
-                boolean inspect = isExpressionFieldViewer();
-                boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
-                if (!inspect)
-                {
-                    IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-                    if (site != null && site.getPage() != null)
-                    {
-                        if (bslEditor != null)
-                            site.getPage().activate(bslEditor);
-                        else
-                            site.getPage().activate(site.getPart());
-                    }
-                }
-                if (!st.isFocusControl())
-                    st.setFocus();
-                // Любые чужие окна (LinkedMode / промах с координатами в навигаторе) —
-                // до нашей команды, иначе получим два shell.
-                // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
-                // решён, а если снимать после показа, пользователь видит мигание — сначала
-                // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
-                forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
-                ParamHintHtmlModifier.dismissAllVisible();
-                boolean focused = st.isFocusControl();
-                Point caretDisp = null;
-                try
-                {
-                    caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
-                }
-                catch (Exception ignored)
-                {
-                }
-                logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"inspect\":" + inspect //$NON-NLS-1$
-                    + ",\"focused\":" + focused //$NON-NLS-1$
-                    + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
-                    + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
-                    + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                        describeActiveShell()) + "\"}"); //$NON-NLS-1$
-                // Активация редактора/фокус выше могли вызвать вложенные события UI.
-                if (gen != paramHintPostGen.get() || viewer.getDocument() != prepared.document
-                    || paramHintDocumentStamp(prepared.document) != prepared.stamp
-                    || modelCaretOffset() != prepared.caret)
-                {
-                    Global.tempLog("param-hint-background", "skip stale before show gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
-                }
-                try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
-                {
-                    boolean opened = prepared.hint.show(viewer);
-                    probe.execOk = opened;
-                    probe.popupShown = opened || isParamHoverShellVisible();
-                }
-                if (!probe.popupShown && isParamHoverShellVisible())
+                caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+            }
+            catch (Exception ignored)
+            {
+            }
+            logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"inspect\":" + inspect //$NON-NLS-1$
+                + ",\"focused\":" + focused //$NON-NLS-1$
+                + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
+                + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
+                + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    describeActiveShell()) + "\"}"); //$NON-NLS-1$
+            // Активация редактора/фокус выше могли вызвать вложенные события UI.
+            if (gen != paramHintPostGen.get() || viewer.getDocument() != prepared.document
+                || paramHintDocumentStamp(prepared.document) != prepared.stamp
+                || modelCaretOffset() != prepared.caret)
+            {
+                Global.tempLog("param-hint-background", "skip stale before show gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
+            {
+                boolean opened = prepared.hint.show(viewer);
+                probe.execOk = opened;
+                probe.popupShown = opened || isParamHoverShellVisible();
+            }
+            if (!probe.popupShown && isParamHoverShellVisible())
+                probe.popupShown = true;
+            // Пересчёт положения после загрузки содержимого — для любого пути показа,
+            // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
+            // в момент расчёта Browser пуст и высота почти нулевая.
+            if (probe.popupShown)
+                ParamHintHtmlModifier.repositionShownParamHint();
+            Shell shown = findParamHintShell(false);
+            // Границы только что показанной подсказки считает EDT, и правую она ставит
+            // НА закрывающую скобку — каретка перед «)» уже вне [first, last).
+            if (shown != null && viewer != null)
+                ParamHintHtmlModifier.includeClosingParen(viewer.getTextWidget(),
+                    viewer.getDocument());
+            if (shown != null && !shown.isDisposed())
+            {
+                boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
+                Point loc = shown.getLocation();
+                logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"moved\":" + moved //$NON-NLS-1$
+                    + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (findParamHintShell(true) != null)
                     probe.popupShown = true;
-                // Пересчёт положения после загрузки содержимого — для любого пути показа,
-                // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
-                // в момент расчёта Browser пуст и высота почти нулевая.
-                if (probe.popupShown)
-                    ParamHintHtmlModifier.repositionShownParamHint();
-                Shell shown = findParamHintShell(false);
-                // Границы только что показанной подсказки считает EDT, и правую она ставит
-                // НА закрывающую скобку — каретка перед «)» уже вне [first, last).
-                if (shown != null && viewer != null)
-                    ParamHintHtmlModifier.includeClosingParen(viewer.getTextWidget(),
-                        viewer.getDocument());
-                if (shown != null && !shown.isDisposed())
-                {
-                    boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
-                    Point loc = shown.getLocation();
-                    logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"moved\":" + moved //$NON-NLS-1$
-                        + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    if (findParamHintShell(true) != null)
-                        probe.popupShown = true;
-                }
-                if (probe.popupShown)
-                    paramHintPostGen.incrementAndGet();
             }
-            catch (Exception ex)
-            {
-                probe.execOk = false;
-                probe.err = String.valueOf(ex);
-            }
-            finally
-            {
-                ContentAssistDebug.perfEnd("paramHint.open", tOpen, //$NON-NLS-1$
-                    "{\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-                        + ",\"execOk\":" + probe.execOk + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
-                + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-                + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-
+            if (probe.popupShown)
+                paramHintPostGen.incrementAndGet();
         }
+        catch (Exception ex)
+        {
+            probe.execOk = false;
+            probe.err = String.valueOf(ex);
+        }
+        logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
+            + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+            + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+
+
     }
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
@@ -2518,47 +2494,43 @@ boolean inLiteral = endCaret >= 0
 
     private ParamHoverProbe executeInvocationParametersHoverCommand()
     {
-        try (ContentAssistDebug.FillSpan phase = ContentAssistDebug.fillStart("paramHint.command", null))
+        ParamHoverProbe probe = new ParamHoverProbe();
+        try
         {
-            ParamHoverProbe probe = new ParamHoverProbe();
-            try
+            org.eclipse.ui.IWorkbenchWindow window =
+                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
             {
-                org.eclipse.ui.IWorkbenchWindow window =
-                    PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-                if (window == null)
-                {
-                    probe.err = "windowNull"; //$NON-NLS-1$
-                    return probe;
-                }
-                org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-                org.eclipse.ui.handlers.IHandlerService handlers = null;
-                if (site != null)
-                    handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
-                if (handlers == null)
-                    handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
-                if (handlers == null)
-                {
-                    probe.err = "handlersNull"; //$NON-NLS-1$
-                    return probe;
-                }
-                try (ContentAssistDebug.FillSpan nativePhase =
-                    ContentAssistDebug.fillStart("paramHint.nativeExecute", handlers);
-                    ParamHintCommandTrace trace = new ParamHintCommandTrace())
+                probe.err = "windowNull"; //$NON-NLS-1$
+                return probe;
+            }
+            org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+            org.eclipse.ui.handlers.IHandlerService handlers = null;
+            if (site != null)
+                handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
+            if (handlers == null)
+                handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
+            if (handlers == null)
+            {
+                probe.err = "handlersNull"; //$NON-NLS-1$
+                return probe;
+            }
+            try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
             {
                 handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
             }
-                probe.execOk = true;
-                fillParamHoverInfoControlProbe(probe);
-                return probe;
-            }
-            catch (Exception ex)
-            {
-                probe.execOk = false;
-                probe.err = String.valueOf(ex);
-                return probe;
-            }
-
+            probe.execOk = true;
+            fillParamHoverInfoControlProbe(probe);
+            return probe;
         }
+        catch (Exception ex)
+        {
+            probe.execOk = false;
+            probe.err = String.valueOf(ex);
+            return probe;
+        }
+
+
     }
 
     private static boolean isParamHoverInfoControlVisible()
@@ -2951,8 +2923,6 @@ boolean inLiteral = endCaret >= 0
             int caret = event.getOffset() + (inserted == null ? 0 : inserted.length());
             if (!processor.isMemberAccessContextGone(doc, caret))
                 return;
-            ContentAssistDebug.perfMark("popupClose.memberContextGone", //$NON-NLS-1$
-                "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             ContentAssistPopupSync.hideProposalPopup(assistant);
         }
         catch (Exception e)
@@ -3014,14 +2984,6 @@ boolean inLiteral = endCaret >= 0
         }
         Object result = withModelSyncHeld(doc, null,
             () -> invokeBslRead(doc, "readOnlyForContentAssist", work)); //$NON-NLS-1$
-        // #region agent log
-        // Однократно: прошёл ли этот вызов через вплетённый вход (wovenBeginCalled).
-        BslXtextDocumentHook.logWeaveDiagOnce("firstAssistRead docClass=" //$NON-NLS-1$
-            + (doc == null ? "null" : doc.getClass().getName()) //$NON-NLS-1$
-            + " lockerClass=" + (doc == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                : String.valueOf(Global.getField(doc, "stateAccess") == null ? null //$NON-NLS-1$
-                    : Global.getField(doc, "stateAccess").getClass().getName()))); //$NON-NLS-1$
-        // #endregion
         if (result != BSL_READ_MISSING)
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
@@ -3353,10 +3315,6 @@ boolean inLiteral = endCaret >= 0
         {
             if (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
                 interrupted.set(true);
-            // #region agent log
-            Global.tempLog("assist-priority", phase + " cancelValidation job=" //$NON-NLS-1$ //$NON-NLS-2$
-                + System.identityHashCode(job) + " state=" + job.getState() + " users=" + users.get()); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             job.cancel();
         }
 
@@ -3388,9 +3346,6 @@ boolean inLiteral = endCaret >= 0
         public void close()
         {
             int remaining = users.decrementAndGet();
-            // #region agent log
-            Global.tempLog("assist-priority", "end users=" + remaining); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             if (remaining == 0)
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
         }
@@ -3403,10 +3358,6 @@ boolean inLiteral = endCaret >= 0
                 return;
             boolean pending = isPending(doc);
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
-            // #region agent log
-            Global.tempLog("assist-priority", "resume job=" + System.identityHashCode(job) //$NON-NLS-1$ //$NON-NLS-2$
-                + " state=" + job.getState() + " pending=" + pending + " skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             if (pending)
                 return; // последний close() снова запланирует возобновление
             if (skip || isModelSyncBusy(doc))
@@ -5612,20 +5563,17 @@ boolean inLiteral = endCaret >= 0
             return;
         IDocument doc = event.getDocument();
         int caret = event.getOffset() + event.getText().length();
-        Global.tempLog("assist-ir-dot", "schedule caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
         // JFace устанавливает выделение через getSelection уже после apply. До этого
         // момента не открывать новый список и не менять состояние завершаемой сессии.
         text.getDisplay().asyncExec(() ->
         {
             if (text.isDisposed() || viewer.getDocument() != doc || modelCaretOffset() != caret)
             {
-                Global.tempLog("assist-ir-dot", "skip changed context caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             ContentAssistSettings settings = ContentAssistSettings.getInstance();
             if (!ComfortSettings.isReplaceListFiltersEnabled() || settings == null || !settings.isEnabled())
             {
-                Global.tempLog("assist-ir-dot", "skip disabled caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             try
@@ -5634,19 +5582,16 @@ boolean inLiteral = endCaret >= 0
                     || !CompletionAutoOpenTrigger.shouldFetchDocument(doc, '.', caret - 1, caret,
                         ContentAssistPopupSync.isPopupVisible(assistant)))
                 {
-                    Global.tempLog("assist-ir-dot", "skip trigger caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 pendingAutoOpen = false;
                 suppressDocumentAutoOpenAfterSession = false;
                 dotBeforeWordCaret = wordRightOfCaret(doc, caret).isEmpty() ? -1 : caret;
                 cancelPendingOrdinaryAssist("irDot"); //$NON-NLS-1$
-                Global.tempLog("assist-ir-dot", "open caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleCompletionAutoOpen(caret, completionAutoOpenSeq.incrementAndGet());
             }
             catch (org.eclipse.jface.text.BadLocationException e)
             {
-                Global.tempLogException("assist-ir-dot", "document changed", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -5953,8 +5898,6 @@ boolean inLiteral = endCaret >= 0
                 readyCaret, processor, () -> openCompletionAutoEdtPopup(readyCaret, autoOpenSeq, true));
         if (!supplied)
         {
-            ContentAssistDebug.pipeline("literalArg.open.deferred", "caret=" + live
-                + " reason=" + (cachedOnly ? "processorUnavailable" : "cacheMiss"));
             if (!cachedOnly)
                 processor.scheduleLiteralArgListInBackground(viewer, readyCaret, "openCacheMiss",
                     () -> openLiteralArgPopup(readyCaret, autoOpenSeq));
@@ -7628,13 +7571,10 @@ processor.applyIrCompletion(snapshot);
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
-            ContentAssistDebug.perfMark("openPopup.memberBg", //$NON-NLS-1$
-                "{\"ok\":false,\"why\":\"filters\"}"); //$NON-NLS-1$
             return false;
         }
         if (!(viewer instanceof SourceViewer sv))
         {
-            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"viewer\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         ContentAssistSessionReloader reloader = forViewer(sv);
@@ -7642,26 +7582,21 @@ processor.applyIrCompletion(snapshot);
         if (ca == null || ContentAssistPopupSync.isPopupVisible(ca))
         {
             SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=false why=visibleOrNoCa"); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistDebug.perfMark("openPopup.memberBg", //$NON-NLS-1$
-                "{\"ok\":false,\"why\":\"visibleOrNoCa\"}"); //$NON-NLS-1$
             return false;
         }
         if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
         {
-            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"apply\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         StyledText widget = sv.getTextWidget();
         if (widget == null || widget.isDisposed() || !widget.isFocusControl())
         {
             SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=false why=focus"); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":false,\"why\":\"focus\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
         SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.perfMark("openPopup.memberBg", "{\"ok\":" + ok + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
     }
 
@@ -8118,9 +8053,6 @@ return;
         /** С любого потока. Таймер уже тикает с такта нажатия ({@link #arm()}). */
         void request(String kind, Runnable action)
         {
-            ContentAssistDebug.pipeline("gate.request", "kind=" + kind
-                + " viewer=" + ContentAssistDebug.pipelineIdentity(host.viewer)
-                + " " + (host.processor == null ? "" : host.processor.pipelineState()));
             synchronized (actions)
             {
                 actions.remove(kind);
@@ -8234,20 +8166,16 @@ return;
                 kinds.append(entry.getKey());
                 try
                 {
-                    try (ContentAssistDebug.PipelineSpan showing = ContentAssistDebug.pipelineStart("gate.action",
-                        "kind=" + entry.getKey() + " waitMs=" + waitMs
-                            + " " + (host.processor == null ? "" : host.processor.pipelineState())))
+                    BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeAction " + entry.getKey()); //$NON-NLS-1$
+                    try
                     {
-                        BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeAction " + entry.getKey()); //$NON-NLS-1$
-                        try
-                        {
-                            entry.getValue().run();
-                        }
-                        finally
-                        {
-                            BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.afterAction " + entry.getKey()); //$NON-NLS-1$
-                        }
+                        entry.getValue().run();
                     }
+                    finally
+                    {
+                        BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.afterAction " + entry.getKey()); //$NON-NLS-1$
+                    }
+
                 }
                 catch (Exception | LinkageError e)
                 {

@@ -4,11 +4,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -25,6 +30,8 @@ import org.eclipse.jface.text.IViewportListener;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.TextUtilities;
+import org.eclipse.jface.internal.text.html.HTMLPrinter;
+import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.hyperlink.IHyperlink;
 import org.eclipse.jface.text.hyperlink.IHyperlinkDetector;
 import org.eclipse.jface.text.hyperlink.IHyperlinkDetectorExtension;
@@ -45,6 +52,7 @@ import org.eclipse.jface.text.source.IAnnotationModelListener;
 import org.eclipse.jface.text.source.IAnnotationModelListenerExtension;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
@@ -59,19 +67,48 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.diagnostics.Severity;
 import org.eclipse.xtext.resource.ILocationInFileProvider;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.ui.editor.XtextSourceViewer;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHoverProvider;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
+import org.eclipse.xtext.ui.editor.hover.html.DefaultEObjectHoverProvider;
+import org.eclipse.xtext.ui.editor.hover.html.XtextBrowserInformationControlInput;
 import org.eclipse.xtext.ui.editor.hyperlinking.XtextHyperlink;
 import org.eclipse.xtext.util.CancelIndicator;
 import org.eclipse.xtext.util.ITextRegion;
 import org.eclipse.xtext.validation.CheckMode;
 import org.eclipse.xtext.validation.IResourceValidator;
 import org.eclipse.xtext.validation.Issue;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
+import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
+import com._1c.g5.v8.dt.ql.QlUtil;
+import com._1c.g5.v8.dt.ql.model.DbViewFromQuery;
+import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
 import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
 import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
 
@@ -91,6 +128,273 @@ import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
 final class BslQueryLiteralSupport
 {
     private BslQueryLiteralSupport() {}
+
+    private static final Map<IDocument, QueryGroupIndices> QUERY_GROUP_INDICES =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
+    private record QueryGroupIndices(long stamp, Map<Integer, String> byLine) {}
+
+    /** Готовые номера запросов по строкам модели; рисование не разбирает текст. */
+    static Map<Integer, String> queryGroupIndices(IDocument document)
+    {
+        QueryGroupIndices indices = QUERY_GROUP_INDICES.get(document);
+        return indices != null && document instanceof IDocumentExtension4 stamped
+            && indices.stamp() == stamped.getModificationStamp()
+            && ComfortSettings.isLiteralFoldingEnabled(ComfortSettings.PREF_FOLD_BATCH_QUERIES)
+                ? indices.byLine() : Map.of();
+    }
+
+    /** Дополнительные группы штатного расчёта свёрток BSL (issue 841). */
+    @SuppressWarnings("unchecked")
+    static void addLiteralFolding(Object document, Object regionAcceptor)
+    {
+        Global.tempLog("literal-folding", "calculate document=" + (document == null ? "null" : document.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        boolean queries = ComfortSettings.isLiteralFoldingEnabled(ComfortSettings.PREF_FOLD_BATCH_QUERIES);
+        boolean texts = ComfortSettings.isLiteralFoldingEnabled(ComfortSettings.PREF_FOLD_TEXT_LITERALS);
+        if ((!queries && !texts)
+            || !(document instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument doc)
+            || !(regionAcceptor instanceof org.eclipse.xtext.ui.editor.folding.IFoldingRegionAcceptor<?>))
+            return;
+        var acceptor = (org.eclipse.xtext.ui.editor.folding.IFoldingRegionAcceptor<org.eclipse.xtext.util.ITextRegion>) regionAcceptor;
+        try
+        {
+            var readModel = doc.getClass().getMethod("readOnlyDataModelWithoutSync", org.eclipse.xtext.util.concurrent.IUnitOfWork.class); //$NON-NLS-1$
+            readModel.invoke(doc,
+                (org.eclipse.xtext.util.concurrent.IUnitOfWork<Object, org.eclipse.xtext.resource.XtextResource>) resource -> {
+                long stamp = ((IDocumentExtension4) doc).getModificationStamp();
+                if (resource == null || resource.getParseResult() == null
+                    || !doc.get().equals(resource.getParseResult().getRootNode().getText()))
+                    return null;
+                Map<Integer, String> indices = new HashMap<>();
+                var objects = resource.getAllContents();
+                while (objects.hasNext())
+                {
+                    if (Thread.currentThread().isInterrupted())
+                        throw new org.eclipse.core.runtime.OperationCanceledException();
+                    if (!(objects.next() instanceof StringLiteral literal))
+                        continue;
+                    var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
+                    if (lines.isEmpty() || lines.get(0).getStartLine() == lines.get(lines.size() - 1).getEndLine())
+                        continue;
+                    Set<Integer> usedLines = new HashSet<>();
+                    int lineCount = lines.get(lines.size() - 1).getEndLine() - lines.get(0).getStartLine() + 1;
+                    if (texts && lineCount >= ComfortSettings.LARGE_TEXT_LITERAL_MIN_LINES)
+                        acceptLiteralFold(doc, acceptor, usedLines, lines.get(0).getOffset(),
+                            lines.get(lines.size() - 1).getEndOffset(), ComfortSettings.isTextLiteralInitiallyFolded());
+                    if (queries)
+                    {
+                        Literal parsed = parse(doc, lines.get(0).getOffset() + 1, true, lineCount - 1);
+                        if (parsed != null && parsed.closeQuote >= 0 && parsed.isQuery())
+                            addBatchQueryFolding(doc, acceptor, usedLines, parsed, indices);
+                    }
+                }
+                if (stamp == ((IDocumentExtension4) doc).getModificationStamp())
+                    QUERY_GROUP_INDICES.put(doc, new QueryGroupIndices(stamp, Map.copyOf(indices)));
+                return null;
+            });
+        }
+        catch (org.eclipse.core.runtime.OperationCanceledException cancelled)
+        {
+            throw cancelled;
+        }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError error)
+        {
+            Global.tempLogException("literal-folding", "calculate", error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Только границы по «;», без парсера QL и построения модели запроса. */
+    private static void addBatchQueryFolding(IDocument doc,
+        org.eclipse.xtext.ui.editor.folding.IFoldingRegionAcceptor<org.eclipse.xtext.util.ITextRegion> acceptor,
+        Set<Integer> usedLines, Literal literal, Map<Integer, String> indices) throws org.eclipse.jface.text.BadLocationException
+    {
+        Map<Integer, Integer> batchIndices = new LinkedHashMap<>();
+        int start = -1;
+        int last = -1;
+        int queryIndex = 0;
+        boolean quoted = false;
+        boolean comment = false;
+        boolean separatorSeen = false;
+        for (int i = 0; i < literal.text.length(); i++)
+        {
+            char c = literal.text.charAt(i);
+            if (comment)
+            {
+                if (c == '\n' || c == '\r')
+                    comment = false;
+                continue;
+            }
+            if (!quoted && c == '/' && i + 1 < literal.text.length() && literal.text.charAt(i + 1) == '/')
+            {
+                comment = true;
+                i++;
+                continue;
+            }
+            if (!quoted && c == ';')
+            {
+                if (start >= 0)
+                {
+                    batchIndices.put(doc.getLineOfOffset(literal.docOffset(start)), queryIndex++);
+                    acceptLiteralFold(doc, acceptor, usedLines, literal.docOffset(start), literal.docOffset(i) + 1);
+                }
+                start = -1;
+                last = -1;
+                separatorSeen = true;
+                continue;
+            }
+            if (!Character.isWhitespace(c))
+            {
+                if (start < 0)
+                    start = i;
+                last = i;
+            }
+            // Удвоенные кавычки дают два переключения и оставляют состояние прежним.
+            if (c == '"')
+                quoted = !quoted;
+        }
+        if (separatorSeen && start >= 0)
+        {
+            batchIndices.put(doc.getLineOfOffset(literal.docOffset(start)), queryIndex++);
+            acceptLiteralFold(doc, acceptor, usedLines, literal.docOffset(start), literal.docOffset(last) + 1);
+        }
+        for (var entry : batchIndices.entrySet())
+            indices.put(entry.getKey(), "[" + entry.getValue() + "/-" + (queryIndex - entry.getValue()) + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static void acceptLiteralFold(IDocument doc,
+        org.eclipse.xtext.ui.editor.folding.IFoldingRegionAcceptor<org.eclipse.xtext.util.ITextRegion> acceptor,
+        Set<Integer> usedLines, int start, int end)
+    {
+        acceptLiteralFold(doc, acceptor, usedLines, start, end, false);
+    }
+
+    private static void acceptLiteralFold(IDocument doc,
+        org.eclipse.xtext.ui.editor.folding.IFoldingRegionAcceptor<org.eclipse.xtext.util.ITextRegion> acceptor,
+        Set<Integer> usedLines, int start, int end, boolean initiallyFolded)
+    {
+        try
+        {
+            int firstLine = doc.getLineOfOffset(start);
+            // Штатный acceptor расширяет диапазон до целых строк; на строке возможен один маркер.
+            if (end <= start || doc.getLineOfOffset(end - 1) <= firstLine || !usedLines.add(firstLine))
+                return;
+            var caption = new org.eclipse.xtext.util.TextRegion(start, 0);
+            if (initiallyFolded)
+                // ICustomFoldingRegionAcceptor.accept: подтверждено javap lcore-ui.
+                acceptor.getClass().getMethod("accept", int.class, int.class, org.eclipse.xtext.util.ITextRegion.class, boolean.class) //$NON-NLS-1$
+                    .invoke(acceptor, start, end - start, caption, true);
+            else
+                acceptor.accept(start, end - start, caption);
+        }
+        catch (org.eclipse.jface.text.BadLocationException | ReflectiveOperationException error)
+        {
+            Global.tempLogException("literal-folding", "region " + start + ":" + end, error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+    }
+
+    /** Хаб EDT не должен проверять отдельные фрагменты составного текста запроса (issue 373). */
+    static void installCheckWeavingHook()
+    {
+        QueryCheckWeaving.install();
+    }
+
+    private static boolean isConcatenatedLiteral(Object object)
+    {
+        return object instanceof StringLiteral literal
+            && literal.eContainer() instanceof BinaryExpression binary
+            && binary.getOperation() == BinaryOperation.PLUS;
+    }
+
+    /** Мост через JDK Predicate: бандлу EDT не нужна зависимость от Комфорт. */
+    private static final class QueryCheckWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com.e1c.g5.v8.dt.internal.bsl.check.BslQlDelegatingCheck"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.queryLiteral.skipConcatenation"; //$NON-NLS-1$
+        private static final String CHECK_DESC = "(Ljava/lang/Object;"
+            + "Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;"
+            + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+
+        static void install()
+        {
+            if (!INSTALLED.compareAndSet(false, true))
+                return;
+            System.getProperties().put(CALLBACK, (Predicate<Object>) BslQueryLiteralSupport::isConcatenatedLiteral);
+            Bundle bundle = FrameworkUtil.getBundle(BslQueryLiteralSupport.class);
+            if (bundle != null && bundle.getBundleContext() != null)
+                bundle.getBundleContext().registerService(WeavingHook.class, new QueryCheckWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                Global.tempLog("query-concatenation", "weave: transformed=" + (transformed != null)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                Global.tempLog("query-concatenation", "weave failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static byte[] transform(byte[] original)
+        {
+            ClassReader reader = new ClassReader(original);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"check".equals(name) || !CHECK_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            Object[] locals = { reader.getClassName(), "java/lang/Object", //$NON-NLS-1$
+                                "com/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor", //$NON-NLS-1$
+                                "com/e1c/g5/v8/dt/check/ICheckParameters", "org/eclipse/core/runtime/IProgressMonitor" }; //$NON-NLS-1$ //$NON-NLS-2$
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            visitLdcInsn(CALLBACK);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            Label pop = new Label();
+                            Label proceed = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, pop);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitVarInsn(Opcodes.ALOAD, 1);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, proceed);
+                            visitInsn(Opcodes.RETURN);
+                            visitLabel(pop);
+                            visitFrame(Opcodes.F_NEW, locals.length, locals, 1, new Object[] { "java/lang/Object" }); //$NON-NLS-1$
+                            visitInsn(Opcodes.POP);
+                            visitLabel(proceed);
+                            visitFrame(Opcodes.F_NEW, locals.length, locals, 0, new Object[0]);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+    }
 
     private static final String[] QUERY_START_WORDS =
         { "ВЫБРАТЬ", "SELECT", "УНИЧТОЖИТЬ", "DROP" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
@@ -187,6 +491,12 @@ final class BslQueryLiteralSupport
      */
     private static Literal parse(IDocument doc, int offset, boolean whole)
     {
+        return parse(doc, offset, whole, MAX_LINES);
+    }
+
+    /** Для свёрток граница уже известна из узла BSL, ограничение в 5000 строк не нужно. */
+    private static Literal parse(IDocument doc, int offset, boolean whole, int maxLines)
+    {
         try
         {
             if (doc == null || offset < 0 || offset > doc.getLength())
@@ -196,7 +506,7 @@ final class BslQueryLiteralSupport
             if (lineText(doc, caretLine).stripLeading().startsWith("|")) //$NON-NLS-1$
             {
                 openLine = -1;
-                for (int ln = caretLine - 1; ln >= 0 && caretLine - ln <= MAX_LINES; ln--)
+                for (int ln = caretLine - 1; ln >= 0 && caretLine - ln <= maxLines; ln--)
                 {
                     String s = lineText(doc, ln).stripLeading();
                     if (s.startsWith("|") || s.startsWith("//")) //$NON-NLS-1$ //$NON-NLS-2$
@@ -222,7 +532,7 @@ final class BslQueryLiteralSupport
             int prevEnd = openInfo.getOffset() + openInfo.getLength();
             boolean indentFromContinuation = false;
             for (int ln = openLine + 1; close < 0 && ln < doc.getNumberOfLines()
-                && ln - openLine <= MAX_LINES; ln++)
+                && ln - openLine <= maxLines; ln++)
             {
                 if (!whole && lit.probeIndex >= 0)
                     break;
@@ -404,11 +714,16 @@ final class BslQueryLiteralSupport
                 ? processor.computeCompletionProposals(qlViewer, lit.probeIndex) : null;
             String lineBreak = TextUtilities.getDefaultLineDelimiter(doc) + lit.indent + "|"; //$NON-NLS-1$
             List<ICompletionProposal> result = new ArrayList<>(raw != null ? raw.length : 0);
+            BslXtextEditor sourceEditor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer);
+            QueryFieldHover fieldHover = new QueryFieldHover(embedded.getDocument(), sourceEditor);
             // Шаблоны (не ConfigurableCompletionProposal) в литерал не перенести.
             for (int i = 0; raw != null && i < raw.length; i++)
             {
                 if (raw[i] instanceof ConfigurableCompletionProposal cp)
-                    result.add(new QueryLiteralProposal(cp, lit, lineBreak));
+                {
+                    result.add(new QueryLiteralProposal(cp, lit, lineBreak, sourceEditor, project, query,
+                        fieldHover.getHoverControlCreator()));
+                }
             }
             return result.toArray(SmartContentAssistProcessor.EMPTY);
         }
@@ -461,11 +776,23 @@ final class BslQueryLiteralSupport
         private final String replacement;
         private final String insert;
         private final int cursor;
+        private final IProject project;
+        private final BslXtextEditor sourceEditor;
+        private final String sourceQuery;
+        private final int queryStart;
+        private final int queryEnd;
+        private final int proposalOffset;
+        private final IInformationControlCreator creator;
+        private volatile QueryHover sideHint;
         private Point selection;
 
-        QueryLiteralProposal(ConfigurableCompletionProposal ql, Literal lit, String lineBreak)
+        QueryLiteralProposal(ConfigurableCompletionProposal ql, Literal lit, String lineBreak,
+            BslXtextEditor sourceEditor, IProject project, String query, IInformationControlCreator creator)
         {
             this.ql = ql;
+            this.project = project;
+            this.sourceEditor = sourceEditor;
+            this.creator = creator;
             int offset = ql.getReplacementOffset();
             this.start = lit.docOffsetOfQuery(offset);
             this.end = Math.max(start, lit.docOffsetOfQuery(offset + ql.getReplacementLength()));
@@ -473,6 +800,22 @@ final class BslQueryLiteralSupport
             this.insert = escape(replacement, lineBreak);
             int cursorPosition = Math.max(0, Math.min(ql.getCursorPosition(), replacement.length()));
             this.cursor = escape(replacement.substring(0, cursorPosition), lineBreak).length();
+            // Поле или таблица: описываем результат этой конкретной подстановки.
+            // У предложений QL EDT не заполняет additionalProposalInfo объектом.
+            boolean name = !replacement.isEmpty() && replacement.chars()
+                .allMatch(c -> isIdentifierChar((char)c) || c == '.');
+            int to = offset + ql.getReplacementLength();
+            // Список запрошен на начале сегмента: штатная длина замены может
+            // быть нулевой, хотя справа осталось уже написанное имя. Для описания
+            // выбранного варианта заменяем это имя целиком, иначе получится
+            // «ПользовательГруппаПользователей» и поле не разрешится.
+            if (name && to >= 0 && to <= query.length())
+                while (to < query.length() && isIdentifierChar(query.charAt(to)))
+                    to++;
+            sourceQuery = name && offset >= 0 && to >= offset && to <= query.length() ? query : null;
+            queryStart = offset;
+            queryEnd = to;
+            proposalOffset = offset + replacement.length() - 1;
         }
 
         private static String escape(String text, String lineBreak)
@@ -530,13 +873,29 @@ final class BslQueryLiteralSupport
         @Override
         public String getAdditionalProposalInfo()
         {
-            return ql.getAdditionalProposalInfo();
+            Object info = getAdditionalProposalInfo(null);
+            return info instanceof XtextBrowserInformationControlInput input ? input.getHtml()
+                : info == null ? null : info.toString();
         }
 
         @Override
         public Object getAdditionalProposalInfo(IProgressMonitor monitor)
         {
-            return ql.getAdditionalProposalInfo(monitor);
+            if (monitor != null && monitor.isCanceled())
+                return null;
+            if (sourceQuery != null)
+            {
+                QueryHover description = sideHint;
+                if (description == null)
+                {
+                    String query = sourceQuery.substring(0, queryStart) + replacement + sourceQuery.substring(queryEnd);
+                    description = queryDescription(sourceEditor, () -> project, query, proposalOffset);
+                    sideHint = description;
+                }
+                return description.info();
+            }
+            return ql.getAdditionalProposalInfo(monitor == null
+                ? new org.eclipse.core.runtime.NullProgressMonitor() : monitor);
         }
 
         @Override
@@ -592,7 +951,7 @@ final class BslQueryLiteralSupport
         @Override
         public IInformationControlCreator getInformationControlCreator()
         {
-            return ql.getInformationControlCreator();
+            return creator;
         }
 
         @Override
@@ -606,6 +965,214 @@ final class BslQueryLiteralSupport
         {
             return start;
         }
+    }
+
+    /** Область слова в запросе, а не всего строкового литерала BSL. */
+    static IRegion queryHoverRegion(ITextViewer viewer, int offset)
+    {
+        Literal lit = viewer == null ? null : parse(viewer.getDocument(), offset, true);
+        if (lit == null || !lit.isQuery())
+            return null;
+        int start = lit.probeIndex;
+        int end = start;
+        if (start >= lit.text.length() || !isIdentifierChar(lit.text.charAt(start)))
+            return new Region(offset, 0);
+        while (start > 0 && isIdentifierChar(lit.text.charAt(start - 1)))
+            start--;
+        while (end < lit.text.length() && isIdentifierChar(lit.text.charAt(end)))
+            end++;
+        return new Region(lit.docOffset(start), lit.docOffset(end) - lit.docOffset(start));
+    }
+
+    /** Контрол должен соответствовать информации QL, а не описанию литерала BSL. */
+    record QueryHover(Object info, IInformationControlCreator creator) {}
+
+    /** Общее описание поля для наведения и боковой подсказки предложений QL. */
+    private static final class QueryFieldHover implements IEObjectHover, ITextHoverExtension
+    {
+        private final XtextDocument document;
+        private final BslXtextEditor sourceEditor;
+        private final IInformationControlCreator creator;
+
+        QueryFieldHover(XtextDocument document, BslXtextEditor sourceEditor)
+        {
+            this.document = document;
+            this.sourceEditor = sourceEditor;
+            IResourceServiceProvider services = IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(document.getResourceURI());
+            IEObjectHoverProvider provider = services == null ? null : services.get(IEObjectHoverProvider.class);
+            creator = provider instanceof DefaultEObjectHoverProvider browserProvider
+                ? MetadataTypeMenu.queryHoverCreator(browserProvider) : null;
+        }
+
+        @Override
+        public IInformationControlCreator getHoverControlCreator()
+        {
+            return creator;
+        }
+
+        @Override
+        public Object getHoverInfo(EObject object, ITextViewer viewer, IRegion region)
+        {
+            if (!(object instanceof DbViewElement element) || element.eIsProxy())
+                return null;
+            return document.readOnly(resource ->
+            {
+                if (resource == null)
+                    return null;
+                String type = ""; //$NON-NLS-1$
+                String typeHtml = ""; //$NON-NLS-1$
+                if (element instanceof DbViewFieldDef)
+                {
+                    var computer = resource.getResourceServiceProvider().get(DerivedTypeComputerForDbViewQuery.class);
+                    var valueType = computer.getFieldType(element).getFirst();
+                    List<String> typeNames = new ArrayList<>();
+                    List<String> typeLinks = new ArrayList<>();
+                    if (valueType != null)
+                        for (var item : valueType.getTypes())
+                        {
+                            String typeName = item.getNameRu();
+                            if (typeName == null || typeName.isBlank())
+                                typeName = item.getName();
+                            if (typeName != null && !typeName.isBlank() && !typeNames.contains(typeName))
+                            {
+                                typeNames.add(typeName);
+                                typeLinks.add(MetadataTypeMenu.link(item, typeName, sourceEditor));
+                            }
+                        }
+                    type = typeNames.isEmpty() ? QlUtil.getTypeName(valueType, true) : String.join(", ", typeNames); //$NON-NLS-1$
+                    typeHtml = typeLinks.isEmpty() ? HTMLPrinter.convertToHTMLContent(type) : String.join(", ", typeLinks); //$NON-NLS-1$
+                }
+                List<String> path = new ArrayList<>();
+                MdObject tableObject = null;
+                Set<EObject> visited = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                EObject current = element instanceof DbViewFieldDef ? element.eContainer() : element;
+                while (current instanceof DbViewElement owner && visited.add(current))
+                {
+                    // DbViewFromQuery носит псевдоним источника из ИЗ. Оригинал
+                    // содержит полное имя таблицы метаданных и виртуальной таблицы.
+                    if (owner instanceof DbViewFromQuery source)
+                    {
+                        // Оригинал источника ИЗ заполняется лениво при расчёте полей.
+                        // getFieldsFromOriginalDbView вычисляет его по mdObject и
+                        // записывает originalDbView (штатный механизм QlUtil).
+                        if (source.getOriginalDbView() == null)
+                            QlUtil.getFieldsFromOriginalDbView(source,
+                                resource.getResourceServiceProvider().get(IDynamicDbViewFieldComputer.class));
+                        if (source.getOriginalDbView() != null)
+                        {
+                            current = source.getOriginalDbView();
+                            continue;
+                        }
+                    }
+                    String name = elementName(owner);
+                    if (tableObject == null && owner.getMdObject() instanceof MdObject metadata)
+                        tableObject = metadata;
+                    if (!name.isBlank())
+                        path.add(0, name);
+                    current = owner.eContainer();
+                }
+                String table = String.join(".", path); //$NON-NLS-1$
+                StringBuilder html = new StringBuilder();
+                if (element instanceof DbViewFieldDef)
+                    html.append("<p>Тип значения: &lt;").append(typeHtml).append("&gt;</p>"); //$NON-NLS-1$ //$NON-NLS-2$
+                html.append("<p>Таблица: <b>").append(MetadataTypeMenu.objectLink(tableObject, table, sourceEditor)).append("</b></p>"); //$NON-NLS-1$ //$NON-NLS-2$
+                // Общий штатный стиль BSL: шрифт, отступы и палитра EDT.
+                String styled = MetadataTypeMenu.style(IrBslHoverHtml.wrapForAssistBrowser(html.toString()));
+                return new XtextBrowserInformationControlInput(null, element, styled, new LabelProvider()
+                {
+                    @Override
+                    public String getText(Object input)
+                    {
+                        return input instanceof DbViewElement view ? elementName(view) : super.getText(input);
+                    }
+                });
+            });
+        }
+
+        private static String elementName(DbViewElement element)
+        {
+            String name = element.getNameRu();
+            return name != null && !name.isBlank() ? name
+                : element.getName() == null ? "" : element.getName(); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Описание найденного поля QL: тип и полное имя таблицы-владельца.
+     * QlEObjectHoverProvider возвращает null для DbView: hasHover проверяет
+     * QlQualifiedNameProvider, который не поддерживает эти объекты. Поэтому
+     * содержимое формируется непосредственно из модели, как и для списка.
+     * Виджеты скрытого редактора доступны только из UI-потока.
+     * Непустой результат с {@code info == null} означает запрос без подсказки:
+     * заменять его справкой по строковому литералу нельзя.
+     */
+    static QueryHover queryHover(BslXtextEditor editor, ITextViewer viewer, int offset)
+    {
+        Literal lit = viewer == null ? null : parse(viewer.getDocument(), offset, true);
+        if (lit == null || !lit.isQuery())
+            return null;
+        return queryDescription(editor, () -> resolveProject(editor), lit.text.toString(), lit.probeIndex);
+    }
+
+    /** Одинаковый расчёт для существующего слова и выбранного предложения списка. */
+    private static QueryHover queryDescription(BslXtextEditor sourceEditor, Supplier<IProject> projectSource,
+        String query, int offset)
+    {
+        QueryHover[] result = { new QueryHover(null, null) };
+        Display display = Display.getDefault();
+        if (display.isDisposed())
+            return result[0];
+        Runnable calculate = () -> {
+            try
+            {
+                IProject project = projectSource.get();
+                if (project == null)
+                {
+                    return;
+                }
+                QlEditor ql = hiddenEditor(project);
+                EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
+                if (!query.equals(embedded.getDocument().get()))
+                    ql.setFullText(query);
+                XtextSourceViewer qlViewer = embedded.getViewer();
+                // readOnly синхронизирует модель после setFullText. Цепочка наведения
+                // использует tryReadOnly и фильтры включённых подсказок; для скрытого
+                // редактора она может не дойти до провайдера описания QL вообще.
+                embedded.getDocument().readOnly(resource ->
+                {
+                    if (resource == null || resource.getParseResult() == null)
+                    {
+                        return null;
+                    }
+                    var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                    if (leaf == null || leaf.isHidden())
+                    {
+                        return null;
+                    }
+                    // QL хранит обращение к полю как выражение, а не обычную
+                    // cross-reference Xtext. QlRuntimeModule связывает этот сервис
+                    // с QlEObjectAtOffsetHelper; resolveElementAt вычисляет DbView
+                    // через QlMapper / IDynamicDbViewFieldComputer, как Ctrl+клик EDT.
+                    EObjectAtOffsetHelper resolver = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+                    EObject field = resolver.resolveElementAt(resource, offset);
+                    if (field == null || field.eIsProxy())
+                        return null;
+                    QueryFieldHover description = new QueryFieldHover(embedded.getDocument(), sourceEditor);
+                    result[0] = new QueryHover(description.getHoverInfo(field, qlViewer,
+                        new Region(leaf.getOffset(), leaf.getLength())), description.getHoverControlCreator());
+                    return null;
+                });
+            }
+            catch (Exception | LinkageError error)
+            {
+            }
+        };
+        if (Display.getCurrent() == display)
+            calculate.run();
+        else
+            display.syncExec(calculate);
+        return result[0];
     }
 
     // --- «Перейти к определению» и Ctrl+клик в литерале-запросе (issue 837) ---
@@ -1127,6 +1694,7 @@ final class BslQueryLiteralSupport
     {
         final Position range;
         String query;
+        boolean concatenated;
         final List<QueryProblemAnnotation> ours = new ArrayList<>();
         /** Сколько отметок хаба убрано под этим покрытием. */
         int hubHidden;
@@ -1305,6 +1873,14 @@ final class BslQueryLiteralSupport
                 return;
             }
             List<Literal> literals = visibleQueryLiterals(document, top, bottom);
+            // Один неблокирующий доступ к актуальному AST для всех видимых литералов.
+            // При занятом документе сохраняем прежние отметки до следующего прохода.
+            Set<Integer> concatenated = concatenatedLiterals(document, literals);
+            if (concatenated == null)
+            {
+                schedule(MARKERS_DELAY_MS);
+                return;
+            }
             IProject project = literals.isEmpty() ? null : resolveProject(editor);
             List<Annotation> remove = new ArrayList<>();
             Map<Annotation, Position> add = new LinkedHashMap<>();
@@ -1322,8 +1898,9 @@ final class BslQueryLiteralSupport
                         coverage = candidate;
                 }
                 String query = lit.text.toString();
+                boolean skipValidation = concatenated.contains(start);
                 String cacheKey = project.getName() + '\n' + query;
-                List<Issue> issues = ISSUES_CACHE.get(cacheKey);
+                List<Issue> issues = skipValidation ? List.of() : ISSUES_CACHE.get(cacheKey);
                 if (issues == null)
                 {
                     issues = validate(project, query);
@@ -1347,11 +1924,12 @@ final class BslQueryLiteralSupport
                 else
                     coverage.range.setLength(end - start);
                 matched.add(coverage);
-                if (query.equals(coverage.query))
+                if (query.equals(coverage.query) && coverage.concatenated == skipValidation)
                     continue;
                 remove.addAll(coverage.ours);
                 coverage.ours.clear();
                 coverage.query = query;
+                coverage.concatenated = skipValidation;
                 for (Issue issue : issues)
                 {
                     String type = annotationType(issue.getSeverity());
@@ -1596,6 +2174,38 @@ final class BslQueryLiteralSupport
         Literal lit = parse(doc, offset, true);
         if (lit != null && seen.add(lit.openQuote) && lit.isQuery())
             result.add(lit);
+    }
+
+    /** Скобки не создают узла в BSL AST: родитель литерала сразу содержит операцию «+». */
+    private static Set<Integer> concatenatedLiterals(IDocument document, List<Literal> literals)
+    {
+        if (literals.isEmpty())
+            return Set.of();
+        if (!(document instanceof XtextDocument xtext))
+            return null;
+        return xtext.tryReadOnly(resource ->
+        {
+            if (resource == null)
+                return null;
+            Set<Integer> result = new HashSet<>();
+            EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+            for (Literal literal : literals)
+            {
+                EObject object = helper.resolveContainedElementAt(resource, literal.openQuote + 1);
+                StringLiteral model = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+                var nodes = model == null ? List.<org.eclipse.xtext.nodemodel.INode>of()
+                    : NodeModelUtils.findNodesForFeature(model, BslPackage.Literals.STRING_LITERAL__LINES);
+                // Не применять результат AST, который ещё соответствует прежнему тексту.
+                // Узел самого объекта может включать окружающие скобки; нужны узлы строк.
+                if (nodes.isEmpty() || nodes.get(0).getOffset() != literal.openQuote
+                    || literal.closeQuote >= 0
+                        && nodes.get(nodes.size() - 1).getEndOffset() != literal.closeQuote + 1)
+                    return null;
+                if (isConcatenatedLiteral(model))
+                    result.add(literal.openQuote);
+            }
+            return result;
+        });
     }
 
     /** Проверка текста запроса штатным валидатором языка запросов; {@code null} — сбой. Только UI. */

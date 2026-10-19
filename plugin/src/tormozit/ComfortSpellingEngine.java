@@ -2661,9 +2661,9 @@ public final class ComfortSpellingEngine
             projectDictCheck.setEnabled(canUseProject);
             projectDictCheck.setSelection(
                 canUseProject && ComfortSettings.isSpellingAddToProjectDictionary());
-            projectDictCheck.setToolTipText(canUseProject
+            projectDictCheck.setToolTipText(TooltipText.wrap(projectDictCheck, canUseProject
                 ? "Писать в .comfort/spelling-comfort-project.dic активного проекта (для git)." //$NON-NLS-1$
-                : "Нет активного проекта — доступен только общий словарь."); //$NON-NLS-1$
+                : "Нет активного проекта — доступен только общий словарь.")); //$NON-NLS-1$
             projectDictCheck.addSelectionListener(new SelectionAdapter()
             {
                 @Override
@@ -2715,10 +2715,10 @@ public final class ComfortSpellingEngine
             declensionLabel.setText("Склонение:"); //$NON-NLS-1$
             declensionCombo = new Combo(area, SWT.READ_ONLY | SWT.DROP_DOWN);
             declensionCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-            declensionCombo.setToolTipText(
+            declensionCombo.setToolTipText(TooltipText.wrap(declensionCombo,
                 "Тип задаёт словарное окончание леммы. При морфологии лемма должна "
                     + "оканчиваться соответственно: -ка, -а/-я, -ый/-ий/-ой, -ть/-ться "
-                    + "и т.п. Иначе формы не строятся."); //$NON-NLS-1$
+                    + "и т.п. Иначе формы не строятся.")); //$NON-NLS-1$
 
             Label prevTitle = new Label(area, SWT.NONE);
             prevTitle.setText("Формы:"); //$NON-NLS-1$

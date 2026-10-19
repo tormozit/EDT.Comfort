@@ -131,9 +131,7 @@ final class BracketContentHintPresenter
                 int shift = whitespaceCharactersShown
                     ? lineDelimiterSignsWidth(gc, widget, lineMapper, hint.widgetLine, lineEndOffset) : 0;
 
-                gc.setForeground(resolveHintColor(widget, hint.widgetColorOffset));
-                gc.setAlpha(ALPHA);
-                gc.drawString(" " + hint.text, location.x + shift, location.y, true); //$NON-NLS-1$
+                paintInlineHint(gc, widget, hint.widgetColorOffset, hint.text, location.x + shift, location.y);
             }
             catch (IllegalArgumentException ignored)
             {
@@ -143,6 +141,24 @@ final class BracketContentHintPresenter
             {
                 gc.setAlpha(255);
             }
+        }
+    }
+
+    /** Общий стиль подписей концов конструкций и номеров запросов пакета. */
+    static void paintInlineHint(GC gc, StyledText widget, int widgetColorOffset, String text, int x, int y)
+    {
+        Color previousColor = gc.getForeground();
+        int previousAlpha = gc.getAlpha();
+        try
+        {
+            gc.setForeground(resolveHintColor(widget, widgetColorOffset));
+            gc.setAlpha(ALPHA);
+            gc.drawString(" " + text, x, y, true); //$NON-NLS-1$
+        }
+        finally
+        {
+            gc.setForeground(previousColor);
+            gc.setAlpha(previousAlpha);
         }
     }
 

@@ -366,10 +366,6 @@ public final class BracketContentHintHook implements IStartup
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    // #region agent log
-                    Global.tempLog("assist-priority-index", "begin canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " disposed=" + disposed); //$NON-NLS-1$
-                    // #endregion
                     if (disposed || monitor.isCanceled())
                         return Status.CANCEL_STATUS;
                     if (!ContentAssistSessionReloader.isModelCurrent(document))
@@ -394,9 +390,6 @@ public final class BracketContentHintHook implements IStartup
                     }
                     catch (Exception e)
                     {
-                        // #region agent log
-                        Global.tempLogException("assist-priority-index", "failed", e); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #endregion
                         Global.log(TAG, "rebuildJob failed: " + e.getMessage()); //$NON-NLS-1$
                         return Status.CANCEL_STATUS;
                     }
@@ -413,9 +406,6 @@ public final class BracketContentHintHook implements IStartup
                         return Status.CANCEL_STATUS;
 
                     index = result;
-                    // #region agent log
-                    Global.tempLog("assist-priority-index", "published entries=" + result.size()); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                     Display display = PlatformUI.getWorkbench().getDisplay();
                     if (display != null && !display.isDisposed())
                     {
@@ -429,9 +419,6 @@ public final class BracketContentHintHook implements IStartup
 
                 private IStatus retryRebuild()
                 {
-                    // #region agent log
-                    Global.tempLog("assist-priority-index", "retry disposed=" + disposed); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                     // Повторяем после уступки подсказкам; закрытый редактор и выключенная
                     // возможность не должны оставлять задание в цикле ожидания.
                     if (!disposed && !widget.isDisposed() && ComfortSettings.isBracketContentHintEnabled())

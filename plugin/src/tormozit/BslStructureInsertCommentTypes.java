@@ -444,6 +444,29 @@ public final class BslStructureInsertCommentTypes
     static void refreshTypesForAssist(Resource resource, int offset,
         java.util.function.Consumer<String> onRecompute)
     {
+        if (resource != null && org.eclipse.swt.widgets.Display.getCurrent() == null
+            && !resource.getContents().isEmpty()
+            && BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))
+            && peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree)
+        {
+            Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+            if (queryLock != null)
+                ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
+                {
+                    BslQueryResultTypes.refresh(resource, offset, onRecompute,
+                        method ->
+                        {
+                            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+                            if (!queryTree.recomputeDependent(module, method, CancelIndicator.NullImpl))
+                                return false;
+                            java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                            if (!changed.isEmpty())
+                                ComfortTreeTypeSystem.StaleTypes.add(resource, changed);
+                            return true;
+                        });
+                    return true;
+                });
+        }
         ComfortTreeTypeSystem.StaleTypes stale = resource == null ? null
             : ComfortTreeTypeSystem.StaleTypes.BY_RESOURCE.get(resource);
         if (stale == null || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
@@ -1645,6 +1668,9 @@ public final class BslStructureInsertCommentTypes
         Method method = methodNamed(module, source.getMethodName());
         if (method == null || property.getName() == null)
             return null;
+        PropertySourceTarget queryField = BslQueryResultTypes.sourceTarget(property, source, module);
+        if (queryField != null)
+            return queryField;
         Invocation invocation = invocationAtSource(source, method);
         if (invocation != null && property.getName().equalsIgnoreCase(insertedKey(invocation)))
             return new PropertySourceTarget(EcoreUtil.getURI(invocation.getParams().get(0)), -1, 0);

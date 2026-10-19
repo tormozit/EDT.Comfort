@@ -114,7 +114,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
 
     private static final String PROPERTIES_MENU_TEXT = "Свойства"; //$NON-NLS-1$
     private static final String OPEN_EDITOR_COMMAND_ID = "com._1c.g5.v8.dt.ui.commands.openEditor"; //$NON-NLS-1$
-    private static final String OPEN_EDITOR_DIAG = "md-attribute-menu-819"; //$NON-NLS-1$
 
     private static final String ITEM_FO = "Функциональные опции"; //$NON-NLS-1$
 
@@ -145,7 +144,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
             if (display == null || display.isDisposed())
                 return;
             display.addFilter(SWT.MenuDetect, MdEditorAttributeMenuHook::handleMenuDetect);
-            Global.tempLog(OPEN_EDITOR_DIAG, "install filters"); //$NON-NLS-1$
             display.addFilter(SWT.Show, MdEditorAttributeMenuHook::handleMenuShow);
             display.addFilter(SWT.MouseDown, MdEditorAttributeMenuHook::handleMouseDown);
             display.addFilter(SWT.MouseDoubleClick, MdEditorAttributeMenuHook::handleMouseDoubleClick);
@@ -630,8 +628,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         Control target = menuTargetOf(control);
         DtGranularEditor<?> editor = editorOf(control);
         IFormPage page = editor != null ? editor.getActivePageInstance() : null;
-        Global.tempLog(OPEN_EDITOR_DIAG, "MenuDetect control=" + control.getClass().getName() //$NON-NLS-1$
-            + " target=" + target + " page=" + (page != null ? page.getId() : null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (target == null)
             return;
         Menu menu = menuOf(target);
@@ -816,52 +812,26 @@ public final class MdEditorAttributeMenuHook implements IStartup
      */
     private static void hideRedundantOpenEditorItem(Menu menu, Control control)
     {
-        Global.tempLog(OPEN_EDITOR_DIAG, "hide begin control=" + control //$NON-NLS-1$
-            + " items=" + menu.getItemCount()); //$NON-NLS-1$
-        for (MenuItem item : menu.getItems())
-        {
-            Object data = item.getData();
-            String command = data instanceof CommandContributionItem contribution && contribution.getCommand() != null
-                ? contribution.getCommand().getId() + " params=" + contribution.getCommand().getParameterMap() : null; //$NON-NLS-1$
-            if (data instanceof HandledContributionItem contribution && contribution.getModel() != null)
-            {
-                MHandledItem model = contribution.getModel();
-                command = (model.getCommand() != null ? model.getCommand().getElementId() : null)
-                    + " params=" + model.getParameters() + " wbCommand=" + model.getWbCommand(); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            Global.tempLog(OPEN_EDITOR_DIAG, "item text=" + plainMenuText(item) //$NON-NLS-1$
-                + " dataClass=" + (data != null ? data.getClass().getName() : null) + " command=" + command); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         if (!(control instanceof Tree tree) || tree.isDisposed())
         {
-            Global.tempLog(OPEN_EDITOR_DIAG, "skip:not-live-tree"); //$NON-NLS-1$
             return;
         }
         boolean dataPage = isDataPageAttributesTree(tree);
         boolean standard = MdEditorTreeHook.isStandardAttributesTree(tree);
-        Global.tempLog(OPEN_EDITOR_DIAG, "scope selection=" + tree.getSelectionCount() //$NON-NLS-1$
-            + " dataPage=" + dataPage + " standard=" + standard); //$NON-NLS-1$ //$NON-NLS-2$
         if (tree.getSelectionCount() != 1 || !dataPage || standard)
         {
-            Global.tempLog(OPEN_EDITOR_DIAG, "skip:scope"); //$NON-NLS-1$
             return;
         }
         EObject member = selectedDataMember(tree);
-        Global.tempLog(OPEN_EDITOR_DIAG, "member=" + describeOpenEditorObject(member) //$NON-NLS-1$
-            + " rowClass=" + (tree.getSelection()[0].getData() != null //$NON-NLS-1$
-                ? tree.getSelection()[0].getData().getClass().getName() : null));
         if (!(member instanceof BasicFeature || member instanceof BasicTabularSection))
         {
-            Global.tempLog(OPEN_EDITOR_DIAG, "skip:member-type"); //$NON-NLS-1$
             return;
         }
         DtGranularEditor<?> editor = editorOf(tree);
         EObject owner = editor != null ? editor.getModel() : null;
-        Global.tempLog(OPEN_EDITOR_DIAG, "editorOwner=" + describeOpenEditorObject(owner)); //$NON-NLS-1$
         boolean belongsToEditor = false;
         for (EObject parent = member.eContainer(); parent != null; parent = parent.eContainer())
         {
-            Global.tempLog(OPEN_EDITOR_DIAG, "ancestor=" + describeOpenEditorObject(parent)); //$NON-NLS-1$
             if (sameObject(parent, owner))
             {
                 belongsToEditor = true;
@@ -870,21 +840,16 @@ public final class MdEditorAttributeMenuHook implements IStartup
         }
         if (!belongsToEditor)
         {
-            Global.tempLog(OPEN_EDITOR_DIAG, "skip:not-owned"); //$NON-NLS-1$
             return;
         }
-        int removed = 0;
         for (MenuItem item : menu.getItems())
         {
             if (isPlainOpenEditorCommand(item.getData()))
             {
-                Global.tempLog(OPEN_EDITOR_DIAG, "remove text=" + plainMenuText(item)); //$NON-NLS-1$
                 ValueTypeColumnMenu.rememberRootPosition(menu, item);
                 item.dispose();
-                removed++;
             }
         }
-        Global.tempLog(OPEN_EDITOR_DIAG, "hide end removed=" + removed); //$NON-NLS-1$
     }
 
     /** Оба штатных представления команды: JFace и E4; переходы через параметры сохраняем. */
@@ -906,11 +871,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
                 && OPEN_EDITOR_COMMAND_ID.equals(model.getCommand().getElementId());
         }
         return false;
-    }
-
-    private static String describeOpenEditorObject(EObject object)
-    {
-        return object != null ? object.eClass().getName() + " uri=" + EcoreUtil.getURI(object) : null; //$NON-NLS-1$
     }
 
     private static boolean hasOurItems(Menu menu)

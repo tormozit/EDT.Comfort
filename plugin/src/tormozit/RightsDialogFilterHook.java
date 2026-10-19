@@ -304,8 +304,8 @@ public final class RightsDialogFilterHook implements IStartup
             final Object searchListenerRef = searchListener;
             final int[] applyGeneration = { 0 };
 
-            searchBox.setToolTipText(FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP
-                    + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            searchBox.setToolTipText(TooltipText.wrap(searchBox, FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP
+                    + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
             searchBox.setMinimumSearchTextLength(0);
             searchBox.setJobScheduleDelay(0);
             FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.RIGHTS_DIALOG);

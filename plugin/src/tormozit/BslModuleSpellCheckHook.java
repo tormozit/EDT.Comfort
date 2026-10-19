@@ -78,10 +78,13 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.quickassist.IQuickAssistInvocationContext;
+import org.eclipse.jface.text.quickassist.IQuickAssistAssistant;
+import org.eclipse.jface.text.quickassist.IQuickAssistProcessor;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.IAnnotationModelExtension;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.ISourceViewerExtension3;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.swt.SWT;
@@ -597,6 +600,12 @@ public final class BslModuleSpellCheckHook implements IStartup
             return;
         }
         wrapAnnotationHover(viewer);
+        if (viewer instanceof ISourceViewerExtension3 extension)
+        {
+            IQuickAssistAssistant assistant = extension.getQuickAssistAssistant();
+            if (assistant != null && !(assistant.getQuickAssistProcessor() instanceof QueryResultQuickAssistProcessor))
+                assistant.setQuickAssistProcessor(new QueryResultQuickAssistProcessor(assistant.getQuickAssistProcessor()));
+        }
         if (SESSIONS.containsKey(editor))
         {
             EditorSession existing = SESSIONS.get(editor);
@@ -3094,6 +3103,73 @@ public final class BslModuleSpellCheckHook implements IStartup
         return base;
     }
 
+    /** Штатный Ctrl+1 плюс то же исправление, которое показывается в подсказке ошибки. */
+    private static final class QueryResultQuickAssistProcessor implements IQuickAssistProcessor
+    {
+        private final IQuickAssistProcessor delegate;
+
+        QueryResultQuickAssistProcessor(IQuickAssistProcessor delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String getErrorMessage()
+        {
+            return delegate == null ? null : delegate.getErrorMessage();
+        }
+
+        @Override
+        public boolean canFix(Annotation annotation)
+        {
+            return delegate != null && delegate.canFix(annotation)
+                || annotation instanceof XtextAnnotation live
+                    && similarNameProposalForUnresolvedReference(live, null, null, true) != null;
+        }
+
+        @Override
+        public boolean canAssist(IQuickAssistInvocationContext context)
+        {
+            return delegate != null && delegate.canAssist(context) || !queryProposals(context).isEmpty();
+        }
+
+        @Override
+        public ICompletionProposal[] computeQuickAssistProposals(IQuickAssistInvocationContext context)
+        {
+            ICompletionProposal[] base = delegate == null ? null : delegate.computeQuickAssistProposals(context);
+            List<ICompletionProposal> result = new ArrayList<>();
+            if (base != null)
+                Collections.addAll(result, base);
+            for (ICompletionProposal proposal : queryProposals(context))
+                if (result.stream().noneMatch(existing -> existing.getDisplayString().equals(proposal.getDisplayString())))
+                    result.add(proposal);
+            return result.toArray(ICompletionProposal[]::new);
+        }
+
+        private List<ICompletionProposal> queryProposals(IQuickAssistInvocationContext context)
+        {
+            List<ICompletionProposal> result = new ArrayList<>();
+            ISourceViewer viewer = context == null ? null : context.getSourceViewer();
+            IAnnotationModel model = viewer == null ? null : viewer.getAnnotationModel();
+            if (model == null)
+                return result;
+            Iterator<Annotation> annotations = model.getAnnotationIterator();
+            while (annotations.hasNext())
+            {
+                Annotation annotation = annotations.next();
+                Position position = model.getPosition(annotation);
+                if (position == null || position.isDeleted || context.getOffset() < position.offset
+                    || context.getOffset() > position.offset + position.length
+                    || !(annotation instanceof XtextAnnotation live))
+                    continue;
+                ICompletionProposal proposal = similarNameProposalForUnresolvedReference(live, viewer, null, true);
+                if (proposal != null)
+                    result.add(proposal);
+            }
+            return result;
+        }
+    }
+
     /**
      * issue #176: ошибки проверки модуля через ИР (см. {@code IrModuleCheckHandler}) - это не
      * {@link XtextAnnotation}, а обычная {@link MarkerAnnotation} над штатным {@code IMarker.PROBLEM}
@@ -3150,23 +3226,43 @@ public final class BslModuleSpellCheckHook implements IStartup
     private static ICompletionProposal similarNameProposalForUnresolvedReference(XtextAnnotation xa,
         ISourceViewer viewer, Image icon)
     {
+        return similarNameProposalForUnresolvedReference(xa, viewer, icon, false);
+    }
+
+    private static ICompletionProposal similarNameProposalForUnresolvedReference(XtextAnnotation xa,
+        ISourceViewer viewer, Image icon, boolean onlyQueryFieldCheck)
+    {
         try
         {
             Issue issue = xa.getIssue();
             String code = issue != null ? issue.getCode() : null;
             boolean isLinking = Diagnostic.LINKING_DIAGNOSTIC.equals(code);
             boolean isDeclaredNameCode = DECLARED_NAME_ERROR_CODES.contains(code);
-            if (issue == null || !(isLinking || isDeclaredNameCode))
+            if (issue == null)
                 return null;
             Integer offset = issue.getOffset();
             Integer length = issue.getLength();
             IXtextDocument document = xa.getDocument();
             if (offset == null || length == null || document == null)
                 return null;
-            return buildSimilarNameProposal(document, viewer, offset, length, icon, null);
+            boolean queryFieldCheck = false;
+            if (onlyQueryFieldCheck || !(isLinking || isDeclaredNameCode))
+            {
+                queryFieldCheck = document.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+                    IProject project = projectOf(resource);
+                    ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+                    CheckUid uid = project == null || repository == null || code == null ? null
+                        : repository.getUidForShortUid(code, project);
+                    return new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid); //$NON-NLS-1$
+                });
+            }
+            if (onlyQueryFieldCheck ? !queryFieldCheck : !(isLinking || isDeclaredNameCode || queryFieldCheck))
+                return null;
+            return buildSimilarNameProposal(document, viewer, offset, length, icon, null, queryFieldCheck);
         }
         catch (Exception e)
         {
+            Global.tempLogException("query-result-types", "quickfix-name-lookup", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -3189,13 +3285,19 @@ public final class BslModuleSpellCheckHook implements IStartup
     private static ICompletionProposal buildSimilarNameProposal(IXtextDocument document,
         ISourceViewer viewer, int offset, int length, Image icon, IMarker markerToClear)
     {
+        return buildSimilarNameProposal(document, viewer, offset, length, icon, markerToClear, false);
+    }
+
+    private static ICompletionProposal buildSimilarNameProposal(IXtextDocument document,
+        ISourceViewer viewer, int offset, int length, Image icon, IMarker markerToClear, boolean queryFields)
+    {
         LockedNameLookup found = document.readOnly(
-            (IUnitOfWork<LockedNameLookup, XtextResource>) resource -> lookupNameUnderLock(resource, offset));
+            (IUnitOfWork<LockedNameLookup, XtextResource>) resource -> lookupNameUnderLock(resource, offset, queryFields));
         if (found == null)
             return null;
         String typed = found.typed;
         NameMatch match = found.match;
-        if (match == null)
+        if (match == null && !queryFields)
             match = matchFromContentAssist(viewer, offset, typed);
         if (match == null)
             return null;
@@ -3232,7 +3334,7 @@ public final class BslModuleSpellCheckHook implements IStartup
      * кандидаты из {@link IScope} и общей таблицы. {@code null} - слова нет, предлагать нечего.
      * Не ждать здесь UI-поток: вызывается под {@code document.readOnly}.
      */
-    private static LockedNameLookup lookupNameUnderLock(XtextResource resource, int offset)
+    private static LockedNameLookup lookupNameUnderLock(XtextResource resource, int offset, boolean queryFields)
     {
         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
             offset);
@@ -3251,6 +3353,9 @@ public final class BslModuleSpellCheckHook implements IStartup
             // честно ничего не предлагать, чем "Заменить на 'ф'".
             return null;
         }
+        // Для результата запроса допустимы только поля конкретной выборки.
+        if (queryFields)
+            return new LockedNameLookup(typed, matchInNames(BslQueryResultTypes.fieldNamesAt(resource, offset), typed));
         NameMatch match = matchFromScope(resource, leaf, typed);
         if (match == null)
             match = matchFromTable(resource, typed);

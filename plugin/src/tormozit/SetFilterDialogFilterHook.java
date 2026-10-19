@@ -160,8 +160,8 @@ public final class SetFilterDialogFilterHook implements IStartup
         tree.setData(LAST_PATTERN_KEY, ""); //$NON-NLS-1$
         int[] applyGeneration = { 0 };
 
-        searchBox.setToolTipText(
-            FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+        searchBox.setToolTipText(TooltipText.wrap(searchBox,
+            FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
         searchBox.setMinimumSearchTextLength(0);
         searchBox.setJobScheduleDelay(0);
         FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.SET_FILTER_DIALOG);

@@ -381,8 +381,8 @@ public final class NavigatorFilterHook implements IStartup
             // что и в FilterInputBox (подтверждено); Ctrl+↓ — встроенная функция самого виджета,
             // не зависит от того, что мы (в отличие от FilterInputBox.create()) не вызываем
             // здесь setHistory() — историю Навигатор ведёт сам.
-            searchFocusControl.setToolTipText(
-                FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            searchFocusControl.setToolTipText(TooltipText.wrap(searchFocusControl,
+                FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов.")); //$NON-NLS-1$
         if (attempt == 0 || attempt % 3 == 0)
             NavigatorFilterDebug.log("try#" + attempt + " searchInput mode=" + searchInput.mode() //$NON-NLS-1$ //$NON-NLS-2$
                     + " " + SearchBoxFilterAccess.describe(searchBox)); //$NON-NLS-1$

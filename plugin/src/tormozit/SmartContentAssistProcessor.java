@@ -101,31 +101,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private final IContentAssistProcessor delegate;
     private final String activationChars;
 
-    /** Только диагностика: последняя правка документа, без влияния на отмену/кэш. */
-    private volatile long pipelineInputId;
-
-    void traceAssistInput(ITextViewer viewer, DocumentEvent event)
-    {
-        pipelineInputId = ContentAssistDebug.pipelineNextId();
-        ContentAssistDebug.pipeline("input", pipelineState()
-            + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
-            + " doc=" + ContentAssistDebug.pipelineIdentity(event == null ? null : event.getDocument())
-            + " offset=" + (event == null ? -1 : event.getOffset())
-            + " removed=" + (event == null ? -1 : event.getLength())
-            + " inserted=" + (event == null || event.getText() == null ? 0 : event.getText().length())
-            + " text=" + ContentAssistDebug.pipelineText(event == null ? null : event.getText()));
-    }
-
-    String pipelineState()
-    {
-        return "processor=" + ContentAssistDebug.pipelineIdentity(this)
-            + " input=" + pipelineInputId + " context=" + fullListContextKey
-            + " cache=" + ContentAssistDebug.pipelineIdentity(fullListCache)
-            + " cacheN=" + fullListCache.length + " ready=" + fullListReady
-            + " complete=" + fullListComplete
-            + " seed=" + ContentAssistDebug.pipelineText(fullListCachePrefix);
-    }
-
     private ICompletionProposal[] fullListCache = EMPTY;
     /** Порядок элементов в {@link #fullListCache} для tie-break при равном рейтинге. */
     private IdentityHashMap<ICompletionProposal, Integer> delegateOrderMap;
@@ -365,7 +340,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static void uiBlockLog(String where, String data)
     {
-        ContentAssistDebug.pipeline(where, data);
         if (uiBlockLogQuiet(where))
             return;
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
@@ -589,7 +563,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         this.delegate = delegate;
         this.activationChars = activationChars;
-        ContentAssistDebug.installModelResolutionTrace();
     }
 
     public IContentAssistProcessor getDelegate()
@@ -1228,7 +1201,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     public void invalidateCache()
     {
-        ContentAssistDebug.pipeline("cache.invalidate", pipelineState());
         fullListReady = false;
         fullListComplete = false;
         assignFullListCache(EMPTY);
@@ -1610,7 +1582,6 @@ return;
         }
         adoptIrTypeForEdtOverlaps(merged, irProposals);
         fullListCache = merged;
-        ContentAssistDebug.pipeline("cache.merged", pipelineState());
         rebuildDelegateOrderMap();
         fullListReady = true;
         if (clearProbeOnEmptyBase)
@@ -2193,10 +2164,6 @@ return result;
         // После пропуска обычный путь получает список членов из фонового расчёта.
         if (org.eclipse.swt.widgets.Display.getCurrent() != null)
         {
-            // #region agent log
-            Global.tempLog("assist-receiver-probe", "skipUi dot=" + dot //$NON-NLS-1$ //$NON-NLS-2$
-                + " manual=" + ManualInvocationDetect.isActive()); //$NON-NLS-1$
-            // #endregion
             return null;
         }
         boolean nonObject = ReceiverTypeLabel.isNonObjectReceiver(doc, dot, caret);
@@ -2290,17 +2257,12 @@ return result;
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
     {
-        try (ContentAssistDebug.PipelineSpan pipeline =
-            ContentAssistDebug.pipelineStart("cache.filter", pipelineState()
-                + " caret=" + caret + " filter=" + ContentAssistDebug.pipelineText(filter)))
-        {
         ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
-        ContentAssistDebug.pipeline("cache.filter.result", ContentAssistDebug.pipelineList(result));
         if (result == null || result.length == 0)
-            return result;
+        return result;
         return synthesizeBareConstructorProposals(result,
-            viewer != null ? viewer.getDocument() : null, caret);
-        }
+        viewer != null ? viewer.getDocument() : null, caret);
+
     }
 
     private ICompletionProposal[] filterCachedProposalsForPopupImpl(ITextViewer viewer, int caret, String filter)
@@ -2629,118 +2591,98 @@ return;
     @Override
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
-        try (ContentAssistDebug.PipelineSpan pipeline =
-            ContentAssistDebug.pipelineStart("compute", pipelineState()
-                + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer) + " offset=" + offset))
-        {
-        long t0 = ContentAssistDebug.perfStart("computeCompletionProposals"); //$NON-NLS-1$
         long tUi = System.nanoTime();
         boolean firstPopup = !wordListSeededOnUi;
         ICompletionProposal[] result = EMPTY;
         try
         {
-            dropListCachesOnTypesChange();
-            long stageStarted = System.nanoTime();
-            Global.tempLog("assist-compute-stages", "impl.begin");
-            result = computeCompletionProposalsImpl(viewer, offset);
-            Global.tempLog("assist-compute-stages", "impl.end ms="
-                + ((System.nanoTime() - stageStarted) / 1_000_000L));
-            // В комментарии пустой список — это просто «нет подходящих типов»: ни ИР,
-            // ни ожидания фонового списка членов (точка в тексте комментария — не
-            // member-access, ждать там нечего, а ожидание держит UI до 1,5 с).
-            if ((result == null || result.length == 0)
-                && !isCommentAssistContext(viewer, resolveInvocationCaret(viewer, offset)))
-            {
-                if (hasIrProposalsForCurrentContext())
-                    result = popupListWithIr(EMPTY);
-                else
-                    result = awaitMemberStockWhenEmpty(viewer, offset, result);
-            }
-            result = synthesizeBareConstructorProposals(result,
-                viewer != null ? viewer.getDocument() : null, offset);
-            stageStarted = System.nanoTime();
-            result = queryParametersOnly(viewer, offset, result);
-            Global.tempLog("assist-compute-stages", "query.end ms="
-                + ((System.nanoTime() - stageStarted) / 1_000_000L));
-            stageStarted = System.nanoTime();
-            result = NaparnikAssistRow.withRow(result);
-            Global.tempLog("assist-compute-stages", "naparnik.end ms="
-                + ((System.nanoTime() - stageStarted) / 1_000_000L));
-            return result;
+        dropListCachesOnTypesChange();
+
+        result = computeCompletionProposalsImpl(viewer, offset);
+        // В комментарии пустой список — это просто «нет подходящих типов»: ни ИР,
+        // ни ожидания фонового списка членов (точка в тексте комментария — не
+        // member-access, ждать там нечего, а ожидание держит UI до 1,5 с).
+        if ((result == null || result.length == 0)
+            && !isCommentAssistContext(viewer, resolveInvocationCaret(viewer, offset)))
+        {
+            if (hasIrProposalsForCurrentContext())
+                result = popupListWithIr(EMPTY);
+            else
+                result = awaitMemberStockWhenEmpty(viewer, offset, result);
+        }
+        result = synthesizeBareConstructorProposals(result,
+            viewer != null ? viewer.getDocument() : null, offset);
+
+        result = queryParametersOnly(viewer, offset, result);
+
+        result = NaparnikAssistRow.withRow(result);
+        return result;
         }
         finally
         {
-            // Ставим изоляцию DataEvent сразу, как только штатный слушатель EDT появился.
-            // Он создаётся лениво внутри первого же расчёта, а без изоляции фоновый расчёт
-            // запускать нельзя — до этой строки перенос в фон не включался никогда.
-            if (viewer != null)
-                BslDataEventGuard.install(viewer.getDocument());
-            FILTER_TOGGLE_CONSUMED.remove();
-            int docLen = -1;
-            int filterLen = 0;
-            int dot = -1;
-            try
+        // Ставим изоляцию DataEvent сразу, как только штатный слушатель EDT появился.
+        // Он создаётся лениво внутри первого же расчёта, а без изоляции фоновый расчёт
+        // запускать нельзя — до этой строки перенос в фон не включался никогда.
+        if (viewer != null)
+            BslDataEventGuard.install(viewer.getDocument());
+        FILTER_TOGGLE_CONSUMED.remove();
+        int docLen = -1;
+        int filterLen = 0;
+        int dot = -1;
+        try
+        {
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            if (doc != null)
             {
-                IDocument doc = viewer != null ? viewer.getDocument() : null;
-                if (doc != null)
-                {
-                    docLen = doc.getLength();
-                    String filter = computeIdentifierFilter(doc, offset);
-                    filterLen = filter == null ? 0 : filter.length();
-                    dot = ReceiverTypeLabel.findMemberAccessDot(doc, offset);
-                }
-            }
-            catch (RuntimeException ignored)
-            {
-            }
-            ContentAssistDebug.perfEnd("computeCompletionProposals", t0, //$NON-NLS-1$
-                "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"popup\":" + isPopupVisible() //$NON-NLS-1$
-                    + ",\"docLen\":" + docLen //$NON-NLS-1$
-                    + ",\"filterLen\":" + filterLen //$NON-NLS-1$
-                    + ",\"dot\":" + dot //$NON-NLS-1$
-                    + ",\"irN\":" + irProposals.length //$NON-NLS-1$
-                    + ",\"irCtx\":" + isIrWordsResolvedForContext() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #region agent log
-            IDocument logDoc = viewer != null ? viewer.getDocument() : null;
-            uiBlockLog("computeCompletionProposals", //$NON-NLS-1$
-                "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
-                    + " off=" + offset //$NON-NLS-1$
-                    + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
-                    + " popup=" + isPopupVisible() //$NON-NLS-1$
-                    + " docLen=" + docLen //$NON-NLS-1$
-                    + " filterLen=" + filterLen //$NON-NLS-1$
-                    + " filter=" + (logDoc != null ? computeIdentifierFilter(logDoc, offset) : "") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " around=\"" + uiBlockAround(logDoc, offset) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + " dot=" + dot //$NON-NLS-1$
-                    + " irN=" + irProposals.length //$NON-NLS-1$
-                    + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
-                    + " cache=" + fullListCache.length //$NON-NLS-1$
-                    + " ctx=" + fullListContextKey //$NON-NLS-1$
-                    + " manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$
-                    + " inLiteral=" + isStringLiteralAssistContext(logDoc, offset) //$NON-NLS-1$
-                    + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
-                    + " firstPopup=" + firstPopup //$NON-NLS-1$
-                    + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            // #endregion
-            // Временная диагностика (issue 628): итог расчёта в литерале-аргументе вызова.
-            int diagCaret = resolveInvocationCaret(viewer, offset);
-            if (BslAssistSourceHeuristics.literalCallOpenQuote(logDoc, diagCaret) >= 0)
-                Global.tempLog("literal-arg", "compute exit off=" + offset + " caret=" + diagCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
-                    + " argCache=" + (literalArgListForCaret(logDoc, diagCaret) != null) //$NON-NLS-1$
-                    + " dot=" + dot + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " popup=" + isPopupVisible() //$NON-NLS-1$
-                    + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
-            IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
-            if (rememberDoc != null && !Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
-            {
-                int rememberCaret = resolveInvocationCaret(viewer, offset);
-                rememberCtorTypeCatalog(rememberDoc, rememberCaret, fullListCache);
+                docLen = doc.getLength();
+                String filter = computeIdentifierFilter(doc, offset);
+                filterLen = filter == null ? 0 : filter.length();
+                dot = ReceiverTypeLabel.findMemberAccessDot(doc, offset);
             }
         }
+        catch (RuntimeException ignored)
+        {
         }
+        // #region agent log
+        IDocument logDoc = viewer != null ? viewer.getDocument() : null;
+        uiBlockLog("computeCompletionProposals", //$NON-NLS-1$
+            "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
+                + " off=" + offset //$NON-NLS-1$
+                + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
+                + " popup=" + isPopupVisible() //$NON-NLS-1$
+                + " docLen=" + docLen //$NON-NLS-1$
+                + " filterLen=" + filterLen //$NON-NLS-1$
+                + " filter=" + (logDoc != null ? computeIdentifierFilter(logDoc, offset) : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + " around=\"" + uiBlockAround(logDoc, offset) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + " dot=" + dot //$NON-NLS-1$
+                + " irN=" + irProposals.length //$NON-NLS-1$
+                + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+                + " cache=" + fullListCache.length //$NON-NLS-1$
+                + " ctx=" + fullListContextKey //$NON-NLS-1$
+                + " manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$
+                + " inLiteral=" + isStringLiteralAssistContext(logDoc, offset) //$NON-NLS-1$
+                + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$
+                + " firstPopup=" + firstPopup //$NON-NLS-1$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
+        // Временная диагностика (issue 628): итог расчёта в литерале-аргументе вызова.
+        int diagCaret = resolveInvocationCaret(viewer, offset);
+        if (BslAssistSourceHeuristics.literalCallOpenQuote(logDoc, diagCaret) >= 0)
+            Global.tempLog("literal-arg", "compute exit off=" + offset + " caret=" + diagCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
+                + " argCache=" + (literalArgListForCaret(logDoc, diagCaret) != null) //$NON-NLS-1$
+                + " dot=" + dot + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " popup=" + isPopupVisible() //$NON-NLS-1$
+                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
+        IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
+        if (rememberDoc != null && !Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
+        {
+            int rememberCaret = resolveInvocationCaret(viewer, offset);
+            rememberCtorTypeCatalog(rememberDoc, rememberCaret, fullListCache);
+        }
+        }
+
     }
 
     /**
@@ -2800,10 +2742,6 @@ return;
                 memberStockAwaitInProgress = false;
             }
         }
-        ContentAssistDebug.perfMark("memberStockAwait", //$NON-NLS-1$
-            "{\"dot\":" + dot + ",\"manual\":" + manual + ",\"ms\":" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"outcome\":\"" + outcome + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return result == null || result.length == 0 ? fallback : result;
     }
 
@@ -2934,8 +2872,6 @@ return;
             if (countNoLinkModelProposals(fullListCache) > 0)
                 return wordListSkip("alreadyOpenedTypes"); //$NON-NLS-1$
             wordListOpenedKey = Integer.MIN_VALUE;
-            ContentAssistDebug.perfMark("wordListDefer.reopenBg", //$NON-NLS-1$
-                "{\"key\":" + key + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         if (countNoLinkModelProposals(fullListCache) > 0
             && isCacheValidForCaret(doc, caret))
@@ -2962,15 +2898,10 @@ return;
         // первый расчёт в редакторе идёт на UI — его закажет вызывающий.
         if (!BslDataEventGuard.install(doc))
         {
-            ContentAssistDebug.perfMark("wordListDefer.bootstrap", //$NON-NLS-1$
-                "{\"why\":\"noGuard\"}"); //$NON-NLS-1$
             return wordListSkip("noGuard"); //$NON-NLS-1$
         }
         if (wordListBackgroundJob != null)
         {
-            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
-                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
-                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
             wordListEpoch++;
@@ -2987,20 +2918,14 @@ return;
         // Слово набирают вплотную перед уже стоящей «.» — это не точка, набранная вдогонку.
         final boolean dotAhead = isDotAt(doc, caret);
         final boolean inspectJob = DebugInspectorHook.isInspectExpressionViewer(viewer);
-        final long pipelineJobId = ContentAssistDebug.pipelineNextId();
-        final long pipelineScheduledNs = System.nanoTime();
-        final long pipelineScheduledInput = pipelineInputId;
-        ContentAssistDebug.pipeline("word.schedule", pipelineState()
-            + " job=" + pipelineJobId + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
-            + " caret=" + caret + " delayMs=" + delayMs + " epoch=" + epoch);
+
+
+
         Job job = new Job("SCAP word list") //$NON-NLS-1$
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                ContentAssistDebug.PipelineSpan pipeline = ContentAssistDebug.pipelineStart("word.run",
-                    pipelineState() + " job=" + pipelineJobId + " scheduledInput=" + pipelineScheduledInput
-                        + " queuedNs=" + (System.nanoTime() - pipelineScheduledNs));
                 uiBlockLog("wordListBackground.run", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                     + " canceled=" + monitor.isCanceled() //$NON-NLS-1$
                     + " seeded=" + wordListSeededOnUi); //$NON-NLS-1$
@@ -3013,7 +2938,6 @@ return;
                     || gen != memberStockContextGen);
                 try
                 {
-                long t0 = System.nanoTime();
                 ICompletionProposal[] raw = EMPTY;
                 java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                 int attempts = 0;
@@ -3108,11 +3032,6 @@ return;
                                 + " attempt=" + attempts); //$NON-NLS-1$
                             return Status.CANCEL_STATUS;
                         }
-                        ContentAssistDebug.perfMark("wordListBackground.err", //$NON-NLS-1$
-                            "{\"err\":\"" + e.getClass().getSimpleName() //$NON-NLS-1$
-                                + "\",\"msg\":\"" //$NON-NLS-1$
-                                + String.valueOf(e.getMessage()).replace('"', '\'')
-                                + "\"}"); //$NON-NLS-1$
                         raw = EMPTY;
                     }
                     // mode == 2 — штатный расчёт отдал второй проход: полный проход
@@ -3143,12 +3062,6 @@ return;
                         }
                     }
                 }
-                ContentAssistDebug.perfLog("wordListBackground", //$NON-NLS-1$
-                    (System.nanoTime() - t0) / 1_000_000L, 0,
-                    "{\"key\":" + key + ",\"n\":" + (raw == null ? -1 : raw.length) //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"attempts\":" + attempts //$NON-NLS-1$
-                        + ",\"off\":" + lastProbe //$NON-NLS-1$
-                        + ",\"events\":" + events.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 final ICompletionProposal[] result = raw == null ? EMPTY : raw;
                 final java.util.Map<Object, Object> dataEvents = events;
                 ICompletionProposal[] popup = result;
@@ -3198,15 +3111,8 @@ return;
                 final String ctorEnvKey = ctorKey;
                 final boolean refreshOnCurrentModel = provisionalModel && !ctorProbe;
                 final long pipelineReadyNs = System.nanoTime();
-                ContentAssistDebug.pipeline("word.publish.queued", pipelineState()
-                    + " job=" + pipelineJobId + " filter=" + ContentAssistDebug.pipelineText(popupFilterFinal)
-                    + " " + ContentAssistDebug.pipelineList(popupList));
                 runWordListOnUi(viewer, display, "word", //$NON-NLS-1$
                     () -> {
-                        try (ContentAssistDebug.PipelineSpan publication = ContentAssistDebug.pipelineStart(
-                            "word.publish", pipelineState() + " job=" + pipelineJobId
-                                + " scheduledInput=" + pipelineScheduledInput
-                                + " uiWaitNs=" + (System.nanoTime() - pipelineReadyNs)))
                         {
                             publishWordList(viewer, key, gen, epoch, result,
                                 dataEvents, popupList, popupFilterFinal, probeOffset, ctorEnvKey);
@@ -3226,18 +3132,12 @@ return;
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
                     restoreAssistWorkerPriority(worker, workerPriority);
-                    ContentAssistDebug.pipeline("word.exit", pipelineState()
-                        + " job=" + pipelineJobId + " canceled=" + monitor.isCanceled()
-                        + " epoch=" + epoch + "/" + wordListEpoch);
-                    pipeline.close();
                 }
             }
         };
         job.setSystem(true);
         job.setPriority(Job.INTERACTIVE);
         wordListBackgroundJob = job;
-        ContentAssistDebug.pipeline("word.scheduled", pipelineState()
-            + " job=" + pipelineJobId + " jobObject=" + ContentAssistDebug.pipelineIdentity(job));
         job.schedule(Math.max(0L, delayMs));
         // #region agent log
         uiBlockLog("scheduleWordListInBackground", "key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -3357,8 +3257,6 @@ return;
      */
     private static boolean memberStockSkip(String reason)
     {
-        ContentAssistDebug.perfMark("memberStockDefer.skip", //$NON-NLS-1$
-            "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         return false;
     }
 
@@ -3366,8 +3264,6 @@ return;
     private static boolean wordListSkip(String reason)
     {
         lastWordListSkip = reason;
-        ContentAssistDebug.perfMark("wordListDefer.skip", //$NON-NLS-1$
-            "{\"why\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #region agent log
         uiBlockLog("wordListSkip", "why=" + reason); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
@@ -3396,7 +3292,6 @@ return;
         {
         }
         long ms = (System.nanoTime() - t0) / 1_000_000L;
-        ContentAssistDebug.perfLog("wordListBackground.waitResource", ms, 0, "{}"); //$NON-NLS-1$
         uiBlockLog("wordListBackground.waitResource", "ms=" + ms); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -3412,9 +3307,6 @@ return;
         wordListBackgroundKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
-            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
-                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
-                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
         }
@@ -3440,9 +3332,6 @@ return;
         pendingPublishKey = Integer.MIN_VALUE;
         if (wordListBackgroundJob != null)
         {
-            ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
-                + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
-                + " state=" + wordListBackgroundJob.getState());
             wordListBackgroundJob.cancel();
             wordListBackgroundJob = null;
         }
@@ -3649,16 +3538,10 @@ return;
         {
             uiBlockLog("wordListBackground.dropEpoch", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                 + " n=" + publishN + " epoch=" + epoch + "/" + wordListEpoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            ContentAssistDebug.perfMark("wordListBackground.dropEpoch", //$NON-NLS-1$
-                "{\"key\":" + key + ",\"n\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (gen != memberStockContextGen)
         {
-            ContentAssistDebug.perfMark("wordListBackground.dropGen", //$NON-NLS-1$
-                "{\"key\":" + key + ",\"was\":" + gen //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"now\":" + memberStockContextGen //$NON-NLS-1$
-                    + ",\"n\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (wordListBackgroundKey == key)
@@ -3680,8 +3563,6 @@ return;
                 + " keepCtor=" + keepCtor); //$NON-NLS-1$
             if (!keepCtor)
             {
-                ContentAssistDebug.perfMark("wordListBackground.dropKey", //$NON-NLS-1$
-                    "{\"key\":" + key + ",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
             key = liveKey;
@@ -3691,15 +3572,11 @@ return;
         {
             uiBlockLog("wordListBackground.dropStale", "key=" + key //$NON-NLS-1$ //$NON-NLS-2$
                 + " caret=" + liveCaret); //$NON-NLS-1$
-            ContentAssistDebug.perfMark("wordListBackground.dropStale", //$NON-NLS-1$
-                "{\"key\":" + key + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ICompletionProposal[] list = result;
         if (list.length == 0)
         {
-            ContentAssistDebug.perfMark("wordListBackground.dropEmpty", //$NON-NLS-1$
-                "{\"key\":" + key + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             rescheduleWordListAfterEmpty(viewer, liveDoc, liveCaret, key);
             return;
         }
@@ -3722,11 +3599,6 @@ return;
         if (list.length == 0 || list.length < fullListCache.length
             || (cacheTypes > 0 && newTypes == 0))
         {
-            ContentAssistDebug.perfMark("wordListBackground.dropShorter", //$NON-NLS-1$
-                "{\"key\":" + key + ",\"n\":" + list.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
-                    + ",\"cacheTypes\":" + cacheTypes //$NON-NLS-1$
-                    + ",\"newTypes\":" + newTypes + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #region agent log
             uiBlockLog("wordListBackground.drop", "n=" + list.length //$NON-NLS-1$ //$NON-NLS-2$
                 + " cache=" + fullListCache.length //$NON-NLS-1$
@@ -3755,9 +3627,6 @@ return;
         clearDelegateSyncProbe();
         rememberInterimDelegateList(list);
         rememberCtorTypeCatalog(liveDoc, liveCaret, list, ctorEnvKey);
-        ContentAssistDebug.perfMark("wordListBackground.publish", //$NON-NLS-1$
-            "{\"key\":" + key + ",\"cache\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"events\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // Открываем окно ровно один раз на контекст: повторный показ снова запустил бы
         // расчёт, и при неудаче получился бы цикл.
         wordListOpenedKey = key;
@@ -3765,10 +3634,6 @@ return;
         if (!thisPopup)
         {
             String liveFilter = computeIdentifierFilter(liveDoc, liveCaret);
-            ContentAssistDebug.pipeline("word.publish.filter", pipelineState()
-                + " liveFilter=" + ContentAssistDebug.pipelineText(liveFilter)
-                + " preparedFilter=" + ContentAssistDebug.pipelineText(popupFilter)
-                + " preparedN=" + (popupList == null ? -1 : popupList.length));
             if (popupList != null && popupList.length > 0 && liveFilter.equals(popupFilter))
             {
                 backgroundPopupList = popupList;
@@ -3782,7 +3647,6 @@ return;
             try
             {
                 opened = ContentAssistSessionReloader.openPopupForBackgroundList(viewer);
-                ContentAssistDebug.perfMark("openPopup.wordBg", "{\"ok\":" + opened + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
             {
@@ -3817,13 +3681,8 @@ return;
         wordListEmptyRestarts++;
         if (wordListEmptyRestarts > WORD_LIST_EMPTY_RESTARTS)
         {
-            ContentAssistDebug.perfMark("wordListBackground.giveUp", //$NON-NLS-1$
-                "{\"key\":" + key + ",\"restarts\":" + wordListEmptyRestarts + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
-        ContentAssistDebug.perfMark("wordListBackground.reschedule", //$NON-NLS-1$
-            "{\"key\":" + key + ",\"caret\":" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"n\":" + wordListEmptyRestarts + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // Пустая сессия уже могла обнулить ключ. Без восстановления schedule
         // выходит с noKey, и после последней буквы Job больше не стартует.
         if (fullListContextKey == Integer.MIN_VALUE)
@@ -3872,7 +3731,6 @@ return;
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                Global.tempLog("assist-model-refresh", "begin key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 BslXtextDocumentHook.markAssistBackground(true);
                 DELEGATE_STALE_CHECK.set(() -> stale(monitor));
                 try
@@ -3889,13 +3747,10 @@ return;
                         // пока та же сессия открыта, продолжаем ждать в том же воркере.
                         if (raw == null && ContentAssistSessionReloader.isModelCurrent(doc))
                         {
-                            Global.tempLog("assist-model-refresh", "stop: no delegate result key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                             return Status.CANCEL_STATUS;
                         }
                         if (raw == null || stamped.getModificationStamp() != computedStamp)
                             continue;
-                        Global.tempLog("assist-model-refresh", "ready key=" + key + " n=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + " stamp=" + computedStamp); //$NON-NLS-1$
                         runWordListOnUi(viewer, display, "wordModelRefresh", () -> { //$NON-NLS-1$
                             int caret = resolveWidgetCaret(viewer);
                             if (stale(monitor) || wordListModelRefreshJob != this
@@ -3903,7 +3758,6 @@ return;
                                 || caret < 0 || computeFullListContextKey(doc, caret) != key
                                 || fullListContextKey != key)
                             {
-                                Global.tempLog("assist-model-refresh", "drop context key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                                 return;
                             }
                             if (stamped.getModificationStamp() != computedStamp)
@@ -3913,7 +3767,6 @@ return;
                             }
                             if (raw.length == 0)
                             {
-                                Global.tempLog("assist-model-refresh", "keep preliminary: empty key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                                 return;
                             }
                             BslDataEventGuard.mergeIntoReal(doc, events);
@@ -3922,8 +3775,6 @@ return;
                             rememberRecoveredDelegateList(viewer, caret, "", raw); //$NON-NLS-1$
                             ContentAssistPopupSync.recomputePopupListPreservingSelection(assistant, source,
                                 SmartContentAssistProcessor.this);
-                            Global.tempLog("assist-model-refresh", "publish key=" + key + " n=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                                + " filter=" + computeIdentifierFilter(doc, caret)); //$NON-NLS-1$
                         });
                         return Status.OK_STATUS;
                     }
@@ -3931,21 +3782,18 @@ return;
                 }
                 catch (Exception | LinkageError | StackOverflowError e)
                 {
-                    Global.tempLogException("assist-model-refresh", "failed key=" + key, e); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
                 finally
                 {
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
-                    Global.tempLog("assist-model-refresh", "end key=" + key + " stale=" + stale(monitor)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 }
             }
         };
         refresh.setSystem(true);
         refresh.setPriority(Job.INTERACTIVE);
         wordListModelRefreshJob = refresh;
-        Global.tempLog("assist-model-refresh", "schedule key=" + key + " epoch=" + epoch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         refresh.schedule();
     }
 
@@ -3975,7 +3823,6 @@ return;
         warmBslDocumentListener(viewer);
         if (!BslDataEventGuard.install(doc))
         {
-            Global.tempLog("assist-cache-refetch", "skip noGuard caret=" + caret);
             return;
         }
         if (cacheOnlyRefetchJob != null)
@@ -4001,9 +3848,6 @@ return;
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                long started = System.nanoTime();
-                Global.tempLog("assist-cache-refetch", "begin caret=" + caret
-                    + " filter=" + filter + " stamp=" + stamp);
                 BslXtextDocumentHook.markAssistBackground(true);
                 DELEGATE_STALE_CHECK.set(() -> stale(monitor));
                 try
@@ -4015,8 +3859,6 @@ return;
                     java.util.Map<Object, Object> events = BslDataEventGuard.drainIsolated(doc);
                     if (stale(monitor))
                         return Status.CANCEL_STATUS;
-                    Global.tempLog("assist-cache-refetch", "ready caret=" + caret
-                        + " filter=" + filter + " raw=" + raw.length);
                     boolean queued = ContentAssistSessionReloader.requestGatedShow(viewer,
                         "cacheRefetch", () -> {
                             if (stale(monitor) || cacheOnlyRefetchJob != this
@@ -4026,12 +3868,9 @@ return;
                                 || (fullListContextKey != Integer.MIN_VALUE && fullListContextKey != key)
                                 || !filter.equals(computeIdentifierFilter(doc, caret)))
                             {
-                                Global.tempLog("assist-cache-refetch", "drop stale caret=" + caret);
                                 return;
                             }
                             ICompletionProposal[] cached = filterAndSort(mergeIrForDisplay(raw), filter);
-                            Global.tempLog("assist-cache-refetch", "publish caret=" + caret
-                                + " filter=" + filter + " raw=" + raw.length + " n=" + cached.length);
                             if (cached.length == 0)
                                 return;
                             BslDataEventGuard.mergeIntoReal(doc, events);
@@ -4062,29 +3901,22 @@ return;
                                 backgroundPopupFilter = ""; //$NON-NLS-1$
                             }
                         });
-                    Global.tempLog("assist-cache-refetch", "queued=" + queued + " caret=" + caret);
                     return Status.OK_STATUS;
                 }
                 catch (Exception | LinkageError | StackOverflowError e)
                 {
-                    Global.tempLogException("assist-cache-refetch", "failed caret=" + caret, e);
                     return Status.CANCEL_STATUS;
                 }
                 finally
                 {
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
-                    Global.tempLog("assist-cache-refetch", "end caret=" + caret
-                        + " stale=" + stale(monitor)
-                        + " ms=" + ((System.nanoTime() - started) / 1_000_000L));
                 }
             }
         };
         job.setSystem(true);
         job.setPriority(Job.INTERACTIVE);
         cacheOnlyRefetchJob = job;
-        Global.tempLog("assist-cache-refetch", "schedule caret=" + caret
-            + " filter=" + filter + " stamp=" + stamp);
         job.schedule();
     }
 
@@ -4105,9 +3937,6 @@ return probeDelegateOnce(viewer, offset);
                 && isStringLiteralAssistContext(doc, caret))
             {
                 String literalFilter = literalArgFilter(doc, caret, SmartFilterTracker.getCurrentFilter());
-                ContentAssistDebug.pipeline("cacheOnly.literalArg", "caret=" + caret
-                    + " filter=" + ContentAssistDebug.pipelineText(literalFilter)
-                    + " " + ContentAssistDebug.pipelineList(java.util.Arrays.asList(literalArg)));
                 return applyLiteralSmartFilter(literalArg, literalFilter);
             }
             restoreCtorTypeCatalog(doc, caret);
@@ -4260,17 +4089,10 @@ if (RepeatedInvocationDetect.isActive())
      */
     public ICompletionProposal[] computeForPopupRefresh(ITextViewer viewer, int offset)
     {
-        long t0 = ContentAssistDebug.perfStart("computeForPopupRefresh"); //$NON-NLS-1$
         ICompletionProposal[] result = EMPTY;
-        try
         {
             result = queryParametersOnly(viewer, offset, computeForPopupRefreshImpl(viewer, offset));
             return result;
-        }
-        finally
-        {
-            ContentAssistDebug.perfEnd("computeForPopupRefresh", t0, //$NON-NLS-1$
-                "{\"off\":" + offset + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
     }
 
@@ -4613,9 +4435,6 @@ return EMPTY;
     boolean hasReadyLiteralArgListForCaret(ITextViewer viewer, int caret)
     {
         ICompletionProposal[] list = literalArgPopupBaseForCaret(viewer, caret);
-        ContentAssistDebug.pipeline("literalArg.cacheReadiness", "caret=" + caret
-            + " sourceN=" + (list == null ? -1 : list.length)
-            + " confirmed=" + literalArgListConfirmed);
         // Ноль совпадений с введённым префиксом не делает готовую базу неполной.
         return list != null;
     }
@@ -5172,7 +4991,6 @@ return EMPTY;
     private ICompletionProposal[] resolveProposalList(ITextViewer viewer, int offset, int caret,
                                                       String filter, boolean smartEnabled)
     {
-        long t0 = ContentAssistDebug.perfStart("resolveProposalList"); //$NON-NLS-1$
         long tUi = System.nanoTime();
         ICompletionProposal[] result = EMPTY;
         try
@@ -5182,10 +5000,6 @@ return EMPTY;
         }
         finally
         {
-            ContentAssistDebug.perfEnd("resolveProposalList", t0, //$NON-NLS-1$
-                "{\"caret\":" + caret + ",\"smart\":" + smartEnabled //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"cache\":" + fullListCache.length //$NON-NLS-1$
-                    + ",\"n\":" + (result == null ? -1 : result.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #region agent log
             uiBlockLog("resolveProposalList", //$NON-NLS-1$
                 "ms=" + ((System.nanoTime() - tUi) / 1_000_000L) //$NON-NLS-1$
@@ -5605,7 +5419,6 @@ return EMPTY;
     private void rebuildMergedFullListCache()
     {
         fullListCache = mergeIrProposals(delegateListCache);
-        ContentAssistDebug.pipeline("cache.rebuilt", pipelineState());
         rebuildDelegateOrderMap();
     }
 
@@ -6278,7 +6091,6 @@ return stripEmptyPlaceholderProposals(result);
                     job.schedule();
                 }
             }
-            Global.tempLog("assist-bare-constructors", "request type=" + name);
         }
 
         static boolean inFlight()
@@ -6292,8 +6104,6 @@ return stripEmptyPlaceholderProposals(result);
         @Override
         protected IStatus run(IProgressMonitor monitor)
         {
-            long started = System.nanoTime();
-            Global.tempLog("assist-bare-constructors", "begin");
             try
             {
                 while (!monitor.isCanceled())
@@ -6323,8 +6133,6 @@ return stripEmptyPlaceholderProposals(result);
                     });
                     if (resolved != null)
                         BARE_CTOR_TYPE_CACHE.putAll(resolved);
-                    Global.tempLog("assist-bare-constructors", "batch requested=" + batch.size()
-                        + " resolved=" + (resolved == null ? 0 : resolved.size()));
                 }
                 ContentAssistSessionReloader.requestGatedShow(viewer, "bareConstructors", () -> {
                     if (viewer.getDocument() != document
@@ -6343,7 +6151,6 @@ return stripEmptyPlaceholderProposals(result);
             }
             catch (Exception | LinkageError | StackOverflowError e)
             {
-                Global.tempLogException("assist-bare-constructors", "failed", e);
                 return Status.CANCEL_STATUS;
             }
             finally
@@ -6353,8 +6160,6 @@ return stripEmptyPlaceholderProposals(result);
                     if (JOBS.get(document) == this)
                         JOBS.remove(document);
                 }
-                Global.tempLog("assist-bare-constructors", "end ms="
-                    + ((System.nanoTime() - started) / 1_000_000L));
             }
         }
     }
@@ -6461,87 +6266,76 @@ return stripEmptyPlaceholderProposals(result);
     private static ICompletionProposal[] synthesizeBareConstructorProposals(
         ICompletionProposal[] list, IDocument doc, int caret)
     {
-        long started = System.nanoTime();
-        Global.tempLog("assist-bare-constructors", "synthesize.begin n="
-            + (list == null ? 0 : list.length) + " ui="
-            + (org.eclipse.swt.widgets.Display.getCurrent() != null));
-        try
+        if (list == null || list.length == 0 || doc == null || !isAfterNewKeyword(doc, caret))
+            return list;
+        Set<String> bareKeysPresent = new HashSet<>();
+        Map<String, ICompletionProposal> zeroArgByKey = new LinkedHashMap<>();
+        Map<String, ICompletionProposal> firstByKey = new LinkedHashMap<>();
+        for (ICompletionProposal p : list)
         {
-            if (list == null || list.length == 0 || doc == null || !isAfterNewKeyword(doc, caret))
-                return list;
-            Set<String> bareKeysPresent = new HashSet<>();
-            Map<String, ICompletionProposal> zeroArgByKey = new LinkedHashMap<>();
-            Map<String, ICompletionProposal> firstByKey = new LinkedHashMap<>();
-            for (ICompletionProposal p : list)
-            {
-                String key = dedupKey(p);
-                if (key.isEmpty())
-                    continue;
-                String lower = key.toLowerCase(java.util.Locale.ROOT);
-                firstByKey.putIfAbsent(lower, p);
-                if (isEffectivelyBare(p))
-                    bareKeysPresent.add(lower);
-                else if (isEffectivelyZeroArgWithParens(p) && !zeroArgByKey.containsKey(lower))
-                    zeroArgByKey.put(lower, p);
-            }
-            Map<String, ICompletionProposal> toInsert = new LinkedHashMap<>();
-            for (Map.Entry<String, ICompletionProposal> e : zeroArgByKey.entrySet())
-            {
-                if (bareKeysPresent.contains(e.getKey()))
-                    continue; // бесскобочный уже есть (обычно от ИР) — preferBareOverEmptyParens уберёт "()"
-                ICompletionProposal raw = unwrapProposal(e.getValue());
-                String typeName = parseProposalListName(displayString(raw));
-                if (typeName.isEmpty())
-                    continue;
-                // +1 — чтобы при равном имени сортировщик (SmartCodeProposalSorter →
-                // compareProposals → resolveNativePriority) ставил бесскобочный НАД перегрузками
-                // своей же группы, а не наравне/ниже (issue 558: без этого тонет в общем списке,
-                // т.к. у синтезированного predlozhenия нет "родного" приоритета EDT).
-                toInsert.put(e.getKey(),
-                    new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
-            }
-            // Структура/Массив/Запрос и подобные: EDT не выдаёт отдельную перегрузку "Тип()" — все
-            // параметры опциональные, EDT показывает одну перегрузку "Тип(Ключи, Значения)" без
-            // нулевой (issue 558: залогировано — "Структура()" не приходит никогда). Синтезировать
-            // не из чего напрямую — спрашиваем модель типов EDT (isBareConstructorTypeName).
-            for (Map.Entry<String, ICompletionProposal> e : firstByKey.entrySet())
-            {
-                String key = e.getKey();
-                if (toInsert.containsKey(key) || bareKeysPresent.contains(key))
-                    continue;
-                ICompletionProposal raw = unwrapProposal(e.getValue());
-                String typeName = parseProposalListName(displayString(raw));
-                // Оригинальный регистр — точнее для QualifiedName-поиска в isBareConstructorTypeName
-                // (кэш промахнётся один раз мимо, дальше по-любому из кэша).
-                if (typeName.isEmpty() || !isBareConstructorTypeName(typeName))
-                    continue;
-                toInsert.put(key,
-                    new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
-            }
-            if (toInsert.isEmpty())
-                return list;
-            // Бесскобочный вариант — самый частый выбор (issue 156), вставляем ПЕРЕД первым
-            // предложением своей группы, а не в конец всего списка (issue 558: иначе тонет внизу
-            // среди совсем других типов).
-            List<ICompletionProposal> merged = new ArrayList<>(list.length + toInsert.size());
-            Set<String> insertedKeys = new HashSet<>();
-            for (ICompletionProposal p : list)
-            {
-                String lower = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
-                ICompletionProposal bare = !lower.isEmpty() && insertedKeys.add(lower)
-                    ? toInsert.get(lower) : null;
-                if (bare != null)
-                    merged.add(bare);
-                merged.add(p);
-            }
-            List<ICompletionProposal> deduped = preferBareOverEmptyParens(merged);
-            return deduped.toArray(new ICompletionProposal[deduped.size()]);
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            String lower = key.toLowerCase(java.util.Locale.ROOT);
+            firstByKey.putIfAbsent(lower, p);
+            if (isEffectivelyBare(p))
+                bareKeysPresent.add(lower);
+            else if (isEffectivelyZeroArgWithParens(p) && !zeroArgByKey.containsKey(lower))
+                zeroArgByKey.put(lower, p);
         }
-        finally
+        Map<String, ICompletionProposal> toInsert = new LinkedHashMap<>();
+        for (Map.Entry<String, ICompletionProposal> e : zeroArgByKey.entrySet())
         {
-            Global.tempLog("assist-bare-constructors", "synthesize.end ms="
-                + ((System.nanoTime() - started) / 1_000_000L));
+            if (bareKeysPresent.contains(e.getKey()))
+                continue; // бесскобочный уже есть (обычно от ИР) — preferBareOverEmptyParens уберёт "()"
+            ICompletionProposal raw = unwrapProposal(e.getValue());
+            String typeName = parseProposalListName(displayString(raw));
+            if (typeName.isEmpty())
+                continue;
+            // +1 — чтобы при равном имени сортировщик (SmartCodeProposalSorter →
+            // compareProposals → resolveNativePriority) ставил бесскобочный НАД перегрузками
+            // своей же группы, а не наравне/ниже (issue 558: без этого тонет в общем списке,
+            // т.к. у синтезированного predlozhenия нет "родного" приоритета EDT).
+            toInsert.put(e.getKey(),
+                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
         }
+        // Структура/Массив/Запрос и подобные: EDT не выдаёт отдельную перегрузку "Тип()" — все
+        // параметры опциональные, EDT показывает одну перегрузку "Тип(Ключи, Значения)" без
+        // нулевой (issue 558: залогировано — "Структура()" не приходит никогда). Синтезировать
+        // не из чего напрямую — спрашиваем модель типов EDT (isBareConstructorTypeName).
+        for (Map.Entry<String, ICompletionProposal> e : firstByKey.entrySet())
+        {
+            String key = e.getKey();
+            if (toInsert.containsKey(key) || bareKeysPresent.contains(key))
+                continue;
+            ICompletionProposal raw = unwrapProposal(e.getValue());
+            String typeName = parseProposalListName(displayString(raw));
+            // Оригинальный регистр — точнее для QualifiedName-поиска в isBareConstructorTypeName
+            // (кэш промахнётся один раз мимо, дальше по-любому из кэша).
+            if (typeName.isEmpty() || !isBareConstructorTypeName(typeName))
+                continue;
+            toInsert.put(key,
+                new BareConstructorProposal(typeName, raw.getImage(), resolveNativePriority(raw) + 1, raw));
+        }
+        if (toInsert.isEmpty())
+            return list;
+        // Бесскобочный вариант — самый частый выбор (issue 156), вставляем ПЕРЕД первым
+        // предложением своей группы, а не в конец всего списка (issue 558: иначе тонет внизу
+        // среди совсем других типов).
+        List<ICompletionProposal> merged = new ArrayList<>(list.length + toInsert.size());
+        Set<String> insertedKeys = new HashSet<>();
+        for (ICompletionProposal p : list)
+        {
+            String lower = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
+            ICompletionProposal bare = !lower.isEmpty() && insertedKeys.add(lower)
+                ? toInsert.get(lower) : null;
+            if (bare != null)
+                merged.add(bare);
+            merged.add(p);
+        }
+        List<ICompletionProposal> deduped = preferBareOverEmptyParens(merged);
+        return deduped.toArray(new ICompletionProposal[deduped.size()]);
+
     }
 
     /**
@@ -6694,18 +6488,11 @@ return stripEmptyPlaceholderProposals(result);
         @Override
         public StyledString getStyledDisplayString()
         {
-            long started = System.nanoTime();
-            try
-            {
-                StyledString styled = new StyledString(typeName);
-                SmartCodeMatcher matcher = new SmartCodeMatcher(SmartFilterTracker.getCurrentFilter());
-                SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(typeName));
-                return styled;
-            }
-            finally
-            {
-                ContentAssistDebug.pipelineStyled(started, this);
-            }
+            StyledString styled = new StyledString(typeName);
+            SmartCodeMatcher matcher = new SmartCodeMatcher(SmartFilterTracker.getCurrentFilter());
+            SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(typeName));
+            return styled;
+
         }
 
         @Override
@@ -6743,17 +6530,12 @@ return stripEmptyPlaceholderProposals(result);
     private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
         int interimN, String path, ICompletionProposal[] result)
     {
-        ContentAssistDebug.pipeline("cache.path", pipelineState()
-            + " caret=" + caret + " filter=" + ContentAssistDebug.pipelineText(filter)
-            + " path=" + path + " interimN=" + interimN
-            + " " + ContentAssistDebug.pipelineList(result));
     }
 
     @SuppressWarnings("unused")
     private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
         boolean cacheValid, String exit, ICompletionProposal[] result)
     {
-        ContentAssistDebug.pipeline("resolve.state", pipelineState());
         // #region agent log
         uiBlockLog("resolveExit", "exit=" + exit //$NON-NLS-1$ //$NON-NLS-2$
             + " caret=" + caret //$NON-NLS-1$
@@ -7436,8 +7218,6 @@ return result;
                 // Без Job (первый раз в редакторе, noGuard) — как раньше, через fetch.
                 if (isMemberStockBackgroundInFlight(dot))
                 {
-                    ContentAssistDebug.perfMark("resolve.memberDeferNoFetch", //$NON-NLS-1$
-                        "{\"dot\":" + dot + ",\"inFlight\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return built;
                 }
             }
@@ -8273,17 +8053,8 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
     private void ensureFullListForContext(ITextViewer viewer, IDocument doc, int caret,
                                           boolean allowSyncMemberCapture)
     {
-        long t0 = ContentAssistDebug.perfStart("ensureFullListForContext"); //$NON-NLS-1$
-        try
-        {
-            ensureFullListForContextImpl(viewer, doc, caret, allowSyncMemberCapture);
-        }
-        finally
-        {
-            ContentAssistDebug.perfEnd("ensureFullListForContext", t0, //$NON-NLS-1$
-                "{\"caret\":" + caret + ",\"syncCapture\":" + allowSyncMemberCapture //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        ensureFullListForContextImpl(viewer, doc, caret, allowSyncMemberCapture);
+
     }
 
     private void ensureFullListForContextImpl(ITextViewer viewer, IDocument doc, int caret,
@@ -8321,11 +8092,6 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             }
             if (keepInFlight || keepWordToMember)
             {
-                ContentAssistDebug.perfMark("contextRestore.keepBg", //$NON-NLS-1$
-                    "{\"key\":" + contextKey //$NON-NLS-1$
-                        + ",\"word\":" + keepWord //$NON-NLS-1$
-                        + ",\"member\":" + keepMember //$NON-NLS-1$
-                        + ",\"wordToMember\":" + keepWordToMember + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 uiBlockLog("contextRestore.keepBg", "key=" + contextKey //$NON-NLS-1$ //$NON-NLS-2$
                     + " prev=" + previousKey + " wordToMember=" + keepWordToMember); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
@@ -8357,9 +8123,6 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             // фон → publish, с писком на каждом витке (замер 05.09.2026).
             if (wordListBackgroundJob != null)
             {
-                ContentAssistDebug.pipeline("word.cancel.request", pipelineState()
-                    + " jobObject=" + ContentAssistDebug.pipelineIdentity(wordListBackgroundJob)
-                    + " state=" + wordListBackgroundJob.getState() + " reason=contextChanged");
                 wordListBackgroundJob.cancel();
                 wordListBackgroundKey = Integer.MIN_VALUE;
             }
@@ -8377,10 +8140,6 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             ContentAssistDebug.log("fullList context change key=" + contextKey //$NON-NLS-1$
                 + " caret=" + caret); //$NON-NLS-1$
             activeMemberAccessDot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
-            ContentAssistDebug.perfMark("contextChange", //$NON-NLS-1$
-                "{\"caret\":" + caret + ",\"key\":" + contextKey //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"dot\":" + ReceiverTypeLabel.findMemberAccessDot(doc, caret) //$NON-NLS-1$
-                    + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // В строковом литерале «.» — не member-access: иначе scheduleMemberStockCapture
             // (readOnly + computeCompletionProposals) занимает UI ~2 с и блокирует IR callback.
             if (isStringLiteralAssistContext(doc, caret))
@@ -8564,9 +8323,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private ICompletionProposal[] probeDelegateAtOffsets(ITextViewer viewer, int[] offsets,
                                                          int dot)
     {
-        long t0 = ContentAssistDebug.perfStart("probeDelegateAtOffsets"); //$NON-NLS-1$
         ICompletionProposal[] outcome = EMPTY;
-        try
         {
             if (dot < 0)
             {
@@ -8582,7 +8339,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     if (count > best.length)
                         best = raw;
                 }
-                outcome = best;
+
                 return best;
             }
             ICompletionProposal[] best = EMPTY;
@@ -8599,15 +8356,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 if (best.length >= MIN_STABLE_MEMBER_CACHE)
                     break;
             }
-            outcome = best;
+
             return best;
-        }
-        finally
-        {
-            ContentAssistDebug.perfEnd("probeDelegateAtOffsets", t0, //$NON-NLS-1$
-                "{\"dot\":" + dot //$NON-NLS-1$
-                    + ",\"offsets\":" + (offsets == null ? 0 : offsets.length) //$NON-NLS-1$
-                    + ",\"n\":" + outcome.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -8682,174 +8432,160 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      */
     private ICompletionProposal[] probeDelegateOnceHeld(ITextViewer viewer, int off)
     {
-        try (ContentAssistDebug.PipelineSpan pipeline = ContentAssistDebug.pipelineStart(
-            "delegate.probe", pipelineState() + " viewer=" + ContentAssistDebug.pipelineIdentity(viewer)
-                + " offset=" + off))
-        {
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
         long tLock = System.nanoTime();
         boolean locked;
         try
         {
-            if (onUi)
+        if (onUi)
+        {
+            DELEGATE_LOCK.lock();
+            locked = true;
+        }
+        else if (Boolean.TRUE.equals(DELEGATE_LOCK_WAIT_BG.get()))
+        {
+            // Ждём замок шагами и на каждом проверяем, нужен ли ещё этот расчёт.
+            // Прервать сам compute EDT нечем (монитор туда не передаётся), но держать
+            // место в очереди для ненужного расчёта — чистая потеря: в логе 12.09.2026
+            // 11:39 это waitMs=651 и waitMs=1035 перед вычислением, которое затем
+            // выбрасывалось.
+            java.util.function.BooleanSupplier staleWhileWaiting = DELEGATE_STALE_CHECK.get();
+            locked = false;
+            while (!locked)
             {
-                DELEGATE_LOCK.lock();
-                locked = true;
-            }
-            else if (Boolean.TRUE.equals(DELEGATE_LOCK_WAIT_BG.get()))
-            {
-                // Ждём замок шагами и на каждом проверяем, нужен ли ещё этот расчёт.
-                // Прервать сам compute EDT нечем (монитор туда не передаётся), но держать
-                // место в очереди для ненужного расчёта — чистая потеря: в логе 12.09.2026
-                // 11:39 это waitMs=651 и waitMs=1035 перед вычислением, которое затем
-                // выбрасывалось.
-                java.util.function.BooleanSupplier staleWhileWaiting = DELEGATE_STALE_CHECK.get();
-                locked = false;
-                while (!locked)
-                {
-                    locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_STEP_MS,
-                        java.util.concurrent.TimeUnit.MILLISECONDS);
-                    if (locked || (staleWhileWaiting != null && staleWhileWaiting.getAsBoolean()))
-                        break;
-                }
-                if (!locked)
-                {
-                    uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
-                        + " staleWhileWaiting waitMs=" //$NON-NLS-1$
-                        + ((System.nanoTime() - tLock) / 1_000_000L));
-                    return null;
-                }
-            }
-            else
-            {
-                locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_WAIT_MS,
+                locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_STEP_MS,
                     java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (locked || (staleWhileWaiting != null && staleWhileWaiting.getAsBoolean()))
+                    break;
             }
+            if (!locked)
+            {
+                uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                    + " staleWhileWaiting waitMs=" //$NON-NLS-1$
+                    + ((System.nanoTime() - tLock) / 1_000_000L));
+                return null;
+            }
+        }
+        else
+        {
+            locked = DELEGATE_LOCK.tryLock(DELEGATE_LOCK_BG_WAIT_MS,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
         }
         catch (InterruptedException e)
         {
-            Thread.currentThread().interrupt();
-            // #region agent log
-            uiBlockLog("probeDelegateOnce", "off=" + off + " interrupted"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return null;
+        Thread.currentThread().interrupt();
+        // #region agent log
+        uiBlockLog("probeDelegateOnce", "off=" + off + " interrupted"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        return null;
         }
         if (!locked)
         {
-            ContentAssistDebug.perfMark("delegate.lockBusy", //$NON-NLS-1$
-                "{\"off\":" + off + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #region agent log
-            uiBlockLog("probeDelegateOnce", "off=" + off + " lockBusy waitMs=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ((System.nanoTime() - tLock) / 1_000_000L));
-            // #endregion
-            return null;
+        // #region agent log
+        uiBlockLog("probeDelegateOnce", "off=" + off + " lockBusy waitMs=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + ((System.nanoTime() - tLock) / 1_000_000L));
+        // #endregion
+        return null;
         }
         long waitMs = (System.nanoTime() - tLock) / 1_000_000L;
-        ContentAssistDebug.pipeline("delegate.lock.acquired", "waitNs=" + (System.nanoTime() - tLock)
-            + " offset=" + off);
         java.util.function.BooleanSupplier staleCheck = DELEGATE_STALE_CHECK.get();
         if (staleCheck != null && staleCheck.getAsBoolean())
         {
-            DELEGATE_LOCK.unlock();
-            uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
-                + " staleAfterLock waitMs=" + waitMs); //$NON-NLS-1$
-            return null;
+        DELEGATE_LOCK.unlock();
+        uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+            + " staleAfterLock waitMs=" + waitMs); //$NON-NLS-1$
+        return null;
         }
         if (onUi && waitMs >= DELEGATE_LOCK_UI_REPORT_MS)
         {
-            ContentAssistDebug.perfMark("delegate.lockWaitUi", //$NON-NLS-1$
-                "{\"off\":" + off + ",\"ms\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
-        long t0 = ContentAssistDebug.perfStart("delegate.compute"); //$NON-NLS-1$
         long tCompute = System.nanoTime();
         ICompletionProposal[] raw = null;
         int modeBefore = delegateAssistMode();
         try
         {
-            // Штатный compute всегда делает nextMode до расчёта. Без reset() после
-            // прошлого вызова mode остаётся 1, nextMode даёт 2: ключевые слова
-            // отключены (mode&1==0), в кэш попадают 3 шаблона вроде «~Метка».
-            if (!onUi)
-                resetDelegateAssistMode();
-            KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
-            // Метод под кареткой, ссылающийся «см.» на функцию, тело которой правили после его
-            // расчёта, пересчитывается здесь — только он и только когда в нём нужен список.
-            // В UI-потоке — нет: там readOnly ждал бы задания разрешения ссылок.
-            if (!onUi && viewer != null && viewer.getDocument() instanceof IXtextDocument refreshDoc)
-            {
-                final int refreshOffset = off;
-                boolean[] shown = { false };
-                try
-                {
-                    refreshDoc.readOnly(resource ->
-                    {
-                        BslStructureInsertCommentTypes.refreshTypesForAssist(resource, refreshOffset, status ->
-                        {
-                            // Состояние — в нижней панели открытого списка вместо «Родитель: …».
-                            shown[0] = true;
-                            ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
-                        });
-                        return null;
-                    });
-                }
-                finally
-                {
-                    if (shown[0])
-                        ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
-                }
-            }
+        // Штатный compute всегда делает nextMode до расчёта. Без reset() после
+        // прошлого вызова mode остаётся 1, nextMode даёт 2: ключевые слова
+        // отключены (mode&1==0), в кэш попадают 3 шаблона вроде «~Метка».
+        if (!onUi)
+            resetDelegateAssistMode();
+        KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
+        // Метод под кареткой, ссылающийся «см.» на функцию, тело которой правили после его
+        // расчёта, пересчитывается здесь — только он и только когда в нём нужен список.
+        // В UI-потоке — нет: там readOnly ждал бы задания разрешения ссылок.
+        if (!onUi && viewer != null && viewer.getDocument() instanceof IXtextDocument refreshDoc)
+        {
+            final int refreshOffset = off;
+            boolean[] shown = { false };
             try
             {
-                raw = delegate.computeCompletionProposals(viewer, off);
-                BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
-            }
-            catch (NullPointerException npe)
-            {
-                // SWT Image / getDisplay с воркера: Xtext пишет в Error Log
-                // «This is not an UI thread» и часть proposal теряется.
-                uiBlockLog("probeDelegateOnce.offUiNpe", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
-                    + " msg=" + String.valueOf(npe.getMessage())); //$NON-NLS-1$
-                raw = EMPTY;
+                refreshDoc.readOnly(resource ->
+                {
+                    BslStructureInsertCommentTypes.refreshTypesForAssist(resource, refreshOffset, status ->
+                    {
+                        // Состояние — в нижней панели открытого списка вместо «Родитель: …».
+                        shown[0] = true;
+                        ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
+                    });
+                    return null;
+                });
             }
             finally
             {
-                endKeywordProbe(keywordProbe);
+                if (shown[0])
+                    ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
             }
-            // Ключевые слова — в каретке, из контекстов этого же опроса. После «&» грамматика
-            // допускает только аннотации, и ответ EDT там окончательный. Грамматика EDT
-            // (Bsl.xtext, PreprocessorLiteralName) объявляет «НаКлиенте» и «НаСервере»
-            // ключевыми словами, хотя платформа их в препроцессоре не принимает, — и замена
-            // ключевых слов выбрасывала эти аннотации из списка.
-            if (!isAnnotationPosition(viewer, off))
-                raw = mergeLiveKeywords(raw, keywordProbe);
-            adjustEdtLiteralPriorities(raw);
-            if (onUi && raw != null && raw.length > 0)
-                wordListSeededOnUi = true;
-            return raw;
+        }
+        try
+        {
+            raw = delegate.computeCompletionProposals(viewer, off);
+            BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
+        }
+        catch (NullPointerException npe)
+        {
+            // SWT Image / getDisplay с воркера: Xtext пишет в Error Log
+            // «This is not an UI thread» и часть proposal теряется.
+            uiBlockLog("probeDelegateOnce.offUiNpe", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+                + " msg=" + String.valueOf(npe.getMessage())); //$NON-NLS-1$
+            raw = EMPTY;
         }
         finally
         {
-            DELEGATE_LOCK.unlock();
-            IDocument d = viewer != null ? viewer.getDocument() : null;
-            long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
-            ContentAssistDebug.perfEnd("delegate.compute", t0, //$NON-NLS-1$
-                "{\"off\":" + off + ",\"n\":" + (raw == null ? -1 : raw.length) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"docLen\":" + (d == null ? -1 : d.getLength()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #region agent log
-            uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
-                + " waitMs=" + waitMs //$NON-NLS-1$
-                + " computeMs=" + computeMs //$NON-NLS-1$
-                + " n=" + (raw == null ? -1 : raw.length) //$NON-NLS-1$
-                + " docLen=" + (d == null ? -1 : d.getLength()) //$NON-NLS-1$
-                + " around=\"" + uiBlockAround(d, off) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
-                + " mode=" + modeBefore + "/" + delegateAssistMode() //$NON-NLS-1$ //$NON-NLS-2$
-                + " head=\"" + previewProposals(raw) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " popup=" + isPopupVisible() //$NON-NLS-1$
-                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            // #endregion
+            endKeywordProbe(keywordProbe);
         }
+        // Ключевые слова — в каретке, из контекстов этого же опроса. После «&» грамматика
+        // допускает только аннотации, и ответ EDT там окончательный. Грамматика EDT
+        // (Bsl.xtext, PreprocessorLiteralName) объявляет «НаКлиенте» и «НаСервере»
+        // ключевыми словами, хотя платформа их в препроцессоре не принимает, — и замена
+        // ключевых слов выбрасывала эти аннотации из списка.
+        if (!isAnnotationPosition(viewer, off))
+            raw = mergeLiveKeywords(raw, keywordProbe);
+        adjustEdtLiteralPriorities(raw);
+        if (onUi && raw != null && raw.length > 0)
+            wordListSeededOnUi = true;
+        return raw;
         }
+        finally
+        {
+        DELEGATE_LOCK.unlock();
+        IDocument d = viewer != null ? viewer.getDocument() : null;
+        long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
+        // #region agent log
+        uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+            + " waitMs=" + waitMs //$NON-NLS-1$
+            + " computeMs=" + computeMs //$NON-NLS-1$
+            + " n=" + (raw == null ? -1 : raw.length) //$NON-NLS-1$
+            + " docLen=" + (d == null ? -1 : d.getLength()) //$NON-NLS-1$
+            + " around=\"" + uiBlockAround(d, off) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + " seeded=" + wordListSeededOnUi //$NON-NLS-1$
+            + " mode=" + modeBefore + "/" + delegateAssistMode() //$NON-NLS-1$ //$NON-NLS-2$
+            + " head=\"" + previewProposals(raw) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + " popup=" + isPopupVisible() //$NON-NLS-1$
+            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
+        }
+
     }
 
     /** Литералы EDT непосредственно перед первым методом в списке автодополнения. */
@@ -9177,9 +8913,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         int dot = doc != null ? ReceiverTypeLabel.findMemberAccessDot(doc, caret) : -1;
         ICompletionProposal[] base = hasMemberListForDot(dot) ? memberStockFullList : EMPTY;
-        // #region agent log
-        Global.tempLog("assist-overload-filter", "stockBase dot=" + dot + " n=" + base.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         return base;
     }
 
@@ -9271,8 +9004,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (runMemberStockCaptureInBackground(viewer, display, dotContextKey,
                 memberStockContextGen, receiver))
                 return;
-            ContentAssistDebug.perfMark("memberStockDefer.uiFallback", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             final int captureGen = memberStockCaptureGen;
             // Расчёт на UI — только через ворота показа: иначе он занимает UI на сотни
             // миллисекунд в произвольный момент, в том числе на недорисованном кадре.
@@ -9378,7 +9109,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     ICompletionProposal[] raw = EMPTY;
                     java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
                     int attempts = 0;
-                    long t0 = System.nanoTime();
                     while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
                     {
                         // Бросаем расчёт, только если место ввода действительно сменилось
@@ -9467,10 +9197,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                             }
                         }
                     }
-                    ContentAssistDebug.perfLog("memberStockBackground", //$NON-NLS-1$
-                        (System.nanoTime() - t0) / 1_000_000L, 0,
-                        "{\"dot\":" + dotContextKey + ",\"attempts\":" + attempts //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"n\":" + (raw == null ? -1 : raw.length) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                     // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
                     // неудачи повторный расчёт для той же точки уже не запустится.
                     if (memberStockBackgroundGen == contextGen
@@ -9540,10 +9266,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (liveDoc == null || liveCaret < 0
             || ReceiverTypeLabel.findMemberAccessDot(liveDoc, liveCaret) != dotContextKey)
             return;
-        ContentAssistDebug.perfMark("memberStockEmpty", //$NON-NLS-1$
-            "{\"dot\":" + dotContextKey + ",\"receiver\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + contextReceiver.replace('"', '\'') + "\",\"popup\":" + isPopupVisible() //$NON-NLS-1$
-                + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // В окне заведомо чужой список: контекст сменился на member-access, а для него у нас
         // нет ничего (кэш контекста пуст и запаса членов нет). Показывать список прошлого
         // контекста нельзя, дорастить его нечем — окно закрывается, как это уже делает
@@ -9558,8 +9280,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 if (shown > 0)
                     return;
                 ContentAssistPopupSync.hideProposalPopup(assistant);
-                ContentAssistDebug.perfMark("memberStockEmpty.popupClosed", //$NON-NLS-1$
-                    "{\"dot\":" + dotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -9630,8 +9350,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // FullList`) ровно то, что мы сейчас публикуем.
         if (fullListContextKey != dotContextKey || !liveReceiver.equals(fullListContextReceiver))
         {
-            ContentAssistDebug.perfMark("memberStockBackground.restoreKey", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"key\":" + fullListContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             fullListContextKey = dotContextKey;
             fullListContextReceiver = liveReceiver;
         }
@@ -9640,15 +9358,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (!dataEvents.isEmpty())
         {
             BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
-            ContentAssistDebug.perfMark("memberStockBackground.dataEvents", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"n\":" + dataEvents.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
         if (result.length <= prev)
         {
-            ContentAssistDebug.perfMark("memberStockBackground.dropShorter", //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"n\":" + result.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"prev\":" + prev + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         captureMemberStockFullList(result, dotContextKey);
@@ -9661,11 +9374,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         // были посчитаны и опубликованы. Зонд устарел — у нас теперь строго больше данных.
         boolean repaired = repairPopupListFromMemberStock(liveDoc, liveCaret);
         clearDelegateSyncProbe();
-        ContentAssistDebug.perfMark("memberStockBackground.toCache", //$NON-NLS-1$
-            "{\"dot\":" + dotContextKey + ",\"repaired\":" + repaired //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"cache\":" + fullListCache.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.perfMark("memberStockBackground.publish", //$NON-NLS-1$
-            "{\"dot\":" + dotContextKey + ",\"n\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer instanceof SourceViewer)
             ContentAssistPopupUi.updateContextTypeLabel((SourceViewer)viewer);
         // Открытое окно — обновить на месте. Закрытое открываем только cachedListOnly:
@@ -9686,7 +9394,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
                                        int captureGen)
     {
-        long t0 = ContentAssistDebug.perfStart("runMemberStockCapture"); //$NON-NLS-1$
         try
         {
             if (captureGen != memberStockCaptureGen)
@@ -9741,13 +9448,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             }
         }
         catch (Exception ignored) {}
-        finally
-        {
-            ContentAssistDebug.perfEnd("runMemberStockCapture", t0, //$NON-NLS-1$
-                "{\"dot\":" + dotContextKey + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"popup\":" + isPopupVisible() //$NON-NLS-1$
-                    + ",\"stock\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     private ICompletionProposal[] resolveMemberAccessOrderedList(ITextViewer viewer, int offset,
@@ -9844,8 +9544,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (viewer == null || dot < 0 || hasMemberStock(dot))
             return memberStockFullListDot == dot ? memberStockFullList : EMPTY;
-        ContentAssistDebug.perfMark("captureMemberStockNow.enter", //$NON-NLS-1$
-            "{\"dot\":" + dot + ",\"popup\":" + isPopupVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         ICompletionProposal[] raw = requestMemberStockAtOffset(viewer, dot + 1, dot);
         if (raw.length > 0)
         {
@@ -9870,7 +9568,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                                              int dot)
     {
         IDocument doc = viewer.getDocument();
-        long t0 = ContentAssistDebug.perfStart("requestMemberStockAtOffset"); //$NON-NLS-1$
         long[] insideNanos = new long[1];
         try
         {
@@ -9895,13 +9592,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         {
             ContentAssistDebug.log("captureMemberStockAtDot ERROR: " + e.getMessage()); //$NON-NLS-1$
             return EMPTY;
-        }
-        finally
-        {
-            // "inside" — сам расчёт; разница с "ms" — ожидание блокировки ресурса Xtext.
-            ContentAssistDebug.perfEnd("requestMemberStockAtOffset", t0, //$NON-NLS-1$
-                "{\"probeOffset\":" + probeOffset + ",\"dot\":" + dot //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"inside\":" + (insideNanos[0] / 1_000_000L) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -9979,8 +9669,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             if (!(provider instanceof
                 org.eclipse.xtext.ui.editor.contentassist.RepeatedContentAssistProcessor.ModeAware modeAware))
             {
-                ContentAssistDebug.perfMark("bslAssistMode.reset", //$NON-NLS-1$
-                    "{\"ok\":false,\"why\":\"noModeAware\"}"); //$NON-NLS-1$
                 return;
             }
             int before = -1;
@@ -10008,13 +9696,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             {
             }
             modeAware.reset();
-            ContentAssistDebug.perfMark("bslAssistMode.reset", //$NON-NLS-1$
-                "{\"ok\":true,\"before\":" + before + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
-            ContentAssistDebug.perfMark("bslAssistMode.reset", //$NON-NLS-1$
-                "{\"ok\":false,\"err\":\"" + e.getClass().getSimpleName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -10036,8 +9720,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             Object provider = getter.invoke(delegate);
             if (provider == null)
             {
-                ContentAssistDebug.perfMark("bslDocEvent.warm", //$NON-NLS-1$
-                    "{\"ok\":false,\"why\":\"noProvider\"}"); //$NON-NLS-1$
                 return;
             }
             // Иконки — на UI, до Job: иначе createImage с воркера забивает Error Log.
@@ -10056,20 +9738,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             }
             if (getDocEvent == null)
             {
-                ContentAssistDebug.perfMark("bslDocEvent.warm", //$NON-NLS-1$
-                    "{\"ok\":false,\"why\":\"noMethod\"}"); //$NON-NLS-1$
                 return;
             }
             getDocEvent.setAccessible(true);
             getDocEvent.invoke(provider, viewer);
-            ContentAssistDebug.perfMark("bslDocEvent.warm", "{\"ok\":true}"); //$NON-NLS-1$
         }
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
-            ContentAssistDebug.perfMark("bslDocEvent.warm", //$NON-NLS-1$
-                "{\"ok\":false,\"err\":\"" + cause.getClass().getSimpleName() //$NON-NLS-1$
-                    + "\"}"); //$NON-NLS-1$
         }
     }
 
@@ -10382,8 +10058,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 if (offUi && (c instanceof org.eclipse.swt.SWTException
                     || c instanceof NullPointerException))
                 {
-                    ContentAssistDebug.perfMark("proxy.swt", //$NON-NLS-1$
-                        "{\"m\":\"" + name + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return defaultOffUiViewerResult(m, probeOffset, rdoc);
                 }
                 throw c;
@@ -10732,29 +10406,24 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
-        try (ContentAssistDebug.PipelineSpan pipeline =
-            ContentAssistDebug.pipelineStart("filter", pipelineState()
-                + " raw=" + ContentAssistDebug.pipelineIdentity(raw)
-                + " filter=" + ContentAssistDebug.pipelineText(filter)))
-        {
         if (raw == null || raw.length == 0)
-            return EMPTY;
+        return EMPTY;
 
         long t0 = System.nanoTime();
         boolean dropGhost = true;
         // #region agent log
         uiBlockLog("filterAndSort.enter", "in=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
-            + " dropGhost=" + dropGhost //$NON-NLS-1$
-            + " filter=" + filter //$NON-NLS-1$
-            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        + " dropGhost=" + dropGhost //$NON-NLS-1$
+        + " filter=" + filter //$NON-NLS-1$
+        + " caller=" + uiBlockCaller()); //$NON-NLS-1$
         // #endregion
         java.lang.management.ThreadMXBean mx =
-            java.lang.management.ManagementFactory.getThreadMXBean();
+        java.lang.management.ManagementFactory.getThreadMXBean();
         long tid = Thread.currentThread().getId();
         if (mx.isThreadCpuTimeSupported() && !mx.isThreadCpuTimeEnabled())
-            mx.setThreadCpuTimeEnabled(true);
+        mx.setThreadCpuTimeEnabled(true);
         if (mx.isThreadContentionMonitoringSupported() && !mx.isThreadContentionMonitoringEnabled())
-            mx.setThreadContentionMonitoringEnabled(true);
+        mx.setThreadContentionMonitoringEnabled(true);
         long cpu0 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
         java.lang.management.ThreadInfo ti0 = mx.getThreadInfo(tid);
         long blk0 = ti0 != null ? ti0.getBlockedTime() : -1L;
@@ -10763,18 +10432,18 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         Map<String, Integer> classHist = new LinkedHashMap<>();
         for (ICompletionProposal p : raw)
         {
-            if (p instanceof SmartCompletionProposal)
-                wrappedN++;
-            ICompletionProposal u = unwrapProposal(p);
-            String cn = u == null ? "null" : u.getClass().getSimpleName(); //$NON-NLS-1$
-            classHist.merge(cn, 1, Integer::sum);
+        if (p instanceof SmartCompletionProposal)
+            wrappedN++;
+        ICompletionProposal u = unwrapProposal(p);
+        String cn = u == null ? "null" : u.getClass().getSimpleName(); //$NON-NLS-1$
+        classHist.merge(cn, 1, Integer::sum);
         }
         StringBuilder classes = new StringBuilder();
         for (Map.Entry<String, Integer> e : classHist.entrySet())
         {
-            if (classes.length() > 0)
-                classes.append(',');
-            classes.append(e.getKey()).append(':').append(e.getValue());
+        if (classes.length() > 0)
+            classes.append(',');
+        classes.append(e.getKey()).append(':').append(e.getValue());
         }
         long scoreMs = -1L;
         long ghostMs = -1L;
@@ -10792,147 +10461,145 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ICompletionProposal[] result = EMPTY;
         try
         {
-            SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
-            List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
-            long tScore = System.nanoTime();
-            for (int i = 0; i < raw.length; i++)
+        SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
+        List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
+        long tScore = System.nanoTime();
+        for (int i = 0; i < raw.length; i++)
+        {
+            ICompletionProposal p = raw[i];
+            long i0 = System.nanoTime();
+            ICompletionProposal unwrapped = unwrapProposal(p);
+            long tDisp = System.nanoTime();
+            String display = displayString(unwrapped);
+            long dispNs = System.nanoTime() - tDisp;
+            int score = 0;
+            long tMatch = System.nanoTime();
+            if (display != null && !display.isEmpty())
             {
-                ICompletionProposal p = raw[i];
-                long i0 = System.nanoTime();
-                ICompletionProposal unwrapped = unwrapProposal(p);
-                long tDisp = System.nanoTime();
-                String display = displayString(unwrapped);
-                long dispNs = System.nanoTime() - tDisp;
-                int score = 0;
-                long tMatch = System.nanoTime();
-                if (display != null && !display.isEmpty())
+                String name = filterMatchName(p);
+                if (!name.isEmpty())
                 {
-                    String name = filterMatchName(p);
-                    if (!name.isEmpty())
-                    {
-                        int nameScore = namePremium(matcher, p, name);
-                        if (nameScore > 0)
-                            score = nameScore * NAME_WEIGHT
-                                + matcher.computeParamPremium(display) * PARAM_WEIGHT;
-                    }
+                    int nameScore = namePremium(matcher, p, name);
+                    if (nameScore > 0)
+                        score = nameScore * NAME_WEIGHT
+                            + matcher.computeParamPremium(display) * PARAM_WEIGHT;
                 }
-                long matchNs = System.nanoTime() - tMatch;
-                long iNs = System.nanoTime() - i0;
-                if (firstNs < 0)
-                    firstNs = iNs;
-                if (dispNs > maxDispNs)
-                    maxDispNs = dispNs;
-                if (matchNs > maxMatchNs)
-                    maxMatchNs = matchNs;
-                if (iNs > maxItemNs)
-                {
-                    maxItemNs = iNs;
-                    maxIdx = i;
-                    maxClass = unwrapped == null ? "null" : unwrapped.getClass().getSimpleName(); //$NON-NLS-1$
-                    maxDispLen = display == null ? -1 : display.length();
-                    maxDisp = clipLogDisplay(display);
-                }
-                if (iNs >= 5_000_000L)
-                {
-                    slowItems++;
-                    // #region agent log
-                    uiBlockLog("filterAndSort.item", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ms=" + (iNs / 1_000_000L) //$NON-NLS-1$
-                        + " dispMs=" + (dispNs / 1_000_000L) //$NON-NLS-1$
-                        + " matchMs=" + (matchNs / 1_000_000L) //$NON-NLS-1$
-                        + " cls=" + (unwrapped == null ? "null" : unwrapped.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " dispLen=" + (display == null ? -1 : display.length()) //$NON-NLS-1$
-                        + " disp=\"" + clipLogDisplay(display) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                }
-                if ((i + 1) % 50 == 0 || i == 0)
-                {
-                    // #region agent log
-                    uiBlockLog("filterAndSort.progress", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
-                        + " elapsedMs=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
-                        + " itemMs=" + (iNs / 1_000_000L) //$NON-NLS-1$
-                        + " maxItemMs=" + (maxItemNs / 1_000_000L)); //$NON-NLS-1$
-                    // #endregion
-                }
-                if (score > 0)
-                    filtered.add(unwrapped);
             }
-            scoreMs = (System.nanoTime() - tScore) / 1_000_000L;
-            if (filtered.isEmpty())
+            long matchNs = System.nanoTime() - tMatch;
+            long iNs = System.nanoTime() - i0;
+            if (firstNs < 0)
+                firstNs = iNs;
+            if (dispNs > maxDispNs)
+                maxDispNs = dispNs;
+            if (matchNs > maxMatchNs)
+                maxMatchNs = matchNs;
+            if (iNs > maxItemNs)
             {
-                uiBlockLog("filterAndSort.empty", "in=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + " filter=" + filter); //$NON-NLS-1$
-                return EMPTY;
+                maxItemNs = iNs;
+                maxIdx = i;
+                maxClass = unwrapped == null ? "null" : unwrapped.getClass().getSimpleName(); //$NON-NLS-1$
+                maxDispLen = display == null ? -1 : display.length();
+                maxDisp = clipLogDisplay(display);
             }
+            if (iNs >= 5_000_000L)
+            {
+                slowItems++;
+                // #region agent log
+                uiBlockLog("filterAndSort.item", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ms=" + (iNs / 1_000_000L) //$NON-NLS-1$
+                    + " dispMs=" + (dispNs / 1_000_000L) //$NON-NLS-1$
+                    + " matchMs=" + (matchNs / 1_000_000L) //$NON-NLS-1$
+                    + " cls=" + (unwrapped == null ? "null" : unwrapped.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " dispLen=" + (display == null ? -1 : display.length()) //$NON-NLS-1$
+                    + " disp=\"" + clipLogDisplay(display) + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+            if ((i + 1) % 50 == 0 || i == 0)
+            {
+                // #region agent log
+                uiBlockLog("filterAndSort.progress", "i=" + i //$NON-NLS-1$ //$NON-NLS-2$
+                    + " elapsedMs=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
+                    + " itemMs=" + (iNs / 1_000_000L) //$NON-NLS-1$
+                    + " maxItemMs=" + (maxItemNs / 1_000_000L)); //$NON-NLS-1$
+                // #endregion
+            }
+            if (score > 0)
+                filtered.add(unwrapped);
+        }
+        scoreMs = (System.nanoTime() - tScore) / 1_000_000L;
+        if (filtered.isEmpty())
+        {
+            uiBlockLog("filterAndSort.empty", "in=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " filter=" + filter); //$NON-NLS-1$
+            return EMPTY;
+        }
 
-            long tGhost = System.nanoTime();
-            dropTypedIdentifierGhostInPlace(filtered);
-            ghostMs = (System.nanoTime() - tGhost) / 1_000_000L;
-            if (filtered.isEmpty())
-                return EMPTY;
+        long tGhost = System.nanoTime();
+        dropTypedIdentifierGhostInPlace(filtered);
+        ghostMs = (System.nanoTime() - tGhost) / 1_000_000L;
+        if (filtered.isEmpty())
+            return EMPTY;
 
-            Integer[] idx = new Integer[filtered.size()];
-            for (int i = 0; i < idx.length; i++)
-                idx[i] = i;
-            long tSort = System.nanoTime();
-            try (ContentAssistDebug.PipelineSpan sorting = ContentAssistDebug.pipelineStart(
-                "filter.sort", "n=" + filtered.size()))
-            {
-                Arrays.sort(idx, (a, b) -> compareProposals(matcher,
-                    filtered.get(a), filtered.get(b)));
-            }
-            sortMs = (System.nanoTime() - tSort) / 1_000_000L;
+        Integer[] idx = new Integer[filtered.size()];
+        for (int i = 0; i < idx.length; i++)
+            idx[i] = i;
+        long tSort = System.nanoTime();
+        {
+            Arrays.sort(idx, (a, b) -> compareProposals(matcher,
+                filtered.get(a), filtered.get(b)));
+        }
+        sortMs = (System.nanoTime() - tSort) / 1_000_000L;
 
-            result = new ICompletionProposal[idx.length];
-            long tWrap = System.nanoTime();
-            for (int i = 0; i < idx.length; i++)
-            {
-                ICompletionProposal p = filtered.get(idx[i]);
-                int order = delegateOrderOf(p);
-                result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
-            }
-            wrapMs = (System.nanoTime() - tWrap) / 1_000_000L;
-            return result;
+        result = new ICompletionProposal[idx.length];
+        long tWrap = System.nanoTime();
+        for (int i = 0; i < idx.length; i++)
+        {
+            ICompletionProposal p = filtered.get(idx[i]);
+            int order = delegateOrderOf(p);
+            result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
+        }
+        wrapMs = (System.nanoTime() - tWrap) / 1_000_000L;
+        return result;
         }
         catch (RuntimeException ex)
         {
-            uiBlockLogThrowable("filterAndSort.crash", ex); //$NON-NLS-1$
-            return EMPTY;
+        uiBlockLogThrowable("filterAndSort.crash", ex); //$NON-NLS-1$
+        return EMPTY;
         }
         catch (StackOverflowError t)
         {
-            uiBlockLogThrowable("filterAndSort.crash", t); //$NON-NLS-1$
-            return EMPTY;
+        uiBlockLogThrowable("filterAndSort.crash", t); //$NON-NLS-1$
+        return EMPTY;
         }
         finally
         {
-            long cpu1 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
-            java.lang.management.ThreadInfo ti1 = mx.getThreadInfo(tid);
-            long blk1 = ti1 != null ? ti1.getBlockedTime() : -1L;
-            long wait1 = ti1 != null ? ti1.getWaitedTime() : -1L;
-            long cpuMs = cpu0 >= 0 && cpu1 >= 0 ? (cpu1 - cpu0) / 1_000_000L : -1L;
-            long blkMs = blk0 >= 0 && blk1 >= 0 ? blk1 - blk0 : -1L;
-            long waitMs = wait0 >= 0 && wait1 >= 0 ? wait1 - wait0 : -1L;
-            // #region agent log
-            uiBlockLog("filterAndSort", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
-                + " cpuMs=" + cpuMs + " blkMs=" + blkMs + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " scoreMs=" + scoreMs + " ghostMs=" + ghostMs //$NON-NLS-1$ //$NON-NLS-2$
-                + " sortMs=" + sortMs + " wrapMs=" + wrapMs //$NON-NLS-1$ //$NON-NLS-2$
-                + " firstMs=" + (firstNs < 0 ? -1L : firstNs / 1_000_000L) //$NON-NLS-1$
-                + " maxItemMs=" + (maxItemNs / 1_000_000L) //$NON-NLS-1$
-                + " maxDispMs=" + (maxDispNs / 1_000_000L) //$NON-NLS-1$
-                + " maxMatchMs=" + (maxMatchNs / 1_000_000L) //$NON-NLS-1$
-                + " maxIdx=" + maxIdx + " maxCls=" + maxClass //$NON-NLS-1$ //$NON-NLS-2$
-                + " maxDispLen=" + maxDispLen + " maxDisp=\"" + maxDisp + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " slowItems=" + slowItems //$NON-NLS-1$
-                + " in=" + raw.length + " n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$
-                + " wrapped=" + wrappedN //$NON-NLS-1$
-                + " dropGhost=" + dropGhost + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
-                + " classes=" + classes //$NON-NLS-1$
-                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
-            // #endregion
+        long cpu1 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
+        java.lang.management.ThreadInfo ti1 = mx.getThreadInfo(tid);
+        long blk1 = ti1 != null ? ti1.getBlockedTime() : -1L;
+        long wait1 = ti1 != null ? ti1.getWaitedTime() : -1L;
+        long cpuMs = cpu0 >= 0 && cpu1 >= 0 ? (cpu1 - cpu0) / 1_000_000L : -1L;
+        long blkMs = blk0 >= 0 && blk1 >= 0 ? blk1 - blk0 : -1L;
+        long waitMs = wait0 >= 0 && wait1 >= 0 ? wait1 - wait0 : -1L;
+        // #region agent log
+        uiBlockLog("filterAndSort", "ms=" + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+            + " cpuMs=" + cpuMs + " blkMs=" + blkMs + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " scoreMs=" + scoreMs + " ghostMs=" + ghostMs //$NON-NLS-1$ //$NON-NLS-2$
+            + " sortMs=" + sortMs + " wrapMs=" + wrapMs //$NON-NLS-1$ //$NON-NLS-2$
+            + " firstMs=" + (firstNs < 0 ? -1L : firstNs / 1_000_000L) //$NON-NLS-1$
+            + " maxItemMs=" + (maxItemNs / 1_000_000L) //$NON-NLS-1$
+            + " maxDispMs=" + (maxDispNs / 1_000_000L) //$NON-NLS-1$
+            + " maxMatchMs=" + (maxMatchNs / 1_000_000L) //$NON-NLS-1$
+            + " maxIdx=" + maxIdx + " maxCls=" + maxClass //$NON-NLS-1$ //$NON-NLS-2$
+            + " maxDispLen=" + maxDispLen + " maxDisp=\"" + maxDisp + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " slowItems=" + slowItems //$NON-NLS-1$
+            + " in=" + raw.length + " n=" + result.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " wrapped=" + wrappedN //$NON-NLS-1$
+            + " dropGhost=" + dropGhost + " filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
+            + " classes=" + classes //$NON-NLS-1$
+            + " caller=" + uiBlockCaller()); //$NON-NLS-1$
+        // #endregion
         }
-        }
+
     }
 
     private static String clipLogDisplay(String display)
@@ -10968,10 +10635,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
 
     private static void dropTypedIdentifierGhostInPlace(List<ICompletionProposal> list)
     {
-        long started = System.nanoTime();
         int before = list == null ? 0 : list.size();
-        Global.tempLog("assist-ghost-filter", "begin n=" + before
-            + " ui=" + (org.eclipse.swt.widgets.Display.getCurrent() != null));
         try
         {
             if (list == null || list.isEmpty())
@@ -11002,8 +10666,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     break;
                 }
             }
-            Global.tempLog("assist-ghost-filter", "candidate=" + hasCandidate
-                + " caret=" + caret + " typed=" + typed);
             if (!hasCandidate)
                 return;
             ImplicitVariable phantom = phantomImplicitAtCaret(list, doc, caret, typed);
@@ -11012,13 +10674,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         catch (StackOverflowError t)
         {
             uiBlockLogThrowable("ghost.drop.soe", t); //$NON-NLS-1$
-            Global.tempLogException("assist-ghost-filter", "drop failed n=" + before, t);
-        }
-        finally
-        {
-            Global.tempLog("assist-ghost-filter", "end before=" + before
-                + " after=" + (list == null ? 0 : list.size())
-                + " ms=" + ((System.nanoTime() - started) / 1_000_000L));
         }
     }
 
@@ -11271,7 +10926,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                        ICompletionProposal p1,
                                        ICompletionProposal p2)
     {
-        ContentAssistDebug.pipelineCompare();
         int n1 = computeNameScore(matcher, p1);
         int n2 = computeNameScore(matcher, p2);
         if (n1 != n2)
@@ -11763,7 +11417,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         {
             if (!(doc instanceof IXtextDocument xtextDoc))
                 return false;
-            long t0 = ContentAssistDebug.perfStart("isNonObjectReceiver"); //$NON-NLS-1$
             boolean result = false;
             try
             {
@@ -11781,11 +11434,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             {
                 ContentAssistDebug.log("isNonObjectReceiver ERROR: " + e.getMessage()); //$NON-NLS-1$
                 return false;
-            }
-            finally
-            {
-                ContentAssistDebug.perfEnd("isNonObjectReceiver", t0, //$NON-NLS-1$
-                    "{\"dot\":" + dotOffset + ",\"nonObject\":" + result + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
 
@@ -12242,7 +11890,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         private static void rebaseEmptyCallDataEventForInsert(DocumentEvent event)
         {
             String text = event.getText();
-            String outcome = null;
+
             int oldStart = -1;
             int desired = -1;
             try
@@ -12266,7 +11914,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 if (oldStart == desired)
                     return;
                 Object info = Global.getField(previous, "allInfo"); //$NON-NLS-1$
-                outcome = "unsupportedPositions"; //$NON-NLS-1$
+
                 if (!(info instanceof List<?> positions) || positions.size() != 1
                     || !(positions.get(0) instanceof LinkedPosition position)
                     || position.getOffset() != oldStart || position.getLength() != 0
@@ -12281,24 +11929,14 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 Object replacement = newDataEvent(listener, previous.getClass(), desired, 0,
                     stop < 0 ? stop : stop + desired - oldStart, model, List.of(rebased),
                     Global.getField(previous, "objects")); //$NON-NLS-1$
-                outcome = "noConstructor"; //$NON-NLS-1$
+
                 if (replacement == null)
                     return;
                 map.put(text, replacement);
-                outcome = "rebased"; //$NON-NLS-1$
+
             }
             catch (Exception ex)
             {
-                outcome = "error:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
-            }
-            finally
-            {
-                // Длительная диагностика: только устаревшие координаты и ошибки,
-                // без текста модуля, штатных пропусков и зависимости от флажка журнала.
-                if (outcome != null)
-                    Global.tempLog("assist-caret-rebase", "emptyCall outcome=" + outcome //$NON-NLS-1$ //$NON-NLS-2$
-                        + " offset=" + event.getOffset() + " oldStart=" + oldStart //$NON-NLS-1$ //$NON-NLS-2$
-                        + " desired=" + desired); //$NON-NLS-1$
             }
         }
 
@@ -12356,11 +11994,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             //     return;
             int targetSlots = method ? parseProposalParamNames(display).size()
                 : resolveMinParams(signature, currentSlots);
-            // #region agent log
-            Global.tempLog("assist-insert-slots", "prepare proposal=" + System.identityHashCode(cp) //$NON-NLS-1$ //$NON-NLS-2$
-                + " display=" + display + " method=" + method + " current=" + currentSlots //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " target=" + targetSlots + " replacement=" + clipCtorText(oldRepl)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             if (targetSlots < 0 || (!method && targetSlots >= currentSlots))
                 return;
             String commaStr = detectCommaStr(inside);
@@ -12378,10 +12011,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             cp.setReplacementString(newRepl);
             cp.setCursorPosition(open + 1);
             syncInitialReplacementContent(cp, newRepl);
-            // #region agent log
-            Global.tempLog("assist-insert-slots", "changed proposal=" + System.identityHashCode(cp) //$NON-NLS-1$ //$NON-NLS-2$
-                + " replacement=" + clipCtorText(newRepl)); //$NON-NLS-1$
-            // #endregion
             ContentAssistSessionReloader.logLinkedMode("ctor.trim", "{\"targetSlots\":" + targetSlots //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"old\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(oldRepl)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"new\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(newRepl)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
