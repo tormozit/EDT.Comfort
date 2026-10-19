@@ -129,7 +129,7 @@ public final class BslSyntaxAssist
     }
 
     /** Экземпляр из Guice-инжектора языка BSL по имени класса. */
-    private static Object injected(String className)
+    static Object injected(String className)
     {
         try
         {

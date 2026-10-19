@@ -28,8 +28,16 @@ import org.eclipse.jface.text.hyperlink.IHyperlinkDetectorExtension;
 import org.eclipse.jface.text.hyperlink.IHyperlinkDetectorExtension2;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.INavigationHistory;
 import org.eclipse.ui.IStartup;
@@ -39,6 +47,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IEObjectDescription;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
@@ -49,6 +58,9 @@ import org.eclipse.xtext.ui.editor.hyperlinking.XtextHyperlink;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
@@ -84,6 +96,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             Display display = Display.getDefault();
             display.addFilter(SWT.MouseMove, BslEditorHyperlinkHook::attach);
             display.addFilter(SWT.MouseDown, BslEditorHyperlinkHook::attach);
+            display.addFilter(SWT.Show, BslEditorHyperlinkHook::showVariableLinks);
             ICommandService commands = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commands != null)
                 commands.addExecutionListener(new OpenDeclarationListener());
@@ -828,6 +841,8 @@ public final class BslEditorHyperlinkHook implements IStartup
                 links = new IHyperlink[] { type };
             }
             IHyperlink[] result = multiple ? metadataLinks(viewer, links, source, page) : links.clone();
+            if (multiple)
+                compactVariableLinks(viewer, result);
             for (int i = 0; i < result.length; i++)
             {
                 // Ссылки на строки BSL оставляем штатными. Для реквизита
@@ -845,6 +860,163 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (delegate instanceof IHyperlinkDetectorExtension extension)
                 extension.dispose();
         }
+    }
+
+    /** Подписи EDT обрезаны до 25 символов: восстанавливаем выражение из AST, issue 848. */
+    private static void compactVariableLinks(ITextViewer viewer, IHyperlink[] links)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+            return;
+        try
+        {
+            document.tryReadOnly(resource ->
+            {
+                if (resource == null)
+                    return null;
+                for (int i = 0; i < links.length; i++)
+                {
+                    if (!(links[i] instanceof XtextHyperlink link) || link.getURI() == null
+                        || !resource.getURI().equals(link.getURI().trimFragment()))
+                        continue;
+                    EObject target = resource.getEObject(link.getURI().fragment());
+                    if (!(target instanceof StaticFeatureAccess access))
+                        continue;
+                    Statement statement = org.eclipse.xtext.EcoreUtil2.getContainerOfType(access, Statement.class);
+                    if (!(statement instanceof SimpleStatement assignment) || assignment.getLeft() != access
+                        || assignment.getRight() == null)
+                        continue;
+                    INode expression = NodeModelUtils.findActualNodeFor(assignment.getRight());
+                    INode statementNode = NodeModelUtils.findActualNodeFor(statement);
+                    if (expression == null || statementNode == null)
+                        continue;
+                    String text = expression.getText().strip().replaceAll("\\s+", " "); //$NON-NLS-1$ //$NON-NLS-2$
+                    String terminator = assignmentTerminator(statementNode);
+                    links[i] = new VariableHyperlink(link, "= " + text + terminator
+                        + " (№" + statementNode.getStartLine() + ")");
+                }
+                return null;
+            });
+        }
+        catch (RuntimeException e)
+        {
+            // При изменении модели во время наведения сохраняем штатные подписи.
+        }
+    }
+
+    private static String assignmentTerminator(INode statementNode)
+    {
+        // Bsl.xtext: statements += Statement SEMICOLON; SimpleStatement не включает «;».
+        for (INode node = statementNode; node != null;)
+        {
+            if (!node.hasNextSibling())
+            {
+                node = node.getParent();
+                continue;
+            }
+            node = node.getNextSibling();
+            for (ILeafNode leaf : node.getLeafNodes())
+            {
+                if (leaf.isHidden())
+                    continue;
+                return ";".equals(leaf.getText()) ? ";" : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+        }
+        return ""; //$NON-NLS-1$
+    }
+
+    /**
+     * LinkListInformationControl заполняет таблицу до Shell.setVisible(true)
+     * (проверено в .tmp/bundles/jface-text/). Измеряем штатные подписи до показа.
+     * Полосы прокрутки остаются под управлением штатного контрола JFace.
+     */
+    private static void showVariableLinks(Event event)
+    {
+        if (!(event.widget instanceof Shell shell) || shell.isDisposed() || (shell.getStyle() & SWT.TOOL) == 0)
+            return;
+        Table table = variableLinksTable(shell);
+        if (table == null)
+            return;
+        int stockTextWidth = 0;
+        int contentTextWidth = 0;
+        GC gc = new GC(table);
+        try
+        {
+            gc.setFont(table.getFont());
+            for (TableItem item : table.getItems())
+            {
+                String original = item.getData() instanceof VariableHyperlink link
+                    ? link.delegate.getHyperlinkText() : item.getText();
+                stockTextWidth = Math.max(stockTextWidth,
+                    gc.textExtent(original == null ? "" : original, SWT.DRAW_TRANSPARENT).x); //$NON-NLS-1$
+                contentTextWidth = Math.max(contentTextWidth,
+                    gc.textExtent(item.getText(), SWT.DRAW_TRANSPARENT).x);
+            }
+        }
+        finally
+        {
+            gc.dispose();
+        }
+        if (table.getLayoutData() instanceof GridData data)
+            data.horizontalAlignment = SWT.FILL;
+        Rectangle bounds = shell.getBounds();
+        Rectangle screen = shell.getMonitor().getClientArea();
+        int viewportHeight = table.getClientArea().height;
+        int contentWidth = shell.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x;
+        // Рамка и отступы одинаковы для исходных и новых подписей. Не меняем текст
+        // TableItem ради замера: нативная таблица сохраняет прежнюю ширину элементов.
+        int stockWidth = Math.max(1, contentWidth - contentTextWidth + stockTextWidth);
+        int width = Math.min(contentWidth, Math.min(screen.width, stockWidth * 2));
+        int x = Math.max(screen.x, Math.min(bounds.x, screen.x + screen.width - width));
+        shell.setBounds(x, bounds.y, width, bounds.height);
+        shell.layout(true, true);
+        // Сужение добавляет горизонтальную полосу уже после штатного расчёта высоты.
+        // Сохраняем прежнюю область строк, компенсируя только занятое полосой место.
+        int lostViewportHeight = Math.max(0, viewportHeight - table.getClientArea().height);
+        int height = Math.min(screen.height, bounds.height + lostViewportHeight);
+        if (height != bounds.height)
+        {
+            int y = Math.max(screen.y, Math.min(bounds.y, screen.y + screen.height - height));
+            shell.setBounds(x, y, width, height);
+            shell.layout(true, true);
+        }
+    }
+
+    private static Table variableLinksTable(Composite parent)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Table table)
+            {
+                if (table.getItemCount() > 0 && table.getItem(0).getData() instanceof IHyperlink)
+                    for (TableItem item : table.getItems())
+                        if (item.getData() instanceof VariableHyperlink)
+                            return table;
+            }
+            else if (child instanceof Composite composite)
+            {
+                Table found = variableLinksTable(composite);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private static final class VariableHyperlink implements IHyperlink
+    {
+        private final IHyperlink delegate;
+        private final String text;
+
+        VariableHyperlink(IHyperlink delegate, String text)
+        {
+            this.delegate = delegate;
+            this.text = text;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return delegate.getHyperlinkRegion(); }
+        @Override public String getTypeLabel() { return delegate.getTypeLabel(); }
+        @Override public String getHyperlinkText() { return text; }
+        @Override public void open() { delegate.open(); }
     }
 
     private static final class ModifiedHistoryDetector extends HistoryDetector

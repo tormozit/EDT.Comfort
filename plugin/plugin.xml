@@ -1980,6 +1980,9 @@
       </enablement>
     </descriptor>
   </extension>
+  <extension point="com._1c.g5.v8.dt.bsl.ui.externalQuickfixProvider">
+    <externalQuickfixProvider class="tormozit.CreateParameterQuickfixProvider"/>
+  </extension>
   <!-- Исправление проблемы EDT 2026; в EDT 2025 её идентификатор не возникает. -->
   <extension point="com.e1c.g5.v8.dt.check.fixes">
     <fix class="tormozit.ModuleAccessibilityAtClientFix"/>
