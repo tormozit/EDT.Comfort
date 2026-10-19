@@ -593,9 +593,9 @@
         description="Удалить все маркеры, оставленные проверкой модуля ИР, для текущего проекта (на случай некорректного результата проверки). Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.IrDeclareExpressionType"
-        name="Объявить тип выражения ИР"
+        name="Объявить тип выражения"
         categoryId="tormozit.commands.global"
-        description="Явно объявить тип выражения под кареткой через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+        description="Объявить тип выражения, параметра или результата метода. При подключённом ИР команда выполняется через ИР. Доступна также через «Генерировать комментарий к методу» (Ctrl+Alt+D). (Комфорт)"/>
     <command
         id="tormozit.ResetFolding"
         name="Сбросить сворачиваемые группы"
@@ -1073,6 +1073,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckClearCommandHandler"
         commandId="tormozit.IrModuleCheckClearMarkers">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrDeclareExpressionTypeCommandHandler"
+        commandId="com._1c.g5.v8.dt.bsl.ui.BslGenerateMethodComment">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">

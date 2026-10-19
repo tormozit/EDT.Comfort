@@ -1300,6 +1300,9 @@ final class BslQueryLiteralSupport
                 html.append("<p>Таблица: <b>").append(MetadataTypeMenu.objectLink(tableObject, table, sourceEditor)).append("</b></p>"); //$NON-NLS-1$ //$NON-NLS-2$
                 // Общий штатный стиль BSL: шрифт, отступы и палитра EDT.
                 String styled = MetadataTypeMenu.style(IrBslHoverHtml.wrapForAssistBrowser(html.toString()));
+                // Обёртка EDT даёт <head lang="ru">. HTML2TextReader распознаёт
+                // только <head> без атрибутов, иначе измеряет CSS/JS как текст.
+                styled = styled.replaceFirst("(?i)<head\\s+[^>]*>", "<head>"); //$NON-NLS-1$ //$NON-NLS-2$
                 return new XtextBrowserInformationControlInput(null, element, styled, new LabelProvider()
                 {
                     @Override

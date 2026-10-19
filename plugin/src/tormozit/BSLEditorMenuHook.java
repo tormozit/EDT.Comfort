@@ -530,10 +530,10 @@ public class BSLEditorMenuHook implements IStartup
                     MenuItem declareTypeItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                             ITEM_TEXT_DeclareExpressionType,
-                            IrDeclareExpressionTypeHandler.COMMAND_ID,
+                            "com._1c.g5.v8.dt.bsl.ui.BslGenerateMethodComment",
                             IrDeclareExpressionTypeCommandHandler.BINDING_CONTEXT_ID));
                     ComfortSubmenuHelper.setMenuItemTooltip(declareTypeItem,
-                        "Явно объявить тип выражения под кареткой через приложение ИР");
+                        "Объявить тип выражения, параметра или результата метода. При подключённом ИР команда выполняется через ИР");
                     declareTypeItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override

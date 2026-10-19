@@ -9,7 +9,7 @@ import org.eclipse.ui.handlers.HandlerUtil;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
-/** Команда «Объявить тип выражения ИР» через приложение ИР. */
+/** Единый обработчик объявления типа и штатной команды генерации комментария. */
 public final class IrDeclareExpressionTypeCommandHandler extends AbstractHandler
 {
     public static final String COMMAND_ID = "tormozit.IrDeclareExpressionType"; //$NON-NLS-1$

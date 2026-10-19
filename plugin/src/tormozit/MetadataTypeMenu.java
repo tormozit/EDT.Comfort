@@ -7,7 +7,6 @@ import java.util.regex.Pattern;
 
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.internal.text.html.HTMLPrinter;
-import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlCreator;
@@ -15,7 +14,6 @@ import org.eclipse.jface.text.hyperlink.IHyperlink;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.BrowserFunction;
-import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
@@ -85,6 +83,7 @@ final class MetadataTypeMenu
         {
             return prepareControl(super.doCreateInformationControl(parent));
         }
+
     }
 
     private static IInformationControl prepareControl(IInformationControl control)
@@ -94,86 +93,8 @@ final class MetadataTypeMenu
         {
             browser.setJavascriptEnabled(true);
             installBrowser(browser);
-            QuerySizeMemory.install(browser.getShell());
         }
         return control;
-    }
-
-    /** Размер общий для наведения, закреплённого окна и боковой подсказки запроса. */
-    private static final class QuerySizeMemory
-    {
-        private static final String SECTION = "queryLiteralHoverSize"; //$NON-NLS-1$
-        private static final String INSTALLED = "tormozit.queryHoverSize"; //$NON-NLS-1$
-
-        static void install(Shell shell)
-        {
-            if (Boolean.TRUE.equals(shell.getData(INSTALLED)))
-                return;
-            shell.setData(INSTALLED, Boolean.TRUE);
-            IDialogSettings root = Activator.getDefault().getDialogSettings();
-            IDialogSettings existing = root.getSection(SECTION);
-            IDialogSettings settings = existing != null ? existing : root.addNewSection(SECTION);
-            boolean resizable = (shell.getStyle() & SWT.RESIZE) != 0;
-            boolean[] shown = { false };
-            Point[] visibleSize = { null };
-            shell.addListener(SWT.Show, event -> {
-                Point size = savedSize(settings);
-                if (size == null)
-                {
-                    Point proposed = shell.getSize();
-                    size = new Point(Math.min(proposed.x, 480), Math.min(proposed.y, 180));
-                }
-                var area = shell.getMonitor().getClientArea();
-                size.x = Math.min(size.x, area.width);
-                size.y = Math.min(size.y, area.height);
-                Point location = shell.getLocation();
-                shell.setBounds(Math.max(area.x, Math.min(location.x, area.x + area.width - size.x)),
-                    Math.max(area.y, Math.min(location.y, area.y + area.height - size.y)), size.x, size.y);
-                visibleSize[0] = shell.getSize();
-                shown[0] = true;
-            });
-            shell.addListener(SWT.Resize, event -> {
-                if (shell.isVisible())
-                    visibleSize[0] = shell.getSize();
-            });
-            // Всплывающий hover не меняет сохранённый пользователем размер.
-            // Пишем размер закреплённого/бокового окна, когда оно закрывается,
-            // а не на Resize: JFace тоже вызывает Resize при расчёте размещения.
-            shell.addListener(SWT.Hide, event -> {
-                Point size = shell.getSize();
-                saveSize(settings, size, resizable);
-                shown[0] = false;
-            });
-            shell.addListener(SWT.Dispose, event -> {
-                if (shown[0] && visibleSize[0] != null)
-                    saveSize(settings, visibleSize[0], resizable);
-            });
-        }
-
-        private static void saveSize(IDialogSettings settings, Point size, boolean resizable)
-        {
-            if (resizable && size.x > 0 && size.y > 0)
-            {
-                settings.put("width", size.x); //$NON-NLS-1$
-                settings.put("height", size.y); //$NON-NLS-1$
-            }
-        }
-
-        private static Point savedSize(IDialogSettings settings)
-        {
-            if (settings.get("width") == null || settings.get("height") == null) //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            try
-            {
-                int width = settings.getInt("width"); //$NON-NLS-1$
-                int height = settings.getInt("height"); //$NON-NLS-1$
-                return width > 0 && height > 0 ? new Point(width, height) : null;
-            }
-            catch (NumberFormatException error)
-            {
-                return null;
-            }
-        }
     }
 
     static void installBrowser(Browser browser)

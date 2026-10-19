@@ -4613,6 +4613,9 @@ public final class ParamHintHtmlModifier
             + "span." + PARAM_MENU_ITEM_CLASS + ":hover" //$NON-NLS-1$ //$NON-NLS-2$
             + "{color:" + selectedForeground + ";background:" + selectedBackground + ";}" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + "</style>"; //$NON-NLS-1$
+        // HTML2TextReader в штатном расчёте размера принимает даже внутри head
+        // оператор «меньше» за начало тега и включает JavaScript в измеряемый текст.
+        // В теле скрипта используем равнозначные сравнения через «больше».
         String script = "<script>" //$NON-NLS-1$
             + "window.comfortParamSelecting=false;" //$NON-NLS-1$
             + "function comfortParamMenuBlocked(e){if(window.comfortParamSelecting)return true;" //$NON-NLS-1$
@@ -4620,13 +4623,13 @@ public final class ParamHintHtmlModifier
             + "var sourceStart=document.createRange();sourceStart.selectNodeContents(e);" //$NON-NLS-1$
             + "sourceStart.setEndBefore(e.lastElementChild);var sourceEnd=sourceStart.cloneRange();" //$NON-NLS-1$
             + "sourceStart.collapse(true);sourceEnd.collapse(false);" //$NON-NLS-1$
-            + "for(var i=0;i<s.rangeCount;i++){var start=s.getRangeAt(i).cloneRange(),end=start.cloneRange();" //$NON-NLS-1$
+            + "for(var i=0;s.rangeCount>i;i++){var start=s.getRangeAt(i).cloneRange(),end=start.cloneRange();" //$NON-NLS-1$
             + "start.collapse(true);end.collapse(false);" //$NON-NLS-1$
-            + "if(start.compareBoundaryPoints(0,sourceEnd)<0&&end.compareBoundaryPoints(0,sourceStart)>0)return true;}" //$NON-NLS-1$
+            + "if(0>start.compareBoundaryPoints(0,sourceEnd)&&end.compareBoundaryPoints(0,sourceStart)>0)return true;}" //$NON-NLS-1$
             + "return false;}" //$NON-NLS-1$
             + "document.addEventListener('selectionchange',function(){" //$NON-NLS-1$
             + "var menus=document.querySelectorAll('span." + PARAM_MENU_CLASS + "');" //$NON-NLS-1$ //$NON-NLS-2$
-            + "for(var i=0;i<menus.length;i++)if(comfortParamMenuBlocked(menus[i].parentNode))" //$NON-NLS-1$
+            + "for(var i=0;menus.length>i;i++)if(comfortParamMenuBlocked(menus[i].parentNode))" //$NON-NLS-1$
             + "menus[i].style.display='none';},true);" //$NON-NLS-1$
             + "function comfortParamMenuTarget(e){for(var n=e.target;n&&n!==document;n=n.parentNode)" //$NON-NLS-1$
             + "if(n.nodeType===1&&(' '+n.className+' ').indexOf(' " + PARAM_MENU_CLASS + " ')>=0)return true;" //$NON-NLS-1$ //$NON-NLS-2$
@@ -4636,7 +4639,7 @@ public final class ParamHintHtmlModifier
             + "var down=!!(e.buttons&1);" //$NON-NLS-1$
             + "if(window.comfortParamSelecting===down)return;window.comfortParamSelecting=down;" //$NON-NLS-1$
             + "if(down){var menus=document.querySelectorAll('span." + PARAM_MENU_CLASS + "');" //$NON-NLS-1$ //$NON-NLS-2$
-            + "for(var i=0;i<menus.length;i++)menus[i].style.display='none';}}" //$NON-NLS-1$
+            + "for(var i=0;menus.length>i;i++)menus[i].style.display='none';}}" //$NON-NLS-1$
             + "['mousedown','mouseup','mousemove','mouseover'].forEach(function(t){" //$NON-NLS-1$
             + "document.addEventListener(t,comfortTrackParamSelection,true);});" //$NON-NLS-1$
             + "function comfortShowParamMenu(e){var m=e.lastElementChild,g=4;" //$NON-NLS-1$
