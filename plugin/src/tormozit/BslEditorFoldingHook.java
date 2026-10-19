@@ -74,7 +74,6 @@ public final class BslEditorFoldingHook
         if (!(sourceViewer instanceof ProjectionViewer viewer))
             return;
         wrapProjectionHover(viewer);
-        FoldingTrace.install(viewer);
         if (Boolean.TRUE.equals(viewer.getData(HOVER_MARKER)))
             return;
         viewer.setData(HOVER_MARKER, Boolean.TRUE);
@@ -84,7 +83,6 @@ public final class BslEditorFoldingHook
             @Override public void projectionEnabled()
             {
                 wrapProjectionHover(viewer);
-                FoldingTrace.install(viewer);
             }
             @Override public void projectionDisabled() {}
         });
@@ -173,7 +171,6 @@ public final class BslEditorFoldingHook
         synchronized void request()
         {
             requested++;
-            Global.tempLog("folding-update", "request generation=" + requested); //$NON-NLS-1$ //$NON-NLS-2$
             if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
                 job.schedule();
         }
@@ -186,7 +183,6 @@ public final class BslEditorFoldingHook
         private org.eclipse.core.runtime.IStatus calculate(org.eclipse.core.runtime.IProgressMonitor monitor)
         {
             long generation = generation();
-            Global.tempLog("folding-update", "begin generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
             try
             {
                 Object target = provider.get();
@@ -225,12 +221,10 @@ public final class BslEditorFoldingHook
                     });
                     if (calculated == null)
                     {
-                        Global.tempLog("folding-update", "retry inconsistent generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
                         continue;
                     }
                     if (calculated.positions == null)
                     {
-                        Global.tempLog("folding-update", "keep syntax errors generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
                         return org.eclipse.core.runtime.Status.CANCEL_STATUS;
                     }
                     final long readyGeneration = generation;
@@ -243,7 +237,6 @@ public final class BslEditorFoldingHook
             }
             catch (Exception | LinkageError e)
             {
-                Global.tempLogException("folding-update", "calculate generation=" + generation, e); //$NON-NLS-1$ //$NON-NLS-2$
                 return org.eclipse.core.runtime.Status.CANCEL_STATUS;
             }
             finally
@@ -252,7 +245,6 @@ public final class BslEditorFoldingHook
                 {
                     completed = generation;
                 }
-                Global.tempLog("folding-update", "end generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -265,12 +257,10 @@ public final class BslEditorFoldingHook
                 return;
             if (generation != generation())
             {
-                Global.tempLog("folding-update", "drop newer request generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (((org.eclipse.jface.text.IDocumentExtension4) doc).getModificationStamp() != calculated.stamp)
             {
-                Global.tempLog("folding-update", "drop changed document generation=" + generation); //$NON-NLS-1$ //$NON-NLS-2$
                 request();
                 return;
             }
@@ -283,12 +273,9 @@ public final class BslEditorFoldingHook
                     (java.util.Collection<org.eclipse.xtext.ui.editor.folding.FoldedPosition>) filter.invoke(target, calculated.positions);
                 Annotation[] removed = (Annotation[]) merge.invoke(target, positions, model);
                 update.invoke(target, false, model, positions, removed);
-                Global.tempLog("folding-update", "publish generation=" + generation + " stamp=" + calculated.stamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " removed=" + removed.length + " added=" + positions.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (ReflectiveOperationException | RuntimeException e)
             {
-                Global.tempLogException("folding-update", "publish generation=" + generation, e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -321,75 +308,8 @@ public final class BslEditorFoldingHook
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLogException("folding-update", "request", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return Boolean.TRUE;
-    }
-
-    /** Временная диагностика изменений документа для свёрток. */
-    private static final class FoldingTrace implements
-        org.eclipse.jface.text.IDocumentListener
-    {
-        private static final String KEY = "tormozit.foldingTrace"; //$NON-NLS-1$
-        private final ProjectionAnnotationModel model;
-        private final IDocument document;
-        private volatile String lastEdit = "none"; //$NON-NLS-1$
-
-        private FoldingTrace(ProjectionAnnotationModel model, IDocument document)
-        {
-            this.model = model;
-            this.document = document;
-        }
-
-        static void install(ProjectionViewer viewer)
-        {
-            ProjectionAnnotationModel model = viewer.getProjectionAnnotationModel();
-            Object previous = viewer.getData(KEY);
-            if (previous instanceof FoldingTrace trace)
-            {
-                if (trace.model == model && trace.document == viewer.getDocument())
-                    return;
-                trace.document.removeDocumentListener(trace);
-            }
-            if (model == null)
-                return;
-            FoldingTrace trace = new FoldingTrace(model, viewer.getDocument());
-            viewer.setData(KEY, trace);
-            trace.document.addDocumentListener(trace);
-            if (previous == null)
-                viewer.getTextWidget().addDisposeListener(event -> {
-                    if (viewer.getData(KEY) instanceof FoldingTrace current)
-                    {
-                        current.document.removeDocumentListener(current);
-                    }
-                });
-        }
-
-        @Override
-        public void documentAboutToBeChanged(org.eclipse.jface.text.DocumentEvent event)
-        {
-            lastEdit = "offset=" + event.getOffset() + " replaced=" + event.getLength() //$NON-NLS-1$ //$NON-NLS-2$
-                + " inserted=" + (event.getText() == null ? 0 : event.getText().length()); //$NON-NLS-1$
-            Global.tempLog("folding-document", "before " + lastEdit + " stamp=" + stamp() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " text=" + escaped(event.getText())); //$NON-NLS-1$
-        }
-
-        @Override
-        public void documentChanged(org.eclipse.jface.text.DocumentEvent event)
-        {
-            Global.tempLog("folding-document", "after offset=" + event.getOffset() + " stamp=" + stamp()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-
-        private long stamp()
-        {
-            return document instanceof org.eclipse.jface.text.IDocumentExtension4 stamped
-                ? stamped.getModificationStamp() : -1;
-        }
-
-        private static String escaped(String text)
-        {
-            return text == null ? "null" : text.replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        }
     }
 
     private static void wrapProjectionHover(ProjectionViewer viewer)

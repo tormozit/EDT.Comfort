@@ -8,16 +8,16 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Label;
 
 /**
  * Крутящийся индикатор слева от подписи статуса: {@code Canvas} в той же ячейке
- * раскладки, что и {@code Label}, чтобы не ломать соседние контролы.
+ * раскладки, что и подпись ({@code Label} или {@code Link}), чтобы не ломать соседние контролы.
  * <p>
  * Потребители: панель проблем ({@link ProblemViewHook}), диалог поиска по дереву
  * сравнения ({@link CompareConfigSearchDialogHook}) и свежесть полнотекстового индекса в окне
- * «Поиск» ({@link ConfigSearchDialogHook}).
+ * «Поиск» ({@link ConfigSearchDialogHook}) и результаты поиска ({@link ConfigSearchResultsHook}).
  */
 final class WaitSpinner
 {
@@ -35,7 +35,7 @@ final class WaitSpinner
 
     private boolean running;
 
-    static WaitSpinner attach(Label status, String tooltip)
+    static WaitSpinner attach(Control status, String tooltip)
     {
         if (status == null || status.isDisposed())
             return null;
@@ -48,7 +48,7 @@ final class WaitSpinner
         return create(status, tooltip);
     }
 
-    private static WaitSpinner create(Label status, String tooltip)
+    private static WaitSpinner create(Control status, String tooltip)
     {
         Composite header = status.getParent();
         Object layoutData = status.getLayoutData();

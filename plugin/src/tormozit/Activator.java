@@ -84,6 +84,7 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.installWeavingHook();
         BslDocCommentTypeMerge.installWeavingHook();
         BslQueryLiteralSupport.installCheckWeavingHook();
+        BslOccurrenceMarkerHook.installLiteralCallbacks();
         BslEditorFoldingHook.install();
         BslFormTypeContextEnrichment.installWeavingHook();
         ConfigSearchDialogHook.installWeavingHook();
@@ -274,7 +275,7 @@ public class Activator extends AbstractUIPlugin
         {
             if (!running)
                 return;
-            pending.put(projectKey(event[1]), event);
+            pending.put(projectKey(event[3]), event);
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed() && posted.compareAndSet(false, true))
                 display.asyncExec(() -> showPending(display));
@@ -322,8 +323,11 @@ public class Activator extends AbstractUIPlugin
             Long last = lastToastNs.get(projectKey);
             if (last != null && now - last.longValue() < INTERVAL_NS)
                 return;
+            String logMessage = (String) event[0];
+            long timeMs = ((Long) event[2]).longValue();
             var toast = ToastNotification.show("Полный пересчёт проверок", //$NON-NLS-1$
-                event[0] + ".", 15_000); //$NON-NLS-1$
+                event[1] + ". Подробности — в журнале EDT.", 15_000, //$NON-NLS-1$
+                () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
             if (toast != null)
                 lastToastNs.put(projectKey, Long.valueOf(now));
         }

@@ -3262,7 +3262,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLogException("query-result-types", "quickfix-name-lookup", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }

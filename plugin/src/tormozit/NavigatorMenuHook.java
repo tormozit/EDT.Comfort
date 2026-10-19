@@ -19,6 +19,9 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.expressions.EvaluationContext;
 import org.eclipse.core.expressions.IEvaluationContext;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.action.ActionContributionItem;
@@ -48,6 +51,13 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonNavigator;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.ui.editor.IURIEditorOpener;
+
+import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
+import com._1c.g5.v8.dt.metadata.mdclass.Method;
+import com._1c.g5.v8.dt.metadata.mdclass.URLTemplate;
 
 /** Дополняет контекстное меню навигатора и упрощает единственную команду «Создать». */
 public final class NavigatorMenuHook implements IStartup
@@ -125,8 +135,90 @@ public final class NavigatorMenuHook implements IStartup
         {
             flattenSingleCreate(menu);
             fillShowInComparisons(menu, viewer.getStructuredSelection());
+            HttpServiceMethodMenu.fill(menu, viewer.getStructuredSelection());
         });
         menu.setData(HOOK_MARKER, Boolean.TRUE);
+    }
+
+    /** Переход к функции из свойства «Обработчик» метода HTTP-сервиса. */
+    private static final class HttpServiceMethodMenu
+    {
+        private static final String ITEM_KEY = "tormozit.httpServiceMethodOpenHandler"; //$NON-NLS-1$
+        private static final String ITEM_TEXT = "Открыть обработчик"; //$NON-NLS-1$
+
+        static void fill(Menu menu, IStructuredSelection selection)
+        {
+            if (menu.getData(ITEM_KEY) instanceof MenuItem previous && !previous.isDisposed())
+                previous.dispose();
+            menu.setData(ITEM_KEY, null);
+            if (selection.size() != 1)
+                return;
+            EObject object = NavigatorElementModels.resolveEObject(selection.getFirstElement());
+            if (!(object instanceof Method method) || method.eIsProxy())
+                return;
+            MenuItem item = new MenuItem(menu, SWT.PUSH, insertIndex(menu));
+            item.setText(ITEM_TEXT);
+            ComfortSubmenuHelper.setMenuItemTooltip(item,
+                "Перейти к функции-обработчику метода HTTP-сервиса"); //$NON-NLS-1$
+            String handler = method.getHandler();
+            item.setEnabled(handler != null && !handler.isBlank());
+            item.addListener(SWT.Selection, event -> open(method));
+            menu.setData(ITEM_KEY, item);
+        }
+
+        /** После «Создать», как штатное «Открыть модуль» у сервиса. */
+        private static int insertIndex(Menu menu)
+        {
+            MenuItem[] items = menu.getItems();
+            for (int i = 0; i < items.length; i++)
+            {
+                if (items[i].getData() instanceof IContributionItem contribution
+                    && NEW_MENU_ID.equals(contribution.getId()))
+                {
+                    int index = i + 1;
+                    while (index < items.length && (items[index].getStyle() & SWT.SEPARATOR) != 0)
+                        index++;
+                    return index;
+                }
+            }
+            return 0;
+        }
+
+        private static void open(Method method)
+        {
+            Global.tempLog("http-service-method", "open handler: method=" + EcoreUtil.getURI(method) //$NON-NLS-1$ //$NON-NLS-2$
+                + " handler=" + method.getHandler()); //$NON-NLS-1$
+            try
+            {
+                if (method.eContainer() instanceof URLTemplate template
+                    && template.eContainer() instanceof HTTPService service && service.getModule() != null)
+                {
+                    Module module = (Module) EcoreUtil.resolve(service.getModule(), service);
+                    String handler = method.getHandler();
+                    for (com._1c.g5.v8.dt.bsl.model.Method target : module.allMethods())
+                    {
+                        if (target.getName() != null && target.getName().equalsIgnoreCase(handler))
+                        {
+                            // Как EventHandlersOpenHandlerHook: штатный BSL opener по URI метода.
+                            IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE
+                                .getResourceServiceProvider(URI.createURI("*.bsl")); //$NON-NLS-1$
+                            IURIEditorOpener opener = provider != null ? provider.get(IURIEditorOpener.class) : null;
+                            if (opener != null && opener.open(EcoreUtil.getURI(target), true) != null)
+                                return;
+                            break;
+                        }
+                    }
+                }
+                ToastNotification.show(ITEM_TEXT, "Не удалось найти обработчик «" + method.getHandler() //$NON-NLS-1$
+                    + "» в модуле HTTP-сервиса."); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("NavigatorMenuHook", "open HTTP service handler", e); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("http-service-method", "open handler failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show(ITEM_TEXT, "Не удалось открыть обработчик метода HTTP-сервиса."); //$NON-NLS-1$
+            }
+        }
     }
 
     private static void fillShowInComparisons(Menu menu, IStructuredSelection selection)

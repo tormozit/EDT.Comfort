@@ -99,6 +99,7 @@ public final class QueryTextEditDialogHook implements IStartup
         // Выделение из модуля и обратно, без автоперехода на первую ошибку — сразу при показе,
         // пока не пришла первая проверка окна (issue 837).
         BslQueryLiteralSupport.bridgeQueryEditorDialog(shell, resolveViewerForShell(shell));
+        QueryBracketSupport.installNativeViewer(resolveViewerForShell(shell));
         // Ctrl+клик по полю таблицы — переход к реквизиту, а не на главную страницу (issue 837).
         shell.getDisplay().asyncExec(() ->
         {

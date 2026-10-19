@@ -2957,12 +2957,67 @@ public final class ProblemViewHook implements IStartup
         data.put(ValidationChecksFilterHook.OPEN_CHECK_DATA_KEY, code);
         Debug.log("openCheckSettings: " + code); //$NON-NLS-1$
         Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
+        CheckSettingsWindowTrace.log("before-create code=" + code, target);
         PreferenceDialog dialog =
             PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
         if (dialog == null)
+        {
+            CheckSettingsWindowTrace.log("create-returned-null", target);
             return;
+        }
+        CheckSettingsWindowTrace.install(dialog.getShell());
         installCheckDescriptionRefresh(dialog);
         dialog.open();
+        CheckSettingsWindowTrace.log("open-returned", target);
+    }
+
+    /** Временная диагностика невидимого модального окна; поведение окна не меняет. */
+    private static final class CheckSettingsWindowTrace
+    {
+        static void install(Shell shell)
+        {
+            log("created", shell);
+            if (shell == null || shell.isDisposed())
+                return;
+            for (int type : new int[] { SWT.Show, SWT.Hide, SWT.Activate, SWT.Deactivate,
+                SWT.Move, SWT.Resize, SWT.Close, SWT.Dispose })
+            {
+                shell.addListener(type, event -> log("event=" + event.type, shell));
+            }
+            Display display = shell.getDisplay();
+            display.asyncExec(() -> log("queued-after-open", shell));
+            display.timerExec(1500, () -> log("after-1500ms", shell));
+        }
+
+        static void log(String phase, Shell shell)
+        {
+            Display display = Display.getCurrent();
+            StringBuilder text = new StringBuilder(phase).append(" target=").append(describe(shell));
+            if (display != null && !display.isDisposed())
+            {
+                text.append(" active=").append(describe(display.getActiveShell()));
+                for (Shell other : display.getShells())
+                    text.append(" shell=").append(describe(other));
+                for (var monitor : display.getMonitors())
+                    text.append(" monitor=").append(monitor.getClientArea());
+            }
+            Global.tempLog("check-settings-window", text.toString());
+        }
+
+        private static String describe(Shell shell)
+        {
+            if (shell == null)
+                return "null";
+            String id = Integer.toHexString(System.identityHashCode(shell));
+            if (shell.isDisposed())
+                return id + "{disposed}";
+            Shell parent = shell.getParent() instanceof Shell owner ? owner : null;
+            return id + "{title=" + shell.getText() + ", bounds=" + shell.getBounds()
+                + ", visible=" + shell.getVisible() + ", enabled=" + shell.getEnabled()
+                + ", minimized=" + shell.getMinimized() + ", style=" + shell.getStyle()
+                + ", parent=" + (parent == null ? "null"
+                    : Integer.toHexString(System.identityHashCode(parent))) + "}";
+        }
     }
 
     /** Общий путь обновления описания при программном открытии страницы проверок. */

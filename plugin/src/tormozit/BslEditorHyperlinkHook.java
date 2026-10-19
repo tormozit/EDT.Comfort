@@ -4,6 +4,9 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.filebuffers.FileBuffers;
+import org.eclipse.core.filebuffers.LocationKind;
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -48,6 +51,7 @@ import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.mcore.McorePackage;
@@ -57,6 +61,7 @@ import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
 import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
@@ -290,7 +295,6 @@ public final class BslEditorHyperlinkHook implements IStartup
         public void open()
         {
             long stamp = ((org.eclipse.jface.text.IDocumentExtension4)document).getModificationStamp();
-            Global.tempLog("query-result-types", "navigation request offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
             org.eclipse.core.runtime.jobs.Job job = org.eclipse.core.runtime.jobs.Job.create(
                 "Переход к определению поля запроса", monitor -> //$NON-NLS-1$
                 {
@@ -303,7 +307,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                             BslStructureInsertCommentTypes.refreshTypesForAssist(resource, offset, status -> {});
                             return BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
                         });
-                        Global.tempLog("query-result-types", "navigation offset=" + offset + " target=" + target); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         if (target != null && !monitor.isCanceled())
                             Display.getDefault().asyncExec(() ->
                             {
@@ -315,7 +318,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                     }
                     catch (RuntimeException | LinkageError failure)
                     {
-                        Global.tempLogException("query-result-types", "navigation", failure); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 });
             job.setSystem(true);
@@ -573,21 +575,23 @@ public final class BslEditorHyperlinkHook implements IStartup
                     boolean typeTarget = target instanceof TypeItem;
                     if (target instanceof TypeItem type)
                         target = typeProducer(type);
-                    EStructuralFeature objectModule = target instanceof MdObject
-                        ? target.eClass().getEStructuralFeature("objectModule") : null; //$NON-NLS-1$
+                    boolean register = target instanceof BasicRegister;
+                    EStructuralFeature instanceModule = target instanceof MdObject
+                        ? target.eClass().getEStructuralFeature(register ? "recordSetModule" : "objectModule") : null; //$NON-NLS-1$ //$NON-NLS-2$
                     EStructuralFeature managerModule = target instanceof MdObject
                         ? target.eClass().getEStructuralFeature("managerModule") : null; //$NON-NLS-1$
                     String dataPage = target instanceof MdObject ? dataPageId(target, page) : null;
                     // Имена и типы свойств подтверждены в .tmp/bundles/mdclass/model/MdClass.xcore.
-                    if (objectModule == null && managerModule == null && dataPage == null)
+                    if (instanceModule == null && managerModule == null && dataPage == null)
                     {
                         result.add(link);
                         continue;
                     }
-                    if (objectModule != null)
-                        result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль объекта",
-                            (MdObject) target, objectModule, source, page));
-                    if (managerModule != null)
+                    if (instanceModule != null && moduleHasContent(target, instanceModule))
+                        result.add(new TypeHyperlink(link.getHyperlinkRegion(),
+                            register ? "Модуль набора записей" : "Модуль объекта",
+                            (MdObject) target, instanceModule, source, page));
+                    if (managerModule != null && moduleHasContent(target, managerModule))
                         result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль менеджера",
                             (MdObject) target, managerModule, source, page));
                     if (dataPage != null)
@@ -607,6 +611,28 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             return links;
         }
+    }
+
+    /** Не разрешаем ссылку на Module: для меню достаточно файла и открытого буфера. */
+    private static boolean moduleHasContent(EObject target, EStructuralFeature feature)
+    {
+        Object value = target.eGet(feature, false);
+        if (!(value instanceof EObject module))
+            return false;
+        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+        if (lookup == null)
+            return true;
+        IFile file = lookup.getPlatformResource(module);
+        if (file == null)
+            return true;
+        var buffer = FileBuffers.getTextFileBufferManager().getTextFileBuffer(file.getFullPath(), LocationKind.IFILE);
+        if (buffer != null && buffer.getDocument() != null)
+            return !buffer.getDocument().get().isBlank();
+        if (!file.exists())
+            return false;
+        String text = BslModuleMethodResolver.moduleText(file);
+        // При ошибке чтения не считаем модуль пустым.
+        return text == null || !text.isBlank();
     }
 
     private static String dataPageId(EObject target, IWorkbenchPage page)

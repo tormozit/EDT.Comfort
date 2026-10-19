@@ -515,7 +515,6 @@ public final class FindReplaceDialogHook implements IStartup
                 return;
             }
             findBeforeSelection = viewer.getSelectedRange();
-            Global.tempLog("findreplace-wholeword", "filter before=" + findBeforeSelection); //$NON-NLS-1$ //$NON-NLS-2$
             /*
              * Причина «дзынь»: штатный поиск с «Слово целиком» идёт через regex \b (ASCII) — для
              * «// …» он не находит, для «Элементы Цикл» цепляет «xЭлементы Цикл», но бип играет
@@ -560,7 +559,6 @@ public final class FindReplaceDialogHook implements IStartup
             if (after != null && !before.equals(after)
                 && IdentifierSelectionSupport.isWholeWordSelection(document, after, findString, caseSensitive))
             {
-                Global.tempLog("findreplace-wholeword", "keep edt result after=" + after); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             boolean forward = !Boolean.FALSE.equals(Global.invoke(dialog, "isForwardSearch")); //$NON-NLS-1$
@@ -568,9 +566,6 @@ public final class FindReplaceDialogHook implements IStartup
                 ? (forward ? before.x + before.y : before.x)
                 : before.x;
             int searchFrom = forward ? fromOffset : fromOffset - 1;
-            Global.tempLog("findreplace-wholeword", //$NON-NLS-1$
-                "research before=" + before + " after=" + after //$NON-NLS-1$ //$NON-NLS-2$
-                    + " forward=" + forward + " searchFrom=" + searchFrom); //$NON-NLS-1$ //$NON-NLS-2$
             StyledText textWidget = viewer.getTextWidget();
             if (textWidget == null || textWidget.isDisposed())
                 return;

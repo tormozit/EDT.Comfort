@@ -660,10 +660,26 @@ public final class RefactoringPreviewHook
             interaction.setColumnReorderEnabled(true);
             interaction.setOwnerDrawColumns(occurrenceTextColumn);
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
-            // true — пользователь уже подстраивал ширины сам, режим заполнения по ширине не навязываем.
-            // Ширины, оставшиеся от авто-заполнения, за «подстроенные» не считаются (KEY_COLUMNS_FILL).
-            interaction.install(
-                FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, widthKeys()));
+            // Сохранённые ширины задают пропорции, но при каждом открытии колонки заполняют окно.
+            // Восстанавливаем через interaction: начальный программный Resize не должен стать drag.
+            int[] initialWidths = new int[table.getColumnCount()];
+            for (int i = 0; i < initialWidths.length; i++)
+            {
+                int logical = logicalColumnIndex(i);
+                initialWidths[i] = table.getColumn(i).getResizable()
+                    ? FormTableColumnState.readWidth(settings, WIDTH_KEYS[logical], DEFAULT_WIDTHS[logical],
+                        ColumnWidthFit.minColumnWidth(table))
+                    : ColumnWidthFit.iconColumnWidth() + (logical == MARK_COLUMN_INDEX ? 6 : 0);
+            }
+            interaction.install();
+            interaction.restoreColumnWidths(initialWidths, true);
+            logColumnWidths("initial: storedFill=" + settings.get(KEY_COLUMNS_FILL) //$NON-NLS-1$
+                + ", restored=" + java.util.Arrays.toString(initialWidths)); //$NON-NLS-1$
+            table.addListener(SWT.Resize, event -> logColumnWidths("tableResize")); //$NON-NLS-1$
+            for (TableColumn column : table.getColumns())
+                column.addListener(SWT.Resize,
+                    event -> logColumnWidths("columnResize: " + table.indexOf(column))); //$NON-NLS-1$
+            table.getDisplay().asyncExec(() -> logColumnWidths("afterLayout")); //$NON-NLS-1$
             interaction.enableHeaderSort(settings);
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
@@ -1579,10 +1595,25 @@ public final class RefactoringPreviewHook
         {
             if (table == null || table.isDisposed())
                 return;
+            logColumnWidths("save"); //$NON-NLS-1$
             TableColumn[] columns = table.getColumns();
             String[] keys = widthKeys();
             FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COLUMNS_FILL,
                 interaction != null && interaction.isColumnsExactFill(), keys, columns, table);
+        }
+
+        private void logColumnWidths(String phase)
+        {
+            if (table.isDisposed())
+                return;
+            int[] widths = new int[table.getColumnCount()];
+            int total = 0;
+            for (int i = 0; i < widths.length; i++)
+                total += widths[i] = table.getColumn(i).getWidth();
+            Global.tempLog("refactoring-preview-widths", phase + ", section=" + dialogSettings().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + ", client=" + table.getClientArea() + ", total=" + total //$NON-NLS-1$ //$NON-NLS-2$
+                + ", widths=" + java.util.Arrays.toString(widths) //$NON-NLS-1$
+                + ", fill=" + (interaction != null && interaction.isColumnsExactFill())); //$NON-NLS-1$
         }
 
         private IDialogSettings dialogSettings()

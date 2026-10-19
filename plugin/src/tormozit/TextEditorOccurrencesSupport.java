@@ -504,6 +504,11 @@ public final class TextEditorOccurrencesSupport
          */
         String selectedText = selectionText(text);
         boolean searchMode = isSearchSelection(selectedText) || isSearchNavigation();
+        if (!searchMode && QueryBracketSupport.hasLogicalSelection(text))
+        {
+            deactivateIfActive(text);
+            return;
+        }
         /*
          * В Xtext-редакторах (BSL) по выделенному слову работает штатный механизм EDT — свой
          * там не включаем, чтобы не дублировать. А вот после поиска штатный подсвечивает

@@ -5,7 +5,6 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
-import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.Region;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.ui.IWorkbenchPart;
@@ -21,6 +20,8 @@ import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
  * Ctrl+Shift+] / Ctrl+Shift+[) внутри многострочного текстового литерала переходят к его
  * границам: вперёд — к закрывающей кавычке, назад — к открывающей. Кавычка при этом выделяется,
  * как штатная команда выделяет найденную операторную скобку.
+ * В тексте запроса при включённой его раскраске скобка под кареткой сначала проверяется
+ * по готовому дереву QL: переход идёт к её паре, включая скобки вложенного запроса.
  *
  * <p>Стоя на самой граничной кавычке, обе команды идут к парной кавычке — направление задаёт
  * кавычка, а не команда. Это единообразно со штатным поведением на круглых и квадратных
@@ -51,6 +52,8 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
         boolean forward = commandId.contains("Forward"); //$NON-NLS-1$
         boolean withSelection = commandId.contains("WithSelection"); //$NON-NLS-1$
 
+        if (QueryBracketSupport.handleNativeCommand(withSelection))
+            return null;
         if (jumpToStringLiteralBound(event, forward, withSelection))
             return null;
 
@@ -80,6 +83,14 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
         // Координаты модели: getSelectedRange даёт модельные офсеты, каретка виджета со
         // свёртками выше неё им не равна (см. AGENTS.md, «Каретка редактора: виджет ≠ модель»).
         Point selection = viewer.getSelectedRange();
+        IRegion queryPair = BslQueryLiteralSupport.queryBracketPair(document, selection.x);
+        if (queryPair != null)
+        {
+            int target = selection.x == queryPair.getOffset()
+                ? queryPair.getOffset() + queryPair.getLength() - 1 : queryPair.getOffset();
+            QueryBracketSupport.selectBracket(viewer, selection, target, withSelection);
+            return true;
+        }
         IRegion literal = findMultilineStringLiteral(document, selection.x);
         if (literal == null)
             return false;
@@ -100,32 +111,7 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
             target = openQuote;
         else
             target = forward ? closeQuote : openQuote;
-        int offset;
-        int length;
-        if (withSelection)
-        {
-            // Как в штатной реализации: диапазон от края исходного выделения до цели,
-            // длина всегда неотрицательна; граничная кавычка входит в выделение.
-            offset = Math.min(selection.x, target);
-            length = Math.max(selection.x + selection.y, target + 1) - offset;
-        }
-        else
-        {
-            offset = target;
-            length = 1; // выделяется сама кавычка — как штатная команда выделяет скобку
-        }
-
-        if (viewer instanceof ITextViewerExtension5 extension)
-        {
-            if (!extension.exposeModelRange(new Region(offset, length)))
-                viewer.resetVisibleRegion();
-        }
-        else
-        {
-            viewer.resetVisibleRegion();
-        }
-        viewer.setSelectedRange(offset, length);
-        viewer.revealRange(offset, length);
+        QueryBracketSupport.selectBracket(viewer, selection, target, withSelection);
         return true;
     }
 

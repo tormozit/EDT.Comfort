@@ -16,7 +16,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * Двойной клик по реквизиту или значению перечисления в навигаторе: штатный {@code OpenHelper}
+ * Двойной клик по реквизиту, значению перечисления или методу HTTP-сервиса в навигаторе: штатный {@code OpenHelper}
  * открывает редактор объекта МД; панель «Свойства» активирует {@link OpenHelperAttributePropertiesHook}.
  * Этот хук — запасной путь, если {@code OpenAction} не дошёл до {@code OpenHelper}.
  */
@@ -122,7 +122,7 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         return item != null ? item.getData() : null;
     }
 
-    /** Узел навигатора без своего редактора: реквизит (обычный, стандартный, ТЧ…) или значение перечисления. */
+    /** Узел без своего редактора: реквизит, значение перечисления или метод HTTP-сервиса. */
     static boolean isMetadataAttributeNode(Object element)
     {
         if (element == null || NavigatorTreeElementLabels.isGroupNode(element))
@@ -137,6 +137,8 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         EObject eObject = NavigatorElementModels.resolveEObject(element);
         if (eObject == null)
             return false;
+        if (eObject instanceof com._1c.g5.v8.dt.metadata.mdclass.Method)
+            return true;
         String typeName = eObject.eClass().getName();
         return typeName != null
                 && (typeName.equals("Attribute") || typeName.endsWith("Attribute") //$NON-NLS-1$ //$NON-NLS-2$

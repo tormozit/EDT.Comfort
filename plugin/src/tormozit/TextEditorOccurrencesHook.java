@@ -108,7 +108,11 @@ public final class TextEditorOccurrencesHook implements IStartup
     private static void handleEvent(Event e)
     {
         if (e.widget instanceof StyledText text && !text.isDisposed())
+        {
+            if (e.type == SWT.FocusIn)
+                QueryBracketSupport.focusNative(text);
             TextEditorOccurrencesSupport.scheduleSelection(text);
+        }
     }
 
     /**

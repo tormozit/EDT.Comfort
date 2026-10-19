@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
@@ -47,8 +46,7 @@ final class IndexFreshness
     /** Данные окна мастера: индекс отставал в какой-то момент с открытия окна. */
     private static final String STALE_SEEN_KEY = "tormozit.indexFreshnessStaleSeen"; //$NON-NLS-1$
     private static final String WATCHED_KEY = "tormozit.indexFreshnessWatched"; //$NON-NLS-1$
-    private static final String REFACTORING_DIAG_TOPIC = "fts-freshness-refactoring"; // agent log — временно //$NON-NLS-1$
-    private static final int REFACTORING_DIAG_POLL_MS = 200; // agent log — временно
+    private static final int WATCH_POLL_MS = 200;
 
     private final Label label;
     /** Окно мастера рефакторинга; {@code null} — вкладка поиска по конфигурации. */
@@ -76,44 +74,13 @@ final class IndexFreshness
             return;
         shell.setData(WATCHED_KEY, Boolean.TRUE);
         Display display = shell.getDisplay();
-        // #region agent log — временно (рефакторинг: «найдено 1 из 3»): правки .bsl с метками времени
-        Global.tempLog(REFACTORING_DIAG_TOPIC, "watchStart shell=" + shell.getText()); //$NON-NLS-1$
-        org.eclipse.core.resources.IResourceChangeListener files = event ->
-        {
-            if (event.getDelta() == null)
-                return;
-            try
-            {
-                event.getDelta().accept(delta ->
-                {
-                    if (delta.getResource() instanceof IFile file && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
-                        Global.tempLog(REFACTORING_DIAG_TOPIC, "fileChanged " + file.getFullPath() + " kind=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + delta.getKind() + " flags=" + delta.getFlags()); //$NON-NLS-1$
-                    return true;
-                });
-            }
-            catch (Exception e)
-            {
-                Global.tempLog(REFACTORING_DIAG_TOPIC, "fileChanged error " + e); //$NON-NLS-1$
-            }
-        };
-        org.eclipse.core.resources.ResourcesPlugin.getWorkspace().addResourceChangeListener(files,
-            org.eclipse.core.resources.IResourceChangeEvent.POST_CHANGE);
-        shell.addDisposeListener(e -> org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .removeResourceChangeListener(files));
-        // #endregion
         display.timerExec(0, new Runnable()
         {
-            boolean staleFlag;
-
             @Override
             public void run()
             {
                 if (shell.isDisposed())
                 {
-                    // #region agent log — временно (рефакторинг: «найдено 1 из 3», индекс отставал?)
-                    Global.tempLog(REFACTORING_DIAG_TOPIC, "shellDisposed staleSeen=" + staleFlag); //$NON-NLS-1$
-                    // #endregion
                     return;
                 }
                 List<IDerivedDataManager> all = managers();
@@ -121,18 +88,7 @@ final class IndexFreshness
                 boolean busy = busy(all, remaining);
                 if (busy)
                     shell.setData(STALE_SEEN_KEY, Boolean.TRUE);
-                staleFlag = shell.getData(STALE_SEEN_KEY) != null;
-                // #region agent log — временно: безусловно, каждый опрос (порог — данные, не условие)
-                StringBuilder line = new StringBuilder("watch busy=").append(busy) //$NON-NLS-1$
-                    .append(" remaining=").append(remaining[0]).append(" staleSeen=").append(staleFlag); //$NON-NLS-1$ //$NON-NLS-2$
-                for (IDerivedDataManager manager : all)
-                    line.append(" | ").append(PROJECTS.get(manager)) //$NON-NLS-1$
-                        .append(" ftsComputed=").append(safe(() -> manager.isComputed("FTS_INDEXING_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" cleanerComputed=").append(safe(() -> manager.isComputed("FTS_CLEANER_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(' ').append(describe(manager.getDerivedDataStatus()));
-                Global.tempLog(REFACTORING_DIAG_TOPIC, line.toString());
-                // #endregion
-                display.timerExec(REFACTORING_DIAG_POLL_MS, this);
+                display.timerExec(WATCH_POLL_MS, this);
             }
         });
     }
@@ -162,7 +118,6 @@ final class IndexFreshness
         freshness.listen();
         label.addDisposeListener(e -> freshness.unlisten());
         freshness.startPolling();
-        freshness.startDiagnostics();
     }
 
     /** Начало отставания индекса событием статуса не сообщается — опрос, пока окно открыто. */
@@ -188,113 +143,12 @@ final class IndexFreshness
         {
             IDerivedDataStatusListener listener = status ->
             {
-                // #region agent log — временно (issue #800)
-                Global.tempLog(DIAG_TOPIC, "statusChanged " + describe(status)); //$NON-NLS-1$
-                // #endregion
                 scheduleRefresh();
             };
             manager.addStatusListener(listener);
             listeners.put(manager, listener);
         }
     }
-
-    // #region agent log — временно (issue #800): какие сигналы горят, пока индекс отстаёт от файлов.
-    private static final String DIAG_TOPIC = "fts-freshness-800"; //$NON-NLS-1$
-    private static final int DIAG_POLL_MS = 200;
-
-    private void startDiagnostics()
-    {
-        org.eclipse.core.resources.IResourceChangeListener files = event ->
-        {
-            if (event.getDelta() == null)
-                return;
-            try
-            {
-                event.getDelta().accept(delta ->
-                {
-                    if (delta.getResource() instanceof IFile file && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
-                        Global.tempLog(DIAG_TOPIC, "fileChanged " + file.getFullPath() + " kind=" + delta.getKind() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " flags=" + delta.getFlags()); //$NON-NLS-1$
-                    return true;
-                });
-            }
-            catch (Exception e)
-            {
-                Global.tempLog(DIAG_TOPIC, "fileChanged error " + e); //$NON-NLS-1$
-            }
-        };
-        org.eclipse.core.resources.ResourcesPlugin.getWorkspace().addResourceChangeListener(files,
-            org.eclipse.core.resources.IResourceChangeEvent.POST_CHANGE);
-        label.addDisposeListener(e -> org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
-            .removeResourceChangeListener(files));
-        Display display = label.getDisplay();
-        display.timerExec(0, new Runnable()
-        {
-            @Override
-            public void run()
-            {
-                if (label.isDisposed())
-                    return;
-                StringBuilder line = new StringBuilder("poll label=[").append(label.getText()).append(']'); //$NON-NLS-1$
-                Object indexManager = Global.getOsgiService(
-                    com._1c.g5.v8.dt.search.core.text.ITextSearchIndexProvider.class);
-                Object entries = Global.getField(indexManager, "projectEntries"); //$NON-NLS-1$
-                if (!(entries instanceof Map<?, ?>))
-                    line.append(" entries=null indexManager=") //$NON-NLS-1$
-                        .append(indexManager != null ? indexManager.getClass().getName() : "null"); //$NON-NLS-1$
-                for (Map.Entry<IDerivedDataManager, IProject> project : PROJECTS.entrySet())
-                {
-                    IDerivedDataManager manager = project.getKey();
-                    line.append(" | ").append(project.getValue().getName()) //$NON-NLS-1$
-                        .append(" idle=").append(safe(manager::isIdle)) //$NON-NLS-1$
-                        .append(" ftsComputed=").append(safe(() -> manager.isComputed("FTS_INDEXING_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" cleanerComputed=").append(safe(() -> manager.isComputed("FTS_CLEANER_SEGMENT"))) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(' ').append(describe(manager.getDerivedDataStatus()));
-                    Object entry = entries instanceof Map<?, ?> map ? map.get(project.getValue()) : null;
-                    Object batch = Global.getField(entry, "activeBatch"); //$NON-NLS-1$
-                    Object postponed = Global.getField(entry, "postponedFilesBatchs"); //$NON-NLS-1$
-                    line.append(" entry=").append(entry != null) //$NON-NLS-1$
-                        .append(" activeBatch=").append(batch == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                            : Global.getField(batch, "addedFiles") + "/" + Global.getField(batch, "removedFiles")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        .append(" postponed=").append(postponed instanceof java.util.Collection<?> list ? list.size() : -1) //$NON-NLS-1$
-                        .append(" syncAfterSnapshot=").append(Global.getField(entry, "synchronizingAfterSnapshotRestoration")); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-                Global.tempLog(DIAG_TOPIC, line.toString());
-                display.timerExec(DIAG_POLL_MS, this);
-            }
-        });
-    }
-
-    private static String safe(java.util.function.BooleanSupplier value)
-    {
-        try
-        {
-            return String.valueOf(value.getAsBoolean());
-        }
-        catch (RuntimeException e)
-        {
-            return "error:" + e; //$NON-NLS-1$
-        }
-    }
-
-    private static String describe(DerivedDataStatus status)
-    {
-        if (status == null)
-            return "status=null"; //$NON-NLS-1$
-        StringBuilder text = new StringBuilder("pipeline=").append(status.getPipelineStatus()) //$NON-NLS-1$
-            .append(" stage=").append(status.getActiveStage()) //$NON-NLS-1$
-            .append(" modelSync=").append(status.isModelSyncActive()).append(" active={"); //$NON-NLS-1$ //$NON-NLS-2$
-        Map<String, PipelineSegmentStatus> active = status.getActivePipelineSegments();
-        if (active != null)
-            active.forEach((id, segment) -> text.append(id).append(':')
-                .append(segment != null ? segment.getRemainingUnitsOfWork() + "/" + segment.getTotalUnitsOfWork() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                .append(' '));
-        return text.append('}').toString();
-    }
-
-    /** Проект каждого менеджера — для подписи строк диагностики. */
-    private static final Map<IDerivedDataManager, IProject> PROJECTS = new java.util.concurrent.ConcurrentHashMap<>();
-    // #endregion
 
     private void unlisten()
     {
@@ -394,7 +248,6 @@ final class IndexFreshness
             if (manager != null && !managers.contains(manager))
             {
                 managers.add(manager);
-                PROJECTS.put(manager, workspaceProject); // agent log — временно (issue #800)
             }
         }
         return managers;

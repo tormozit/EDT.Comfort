@@ -7,9 +7,12 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import org.eclipse.osgi.framework.log.FrameworkLog;
+import org.eclipse.osgi.framework.log.FrameworkLogEntry;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
@@ -37,6 +40,7 @@ public final class Activator
     {
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
+        context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
     }
 
     @Override
@@ -45,23 +49,193 @@ public final class Activator
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
     }
 
-    /** Уведомления о полном пересчёте проверок; ранний бандл не зависит от Workbench. */
+    /** Контекст операторных слов в строках: класс задания загружается до основного бандла. */
+    private static final class OccurrenceLiteralWeaving implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.bsl.ui.editor.occurrences.BslOccurrenceMarker$InnerMarkOccurrencesJob"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.occurrences.insideLiteral"; //$NON-NLS-1$
+        private static final String QUERY_CALLBACK = "tormozit.occurrences.queryBrackets"; //$NON-NLS-1$
+        private static final String STATUS = "tormozit.occurrences.literalPatch"; //$NON-NLS-1$
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                System.setProperty(STATUS, transformed != null ? "woven context+query" : "methods not found"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                System.setProperty(STATUS, "error " + error); //$NON-NLS-1$
+            }
+        }
+
+        private static byte[] transform(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if ("run".equals(name) //$NON-NLS-1$
+                        && "(Lorg/eclipse/core/runtime/IProgressMonitor;)Lorg/eclipse/core/runtime/IStatus;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        return new MethodVisitor(Opcodes.ASM9, method)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                emitQueryBrackets(this, reader.getClassName());
+                                touched[0]++;
+                            }
+                        };
+                    }
+                    if (!"isLogicalBracket".equals(name) || !"(Ljava/lang/String;)Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            visitLdcInsn(CALLBACK);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            Label pop = new Label();
+                            Label proceed = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, pop);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitVarInsn(Opcodes.ALOAD, 0);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, proceed);
+                            visitInsn(Opcodes.ICONST_0);
+                            visitInsn(Opcodes.IRETURN);
+                            Object[] locals = { reader.getClassName(), "java/lang/String" }; //$NON-NLS-1$
+                            visitLabel(pop);
+                            visitFrame(Opcodes.F_NEW, locals.length, locals, 1,
+                                new Object[] { "java/lang/Object" }); //$NON-NLS-1$
+                            visitInsn(Opcodes.POP);
+                            visitLabel(proceed);
+                            visitFrame(Opcodes.F_NEW, locals.length, locals, 0, new Object[0]);
+                            touched[0]++;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] == 2 ? writer.toByteArray() : null;
+        }
+
+        /** Вызов приватного replaceAnnotations — тот же, что в штатной ветке логических скобок. */
+        private static void emitQueryBrackets(MethodVisitor method, String owner)
+        {
+            method.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            method.visitLdcInsn(QUERY_CALLBACK);
+            method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            method.visitInsn(Opcodes.DUP);
+            Label pop = new Label();
+            Label proceed = new Label();
+            Label apply = new Label();
+            method.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Function"); //$NON-NLS-1$
+            method.visitJumpInsn(Opcodes.IFEQ, pop);
+            method.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+            method.visitVarInsn(Opcodes.ALOAD, 0);
+            method.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            method.visitInsn(Opcodes.DUP);
+            method.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/Map"); //$NON-NLS-1$
+            method.visitJumpInsn(Opcodes.IFEQ, pop);
+            method.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Map"); //$NON-NLS-1$
+            method.visitVarInsn(Opcodes.ASTORE, 2);
+            method.visitVarInsn(Opcodes.ALOAD, 1);
+            method.visitMethodInsn(Opcodes.INVOKEINTERFACE, "org/eclipse/core/runtime/IProgressMonitor", //$NON-NLS-1$
+                "isCanceled", "()Z", true); //$NON-NLS-1$ //$NON-NLS-2$
+            method.visitJumpInsn(Opcodes.IFEQ, apply);
+            method.visitFieldInsn(Opcodes.GETSTATIC, "org/eclipse/core/runtime/Status", //$NON-NLS-1$
+                "CANCEL_STATUS", "Lorg/eclipse/core/runtime/IStatus;"); //$NON-NLS-1$ //$NON-NLS-2$
+            method.visitInsn(Opcodes.ARETURN);
+            Object[] locals = { owner, "org/eclipse/core/runtime/IProgressMonitor" }; //$NON-NLS-1$
+            method.visitLabel(apply);
+            method.visitFrame(Opcodes.F_NEW, 3,
+                new Object[] { owner, "org/eclipse/core/runtime/IProgressMonitor", "java/util/Map" }, //$NON-NLS-1$ //$NON-NLS-2$
+                0, new Object[0]);
+            method.visitVarInsn(Opcodes.ALOAD, 0);
+            method.visitVarInsn(Opcodes.ALOAD, 2);
+            method.visitVarInsn(Opcodes.ALOAD, 0);
+            method.visitFieldInsn(Opcodes.GETFIELD, owner, "viewer", //$NON-NLS-1$
+                "Lorg/eclipse/jface/text/source/ISourceViewer;"); //$NON-NLS-1$
+            method.visitMethodInsn(Opcodes.INVOKEINTERFACE, "org/eclipse/jface/text/source/ISourceViewer", //$NON-NLS-1$
+                "getAnnotationModel", "()Lorg/eclipse/jface/text/source/IAnnotationModel;", true); //$NON-NLS-1$ //$NON-NLS-2$
+            method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, owner, "replaceAnnotations", //$NON-NLS-1$
+                "(Ljava/util/Map;Lorg/eclipse/jface/text/source/IAnnotationModel;)V", false); //$NON-NLS-1$
+            method.visitFieldInsn(Opcodes.GETSTATIC, "org/eclipse/core/runtime/Status", //$NON-NLS-1$
+                "OK_STATUS", "Lorg/eclipse/core/runtime/IStatus;"); //$NON-NLS-1$ //$NON-NLS-2$
+            method.visitInsn(Opcodes.ARETURN);
+            method.visitLabel(pop);
+            method.visitFrame(Opcodes.F_NEW, locals.length, locals, 1, new Object[] { "java/lang/Object" }); //$NON-NLS-1$
+            method.visitInsn(Opcodes.POP);
+            method.visitLabel(proceed);
+            method.visitFrame(Opcodes.F_NEW, locals.length, locals, 0, new Object[0]);
+        }
+    }
+
+    /** Системный журнал инициаторов полного пересчёта и уведомления; без зависимости от Workbench. */
     private static final class CheckRecomputeNotifications implements WeavingHook
     {
         private static final String CALLBACK = "tormozit.checkRecompute.event"; //$NON-NLS-1$
+        private static final String PREFIX = "[ComfortCheckDiagnostics] "; //$NON-NLS-1$
         private static final String SCHEDULER = "com.e1c.g5.v8.dt.internal.check.CheckScheduler"; //$NON-NLS-1$
         private static final String METADATA =
             "com.e1c.g5.v8.dt.internal.check.repository.ProjectCheckMetadataManager"; //$NON-NLS-1$
         private static final String DERIVED = "com._1c.g5.v8.internal.derived.DerivedDataManager"; //$NON-NLS-1$
-        private static final String FULL_SCOPE_DESC =
-            "(Lorg/eclipse/core/resources/IProject;Ljava/util/Set;Lcom/e1c/g5/v8/dt/check/CheckComplexity;" //$NON-NLS-1$
-                + "Lcom/_1c/g5/v8/bm/core/IBmTransaction;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String PROJECT = "Lorg/eclipse/core/resources/IProject;"; //$NON-NLS-1$
+        private static final String TRANSACTION = "Lcom/_1c/g5/v8/bm/core/IBmTransaction;"; //$NON-NLS-1$
+        private static final String MONITOR = "Lorg/eclipse/core/runtime/IProgressMonitor;"; //$NON-NLS-1$
+        private static final String REQUEST = PROJECT + "Ljava/util/Set;Ljava/util/Collection;"; //$NON-NLS-1$
+
+        private final FrameworkLog log;
+        private final String bundleId;
+        private final java.util.concurrent.atomic.AtomicLong eventIds = new java.util.concurrent.atomic.AtomicLong();
+
+        private CheckRecomputeNotifications(FrameworkLog log, String bundleId)
+        {
+            this.log = log;
+            this.bundleId = bundleId;
+        }
 
         static void install(BundleContext context)
         {
-            CheckRecomputeNotifications notifications = new CheckRecomputeNotifications();
-            System.getProperties().put(CALLBACK, (Consumer<Object[]>) notifications::notifyFullRecompute);
-            context.registerService(WeavingHook.class, notifications, null);
+            var reference = context.getServiceReference(FrameworkLog.class);
+            FrameworkLog log = reference != null ? context.getService(reference) : null;
+            if (log == null)
+            {
+                System.setProperty(CALLBACK + ".status", "FrameworkLog unavailable"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            CheckRecomputeNotifications diagnostics =
+                new CheckRecomputeNotifications(log, context.getBundle().getSymbolicName());
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
+            context.registerService(WeavingHook.class, diagnostics, null);
+            diagnostics.write("installed; earlyBundle=" + context.getBundle().getVersion() //$NON-NLS-1$
+                + "; waiting for CheckScheduler, ProjectCheckMetadataManager, DerivedDataManager", null); //$NON-NLS-1$
         }
 
         @Override
@@ -69,30 +243,35 @@ public final class Activator
         {
             String name = wovenClass.getClassName();
             if (wovenClass.getState() != WovenClass.TRANSFORMING
-                || !(SCHEDULER.equals(name) || DERIVED.equals(name)))
+                || !(SCHEDULER.equals(name) || METADATA.equals(name) || DERIVED.equals(name)))
                 return;
             try
             {
                 ClassReader reader = new ClassReader(wovenClass.getBytes());
                 ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
                 int[] matches = {0};
+                boolean[] metadataField = {!METADATA.equals(name)};
                 reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
                 {
+                    @Override
+                    public FieldVisitor visitField(int access, String field, String descriptor,
+                        String signature, Object value)
+                    {
+                        if ("recomputationTasks".equals(field) && "Ljava/util/Map;".equals(descriptor) //$NON-NLS-1$ //$NON-NLS-2$
+                            && (access & Opcodes.ACC_STATIC) == 0)
+                            metadataField[0] = true;
+                        return super.visitField(access, field, descriptor, signature, value);
+                    }
+
                     @Override
                     public MethodVisitor visitMethod(int access, String method, String descriptor,
                         String signature, String[] exceptions)
                     {
                         MethodVisitor visitor = super.visitMethod(access, method, descriptor, signature, exceptions);
-                        String event = null;
-                        if (SCHEDULER.equals(name) && "scheduleScopedFullRebuild".equals(method) //$NON-NLS-1$
-                            && FULL_SCOPE_DESC.equals(descriptor))
-                            event = "full-check-scope"; //$NON-NLS-1$
-                        if (DERIVED.equals(name) && "recomputeAll".equals(method) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                            event = "derived-recompute-all"; //$NON-NLS-1$
+                        String event = event(name, method, descriptor);
                         if (event == null || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
                             return visitor;
                         matches[0]++;
-                        String phase = event;
                         return new MethodVisitor(Opcodes.ASM9, visitor)
                         {
                             @Override
@@ -105,13 +284,16 @@ public final class Activator
                                 visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
                                 visitInsn(Opcodes.DUP);
                                 visitInsn(Opcodes.ICONST_0);
-                                visitLdcInsn(phase);
+                                visitLdcInsn(event);
                                 visitInsn(Opcodes.AASTORE);
                                 for (int i = 1; i < count; i++)
                                 {
                                     visitInsn(Opcodes.DUP);
                                     visitLdcInsn(i);
                                     visitVarInsn(Opcodes.ALOAD, SCHEDULER.equals(name) ? i : 0);
+                                    if (METADATA.equals(name))
+                                        visitFieldInsn(Opcodes.GETFIELD, name.replace('.', '/'), "recomputationTasks", //$NON-NLS-1$
+                                            "Ljava/util/Map;"); //$NON-NLS-1$
                                     visitInsn(Opcodes.AASTORE);
                                 }
                                 visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
@@ -120,47 +302,124 @@ public final class Activator
                         };
                     }
                 }, 0);
-                if (matches[0] == 1)
+                int expected = SCHEDULER.equals(name) ? 3 : 1;
+                String status = "class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + wovenClass.getBundleWiring().getBundle().getVersion()
+                    + "; methods=" + matches[0] + "/" + expected; //$NON-NLS-1$ //$NON-NLS-2$
+                if (matches[0] == expected && metadataField[0])
+                {
                     wovenClass.setBytes(writer.toByteArray());
+                    write("woven; " + status, null); //$NON-NLS-1$
+                }
+                else
+                    write("NOT WOVEN: incompatible methods/fields; " + status, null); //$NON-NLS-1$
             }
-            catch (Throwable ignored)
+            catch (Throwable error)
             {
-                // Несовместимый класс остаётся штатным; уведомления не должны мешать EDT.
+                write("NOT WOVEN: " + name, error); //$NON-NLS-1$
             }
         }
 
-        private void notifyFullRecompute(Object[] event)
+        private static String event(String type, String method, String descriptor)
+        {
+            if (SCHEDULER.equals(type))
+            {
+                if ("scheduleValidation".equals(method) //$NON-NLS-1$
+                    && (descriptor.equals("(" + REQUEST + MONITOR + ")V") //$NON-NLS-1$ //$NON-NLS-2$
+                        || descriptor.equals("(" + REQUEST + "Z" + TRANSACTION + MONITOR + ")V"))) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    return "validation-request"; //$NON-NLS-1$
+                if ("scheduleScopedFullRebuild".equals(method) //$NON-NLS-1$
+                    && descriptor.equals("(" + PROJECT + "Ljava/util/Set;" //$NON-NLS-1$ //$NON-NLS-2$
+                        + "Lcom/e1c/g5/v8/dt/check/CheckComplexity;" + TRANSACTION + MONITOR + ")V")) //$NON-NLS-1$ //$NON-NLS-2$
+                    return "full-check-scope"; //$NON-NLS-1$
+            }
+            if (METADATA.equals(type) && "scheduleChangedCheckRecomputationIfNecessary".equals(method) //$NON-NLS-1$
+                && "()V".equals(descriptor)) //$NON-NLS-1$
+                return "check-contributors"; //$NON-NLS-1$
+            if (DERIVED.equals(type) && "recomputeAll".equals(method) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                return "derived-recompute-all"; //$NON-NLS-1$
+            return null;
+        }
+
+        private void record(Object[] event)
         {
             try
             {
-                String reason = notificationReason(event, Thread.currentThread().getStackTrace());
-                if (reason == null)
-                    return;
-                String message = ("full-check-scope".equals(event[0]) //$NON-NLS-1$
-                    ? "Назначена полная перепроверка проекта " + event[1] //$NON-NLS-1$
-                    : "Запрошен полный пересчёт производных данных") + ".\nПричина: " + reason; //$NON-NLS-1$ //$NON-NLS-2$
-                Object[] notification = {message, event[1]};
-                Consumer<Object[]> consumer;
-                var properties = System.getProperties();
-                synchronized (properties)
+                String phase = (String) event[0];
+                String text = phase + "; thread=" + Thread.currentThread().getName(); //$NON-NLS-1$
+                if ("validation-request".equals(phase) || "full-check-scope".equals(phase)) //$NON-NLS-1$ //$NON-NLS-2$
                 {
-                    @SuppressWarnings("unchecked")
-                    Consumer<Object[]> callback = (Consumer<Object[]>) properties.get(CALLBACK + ".notify"); //$NON-NLS-1$
-                    consumer = callback;
-                    if (consumer == null)
+                    text += "; project=" + event[1] + "; checks=" + event[2]; //$NON-NLS-1$ //$NON-NLS-2$
+                    if ("validation-request".equals(phase)) //$NON-NLS-1$
+                    {
+                        Collection<?> objects = (Collection<?>) event[3];
+                        text += "; objects=" + (objects == null ? "null" : objects.size()) //$NON-NLS-1$ //$NON-NLS-2$
+                            + "; projectScope=" + (objects != null && objects.isEmpty()); //$NON-NLS-1$
+                    }
+                    else
+                        text += "; complexity=" + event[3]; //$NON-NLS-1$
+                }
+                else if ("check-contributors".equals(phase)) //$NON-NLS-1$
+                {
+                    text += "; changes="; //$NON-NLS-1$
+                    if (event[1] instanceof Map<?, ?> changes)
+                    {
+                        for (var entry : changes.entrySet())
+                        {
+                            text += " [" + entry.getKey(); //$NON-NLS-1$
+                            for (String field : List.of("added", "updated", "removed")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            {
+                                var member = entry.getValue().getClass().getDeclaredField(field);
+                                member.setAccessible(true);
+                                text += "; " + field + "=" + member.get(entry.getValue()); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
+                            text += "]"; //$NON-NLS-1$
+                        }
+                        if (changes.isEmpty())
+                            text += "none"; //$NON-NLS-1$
+                    }
+                    else
+                        text += "none"; //$NON-NLS-1$
+                }
+                else
+                    text += "; manager=" + event[1].getClass().getName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
+                        + Integer.toHexString(System.identityHashCode(event[1]));
+                text += "; eventId=" + eventIds.incrementAndGet(); //$NON-NLS-1$
+                Exception stack = new Exception("Diagnostic call stack (not an error)"); //$NON-NLS-1$
+                boolean full = "full-check-scope".equals(phase) || "derived-recompute-all".equals(phase); //$NON-NLS-1$ //$NON-NLS-2$
+                String reason = full ? notificationReason(event, stack.getStackTrace()) : null;
+                if (full)
+                    text += "; reason=" + (reason != null ? reason : "manual-request"); //$NON-NLS-1$ //$NON-NLS-2$
+                write(text, stack);
+                if (full && reason != null)
+                {
+                    Object[] notification = {PREFIX + text,
+                        ("full-check-scope".equals(phase) //$NON-NLS-1$
+                            ? "Назначена полная перепроверка проекта " + event[1] //$NON-NLS-1$
+                            : "Запрошен полный пересчёт производных данных") + ".\nПричина: " + reason, //$NON-NLS-1$ //$NON-NLS-2$
+                        Long.valueOf(System.currentTimeMillis()), event[1]};
+                    Consumer<Object[]> consumer;
+                    var properties = System.getProperties();
+                    synchronized (properties)
                     {
                         @SuppressWarnings("unchecked")
-                        Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
-                            CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
-                        pending.put(event[1], notification);
+                        Consumer<Object[]> callback = (Consumer<Object[]>) properties.get(CALLBACK + ".notify"); //$NON-NLS-1$
+                        consumer = callback;
+                        if (consumer == null)
+                        {
+                            @SuppressWarnings("unchecked")
+                            Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
+                                CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
+                            pending.put(event[1], notification);
+                        }
                     }
+                    if (consumer != null)
+                        consumer.accept(notification);
                 }
-                if (consumer != null)
-                    consumer.accept(notification);
             }
-            catch (Throwable ignored)
+            catch (Throwable error)
             {
-                // Отказ уведомления не должен прерывать расчёт EDT.
+                write("diagnostic callback failed; event=" + event[0], error); //$NON-NLS-1$
             }
         }
 
@@ -191,6 +450,18 @@ public final class Activator
             return "Источник запуска не распознан"; //$NON-NLS-1$
         }
 
+        private void write(String message, Throwable stack)
+        {
+            try
+            {
+                log.log(new FrameworkLogEntry(bundleId, FrameworkLogEntry.INFO, 0,
+                    PREFIX + message, 0, stack, null));
+            }
+            catch (Throwable ignored)
+            {
+                // Даже отказ журнала не должен прерывать расчёт EDT или загрузку класса.
+            }
+        }
     }
 
     /**

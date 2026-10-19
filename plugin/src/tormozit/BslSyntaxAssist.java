@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 
@@ -195,6 +197,90 @@ public final class BslSyntaxAssist
     {
         Object pages = group != null ? Global.invoke(group, "getPages") : null; //$NON-NLS-1$
         return pages instanceof List<?> list ? list : List.of();
+    }
+
+    /** Статьи QL берутся только из раздела языка запросов, а не из документации строки BSL. */
+    static List<?> queryKeywordPages(EObject context, String keyword)
+    {
+        List<Object> pages = new ArrayList<>();
+        try
+        {
+            Object provider = documentationProvider();
+            Object version = context == null ? null : Global.invoke(provider, "getVersion", context); //$NON-NLS-1$
+            Object platform = Global.getField(provider, "platformDocumentationProvider"); //$NON-NLS-1$
+            Object tree = version == null ? null : Global.invoke(platform, "getTree", version); //$NON-NLS-1$
+            Object root = Global.invoke(tree, "getNode", "SyntaxHelperQueries/root.html"); //$NON-NLS-1$ //$NON-NLS-2$
+            List<String> paths = new ArrayList<>();
+            String path = switch (keyword.toUpperCase(Locale.ROOT))
+            {
+                // У этих конструкций заголовок статьи не совпадает с именем в запросе.
+                case "ЗНАЧЕНИЕ", "VALUE" -> "ShqueryUsingPredefinedConfigurationData"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ДАТАВРЕМЯ", "DATETIME" -> "LitDate"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ТИП", "TYPE" -> "LitType"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // В английском оглавлении: ROW и AUTORECORDNUMBER, в синтаксисе — эти имена.
+                case "STRING" -> "STRING"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "RECORDAUTONUMBER" -> "RECORDAUTONUMBER"; //$NON-NLS-1$ //$NON-NLS-2$
+                case "КАК", "AS" -> "KeyWordsAS"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ИЗ", "FROM" -> "FromStatement"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ГДЕ", "WHERE" -> "WhereStatement"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ПОМЕСТИТЬ", "INTO" -> "INTO"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "СГРУППИРОВАТЬ", "GROUP" -> "GROUPStatement"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ИМЕЮЩИЕ", "HAVING" -> "aggregate_function_values_restrictions.html"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "УПОРЯДОЧИТЬ", "ORDER" -> "ORDERBYSection"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ОБЪЕДИНИТЬ", "UNION", "ВСЕ", "ALL" -> "UNIONSection"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                case "ИНДЕКСИРОВАТЬ", "INDEX" -> "INDEXBY"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ИТОГИ", "TOTALS" -> "query_totals.html"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ОБЩИЕ", "OVERALL" -> "overall_totals.html"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ДЛЯ", "FOR", "ИЗМЕНЕНИЯ", "UPDATE" -> "FORUPDATEStatement"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                case "СОЕДИНЕНИЕ", "JOIN", "ВНЕШНЕЕ", "OUTER" -> "JOIN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                case "ВНУТРЕННЕЕ", "INNER" -> "INNERJOIN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ЛЕВОЕ", "LEFT" -> "LEFTJOIN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ПРАВОЕ", "RIGHT" -> "RIGHTJOIN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ПОЛНОЕ", "FULL" -> "FULLJOIN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ВЫБОР", "CASE", "КОГДА", "WHEN", "ТОГДА", "THEN", "ИНАЧЕ", "ELSE", "КОНЕЦ", "END" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$ //$NON-NLS-9$ //$NON-NLS-10$
+                    -> "query_select.html"; //$NON-NLS-1$
+                case "ВЫРАЗИТЬ", "CAST" -> "query_cast.html"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "И", "AND", "ИЛИ", "OR", "НЕ", "NOT" -> "OperationLogCompare"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+                case "В", "IN" -> "CompareB"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ЕСТЬ", "IS" -> "IS_NULL"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ПОДОБНО", "LIKE", "СПЕЦСИМВОЛ", "ESCAPE" -> "LIKE"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                case "МЕЖДУ", "BETWEEN" -> "BETWEEN"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                case "ССЫЛКА", "REFS" -> "REFS"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                default -> null;
+            };
+            if (path != null)
+                paths.add("SyntaxHelperQueries/" + path); //$NON-NLS-1$
+            else
+                collectQueryKeywordPaths(root, keyword, paths);
+            for (String found : paths)
+            {
+                Object page = Global.invoke(provider, "getDocByPlatformDocPath", found, version, language()); //$NON-NLS-1$
+                if (page != null)
+                    pages.add(page);
+            }
+            Global.tempLog("query-syntax-assist", "keyword=" + keyword + ", paths=" + paths //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ", pages=" + pages.size()); //$NON-NLS-1$
+        }
+        catch (RuntimeException | LinkageError error)
+        {
+            Global.tempLogException("query-syntax-assist", "страницы QL: " + keyword, error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return pages;
+    }
+
+    private static void collectQueryKeywordPaths(Object node, String keyword, List<String> paths)
+    {
+        if (node == null)
+            return;
+        Object path = Global.invoke(node, "getPath"); //$NON-NLS-1$
+        if (path instanceof String text && text.startsWith("SyntaxHelperQueries/") //$NON-NLS-1$
+            && (keyword.equalsIgnoreCase((String) Global.invoke(node, "getName", "ru")) //$NON-NLS-1$ //$NON-NLS-2$
+                || keyword.equalsIgnoreCase((String) Global.invoke(node, "getName", "en")))) //$NON-NLS-1$ //$NON-NLS-2$
+            paths.add(text);
+        Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
+        if (children instanceof Collection<?> collection)
+            for (Object child : collection)
+                collectQueryKeywordPaths(child, keyword, paths);
     }
 
     /** Поисковый запрос, который EDT сопоставил группе; может быть {@code null}. */

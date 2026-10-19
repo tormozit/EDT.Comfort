@@ -69,6 +69,7 @@ import org.eclipse.xtext.diagnostics.Severity;
 import org.eclipse.xtext.resource.ILocationInFileProvider;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.ui.editor.model.XtextDocument;
@@ -96,6 +97,7 @@ import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
@@ -108,6 +110,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.QlUtil;
 import com._1c.g5.v8.dt.ql.model.DbViewFromQuery;
+import com._1c.g5.v8.dt.ql.model.FunctionInvocationExpression;
+import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
 import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
 import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
@@ -335,11 +339,9 @@ final class BslQueryLiteralSupport
                 byte[] transformed = transform(woven.getBytes());
                 if (transformed != null)
                     woven.setBytes(transformed);
-                Global.tempLog("query-concatenation", "weave: transformed=" + (transformed != null)); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (RuntimeException | LinkageError error)
             {
-                Global.tempLog("query-concatenation", "weave failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -492,6 +494,176 @@ final class BslQueryLiteralSupport
     private static Literal parse(IDocument doc, int offset, boolean whole)
     {
         return parse(doc, offset, whole, MAX_LINES);
+    }
+
+    /** Связанные операторные слова из готового дерева QL, без запуска разбора запроса. */
+    static List<int[]> queryLogicalBrackets(IDocument doc, int offset, int selectionLength)
+        throws org.eclipse.jface.text.BadLocationException
+    {
+        if (!ComfortSettings.isQueryLiteralHighlightingEnabled() || !(doc instanceof XtextDocument)
+            || offset < 0 || offset > doc.getLength())
+            return null;
+        int start = offset;
+        while (start > 0 && isIdentifierChar(doc.getChar(start - 1)))
+            start--;
+        int end = offset;
+        while (end < doc.getLength() && isIdentifierChar(doc.getChar(end)))
+            end++;
+        if (!QueryBracketSupport.isKeyword(doc.get(start, end - start))
+            || selectionLength > 0 && (offset != start || selectionLength != end - start))
+            return null;
+        int wordStart = start;
+        return queryBracketRanges(doc, wordStart, false);
+    }
+
+    /** Пара символов запроса из готового дерева, в координатах модуля. */
+    static IRegion queryBracketPair(IDocument doc, int offset)
+    {
+        Global.tempLog("query-literal-pairs", "lookup offset=" + offset + ", enabled=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + ComfortSettings.isQueryLiteralHighlightingEnabled());
+        if (!ComfortSettings.isQueryLiteralHighlightingEnabled() || doc == null
+            || offset < 0 || offset >= doc.getLength())
+            return null;
+        try
+        {
+            char symbol = doc.getChar(offset);
+            if ("()[]{}".indexOf(symbol) < 0) //$NON-NLS-1$
+                return null;
+            List<int[]> ranges = queryBracketRanges(doc, offset, true);
+            Global.tempLog("query-literal-pairs", "symbol=" + symbol + ", ranges=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (ranges == null ? "null" : ranges.size())); //$NON-NLS-1$
+            if (ranges == null || ranges.size() != 2)
+                return null;
+            return new Region(ranges.get(0)[0], ranges.get(1)[0] - ranges.get(0)[0] + 1);
+        }
+        catch (org.eclipse.jface.text.BadLocationException error)
+        {
+            Global.tempLogException("query-literal-pairs", "lookup", error); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    private static List<int[]> queryBracketRanges(IDocument doc, int offset, boolean symbols)
+    {
+        if (!(doc instanceof XtextDocument xtext))
+            return null;
+        return xtext.tryReadOnly(resource ->
+        {
+            if (resource == null || resource.getParseResult() == null)
+                return null;
+            var helper = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+            EObject object = helper.resolveContainedElementAt(resource, offset);
+            StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+            return literal == null ? null : QueryBrackets.find(literal, offset, symbols);
+        });
+    }
+
+    /** Группы слов из уже выполненной живой проверки запроса; новое дерево не строится. */
+    private static final class QueryBrackets
+    {
+        static List<int[]> find(StringLiteral literal, int moduleOffset, boolean symbols)
+        {
+            var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
+            if (lines.isEmpty())
+                return null;
+            DefaultStringLiteralTextProvider text = new DefaultStringLiteralTextProvider(literal);
+            String query = text.getText();
+            QueryValidation validation = null;
+            synchronized (ISSUES_CACHE)
+            {
+                for (QueryValidation candidate : ISSUES_CACHE.values())
+                {
+                    if (query.replace("\r\n", "\n").equals(candidate.query().replace("\r\n", "\n"))) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    {
+                        validation = candidate;
+                        break;
+                    }
+                }
+            }
+            if (validation == null)
+            {
+                return null;
+            }
+            int base = lines.get(0).getOffset();
+            int queryOffset = queryOffset(text, literal, base, moduleOffset, query.length());
+            if (queryOffset < 0)
+                return null;
+            queryOffset = lineEndingOffset(query, queryOffset, validation.query());
+            List<int[]> selected = null;
+            if (symbols)
+            {
+                for (int[] pair : validation.pairs())
+                {
+                    if (pair[0] == queryOffset || pair[1] == queryOffset)
+                    {
+                        selected = List.of(new int[] { pair[0], 1 }, new int[] { pair[1], 1 });
+                        break;
+                    }
+                }
+            }
+            for (List<int[]> group : symbols ? List.<List<int[]>>of() : validation.groups())
+            {
+                for (int[] range : group)
+                {
+                    if (range[0] == queryOffset)
+                    {
+                        selected = group;
+                        break;
+                    }
+                }
+                if (selected != null)
+                    break;
+            }
+            if (selected == null)
+                return null;
+            List<int[]> result = new ArrayList<>();
+            for (int[] range : selected)
+            {
+                var from = text.getLocation(lineEndingOffset(validation.query(), range[0], query));
+                var to = text.getLocation(lineEndingOffset(validation.query(), range[0] + range[1] - 1, query));
+                if (from == null || to == null || from.getFirst() != literal || to.getFirst() != literal)
+                    return null;
+                result.add(new int[] { base + from.getSecond(), to.getSecond() - from.getSecond() + 1 });
+            }
+            return result;
+        }
+
+        /** Единственное различие представлений — LF в живой проверке и CRLF у провайдера BSL. */
+        private static int lineEndingOffset(String from, int offset, String to)
+        {
+            int remaining = from.substring(0, offset).replace("\r\n", "\n").length(); //$NON-NLS-1$ //$NON-NLS-2$
+            int result = 0;
+            while (remaining > 0 && result < to.length())
+            {
+                if (to.charAt(result++) == '\r' && result < to.length() && to.charAt(result) == '\n')
+                    result++;
+                remaining--;
+            }
+            return result;
+        }
+
+        /** Обратное штатное отображение QL → BSL монотонно, включая удвоенные кавычки. */
+        private static int queryOffset(DefaultStringLiteralTextProvider text, StringLiteral literal,
+            int base, int moduleOffset, int length)
+        {
+            int low = 0;
+            int high = length - 1;
+            while (low <= high)
+            {
+                int middle = (low + high) >>> 1;
+                var location = text.getLocation(middle);
+                if (location == null || location.getFirst() != literal)
+                    return -1;
+                int current = base + location.getSecond();
+                if (current == moduleOffset)
+                    return middle;
+                if (current < moduleOffset)
+                    low = middle + 1;
+                else
+                    high = middle - 1;
+            }
+            return -1;
+        }
     }
 
     /** Для свёрток граница уже известна из узла BSL, ограничение в 5000 строк не нужно. */
@@ -987,6 +1159,52 @@ final class BslQueryLiteralSupport
     /** Контрол должен соответствовать информации QL, а не описанию литерала BSL. */
     record QueryHover(Object info, IInformationControlCreator creator) {}
 
+    /** Ключевое слово или имя функции QL под модельной кареткой BSL; только UI. */
+    static String queryKeyword(BslXtextEditor editor, ITextViewer viewer, int offset)
+    {
+        Literal lit = viewer == null ? null : parse(viewer.getDocument(), offset, true);
+        if (lit == null || !lit.isQuery())
+            return null;
+        try
+        {
+            IProject project = resolveProject(editor);
+            if (project == null)
+                return null;
+            QlEditor ql = hiddenEditor(project);
+            EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
+            String query = lit.text.toString();
+            if (!query.equals(embedded.getDocument().get()))
+                ql.setFullText(query);
+            String keyword = embedded.getDocument().readOnly(resource -> {
+                if (resource == null || resource.getParseResult() == null)
+                    return null;
+                var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), lit.probeIndex);
+                if (leaf == null || leaf.isHidden())
+                    return null;
+                // FunctionWord допускает ID: ПОДСТРОКА, ЕСТЬNULL и другие функции
+                // не обязаны быть Keyword. Проверяем именно узел имени вызова,
+                // чтобы поле или параметр с таким же текстом не стали функцией.
+                FunctionInvocationExpression function = EcoreUtil2.getContainerOfType(
+                    NodeModelUtils.findActualSemanticObjectFor(leaf), FunctionInvocationExpression.class);
+                if (function != null)
+                    for (var name : NodeModelUtils.findNodesForFeature(function,
+                        QlPackage.Literals.FUNCTION_INVOCATION_EXPRESSION__FUNCTION_TYPE))
+                        if (lit.probeIndex >= name.getOffset() && lit.probeIndex < name.getEndOffset())
+                            return name.getText().trim();
+                return leaf.getGrammarElement() instanceof Keyword word
+                    && !word.getValue().isEmpty() && Character.isLetter(word.getValue().charAt(0))
+                        ? word.getValue() : null;
+            });
+            Global.tempLog("query-syntax-assist", "offset=" + offset + ", keyword=" + keyword); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return keyword;
+        }
+        catch (Exception | LinkageError error)
+        {
+            Global.tempLogException("query-syntax-assist", "ключевое слово QL", error); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
     /** Общее описание поля для наведения и боковой подсказки предложений QL. */
     private static final class QueryFieldHover implements IEObjectHover, ITextHoverExtension
     {
@@ -1148,6 +1366,12 @@ final class BslQueryLiteralSupport
                     var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
                     if (leaf == null || leaf.isHidden())
                     {
+                        return null;
+                    }
+                    if (leaf.getGrammarElement() instanceof Keyword)
+                    {
+                        Global.tempLog("query-syntax-assist", "подсказка ключевого слова подавлена: " //$NON-NLS-1$ //$NON-NLS-2$
+                            + leaf.getText() + ", offset=" + offset); //$NON-NLS-1$
                         return null;
                     }
                     // QL хранит обращение к полю как выражение, а не обычную
@@ -1605,17 +1829,22 @@ final class BslQueryLiteralSupport
     private static final String[] HUB_PREFIXES =
         { "Запрос в строковом литерале: ", "Query in string literal: " }; //$NON-NLS-1$ //$NON-NLS-2$
     private static final Map<BslXtextEditor, MarkerSession> MARKER_SESSIONS = new WeakHashMap<>();
-    /** Ответы валидатора по тексту запроса: прокрутка и правки вне литерала не проверяют его заново. */
-    private static final Map<String, List<Issue>> ISSUES_CACHE = new LinkedHashMap<>(16, 0.75f, true)
+    /** Ошибки и группы операторных слов из одного готового дерева живой проверки. */
+    private static record QueryValidation(String query, List<Issue> issues, List<List<int[]>> groups,
+        List<int[]> pairs) {}
+
+    /** Прокрутка и правки вне литерала не проверяют запрос заново. */
+    private static final Map<String, QueryValidation> ISSUES_CACHE = Collections.synchronizedMap(
+        new LinkedHashMap<>(16, 0.75f, true)
     {
         private static final long serialVersionUID = 1L;
 
         @Override
-        protected boolean removeEldestEntry(Map.Entry<String, List<Issue>> eldest)
+        protected boolean removeEldestEntry(Map.Entry<String, QueryValidation> eldest)
         {
             return size() > 64;
         }
-    };
+    });
 
     /**
      * Живые маркеры ошибок запросов в литералах видимой области редактора модуля: без
@@ -1900,18 +2129,19 @@ final class BslQueryLiteralSupport
                 String query = lit.text.toString();
                 boolean skipValidation = concatenated.contains(start);
                 String cacheKey = project.getName() + '\n' + query;
-                List<Issue> issues = skipValidation ? List.of() : ISSUES_CACHE.get(cacheKey);
-                if (issues == null)
+                QueryValidation validation = skipValidation
+                    ? new QueryValidation(query, List.of(), List.of(), List.of()) : ISSUES_CACHE.get(cacheKey);
+                if (validation == null)
                 {
-                    issues = validate(project, query);
-                    if (issues == null)
+                    validation = validate(project, query);
+                    if (validation == null)
                     {
                         // Сбой проверки: покрытие (если было) не трогаем.
                         if (coverage != null)
                             matched.add(coverage);
                         continue;
                     }
-                    ISSUES_CACHE.put(cacheKey, issues);
+                    ISSUES_CACHE.put(cacheKey, validation);
                 }
                 if (coverage == null)
                 {
@@ -1930,7 +2160,7 @@ final class BslQueryLiteralSupport
                 coverage.ours.clear();
                 coverage.query = query;
                 coverage.concatenated = skipValidation;
-                for (Issue issue : issues)
+                for (Issue issue : validation.issues())
                 {
                     String type = annotationType(issue.getSeverity());
                     if (type == null || issue.getOffset() == null || issue.getMessage() == null)
@@ -2209,7 +2439,7 @@ final class BslQueryLiteralSupport
     }
 
     /** Проверка текста запроса штатным валидатором языка запросов; {@code null} — сбой. Только UI. */
-    private static List<Issue> validate(IProject project, String query)
+    private static QueryValidation validate(IProject project, String query)
     {
         try
         {
@@ -2217,14 +2447,18 @@ final class BslQueryLiteralSupport
             EmbeddedEditor embedded = editor.getEmbeddedQlEditor();
             if (!query.equals(embedded.getDocument().get()))
                 editor.setFullText(query);
-            List<Issue> issues = embedded.getDocument().readOnly(resource ->
+            return embedded.getDocument().readOnly(resource ->
             {
                 if (resource == null)
-                    return List.<Issue>of();
+                    return null;
                 IResourceValidator validator = resource.getResourceServiceProvider().getResourceValidator();
-                return validator.validate(resource, CheckMode.NORMAL_AND_FAST, CancelIndicator.NullImpl);
+                List<Issue> issues = validator.validate(resource, CheckMode.NORMAL_AND_FAST, CancelIndicator.NullImpl);
+                var parsed = resource.getParseResult();
+                return new QueryValidation(parsed == null ? query : parsed.getRootNode().getText(),
+                    issues == null ? List.of() : List.copyOf(issues),
+                    QueryBracketSupport.collect(parsed == null ? null : parsed.getRootNode()),
+                    QueryBracketSupport.collectPairs(parsed == null ? null : parsed.getRootNode()));
             });
-            return issues != null ? new ArrayList<>(issues) : List.of();
         }
         catch (Exception | LinkageError e)
         {

@@ -70,7 +70,6 @@ import com._1c.g5.v8.dt.ql.resource.QlMapper;
  */
 public final class BslQueryResultTypes implements IInvocationTypesComputerExtension
 {
-    private static final String LOG = "query-result-types"; //$NON-NLS-1$
     private static final Set<String> RESULT_METHODS = Set.of(
         "execute", "выполнить", "executebatch", "выполнитьпакет", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "select", "выбрать", "unload", "выгрузить", "get", "получить"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
@@ -112,36 +111,27 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     /** Кандидаты быстрого исправления: только готовый план, без расчёта схемы в UI. */
     static List<String> fieldNamesAt(XtextResource resource, int offset)
     {
-        long started = System.nanoTime();
         List<String> names = new ArrayList<>();
-        try
+        if (resource.getContents().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            return List.of();
+        Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (lock == null)
+            return List.of();
+        synchronized (lock)
         {
-            if (resource.getContents().isEmpty()
-                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+            DynamicFeatureAccess access = EcoreUtil2.getContainerOfType(object, DynamicFeatureAccess.class);
+            Method method = access == null ? null : EcoreUtil2.getContainerOfType(access, Method.class);
+            Session session = session(resource, false);
+            Plan plan = session == null || method == null ? null : session.plans.get(method);
+            ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
+            if (plan == null || node == null || !node.getText().equals(plan.text)
+                || access.eContainer() instanceof Invocation invocation && invocation.getMethodAccess() == access)
                 return List.of();
-            Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
-            if (lock == null)
-                return List.of();
-            synchronized (lock)
-            {
-                EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
-                DynamicFeatureAccess access = EcoreUtil2.getContainerOfType(object, DynamicFeatureAccess.class);
-                Method method = access == null ? null : EcoreUtil2.getContainerOfType(access, Method.class);
-                Session session = session(resource, false);
-                Plan plan = session == null || method == null ? null : session.plans.get(method);
-                ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
-                if (plan == null || node == null || !node.getText().equals(plan.text)
-                    || access.eContainer() instanceof Invocation invocation && invocation.getMethodAccess() == access)
-                    return List.of();
-                names.addAll(plan.fieldCandidates.getOrDefault(access, List.of()));
-            }
-            return names;
+            names.addAll(plan.fieldCandidates.getOrDefault(access, List.of()));
         }
-        finally
-        {
-            Global.tempLog(LOG, "quickfix-candidates offset=" + offset + " names=" + names.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " totalUs=" + micros(System.nanoTime() - started)); //$NON-NLS-1$
-        }
+        return names;
     }
 
     /**
@@ -150,108 +140,63 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     public static List<DynamicFeatureAccess> unknownFields(Module module, CancelIndicator cancellation)
     {
-        long started = System.nanoTime();
-        int prepared = 0;
-        int reused = 0;
-        int irrelevant = 0;
         List<DynamicFeatureAccess> problems = new ArrayList<>();
-        try
+        if (module == null || !(module.eResource() instanceof XtextResource)
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+            return List.of();
+        Object lock = Global.invoke(module.eResource(), "getLock"); //$NON-NLS-1$
+        if (lock == null)
+            return List.of();
+        synchronized (lock)
         {
-            if (module == null || !(module.eResource() instanceof XtextResource)
-                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
-                return List.of();
-            Object lock = Global.invoke(module.eResource(), "getLock"); //$NON-NLS-1$
-            if (lock == null)
-                return List.of();
-            synchronized (lock)
+            Session session = session(module.eResource(), true);
+            session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
+            for (Method method : module.allMethods())
             {
-                Session session = session(module.eResource(), true);
-                session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
-                for (Method method : module.allMethods())
+                if (cancellation.isCanceled())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+                if (node == null)
+                    continue;
+                Plan plan = session.plans.get(method);
+                String text = node.getText();
+                if (plan == null || !text.equals(plan.text))
                 {
-                    if (cancellation.isCanceled())
-                        throw new org.eclipse.core.runtime.OperationCanceledException();
-                    ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
-                    if (node == null)
-                        continue;
-                    Plan plan = session.plans.get(method);
-                    String text = node.getText();
-                    if (plan == null || !text.equals(plan.text))
+                    session.plans.remove(method);
+                    plan = new Plan(method, text);
+                    plan.originsOnly = true;
+                    try
                     {
-                        session.plans.remove(method);
-                        plan = new Plan(method, text);
-                        plan.originsOnly = true;
-                        try
+                        // Без обращений к полям схемы для автопроверки не нужны.
+                        if (!plan.hasQueryFieldAccess(cancellation))
                         {
-                            // Без обращений к полям схемы для автопроверки не нужны.
-                            if (!plan.hasQueryFieldAccess(cancellation))
-                            {
-                                irrelevant++;
-                                continue;
-                            }
+                            continue;
                         }
-                        finally
-                        {
-                            plan.originsOnly = false;
-                        }
-                        plan.cancellation = cancellation;
-                        try
-                        {
-                            plan.prepare();
-                        }
-                        finally
-                        {
-                            plan.cancellation = CancelIndicator.NullImpl;
-                        }
-                        session.plans.put(method, plan);
-                        prepared++;
                     }
-                    else
-                        reused++;
-                    problems.addAll(plan.unknownFields(cancellation));
+                    finally
+                    {
+                        plan.originsOnly = false;
+                    }
+                    plan.cancellation = cancellation;
+                    try
+                    {
+                        plan.prepare();
+                    }
+                    finally
+                    {
+                        plan.cancellation = CancelIndicator.NullImpl;
+                    }
+                    session.plans.put(method, plan);
                 }
+                problems.addAll(plan.unknownFields(cancellation));
             }
-            return problems;
         }
-        catch (org.eclipse.core.runtime.OperationCanceledException canceled)
-        {
-            throw canceled;
-        }
-        catch (RuntimeException | LinkageError failure)
-        {
-            Global.tempLogException(LOG, "validation", failure); //$NON-NLS-1$
-            throw failure;
-        }
-        finally
-        {
-            Global.tempLog(LOG, "validation module=" + (module == null ? "null" : EcoreUtil.getURI(module)) //$NON-NLS-1$ //$NON-NLS-2$
-                + " prepared=" + prepared + " reused=" + reused + " problems=" + problems.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " irrelevant=" + irrelevant //$NON-NLS-1$
-                + " totalUs=" + micros(System.nanoTime() - started) + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        return problems;
     }
 
     /** Вызывающий держит readOnly документа и блокировку перевязки ресурса. */
     static void refresh(Resource resource, int offset, Consumer<String> status,
         Predicate<Method> recompute)
-    {
-        long started = System.nanoTime();
-        RefreshTiming timing = new RefreshTiming();
-        try
-        {
-            refreshMeasured(resource, offset, status, recompute, timing);
-        }
-        finally
-        {
-            Global.tempLog(LOG, "refresh method=" + timing.method + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " outcome=" + timing.outcome + " totalUs=" + micros(System.nanoTime() - started) //$NON-NLS-1$ //$NON-NLS-2$
-                + " prepareUs=" + micros(timing.prepareNs) + " recomputeUs=" + micros(timing.recomputeNs) //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        }
-    }
-
-    private static void refreshMeasured(Resource resource, int offset, Consumer<String> status,
-        Predicate<Method> recompute, RefreshTiming timing)
     {
         if (!(resource instanceof XtextResource xtext)
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(
@@ -262,31 +207,19 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
         if (node == null)
             return;
-        timing.method = method.getName();
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
         if (previous != null && previous.complete && text.equals(previous.text))
         {
-            timing.outcome = "method-cache-hit"; //$NON-NLS-1$
             return;
         }
-        timing.outcome = "failed"; //$NON-NLS-1$
-        Global.tempLog(LOG, "prepare method=" + method.getName()); //$NON-NLS-1$
         try
         {
             Plan plan = previous != null && text.equals(previous.text) ? previous : new Plan(method, text);
-            long prepareStarted = System.nanoTime();
-            try
-            {
-                // Валидация могла уже подготовить план, не переустанавливая типы BSL.
-                if (plan != previous)
-                    plan.prepare();
-            }
-            finally
-            {
-                timing.prepareNs = System.nanoTime() - prepareStarted;
-            }
+            // Валидация могла уже подготовить план, не переустанавливая типы BSL.
+            if (plan != previous)
+                plan.prepare();
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
             // только он. Старые методы удаляем, чтобы ресурс редактора их не удерживал.
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
@@ -296,61 +229,20 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
-                long recomputeStarted = System.nanoTime();
-                boolean recomputed;
-                try
-                {
-                    recomputed = recompute.test(method);
-                }
-                finally
-                {
-                    timing.recomputeNs = System.nanoTime() - recomputeStarted;
-                }
+                boolean recomputed = recompute.test(method);
                 if (!recomputed)
                 {
-                    timing.outcome = "recompute-unavailable"; //$NON-NLS-1$
-                    Global.tempLog(LOG, "recompute unavailable method=" + method.getName()); //$NON-NLS-1$
                     return;
                 }
                 BslDocCommentComputedTypes.bumpTypesGeneration();
             }
             plan.complete = true;
-            timing.outcome = "ready"; //$NON-NLS-1$
-            Global.tempLog(LOG, "ready method=" + method.getName() + " calls=" + plan.types.size()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (RuntimeException | LinkageError failure)
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
             session.plans.remove(method);
-            Global.tempLogException(LOG, "prepare " + method.getName(), failure); //$NON-NLS-1$
         }
-    }
-
-    private static long micros(long nanoseconds)
-    {
-        return nanoseconds / 1_000L;
-    }
-
-    private static final class RefreshTiming
-    {
-        String method = "-"; //$NON-NLS-1$
-        String outcome = "not-applicable"; //$NON-NLS-1$
-        long prepareNs;
-        long recomputeNs;
-    }
-
-    private static final class QueryTiming
-    {
-        String outcome = "failed"; //$NON-NLS-1$
-        long providerNs;
-        long typeNs;
-        long sourceNs;
-        int schemaId;
-        int textRequests;
-        int queryChars;
-        int queryHash;
-        int fields;
-        int results;
     }
 
     private static Session session(Resource resource, boolean create)
@@ -710,68 +602,25 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
         private List<Result> query(StringLiteral literal)
         {
-            long started = System.nanoTime();
-            QueryTiming timing = new QueryTiming();
-            try
-            {
-                return queryMeasured(literal, timing);
-            }
-            finally
-            {
-                Global.tempLog(LOG, "query-timing method=" + method.getName() + " offset=" + start(literal) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " literalId=" + System.identityHashCode(literal) + " schemaId=" + timing.schemaId //$NON-NLS-1$ //$NON-NLS-2$
-                    + " textRequests=" + timing.textRequests + " queryChars=" + timing.queryChars //$NON-NLS-1$ //$NON-NLS-2$
-                    + " queryHash=" + timing.queryHash //$NON-NLS-1$
-                    + " outcome=" + timing.outcome + " totalUs=" + micros(System.nanoTime() - started) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " providerUs=" + micros(timing.providerNs) + " fieldTypesUs=" + micros(timing.typeNs) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " fieldSourcesUs=" + micros(timing.sourceNs) + " results=" + timing.results //$NON-NLS-1$ //$NON-NLS-2$
-                    + " fields=" + timing.fields + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        private List<Result> queryMeasured(StringLiteral literal, QueryTiming timing)
-        {
             List<Result> cached = queries.get(literal);
             if (cached != null)
             {
-                timing.outcome = "literal-cache-hit"; //$NON-NLS-1$
-                timing.results = cached.size();
                 return cached;
             }
             IDependentQuerySchemaProvider provider = Global.getOsgiService(IDependentQuerySchemaProvider.class);
             if (provider == null)
                 throw new IllegalStateException("IDependentQuerySchemaProvider unavailable"); //$NON-NLS-1$
             DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
-            QuerySchema schema;
-            long providerStarted = System.nanoTime();
-            try
-            {
-                schema = provider.getQuerySchema(literal,
-                    com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
-                    (object, feature) ->
-                    {
-                        timing.textRequests++;
-                        String queryText = textProvider.getText();
-                        timing.queryChars = queryText.length();
-                        timing.queryHash = queryText.hashCode();
-                        return queryText;
-                    }, cancellation);
-            }
-            finally
-            {
-                timing.providerNs = System.nanoTime() - providerStarted;
-            }
-            timing.schemaId = System.identityHashCode(schema);
+            QuerySchema schema = provider.getQuerySchema(literal,
+                com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
+                (object, feature) -> textProvider.getText(), cancellation);
             if (schema == null || schema.eResource() == null)
                 throw new IllegalStateException("Query schema unavailable"); //$NON-NLS-1$
             // DependentModelProvider.createDependentModel уже вызывает
             // EcoreUtil2.resolveLazyCrossReferences перед возвратом схемы.
             if (!schema.eResource().getErrors().isEmpty())
             {
-                Global.tempLog(LOG, "query invalid offset=" + start(literal) //$NON-NLS-1$
-                    + " errors=" + schema.eResource().getErrors()); //$NON-NLS-1$
                 queries.put(literal, List.of());
-                timing.outcome = "invalid-query"; //$NON-NLS-1$
                 return List.of();
             }
             DerivedTypeComputerForDbViewQuery computer =
@@ -792,36 +641,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         throw new IllegalStateException("Query result fields unavailable"); //$NON-NLS-1$
                     for (DbViewFieldDef field : view.getActualFields())
                     {
-                        TypeDescription type;
-                        long typeStarted = System.nanoTime();
-                        try
-                        {
-                            type = computer.getFieldType(field).getFirst();
-                        }
-                        finally
-                        {
-                            timing.typeNs += System.nanoTime() - typeStarted;
-                        }
+                        TypeDescription type = computer.getFieldType(field).getFirst();
                         int offset;
                         int length;
-                        long sourceStarted = System.nanoTime();
-                        try
-                        {
-                            INode source = fieldNode(field, select, mapper);
-                            var location = source == null ? null : textProvider.getLocation(source.getOffset());
-                            var endLocation = source == null ? null : textProvider.getLocation(source.getEndOffset());
-                            offset = location == null ? -1 : firstLine + location.getSecond();
-                            length = location == null || endLocation == null ? 0
-                                : endLocation.getSecond() - location.getSecond();
-                        }
-                        finally
-                        {
-                            timing.sourceNs += System.nanoTime() - sourceStarted;
-                        }
+                        INode source = fieldNode(field, select, mapper);
+                        var location = source == null ? null : textProvider.getLocation(source.getOffset());
+                        var endLocation = source == null ? null : textProvider.getLocation(source.getEndOffset());
+                        offset = location == null ? -1 : firstLine + location.getSecond();
+                        length = location == null || endLocation == null ? 0
+                            : endLocation.getSecond() - location.getSecond();
                         fields.add(new Field(field.getName(), field.getNameRu(),
                             type == null ? List.of() : List.copyOf(type.getTypes()),
                             literalUri, offset, length));
-                        timing.fields++;
                     }
                 }
                 // Сохраняем место УНИЧТОЖИТЬ/ПОМЕСТИТЬ в пакете. Его колонки
@@ -832,9 +663,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             cached = List.copyOf(results);
             queries.put(literal, cached);
-            timing.outcome = "ready"; //$NON-NLS-1$
-            timing.results = cached.size();
-            Global.tempLog(LOG, "query offset=" + start(literal) + " results=" + cached.size()); //$NON-NLS-1$ //$NON-NLS-2$
             return cached;
         }
 

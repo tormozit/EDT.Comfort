@@ -146,9 +146,6 @@ final class BracketContentHintIndex
     static int resolveEndOffset(EObject element, ICompositeNode node)
     {
         int endOffset = resolveEndOffset(element, node, new org.eclipse.core.runtime.NullProgressMonitor());
-        // #region agent log
-        Global.tempLog("folding-end-offset", "start=" + node.getOffset() + " end=" + endOffset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         return endOffset;
     }
 

@@ -1868,12 +1868,6 @@ public class ConfigSearchDialogHook implements IStartup
                             caseSensitive =
                                 Boolean.TRUE.equals(Global.invoke(input, "isCaseSensitive"));
                         }
-                        // #region agent log — временно (issue #800)
-                        Global.tempLog("config-search-800", "run search=[" //$NON-NLS-1$ //$NON-NLS-2$
-                            + Global.invoke(input, "getSearchString") + "] wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
-                            + " scopeRefs=" + scopeRefs + " nstr=" + (nstr != null) //$NON-NLS-1$ //$NON-NLS-2$
-                            + " wrapped=" + (wordFilter != null || scopeRefs != null || nstr != null)); //$NON-NLS-1$
-                        // #endregion
                         if (wordFilter != null || scopeRefs != null || nstr != null)
                             args[1] = createFilteredCollector(
                                 args[1], wordFilter, caseSensitive, scopeRefs, nstr, executorCL);
@@ -1936,17 +1930,9 @@ public class ConfigSearchDialogHook implements IStartup
     private static boolean accept(Object match, String searchString, boolean caseSensitive,
         SearchSetMembership membership, NStrCategory nstr) throws Exception
     {
-        // #region agent log — временно (issue #800): что EDT отдаёт сборщику и что отсекают наши фильтры
         boolean wholeWord = searchString == null || isWholeWordMatch(match, searchString, caseSensitive);
         boolean nstrOk = nstr == null || nstr.allows(match);
         boolean member = membership == null || membership.allows(match);
-        String where = match instanceof TextSearchFileMatch fm
-            ? fm.getFile().getFullPath() + " line=" + fm.getLineNumber() + " fileOffset=" + fm.getFileOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                + " inLine=" + fm.getTextOffset() + " len=" + fm.getTextLength() + " text=[" + fm.getText() + "]" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            : String.valueOf(match);
-        Global.tempLog("config-search-800", "match " + where + " search=[" + searchString + "] wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + " nstr=" + nstrOk + " member=" + member); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (!wholeWord)
             return false;
         if (!nstrOk)

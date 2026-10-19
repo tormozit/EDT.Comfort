@@ -1,13 +1,20 @@
 package tormozit;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+import java.util.function.Function;
 
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.TextSelection;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.dialogs.IPageChangeProvider;
 import org.eclipse.jface.dialogs.IPageChangedListener;
@@ -29,6 +36,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.eclipse.xtext.ui.editor.occurrences.MarkOccurrenceActionContributor;
 import org.eclipse.xtext.ui.editor.occurrences.OccurrenceMarker;
+import org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com.google.inject.Injector;
@@ -68,6 +76,92 @@ public final class BslOccurrenceMarkerHook implements IStartup
 {
     /** Тема временного лога модуля. */
     private static final String TEMP_TOPIC = "bsl-occurrence-marker"; //$NON-NLS-1$
+
+    /** Функция контекста для вплетения из раннего бандла. */
+    static void installLiteralCallbacks()
+    {
+        LiteralBracketSupport.install();
+    }
+
+    /**
+     * EDT выбирает парные конструкции только по написанию слова, без проверки контекста.
+     * В строковом литерале оставляем обычный поиск текста базового AbstractOccurrenceMarker.
+     * Поля document/selection и метод isLogicalBracket подтверждены javap bsl-ui.
+     */
+    private static final class LiteralBracketSupport
+    {
+        private static final String CALLBACK = "tormozit.occurrences.insideLiteral"; //$NON-NLS-1$
+        private static final String QUERY_CALLBACK = "tormozit.occurrences.queryBrackets"; //$NON-NLS-1$
+        private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+
+        static void install()
+        {
+            if (!INSTALLED.compareAndSet(false, true))
+                return;
+            System.getProperties().put(CALLBACK, (Predicate<Object>) LiteralBracketSupport::insideLiteral);
+            System.getProperties().put(QUERY_CALLBACK,
+                (Function<Object, Object>) LiteralBracketSupport::queryBrackets);
+        }
+
+        /** Карта применяется штатным заданием с его отменой и заменой аннотаций. */
+        private static Object queryBrackets(Object job)
+        {
+            if (!ComfortSettings.isQueryLiteralHighlightingEnabled())
+            {
+                return null;
+            }
+            try
+            {
+                Object document = Global.getField(job, "document"); //$NON-NLS-1$
+                Object selection = Global.getField(job, "selection"); //$NON-NLS-1$
+                if (!(document instanceof IDocument doc) || !(selection instanceof ITextSelection text))
+                {
+                    return null;
+                }
+                List<int[]> ranges = BslQueryLiteralSupport.queryLogicalBrackets(doc,
+                    text.getOffset(), text.getLength());
+                if (ranges == null)
+                    return null;
+                Map<Annotation, Position> annotations = new HashMap<>();
+                for (int[] range : ranges)
+                {
+                    Annotation annotation = new Annotation(
+                        "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation", false, //$NON-NLS-1$
+                        doc.get(range[0], range[1]));
+                    annotations.put(annotation, new Position(range[0], range[1]));
+                }
+                return annotations;
+            }
+            catch (Exception | LinkageError error)
+            {
+                return null;
+            }
+        }
+
+        private static boolean insideLiteral(Object job)
+        {
+            if (!ComfortSettings.isQueryLiteralHighlightingEnabled())
+            {
+                return false;
+            }
+            try
+            {
+                Object document = Global.getField(job, "document"); //$NON-NLS-1$
+                Object selection = Global.getField(job, "selection"); //$NON-NLS-1$
+                if (!(document instanceof IDocument doc) || !(selection instanceof ITextSelection text))
+                {
+                    return false;
+                }
+                String partition = doc.getPartition(text.getOffset()).getType();
+                boolean literal = TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION.equals(partition);
+                return literal;
+            }
+            catch (Exception error)
+            {
+                return false;
+            }
+        }
+    }
 
     /** Сколько раз ждём появления маркера редактора (его создаёт callback при открытии). */
     private static final int MAX_ATTACH_ATTEMPTS = 100;
@@ -155,7 +249,10 @@ public final class BslOccurrenceMarkerHook implements IStartup
             pages.addPageChangedListener(event -> hookEditor(part));
 
         BslXtextEditor editor = GetRef.getActiveBslEditor(part);
-        if (editor == null || wrappers.containsKey(editor))
+        if (editor == null)
+            return;
+        QueryBracketSupport.installModuleEditor(editor);
+        if (wrappers.containsKey(editor))
             return;
         Display.getDefault().asyncExec(() -> attach(editor, 0));
     }

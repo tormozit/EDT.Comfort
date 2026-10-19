@@ -70,13 +70,14 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
             return null;
 
         String selected = selectedText(document, range);
+        String queryKeyword = BslQueryLiteralSupport.queryKeyword(editor, viewer, range.x);
         Future<?> previous = running;
         if (previous != null)
         {
             previous.cancel(false);
             running = null;
         }
-        running = CompletableFuture.runAsync(() -> resolveAndShow(document, range.x, selected, display));
+        running = CompletableFuture.runAsync(() -> resolveAndShow(document, range.x, selected, queryKeyword, display));
         return null;
     }
 
@@ -108,9 +109,17 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
     }
 
     /** Вне потока UI: определяем роль слова и запрос для поиска. */
-    private void resolveAndShow(IXtextDocument document, int offset, String selected, Display display)
+    private void resolveAndShow(IXtextDocument document, int offset, String selected, String queryKeyword,
+        Display display)
     {
         EObject element = BslSyntaxAssist.elementAt(document, offset);
+        if (queryKeyword != null)
+        {
+            List<?> queryPages = BslSyntaxAssist.queryKeywordPages(element, queryKeyword);
+            if (!display.isDisposed())
+                display.asyncExec(() -> show(queryPages, queryKeyword));
+            return;
+        }
         Object group = element != null ? BslSyntaxAssist.viewDocumentationPages(element) : null;
         List<?> rawPages = BslSyntaxAssist.pagesOf(group);
         List<?> pages = rawPages.stream().filter(Objects::nonNull).toList();

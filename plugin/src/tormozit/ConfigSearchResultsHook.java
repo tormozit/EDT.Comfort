@@ -23,6 +23,8 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.osgi.framework.Bundle;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EClass;
@@ -2355,10 +2357,151 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String BSL_BM_UI_SUPPLIER =
         "com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchRefactoringSupplier"; //$NON-NLS-1$
     private static volatile boolean fullTextAugmentRunning;
+    private static Job fullTextAugmentJob;
+    private static Object fullTextAugmentResult;
     /** Результат, в который уже опубликован полнотекстовый проход. */
     private static Object fullTextRowsResult;
     private static String fullTextRowsKey;
     private static int fullTextRowsGeneration = -1;
+
+    /** Индикатор общего заголовка панели: все штатные виды поиска и полнотекстовый проход. */
+    private static final class SearchViewProgress
+    {
+        private static final String KEY = "tormozit.searchViewProgress"; //$NON-NLS-1$
+        private final IViewPart view;
+        private final Composite content;
+        private WaitSpinner spinner;
+
+        SearchViewProgress(IViewPart view, Composite content)
+        {
+            this.view = view;
+            this.content = content;
+        }
+
+        void tick()
+        {
+            if (content.isDisposed())
+                return;
+            update();
+            content.getDisplay().timerExec(100, this::tick);
+        }
+
+        void update()
+        {
+            Object result = Global.getField(view, "fCurrentSearch"); //$NON-NLS-1$
+            boolean running = result instanceof ISearchResult search
+                && (NewSearchUI.isQueryRunning(search.getQuery())
+                    || fullTextAugmentRunning && fullTextAugmentResult == result);
+            if (Global.getField(view, "fCancelAction") instanceof IAction action) //$NON-NLS-1$
+                action.setEnabled(running);
+            if ((spinner == null || spinner.isDisposed()) && running
+                && Global.getField(view, "fDescription") instanceof Link link && !link.isDisposed()) //$NON-NLS-1$
+                spinner = WaitSpinner.attach(link, "Поиск ещё выполняется, результаты могут быть неполными"); //$NON-NLS-1$
+            if (spinner != null && !spinner.isDisposed())
+                spinner.setActive(running);
+        }
+    }
+
+    private static boolean installSearchViewProgress(IViewPart view)
+    {
+        if (!(Global.getField(view, "fPageContent") instanceof Composite content) || content.isDisposed()) //$NON-NLS-1$
+            return false;
+        if (!(content.getData(SearchViewProgress.KEY) instanceof SearchViewProgress))
+        {
+            SearchViewProgress progress = new SearchViewProgress(view, content);
+            content.setData(SearchViewProgress.KEY, progress);
+            progress.tick();
+        }
+        return true;
+    }
+
+    private static void updateSearchViewProgress(IViewPart view)
+    {
+        if (view != null && Global.getField(view, "fPageContent") instanceof Composite content //$NON-NLS-1$
+            && !content.isDisposed() && content.getData(SearchViewProgress.KEY) instanceof SearchViewProgress progress)
+            progress.update();
+    }
+
+    /** Отмена отдельного полнотекстового прохода штатной кнопкой панели. */
+    private static final class FullTextSearchProgress
+    {
+        private final IViewPart view;
+        private final TreeViewer treeViewer;
+        private final Object searchResult;
+        private final Job job;
+        private final int generation;
+        private final IAction cancelAction;
+        private final Listener stopListener;
+        private final Listener disposeListener;
+
+        FullTextSearchProgress(TreeViewer treeViewer, Object searchResult, Job job,
+            String qualifiedName, int generation)
+        {
+            this.view = findSearchViewPart();
+            this.treeViewer = treeViewer;
+            this.searchResult = searchResult;
+            this.job = job;
+            this.generation = generation;
+            this.cancelAction = view != null && Global.getField(view, "fCancelAction") instanceof IAction action //$NON-NLS-1$
+                ? action : null;
+            disposeListener = event -> job.cancel();
+            stopListener = event -> {
+                if (isCurrentResult() && event.widget != null
+                    && event.widget.getData() instanceof ActionContributionItem item
+                    && item.getAction() == cancelAction)
+                {
+                    // Остановка не должна снова запускать тот же проход при обновлении таблицы.
+                    fullTextRowsResult = searchResult;
+                    fullTextRowsKey = qualifiedName;
+                    fullTextRowsGeneration = generation;
+                    job.cancel();
+                    event.type = SWT.None;
+                }
+            };
+        }
+
+        private boolean isCurrentResult()
+        {
+            return view != null && Global.getField(view, "fCurrentSearch") == searchResult; //$NON-NLS-1$
+        }
+
+        void start()
+        {
+            Display display = treeViewer.getTree().getDisplay();
+            display.addFilter(SWT.Selection, stopListener);
+            treeViewer.getTree().addListener(SWT.Dispose, disposeListener);
+            job.addJobChangeListener(new JobChangeAdapter()
+            {
+                @Override
+                public void done(IJobChangeEvent event)
+                {
+                    runOnUi(() -> finish(display));
+                }
+            });
+            if (view != null)
+            {
+                installSearchViewProgress(view);
+                updateSearchViewProgress(view);
+            }
+        }
+
+        private void finish(Display display)
+        {
+            display.removeFilter(SWT.Selection, stopListener);
+            if (fullTextAugmentJob == job)
+            {
+                fullTextAugmentJob = null;
+                fullTextAugmentResult = null;
+                fullTextAugmentRunning = false;
+            }
+            if (treeViewer.getTree().isDisposed() || view == null)
+                return;
+            treeViewer.getTree().removeListener(SWT.Dispose, disposeListener);
+            updateSearchViewProgress(view);
+            if (treeViewer.getInput() != searchResult || searchGeneration != generation)
+                syncMatchTableToTree(treeViewer);
+        }
+    }
 
     /**
      * Полнотекстовые вхождения добавляются в штатный результат EDT через ISearchResultCollector.
@@ -2396,6 +2539,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 {
                     List<MatchRow> extra = collectFullTextRows(project, qualifiedName, simpleName,
                         new java.util.HashSet<>(), monitor);
+                    if (monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
                     var manager = (IBmModelManager)
                         Global.getServiceByClass(IBmModelManager.class);
                     var model = manager != null ? manager.getModel(project) : null;
@@ -2415,6 +2560,8 @@ public final class ConfigSearchResultsHook implements IStartup
                     }
                     for (MatchRow row : extra)
                     {
+                        if (monitor.isCanceled())
+                            return Status.CANCEL_STATUS;
                         boolean code = BslOccurrenceContextResolver.KIND_METHOD.equals(row.syntaxKind)
                             || BslOccurrenceContextResolver.KIND_PROPERTY.equals(row.syntaxKind);
                         if (code && nativeLines.contains(row.file.getFullPath() + "#" + row.lineNumber))
@@ -2425,8 +2572,7 @@ public final class ConfigSearchResultsHook implements IStartup
                             Math.max(0, row.directHlStart), row.directLength, row.directOffset, row.lineNumber));
                     }
                     runOnUi(() -> {
-                        fullTextAugmentRunning = false;
-                        if (matchViewer.getTable().isDisposed() || treeViewer.getTree().isDisposed()
+                        if (monitor.isCanceled() || matchViewer.getTable().isDisposed() || treeViewer.getTree().isDisposed()
                             || treeViewer.getInput() != searchResult || searchGeneration != generation)
                         {
                             if (!treeViewer.getTree().isDisposed())
@@ -2451,11 +2597,14 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 catch (Exception | LinkageError e)
                 {
-                    fullTextAugmentRunning = false;
+                    return monitor.isCanceled() ? Status.CANCEL_STATUS : Status.OK_STATUS;
                 }
                 return Status.OK_STATUS;
             }
         };
+        fullTextAugmentJob = job;
+        fullTextAugmentResult = searchResult;
+        new FullTextSearchProgress(treeViewer, searchResult, job, qualifiedName, generation).start();
         job.setSystem(true);
         job.schedule();
     }
@@ -2503,7 +2652,7 @@ public final class ConfigSearchResultsHook implements IStartup
             return result;
         Object scope = buildFullTextScope(searchCore, participant, project);
         Object changesObj = Global.invoke(participant, "createRefactoringChange", //$NON-NLS-1$
-            new NullChange(), simpleName, scope, new NullProgressMonitor());
+            new NullChange(), simpleName, scope, monitor);
         if (!(changesObj instanceof java.util.Collection<?> changes))
             return result;
         List<Object> leaves = new ArrayList<>();
@@ -6147,6 +6296,8 @@ public final class ConfigSearchResultsHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         display.asyncExec(() -> {
+            if (fullTextAugmentJob != null)
+                fullTextAugmentJob.cancel();
             IViewPart view = findSearchViewPart();
             if (view != null)
                 schedulePatch(view, 0);
@@ -6507,8 +6658,6 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static void schedulePatch(IViewPart view, int attempt)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -6516,6 +6665,13 @@ public final class ConfigSearchResultsHook implements IStartup
         display.timerExec(delay, () -> {
             if (display.isDisposed())
                 return;
+            // Общий заголовок панели относится ко всем страницам, независимо от замены списков.
+            if (!installSearchViewProgress(view))
+            {
+                if (attempt < 40)
+                    schedulePatch(view, attempt + 1);
+                return;
+            }
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return; // настройка выключена, пока ждали появления страницы
             if (!tryPatch(view) && attempt < 40)
