@@ -17,6 +17,7 @@ import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DefaultPositionUpdater;
 import org.eclipse.jface.text.DocumentEvent;
@@ -115,6 +116,8 @@ import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
 import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
 import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
+import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
+import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManagerListener;
 
 /**
  * Автодополнение в строковом литерале с текстом запроса без ИР (issue 837). Список даёт
@@ -1922,8 +1925,6 @@ final class BslQueryLiteralSupport
     private static final class Coverage
     {
         final Position range;
-        String query;
-        boolean concatenated;
         final List<QueryProblemAnnotation> ours = new ArrayList<>();
         /** Сколько отметок хаба убрано под этим покрытием. */
         int hubHidden;
@@ -1964,6 +1965,9 @@ final class BslQueryLiteralSupport
         final IAnnotationModelListener annotationListener = new AnnotationListener();
         DefaultPositionUpdater positionUpdater;
         IAnnotationModel listenedModel;
+        IGitMarkerFilterManager baselineManager;
+        IProject baselineProject;
+        final IGitMarkerFilterManagerListener baselineListener = (project, path) -> refreshBaseline();
         int generation;
 
         MarkerSession(BslXtextEditor editor, ISourceViewer viewer)
@@ -1993,6 +1997,8 @@ final class BslQueryLiteralSupport
                 return;
             ++generation;
             MARKER_SESSIONS.remove(editor);
+            if (baselineManager != null)
+                baselineManager.removeListener(baselineProject, baselineListener);
             try
             {
                 List<Annotation> remove = new ArrayList<>();
@@ -2031,6 +2037,58 @@ final class BslQueryLiteralSupport
                 if (gen == generation)
                     run();
             });
+        }
+
+        /** Смена базы или состояния фильтра касается и отметок вне видимой области. */
+        private void refreshBaseline()
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                if (!MARKER_SESSIONS.containsKey(editor))
+                    return;
+                IAnnotationModel model = viewer.getAnnotationModel();
+                for (Coverage coverage : coverages)
+                {
+                    if (model != null)
+                        coverage.ours.forEach(model::removeAnnotation);
+                    coverage.ours.clear();
+                }
+                schedule(0);
+            });
+        }
+
+        private void listenToBaseline(IProject project)
+        {
+            if (baselineManager != null || project == null)
+                return;
+            baselineManager = Global.getOsgiService(IGitMarkerFilterManager.class);
+            if (baselineManager != null)
+            {
+                baselineProject = project;
+                baselineManager.addListener(project, baselineListener);
+            }
+        }
+
+        /** Как в BslNotifyingResourceValidator: строка Xtext начинается с единицы. */
+        private boolean hiddenByBaseline(int offset)
+        {
+            if (baselineManager == null || !baselineManager.isFilterApplied()
+                || !(document instanceof XtextDocument xtext))
+                return false;
+            URI uri = xtext.getResourceURI();
+            if (uri == null)
+                return false;
+            try
+            {
+                return baselineManager.shouldSkipIssue(uri, document.getLineOfOffset(offset) + 1);
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                return false;
+            }
         }
 
         private Position track(int offset, int length)
@@ -2111,6 +2169,7 @@ final class BslQueryLiteralSupport
                 return;
             }
             IProject project = literals.isEmpty() ? null : resolveProject(editor);
+            listenToBaseline(project);
             List<Annotation> remove = new ArrayList<>();
             Map<Annotation, Position> add = new LinkedHashMap<>();
             java.util.Set<Coverage> matched = new java.util.HashSet<>();
@@ -2154,12 +2213,10 @@ final class BslQueryLiteralSupport
                 else
                     coverage.range.setLength(end - start);
                 matched.add(coverage);
-                if (query.equals(coverage.query) && coverage.concatenated == skipValidation)
-                    continue;
+                // Результат проверки кэшируется, но строка в модуле и фильтр базы меняются
+                // даже при неизменном тексте запроса — видимость пересчитывается каждый раз.
                 remove.addAll(coverage.ours);
                 coverage.ours.clear();
-                coverage.query = query;
-                coverage.concatenated = skipValidation;
                 for (Issue issue : validation.issues())
                 {
                     String type = annotationType(issue.getSeverity());
@@ -2169,6 +2226,8 @@ final class BslQueryLiteralSupport
                     int length = issue.getLength() != null ? Math.max(1, issue.getLength()) : 1;
                     int problemStart = lit.docOffset(offset);
                     int problemEnd = Math.max(problemStart + 1, lit.docOffset(offset + length));
+                    if (hiddenByBaseline(problemStart))
+                        continue;
                     QueryProblemAnnotation annotation = new QueryProblemAnnotation(type, issue.getMessage());
                     coverage.ours.add(annotation);
                     add.put(annotation, new Position(problemStart, problemEnd - problemStart));
