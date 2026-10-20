@@ -2616,7 +2616,7 @@ return;
 
         result = queryParametersOnly(viewer, offset, result);
 
-        result = NaparnikAssistRow.withRow(result);
+        result = NaparnikAssistRow.withRow(dropTemplateTypes(result));
         return result;
         }
         finally
@@ -4237,17 +4237,21 @@ return EMPTY;
     /** Имена для свободного текста (issue 844); все позиции — модельные. */
     private static final class TextNameProposals
     {
-        static ICompletionProposal[] merge(ITextViewer viewer, int caret, ICompletionProposal[] stock)
+        static ICompletionProposal[] merge(ITextViewer viewer, int caret, ICompletionProposal[] delegateStock)
         {
             IDocument doc = viewer != null ? viewer.getDocument() : null;
             boolean comment = isCommentAssistContext(doc, caret);
             if (!(doc instanceof IXtextDocument xdoc) || caret < 0
                 || (!comment && !isStringLiteralAssistContext(viewer, caret))
                 || (!comment && isQueryLiteralSegment(doc, caret)))
-                return stock;
+                return delegateStock;
             if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(resolveEditorForLiteralAudit(viewer),
                 viewer instanceof SourceViewer sv ? sv : null) != null)
-                return stock;
+                return delegateStock;
+            // Штатный список EDT тоже содержит шаблонные типы («СправочникОбъектИмяСправочника»).
+            ICompletionProposal[] stock = delegateStock == null ? null : Arrays.stream(delegateStock)
+                .filter(p -> p == null || !isTemplateTypeName(String.valueOf(filterMatchName(p))))
+                .toArray(ICompletionProposal[]::new);
             if (hasNativeVariants(stock))
                 return stock;
             try
@@ -4310,10 +4314,20 @@ return EMPTY;
                             // Тип CommonModule нужен для разрешения членов, но не как вторая строка списка.
                             if (isCommonModuleTypeName(type.getName()))
                                 continue;
-                            if (name != null && !name.isBlank())
+                            // Шаблонные типы платформы («СправочникОбъектИмяСправочника») — не имена.
+                            if (name != null && !name.isBlank() && !isTemplateTypeName(name))
                                 names.put(name, "Тип"); //$NON-NLS-1$
                         }
                     }
+                    if (receiver == null)
+                    {
+                        // Менеджеры: «Справочники», «Документы», … — за ними идут имена объектов.
+                        for (String manager : MdTypeMapping.managerPluralNames())
+                            names.put(english ? MdTypeMapping.anyToFolder(MdTypeMapping.ruPluralToRu(manager))
+                                : manager, "Менеджер"); //$NON-NLS-1$
+                    }
+                    else if (project instanceof IConfigurationAware aware && aware.getConfiguration() != null)
+                        addManagerObjectNames(names, aware.getConfiguration(), receiver, resource);
                     if (receiver != null)
                     {
                         if (receiverType == null && names.isEmpty())
@@ -4363,6 +4377,49 @@ return EMPTY;
             }
         }
 
+        /**
+         * После «Справочники.» — имена справочников конфигурации, после «Справочники.Имя.» — экспортные
+         * методы модуля менеджера (текст «Справочники.Имя.Метод» ведёт туда же по Ctrl+F12).
+         */
+        private static void addManagerObjectNames(Map<String, String> names, EObject configuration,
+            String receiver, org.eclipse.xtext.resource.XtextResource resource)
+        {
+            String path = receiver.regionMatches(true, 0, "Метаданные.", 0, 11) ? receiver.substring(11) : receiver; //$NON-NLS-1$
+            String[] parts = path.split("\\.", -1); //$NON-NLS-1$
+            if (parts.length > 2)
+                return;
+            String singular = MdTypeMapping.ruPluralToRu(parts[0]);
+            String folder = singular != null ? MdTypeMapping.anyToFolder(singular)
+                : MdTypeMapping.anyToFolder(parts[0]);
+            if (folder == null || !(singular != null || folder.equalsIgnoreCase(parts[0])))
+                return;
+            var feature = configuration.eClass()
+                .getEStructuralFeature(Character.toLowerCase(folder.charAt(0)) + folder.substring(1));
+            if (feature == null || !feature.isMany())
+                return;
+            for (Object item : (List<?>) configuration.eGet(feature))
+            {
+                if (!(item instanceof com._1c.g5.v8.dt.metadata.mdclass.MdObject md) || md.getName() == null)
+                    continue;
+                if (parts.length == 1)
+                {
+                    names.put(md.getName(), "Объект"); //$NON-NLS-1$
+                    continue;
+                }
+                if (!md.getName().equalsIgnoreCase(parts[1]))
+                    continue;
+                var moduleFeature = md.eClass().getEStructuralFeature("managerModule"); //$NON-NLS-1$
+                Object module = moduleFeature == null ? null : md.eGet(moduleFeature, false);
+                if (module instanceof EObject proxy && proxy.eIsProxy())
+                    module = EcoreUtil.resolve(proxy, resource);
+                if (module instanceof com._1c.g5.v8.dt.bsl.model.Module bsl)
+                    for (com._1c.g5.v8.dt.bsl.model.Method method : bsl.allMethods())
+                        if (method.isExport() && method.getName() != null)
+                            names.put(method.getName(), "Метод"); //$NON-NLS-1$
+                return;
+            }
+        }
+
         private static String childTypeName(String parent, String qualifiedName)
         {
             int start = parent.length() + 1;
@@ -4371,6 +4428,23 @@ return EMPTY;
                 || qualifiedName.indexOf('.', start) >= 0)
                 return null;
             return qualifiedName.substring(start);
+        }
+
+        /**
+         * {@code <Вид><Что>Имя<Вид>}: по виду метаданных платформа описывает все объекты сразу
+         * («СправочникОбъектИмяСправочника»). Начало — вид метаданных, чтобы не задеть
+         * переменные вроде «ТекущееИмяФайла».
+         */
+        static boolean isTemplateTypeName(String name)
+        {
+            if (name == null || name.indexOf('.') >= 0 || !name.matches(".+Имя[А-ЯЁ]\\p{L}*")) //$NON-NLS-1$
+                return false;
+            if (name.startsWith("БазовыеВидыРасчета") || name.startsWith("ТочкаМаршрута")) //$NON-NLS-1$ //$NON-NLS-2$
+                return true;
+            for (String kind : GoToDefinition.TYPE_TO_FOLDER.keySet())
+                if (name.startsWith(kind))
+                    return true;
+            return false;
         }
 
         private static boolean isCommonModuleTypeName(String name)
@@ -4481,7 +4555,24 @@ return EMPTY;
             return queryKey;
         int quote = BslAssistSourceHeuristics.literalCallOpenQuote(doc, caret);
         if (quote < 0)
-            return -1;
+        {
+            // Партиция EDT даёт начало и обычного литерала, например Текст = "".
+            // Аргумент вызова для такого литерала отсутствует, но список ему тоже нужен.
+            if (!(doc instanceof IXtextDocument) || caret <= 0 || caret > doc.getLength())
+                return -1;
+            try
+            {
+                var partition = doc.getPartition(caret - 1);
+                if (!org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper
+                    .STRING_LITERAL_PARTITION.equals(partition.getType()))
+                    return -1;
+                quote = partition.getOffset();
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                return -1;
+            }
+        }
         try
         {
             for (int i = caret - 1; i > quote; i--)
@@ -4583,7 +4674,7 @@ return EMPTY;
     }
 
     /**
-     * Режим без ИР, каретка в литерале-аргументе вызова, а списка текущего сегмента нет и
+     * Режим без ИР, каретка в строковом литерале, а списка текущего сегмента нет и
      * это не Ctrl+Space: запросить список в фоне (публикация откроет или обновит окно).
      *
      * @return {@code true} — вызывающий не должен показывать другие списки литерала: они
@@ -4663,8 +4754,8 @@ return EMPTY;
     }
 
     /**
-     * Список для литерала-аргумента вызова в режиме без ИР — только в фоне: такт набора
-     * в литерале ничего не ждёт. Прочие литералы не трогаем. Готовый список кладётся в кэш
+     * Список для строкового литерала в режиме без ИР — только в фоне: такт набора
+     * в литерале ничего не ждёт. Готовый список кладётся в кэш
      * литерала, {@code onReady} выполняется на UI через ворота показа и только если каретка
      * всё ещё в том же литерале, а список непуст.
      *
@@ -8683,7 +8774,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         boolean delegateCompleted = false;
         try
         {
-            raw = delegate.computeCompletionProposals(viewer, off);
+            raw = dropTemplateTypes(delegate.computeCompletionProposals(viewer, off));
             BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
             delegateCompleted = true;
         }
@@ -10569,6 +10660,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        raw = dropTemplateTypes(raw);
         if (raw == null || raw.length == 0)
         return EMPTY;
 
@@ -11075,6 +11167,25 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             proposal = next;
         }
         return proposal;
+    }
+
+    /** Убирает шаблонные типы платформы («СправочникОбъектИмяСправочника») из любого списка. */
+    static ICompletionProposal[] dropTemplateTypes(ICompletionProposal[] proposals)
+    {
+        if (proposals == null)
+            return null;
+        boolean found = false;
+        for (ICompletionProposal proposal : proposals)
+            if (proposal != null && TextNameProposals.isTemplateTypeName(filterMatchName(proposal)))
+            {
+                found = true;
+                break;
+            }
+        if (!found)
+            return proposals;
+        return Arrays.stream(proposals)
+            .filter(p -> p == null || !TextNameProposals.isTemplateTypeName(filterMatchName(p)))
+            .toArray(ICompletionProposal[]::new);
     }
 
     private static ICompletionProposal[] unwrapProposals(ICompletionProposal[] raw)

@@ -311,6 +311,12 @@ public final class MdTypeMapping
         return RU_PLURAL_TO_RU.get(ruPlural);
     }
 
+    /** Имена менеджеров во множественном числе («Справочники», «Документы», …). */
+    public static java.util.Set<String> managerPluralNames()
+    {
+        return java.util.Collections.unmodifiableSet(RU_PLURAL_TO_RU.keySet());
+    }
+
     /**
      * Подпись узла-группы в дереве панели поиска («Общие формы», «Планы обмена» — с пробелами,
      * как показывает EDT) → RU ед.ч. типа МД. См. {@link #TREE_GROUP_LABEL_TO_RU}.

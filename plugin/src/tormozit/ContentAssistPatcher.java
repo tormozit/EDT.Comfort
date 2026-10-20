@@ -8,6 +8,7 @@ import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.source.SourceViewer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor;
+import org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper;
 
 public final class ContentAssistPatcher
 {
@@ -75,12 +76,9 @@ public final class ContentAssistPatcher
             contentAssist.setContentAssistProcessor(wrapper, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, wrapper);
         }
-        // Комментарий — отдельная партиция (__sl_comment), и Xtext ставит туда тот же самый
-        // процессор (DefaultContentAssistantFactory.setContentAssistProcessor — цикл по всем
-        // типам содержимого). Без этой строки список типов в комментарии остаётся штатным:
-        // без многословного фильтра, сортировки и подсветки. Партицию строки (__string) не
-        // трогаем — там у нас свой конвейер поверх штатного списка.
-        for (String contentType : commentContentTypes(contentAssist))
+        // Xtext регистрирует отдельные процессоры для комментариев и строк.
+        // Им нужен тот же обработчик, чтобы Ctrl+Space проходил через дополнение списка EDT.
+        for (String contentType : textContentTypes(contentAssist))
         {
             contentAssist.setContentAssistProcessor(wrapper, contentType);
             forceReplaceProcessor(contentAssist, contentType, wrapper);
@@ -126,7 +124,7 @@ return true;
             contentAssist.setContentAssistProcessor(nativeProc, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, nativeProc);
         }
-        for (String contentType : commentContentTypes(contentAssist))
+        for (String contentType : textContentTypes(contentAssist))
         {
             contentAssist.setContentAssistProcessor(nativeProc, contentType);
             forceReplaceProcessor(contentAssist, contentType, nativeProc);
@@ -200,7 +198,7 @@ return true;
      * Читаем реальную карту процессоров, а не константу бандла EDT: карта — то, по чему
      * ассистент и выбирает процессор.
      */
-    private static java.util.List<String> commentContentTypes(ContentAssistant ca)
+    private static java.util.List<String> textContentTypes(ContentAssistant ca)
     {
         java.util.List<String> types = new java.util.ArrayList<>(2);
         try
@@ -215,13 +213,14 @@ return true;
                 return types;
             for (Object key : ((java.util.Map<?, ?>) map).keySet())
             {
-                if (key instanceof String type && type.endsWith("_comment")) //$NON-NLS-1$
+                if (key instanceof String type && (type.endsWith("_comment") //$NON-NLS-1$
+                    || TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION.equals(type)))
                     types.add(type);
             }
         }
         catch (Exception e)
         {
-            Global.log("ContentAssistPatcher: commentContentTypes failed: " + e.getMessage()); //$NON-NLS-1$
+            Global.log("ContentAssistPatcher: textContentTypes failed: " + e.getMessage()); //$NON-NLS-1$
         }
         return types;
     }
