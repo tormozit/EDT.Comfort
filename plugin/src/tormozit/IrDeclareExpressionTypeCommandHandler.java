@@ -21,7 +21,7 @@ public final class IrDeclareExpressionTypeCommandHandler extends AbstractHandler
         BslXtextEditor editor = resolveBslEditor(HandlerUtil.getActivePart(event));
         if (editor == null)
             editor = resolveBslEditor(HandlerUtil.getActiveEditor(event));
-        IrDeclareExpressionTypeHandler.declareExpressionType(editor);
+        DeclareExpressionTypeHandler.declareExpressionType(editor);
         return null;
     }
 

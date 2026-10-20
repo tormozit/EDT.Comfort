@@ -279,6 +279,10 @@ public final class ComfortSettings
     /** Раскраска запросов в литералах включена по умолчанию. */
     public static final boolean DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED = true;
 
+    /** Полный комментарий без описаний, полученных из имён. */
+    public static final String PREF_ECONOMICAL_METHOD_COMMENT = "comfort.methodComment.economical"; //$NON-NLS-1$
+    public static final boolean DEFAULT_ECONOMICAL_METHOD_COMMENT = true;
+
     // ---- Bracket content hint ----
 
     /** Ключ: включён ли показ содержимого открывающей конструкции у закрывающей. */
@@ -1248,6 +1252,14 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED);
+    }
+
+    public static boolean isEconomicalMethodCommentEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_ECONOMICAL_METHOD_COMMENT;
+        return settings.preferenceStore.getBoolean(PREF_ECONOMICAL_METHOD_COMMENT);
     }
 
     /** Подсветка создаваемых переменных включена. */

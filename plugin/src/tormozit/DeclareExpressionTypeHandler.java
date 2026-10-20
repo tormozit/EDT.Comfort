@@ -18,10 +18,12 @@ import org.eclipse.xtext.resource.XtextResource;
 
 import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocCommentSerializer;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection.TypeDefinition;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TextPart;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
@@ -30,9 +32,11 @@ import com._1c.g5.v8.dt.bsl.model.IndexAccess;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.Statement;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.ui.contentassist.BslCommentUiUtils;
 import com._1c.g5.v8.dt.bsl.ui.contentassist.BslProposalProvider;
+import com._1c.g5.v8.dt.bsl.util.BslUtil;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.lcore.ui.texteditor.IndentTextEditorProvider;
 import com._1c.g5.v8.dt.mcore.Environmental;
@@ -43,12 +47,12 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 /**
  * Объявление типа выражения или параметра/результата метода, с приоритетом подключённого ИР.
  */
-public final class IrDeclareExpressionTypeHandler
+public final class DeclareExpressionTypeHandler
 {
     public static final String COMMAND_ID = "tormozit.IrDeclareExpressionType"; //$NON-NLS-1$
     static final String MENU_LABEL = "Объявить тип выражения"; //$NON-NLS-1$
 
-    private IrDeclareExpressionTypeHandler() {}
+    private DeclareExpressionTypeHandler() {}
 
     public static void declareExpressionType(BslXtextEditor editor)
     {
@@ -96,7 +100,7 @@ public final class IrDeclareExpressionTypeHandler
         }
         catch (Exception e)
         {
-            Global.log("IrDeclareExpressionTypeHandler: " + e.getMessage()); //$NON-NLS-1$
+            Global.log("DeclareExpressionTypeHandler: " + e.getMessage()); //$NON-NLS-1$
             toast(MENU_LABEL, "Ошибка вызова ИР: " + e.getMessage(), 5_000); //$NON-NLS-1$
         }
     }
@@ -119,8 +123,8 @@ public final class IrDeclareExpressionTypeHandler
                     toast(MENU_LABEL, "Не найдено присвоение выражению в текущей ветви или объявление параметра/результата");
                     return;
                 }
-                if (!edit.text().isEmpty())
-                    document.replace(edit.offset(), 0, edit.text());
+                if (!edit.text().isEmpty() || edit.replaced() > 0)
+                    document.replace(edit.offset(), edit.replaced(), edit.text());
                 if (viewer instanceof ITextViewerExtension5 extension)
                     extension.exposeModelRange(new Region(edit.selection(), edit.length()));
                 viewer.setSelectedRange(edit.selection(), edit.length());
@@ -173,6 +177,13 @@ public final class IrDeclareExpressionTypeHandler
                         if (siblings.get(i) instanceof SimpleStatement assignment && matches(assignment, key))
                             return withComputedType(sideCommentEdit(document, assignment), assignment.getRight(), resource);
             }
+            // Ссылка на параметр в теле метода: его описание служит объявлением типа,
+            // если в текущей ветви нет более близкого присвоения.
+            if (method != null && expression instanceof StaticFeatureAccess access)
+                for (var entry : access.getFeatureEntries())
+                    if (entry.getFeature() instanceof FormalParam referenced
+                        && EcoreUtil2.getContainerOfType(referenced, Method.class) == method)
+                        return methodEdit(resource, document, method, referenced);
             return null;
         }
 
@@ -213,7 +224,7 @@ public final class IrDeclareExpressionTypeHandler
                 return new Edit(edit.selection(), computed, edit.selection(), computed.length());
             int relative = edit.selection() - edit.offset();
             String text = edit.text().substring(0, relative) + computed + edit.text().substring(relative);
-            return new Edit(edit.offset(), text, edit.selection(), computed.length());
+            return new Edit(edit.offset(), edit.replaced(), text, edit.selection(), computed.length());
         }
 
         private static boolean matches(SimpleStatement assignment, String key)
@@ -293,10 +304,19 @@ public final class IrDeclareExpressionTypeHandler
                 int offset = NodeModelUtils.findActualNodeFor(method).getOffset();
                 String separator = services.get(BslProposalProvider.class)
                     .getLineFormatter((org.eclipse.xtext.ui.editor.model.IXtextDocument) document, offset);
-                var template = BslCommentUiUtils.createOrUpdateTemplateForMethod(document, offset, method,
-                    separator, parameterIndent,
-                    services.get(TypesComputer.class), provider, manager, old);
-                String text = template.getContent() + separator;
+                boolean russian = BslUtil.isRussian(method, manager);
+                String template;
+                if (ComfortSettings.isEconomicalMethodCommentEnabled())
+                {
+                    template = BslCommentUiUtils.createTemplateTextForMethod(method, ".", separator,
+                        parameterIndent, services.get(TypesComputer.class), manager, provider, old, russian);
+                    template = emptyGeneratedDescriptions(template, method, parameter, separator, parameterIndent,
+                        old, russian);
+                }
+                else
+                    template = BslCommentUiUtils.createOrUpdateTemplateForMethod(document, offset, method,
+                        separator, parameterIndent, services.get(TypesComputer.class), provider, manager, old).getContent();
+                String text = template + separator;
                 org.eclipse.jface.text.Document generated = new org.eclipse.jface.text.Document(text);
                 List<Integer> starts = new ArrayList<>();
                 List<String> lines = new ArrayList<>();
@@ -335,6 +355,56 @@ public final class IrDeclareExpressionTypeHandler
             String indent = document.get(line.getOffset(), nodes.get(0).getOffset() - line.getOffset());
             return withComputedType(commentEdit(document, parsed, parameter, nodes.stream().map(INode::getOffset).toList(),
                 end, separator, indent, parameterIndent, old), parameter == null ? method : parameter, resource);
+        }
+
+        /**
+         * Только новый полный комментарий: типы сохраняем, описания из имён не переносим.
+         * Параметры без типа убираем (кроме {@code target} — ему команда сейчас объявит тип),
+         * опустевший раздел «Параметры:» — тоже.
+         */
+        private static String emptyGeneratedDescriptions(String template, Method method, FormalParam target,
+            String separator, String parameterIndent, boolean old, boolean russian)
+        {
+            List<String> lines = template.lines().filter(line -> line.stripLeading().startsWith("//"))
+                .map(line -> line.substring(line.indexOf("//"))).toList();
+            BslDocumentationComment comment = BslCommentUtils.parseTemplateComment(lines, method, old);
+            var description = comment.getDescription();
+            description.getParts().clear();
+            description.addPart(new TextPart(description, -1, "."));
+            if (comment.getParametersSection() != null)
+                for (var field : comment.getParametersSection().getParameterDefinitions())
+                {
+                    emptyGeneratedTypeDescriptions(field.getTypeSections());
+                    field.getDescription().getParts().clear();
+                }
+            if (comment.getParametersSection() != null)
+            {
+                var fields = comment.getParametersSection().getParameterDefinitions();
+                fields.removeIf(field -> (target == null || !field.getName().equalsIgnoreCase(target.getName()))
+                    && field.getTypeSections().stream().allMatch(section -> section.getTypeDefinitions().isEmpty()));
+                if (fields.isEmpty())
+                    comment.setParametersSection(null);
+            }
+            if (comment.getReturnSection() != null)
+                emptyGeneratedTypeDescriptions(comment.getReturnSection().getReturnTypes());
+            String delimiter = separator.startsWith("\r\n") ? "\r\n" : separator.substring(0, 1);
+            String text = BslDocCommentSerializer.newBuilder().setOldFormat(old).setScriptVariant(russian)
+                .lineSeparator(delimiter).ignoreLineNumbers().build()
+                .serialize(comment, separator, parameterIndent);
+            return text.lines().filter(line -> !line.isBlank() && !line.strip().equals("//"))
+                .collect(java.util.stream.Collectors.joining(delimiter));
+        }
+
+        private static void emptyGeneratedTypeDescriptions(List<TypeSection> sections)
+        {
+            for (TypeSection section : sections)
+            {
+                // Разбор типов ленивый: материализуем их до очистки описания.
+                section.getTypeDefinitions();
+                var description = section.getDescription();
+                description.getParts().clear();
+                description.addPart(new TextPart(description, -1, ""));
+            }
         }
 
         private static TypeDefinition targetType(BslDocumentationComment comment, FormalParam parameter)
@@ -396,6 +466,10 @@ public final class IrDeclareExpressionTypeHandler
                     }
                     if (offset < limit && document.getChar(offset) == '-')
                         return new Edit(offset + 1, " ", offset + 2, 0);
+                    // Хвостовые пробелы после одного имени заменяем разделителем, а не оставляем перед ним.
+                    int nameEnd = starts.get(field.getLineNumber()) + field.getNameOffset() + field.getName().length();
+                    if (offset == limit)
+                        return new Edit(nameEnd, limit - nameEnd, " - ", nameEnd + 3, 0);
                     return new Edit(offset, " - ", offset + 3, 0);
                 }
             }
@@ -440,6 +514,19 @@ public final class IrDeclareExpressionTypeHandler
                         }
                     }
             }
+            if (section == null && parameter != null && comment.getReturnSection() != null)
+            {
+                // «Параметры:» по стандарту идут перед «Возвращаемое значение:».
+                int insert = starts.get(comment.getReturnSection().getLineNumber());
+                String text = "// Параметры:" + separator + indent + entryPrefix + parameter.getName() + " - ";
+                int selection = insert + text.length();
+                if (!old)
+                {
+                    text += "[]";
+                    selection++;
+                }
+                return new Edit(insert, text + separator + indent, selection, 0);
+            }
             String text = separator + indent + entryPrefix;
             if (section == null)
                 text = prefix + (parameter == null ? "Возвращаемое значение:" : "Параметры:")
@@ -461,7 +548,14 @@ public final class IrDeclareExpressionTypeHandler
             return prefix.startsWith("//") && prefix.substring(2).isBlank() ? prefix : null;
         }
 
-        private static record Edit(int offset, String text, int selection, int length) {}
+        /** {@code replaced} — длина заменяемого с {@code offset} текста; {@code selection} — уже после замены. */
+        private static record Edit(int offset, int replaced, String text, int selection, int length)
+        {
+            Edit(int offset, String text, int selection, int length)
+            {
+                this(offset, 0, text, selection, length);
+            }
+        }
     }
 
     private static void ensureCodeEditor(IRSession irSession)

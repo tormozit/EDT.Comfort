@@ -57,6 +57,8 @@ final class ComfortVisibleSettings
             "Записывать стеки при зависаниях", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ContentAssistSettings.PREF_ENABLED, //$NON-NLS-1$
             "Автооткрытие подсказок при вводе", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Редактор кода", ComfortSettings.PREF_ECONOMICAL_METHOD_COMMENT, //$NON-NLS-1$
+            "Экономная генерация комментария к методу", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ContentAssistSettings.PREF_TIMEOUT, //$NON-NLS-1$
             "Автооткрытие: Задержка (мс)", Kind.TEXT), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED, //$NON-NLS-1$

@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.e4.ui.model.application.ui.menu.MHandledItem;
+import org.eclipse.e4.ui.workbench.renderers.swt.HandledContributionItem;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.text.source.ISourceViewer;
@@ -32,6 +34,7 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.menus.CommandContributionItem;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -74,7 +77,9 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_GitFragmentSearch = IrGitFragmentSearchHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck =IrModuleCheckHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheckClear = IrModuleCheckClearHandler.MENU_LABEL;
-    private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_DeclareExpressionType = DeclareExpressionTypeHandler.MENU_LABEL;
+    private static final String GENERATE_METHOD_COMMENT_COMMAND_ID = "com._1c.g5.v8.dt.bsl.ui.BslGenerateMethodComment"; //$NON-NLS-1$
+    private static final String GENERATE_METHOD_COMMENT_HOOKED = "tormozit.generateMethodCommentTooltipHooked"; //$NON-NLS-1$
     private static final String ITEM_TEXT_ResetFolding = ResetFoldingHandler.MENU_LABEL;
 
     private static final String SURROUND_HINT =
@@ -381,6 +386,65 @@ public class BSLEditorMenuHook implements IStartup
     }
 
     // =========================================================================
+    // Подсказка штатного «Генерировать комментарии к методу» (Источник)
+    // =========================================================================
+
+    private static String declareExpressionTypeTooltip()
+    {
+        return "Объявить тип выражения, параметра или результата метода. При подключённом ИР команда выполняется через ИР.\n"
+            + "Без ИР у метода без комментария создаётся комментарий. С флажком «"
+            + ComfortVisibleSettings.label(ComfortSettings.PREF_ECONOMICAL_METHOD_COMMENT)
+            + "» (Параметры → Комфорт → Редактор кода) добавляется минимально необходимый комментарий "
+            + "для указания типа функции или параметра";
+    }
+
+    /**
+     * Штатные подменю заполняются при их показе, поэтому слушатель ставим на каждое подменю один раз:
+     * он срабатывает после заполнения и находит пункт команды по идентификатору, а не по надписи.
+     */
+    private static void hookStockGenerateMethodCommentTooltip(Menu menu)
+    {
+        for (MenuItem item : menu.getItems())
+        {
+            if (item.isDisposed() || (item.getStyle() & SWT.CASCADE) == 0)
+                continue;
+            Menu sub = item.getMenu();
+            if (sub == null || sub.isDisposed() || Boolean.TRUE.equals(sub.getData(GENERATE_METHOD_COMMENT_HOOKED)))
+                continue;
+            sub.setData(GENERATE_METHOD_COMMENT_HOOKED, Boolean.TRUE);
+            sub.addMenuListener(new MenuAdapter()
+            {
+                @Override
+                public void menuShown(MenuEvent e)
+                {
+                    for (MenuItem stock : sub.getItems())
+                        if (!stock.isDisposed() && isGenerateMethodCommentCommand(stock.getData()))
+                            ComfortSubmenuHelper.setMenuItemTooltip(stock, declareExpressionTypeTooltip());
+                }
+            });
+        }
+    }
+
+    /** Оба штатных представления команды: JFace и E4. */
+    private static boolean isGenerateMethodCommentCommand(Object data)
+    {
+        if (data instanceof CommandContributionItem contribution)
+            return contribution.getCommand() != null
+                && GENERATE_METHOD_COMMENT_COMMAND_ID.equals(contribution.getCommand().getId());
+        if (data instanceof HandledContributionItem contribution)
+        {
+            MHandledItem model = contribution.getModel();
+            if (model == null)
+                return false;
+            if (model.getWbCommand() != null)
+                return GENERATE_METHOD_COMMENT_COMMAND_ID.equals(model.getWbCommand().getId());
+            return model.getCommand() != null
+                && GENERATE_METHOD_COMMENT_COMMAND_ID.equals(model.getCommand().getElementId());
+        }
+        return false;
+    }
+
+    // =========================================================================
     // Построение MenuAdapter
     // =========================================================================
 
@@ -530,10 +594,9 @@ public class BSLEditorMenuHook implements IStartup
                     MenuItem declareTypeItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                             ITEM_TEXT_DeclareExpressionType,
-                            "com._1c.g5.v8.dt.bsl.ui.BslGenerateMethodComment",
+                            GENERATE_METHOD_COMMENT_COMMAND_ID,
                             IrDeclareExpressionTypeCommandHandler.BINDING_CONTEXT_ID));
-                    ComfortSubmenuHelper.setMenuItemTooltip(declareTypeItem,
-                        "Объявить тип выражения, параметра или результата метода. При подключённом ИР команда выполняется через ИР");
+                    ComfortSubmenuHelper.setMenuItemTooltip(declareTypeItem, declareExpressionTypeTooltip());
                     declareTypeItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
@@ -563,6 +626,8 @@ public class BSLEditorMenuHook implements IStartup
 
                     addedItems.add(BslHoverHintState.addMenuItem(comfortSub));
                 } 
+
+                hookStockGenerateMethodCommentTooltip(menu);
 
                 Menu surroundSub = findExistingSurroundSubmenu(menu);
                 if (surroundSub != null && !Boolean.TRUE.equals(surroundSub.getData("tormozit.surroundHooked")))
@@ -808,7 +873,7 @@ public class BSLEditorMenuHook implements IStartup
             IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
             if (handlerService != null)
             {
-                handlerService.executeCommand(IrDeclareExpressionTypeHandler.COMMAND_ID, null);
+                handlerService.executeCommand(DeclareExpressionTypeHandler.COMMAND_ID, null);
                 return;
             }
         }
@@ -816,7 +881,7 @@ public class BSLEditorMenuHook implements IStartup
         {
             // fallback ниже
         }
-        IrDeclareExpressionTypeHandler.declareExpressionType(editor);
+        DeclareExpressionTypeHandler.declareExpressionType(editor);
     }
 
     private static void runResetFoldingCommand(BslXtextEditor editor)

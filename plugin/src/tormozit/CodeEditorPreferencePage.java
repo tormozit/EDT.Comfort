@@ -216,5 +216,14 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
                 + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
                 spellingIdentsHost);
         }
+
+        BooleanFieldEditor economicalCommentField = new BooleanFieldEditor(
+            ComfortSettings.PREF_ECONOMICAL_METHOD_COMMENT,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_ECONOMICAL_METHOD_COMMENT),
+            parent);
+        addField(economicalCommentField);
+        setFieldTooltip(economicalCommentField,
+            "В этом режиме добавляется минимально необходимый комментарий для указания типа функции или параметра.", //$NON-NLS-1$
+            parent);
     }
 }

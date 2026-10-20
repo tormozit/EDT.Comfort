@@ -151,6 +151,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_QUERY_LITERAL_HIGHLIGHTING_ENABLED,
             ComfortSettings.DEFAULT_QUERY_LITERAL_HIGHLIGHTING_ENABLED);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_ECONOMICAL_METHOD_COMMENT,
+            ComfortSettings.DEFAULT_ECONOMICAL_METHOD_COMMENT);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
         settings.getPreferenceStore().setDefault(
