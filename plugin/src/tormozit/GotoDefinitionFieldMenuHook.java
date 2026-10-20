@@ -450,6 +450,7 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             int dot = candidate.indexOf('.');
             String firstSeg = dot > 0 ? candidate.substring(0, dot) : candidate;
             if (MdTypeMapping.isKnownMdRootType(firstSeg)
+                    || MdTypeMapping.ruPluralToRu(firstSeg) != null
                     || GoToDefinition.TYPE_SUFFIX_MAP.containsKey(firstSeg))
             {
                 if (!singleOnly)

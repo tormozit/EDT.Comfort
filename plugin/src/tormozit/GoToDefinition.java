@@ -2140,6 +2140,12 @@ public class GoToDefinition extends AbstractHandler
             }
 
             IRSession session = IRApplication.getSession(dtProject, true);
+            if (session == null && IRApplication.findApplicationForDtProject(dtProject) == null)
+            {
+
+                debugStep("session", "у проекта нет приложения ИБ, переход без ИР"); //$NON-NLS-1$ //$NON-NLS-2$
+                return RESULT_NOT_HANDLED;
+            }
             if (session == null || session.executor == null)
             {
 

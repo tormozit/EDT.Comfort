@@ -7,6 +7,7 @@ import java.util.List;
 import org.eclipse.core.filebuffers.FileBuffers;
 import org.eclipse.core.filebuffers.LocationKind;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -378,7 +379,9 @@ public final class BslEditorHyperlinkHook implements IStartup
     {
         IHyperlink link = typeLink(editor, page, viewer, offset);
         if (link == null)
-            link = literalLink(editor, page, viewer, offset);
+            link = fullNameLink(editor, page, viewer, offset, false);
+        if (link == null)
+            link = fullNameLink(editor, page, viewer, offset, true);
         if (link == null)
         {
             // Поля, псевдонимы, виртуальные таблицы в литерале-запросе — как в «Редакторе запроса».
@@ -392,8 +395,11 @@ public final class BslEditorHyperlinkHook implements IStartup
      * Ссылка на объект метаданных по полному имени «Тип.Имя» под {@code offset} в строковом
      * литерале (текст запроса, аргумент НайтиПоПолномуИмени и т.п.). Дальние сегменты
      * («…КурсыВалют.СрезПоследних») не мешают — ссылка ведёт на объект верхнего уровня.
+     * Первый сегмент может быть и во множественном числе («Справочники.Имя.Метод»).
+     * {@code inComment} — то же для комментария {@code //}.
      */
-    private static IHyperlink literalLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
+    private static IHyperlink fullNameLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer,
+        int offset, boolean inComment)
     {
         if (!(viewer.getDocument() instanceof IXtextDocument document) || document.getResourceURI() == null)
             return null;
@@ -403,10 +409,10 @@ public final class BslEditorHyperlinkHook implements IStartup
             {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
-                ILeafNode leaf = literalLeaf(resource, offset);
+                ILeafNode leaf = inComment ? commentLeaf(resource, offset) : literalLeaf(resource, offset);
                 // Каретка сразу за именем перед закрывающей кавычкой или концом строки.
                 if (leaf == null && offset > 0)
-                    leaf = literalLeaf(resource, offset - 1);
+                    leaf = inComment ? commentLeaf(resource, offset - 1) : literalLeaf(resource, offset - 1);
                 if (leaf == null)
                     return null;
                 String text = leaf.getText();
@@ -416,16 +422,26 @@ public final class BslEditorHyperlinkHook implements IStartup
                     start--;
                 while (start < position && text.charAt(start) == '.')
                     start++;
-                int typeEnd = text.indexOf('.', start);
-                if (typeEnd < 0 || !MdTypeMapping.isKnownMdRootType(text.substring(start, typeEnd)))
+                // Глобальное свойство «Метаданные.Справочники.Имя» — имя объекта идёт после него.
+                int skip = text.regionMatches(true, start, METADATA_PREFIX, 0, METADATA_PREFIX.length())
+                    ? METADATA_PREFIX.length() : 0;
+                int typeEnd = text.indexOf('.', start + skip);
+                if (typeEnd < 0)
                     return null;
-                int end = typeEnd + 1;
-                while (end < text.length() && isTypeNameChar(text.charAt(end)) && text.charAt(end) != '.')
+                String typeWord = text.substring(start + skip, typeEnd);
+                if (!MdTypeMapping.isKnownMdRootType(typeWord) && MdTypeMapping.ruPluralToRu(typeWord) == null
+                    && !GoToDefinition.TYPE_SUFFIX_MAP.containsKey(typeWord))
+                    return null;
+                int end = start;
+                while (end < text.length() && isTypeNameChar(text.charAt(end)))
                     end++;
-                // Под указателем — дальний сегмент, а не само «Тип.Имя».
-                if (end == typeEnd + 1 || position > end)
+                while (end > start && text.charAt(end - 1) == '.')
+                    end--;
+                // Под указателем — само имя, а не пробел или знак после него.
+                if (end <= typeEnd + 1 || position > end)
                     return null;
-                return new Object[] { text.substring(start, end), new Region(leaf.getOffset() + start, end - start) };
+                return new Object[] { text.substring(start + skip, end), Integer.valueOf(leaf.getOffset() + start),
+                    Integer.valueOf(skip) };
             });
             if (found == null)
                 return null;
@@ -433,16 +449,67 @@ public final class BslEditorHyperlinkHook implements IStartup
             IV8Project project = manager == null ? null : manager.getProject(document.getResourceURI());
             if (project == null)
                 return null;
-            // Поиск в BM — вне блокировки документа.
-            String name = (String) found[0];
-            return GoToDefinition.resolveEObjectByQualifiedName(name, project) instanceof MdObject target
-                ? new TypeHyperlink((IRegion) found[1], name, target, editor, page)
-                : null;
+            // Поиск в BM — вне блокировки документа. Берём самую длинную начальную часть имени,
+            // которая есть в конфигурации: хвост («.Метод», опечатка) ссылку не отменяет.
+            String[] segments = ((String) found[0]).split("\\.", -1); //$NON-NLS-1$
+            int regionStart = (Integer) found[1];
+            int skip = (Integer) found[2];
+            int fullLength = skip + ((String) found[0]).length();
+            for (int count = segments.length; count >= 2; count--)
+            {
+                if (count > 2 && count % 2 != 0)
+                    continue; // после «Тип.Имя» идут пары «Вид.Имя»
+                String raw = String.join(".", java.util.Arrays.copyOf(segments, count)); //$NON-NLS-1$
+                if (GoToDefinition.resolveEObjectByQualifiedName(normalizeFullName(segments, count), project)
+                    instanceof MdObject target)
+                {
+                    boolean onTail = offset - regionStart > skip + raw.length();
+                    // «Справочники.Имя.Метод» с указателем на методе — в метод модуля менеджера,
+                    // а не в меню объекта.
+                    if (onTail && count == 2 && segments.length == 3 && MdTypeMapping.ruPluralToRu(segments[0]) != null)
+                        return new ManagerMethodHyperlink(new Region(regionStart, fullLength),
+                            String.join(".", segments), project.getProject(), editor, page); //$NON-NLS-1$
+                    // Иной хвост — ссылкой подсвечиваем имя целиком.
+                    int length = onTail ? fullLength : skip + raw.length();
+                    return new TypeHyperlink(new Region(regionStart, length), raw, target, editor, page);
+                }
+            }
+            return null;
         }
         catch (RuntimeException | LinkageError e)
         {
             return null;
         }
+    }
+
+    private static final String METADATA_PREFIX = "Метаданные."; //$NON-NLS-1$
+
+    /** «Справочники.Имя.Формы.Ф» /«СправочникСсылка.Имя» → «Справочник.Имя.Форма.Ф» (первые {@code count} сегментов). */
+    private static String normalizeFullName(String[] segments, int count)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++)
+        {
+            String segment = segments[i];
+            if (i == 0)
+            {
+                String base = MdTypeMapping.ruPluralToRu(segment);
+                if (base == null)
+                    base = GoToDefinition.TYPE_SUFFIX_MAP.get(segment);
+                if (base != null)
+                    segment = base;
+            }
+            else if (i >= 2 && i % 2 == 0)
+            {
+                String singular = MdTypeMapping.systemLabelToSingular(segment);
+                if (singular != null)
+                    segment = singular;
+            }
+            if (i > 0)
+                sb.append('.');
+            sb.append(segment);
+        }
+        return sb.toString();
     }
 
     private static ILeafNode literalLeaf(XtextResource resource, int offset)
@@ -728,6 +795,39 @@ public final class BslEditorHyperlinkHook implements IStartup
                 if (editor.setActivePage(pageId) == null)
                     retryActivatePage(editor, pageId, attempt + 1);
             });
+        }
+    }
+
+    /** Метод модуля менеджера по тексту «Справочники.Имя.Метод» — тот же переход, что Ctrl+F12. */
+    private static final class ManagerMethodHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final String name;
+        private final IProject project;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        ManagerMethodHyperlink(IRegion region, String name, IProject project, BslXtextEditor source,
+            IWorkbenchPage page)
+        {
+            this.region = region;
+            this.name = name;
+            this.project = project;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return name; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                scope.opened = GoToDefinition.jump(name, source.getSite().getShell(), page, project, false);
+            }
         }
     }
 

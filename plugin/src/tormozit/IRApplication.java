@@ -1592,7 +1592,7 @@ public final class IRApplication
         return null;
     }
 
-    private static IInfobaseApplication findApplicationForDtProject(IDtProject dtProject)
+    static IInfobaseApplication findApplicationForDtProject(IDtProject dtProject)
     {
         BundleContext ctx = Global.ourContext();
         ServiceReference<Object>[] refs = null;
