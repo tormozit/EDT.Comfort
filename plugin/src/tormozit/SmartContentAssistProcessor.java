@@ -342,6 +342,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     // #region agent log
     static final String UI_BLOCK_LOG = "assist-ui-block"; //$NON-NLS-1$
 
+    /**
+     * Сторож на дефекты расчёта типов EDT: пустой список членов после «.» (с разбором
+     * получателя) и {@code returnLost} — функция потеряла тип возврата в частичном расчёте.
+     */
+    static final String RECEIVER_TYPE_LOG = "receiver-type"; //$NON-NLS-1$
+
     static void uiBlockLog(String where, String data)
     {
         if (uiBlockLogQuiet(where))
@@ -1658,8 +1664,6 @@ return;
                     || stock.length > existing.length)
                 {
                     storeLiteralArgList(doc, caret, stock);
-                    Global.tempLog("literal-arg", "cache capture native caret=" + caret
-                        + " n=" + stock.length + " previousN=" + (existing == null ? 0 : existing.length));
                 }
             }
         }
@@ -2311,11 +2315,6 @@ return result;
                 IDocument doc = viewer != null ? viewer.getDocument() : null;
                 debugFilterCachedExit(viewer, caret, filter, doc, stock.length, "stockStable", //$NON-NLS-1$
                     result);
-                // Временная диагностика (issue 628, пустой список после «СправочникСсылка.»).
-                Global.tempLog("literal-arg", "filterCached stockStable caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " filter=" + filter + " stock=" + stock.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + " n=" + result.length + " sample=" + literalArgSample(stock) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " caller=" + uiBlockCaller()); //$NON-NLS-1$
                 return result;
             }
             return null;
@@ -2409,8 +2408,6 @@ return result;
             && (containsOnlyTemplateProposals(literalArg)
                 || lastStableDelegateList.length > literalArg.length))
         {
-            Global.tempLog("literal-arg", "cache upgrade native caret=" + caret
-                + " previousN=" + literalArg.length + " nativeN=" + lastStableDelegateList.length);
             storeLiteralArgList(doc, caret, stripIrProposals(unwrapProposals(lastStableDelegateList)));
             literalArg = literalArgListForCaret(doc, caret);
         }
@@ -2669,15 +2666,6 @@ return;
                 + " firstPopup=" + firstPopup //$NON-NLS-1$
                 + " caller=" + uiBlockCaller()); //$NON-NLS-1$
         // #endregion
-        // Временная диагностика (issue 628): итог расчёта в литерале-аргументе вызова.
-        int diagCaret = resolveInvocationCaret(viewer, offset);
-        if (BslAssistSourceHeuristics.literalCallOpenQuote(logDoc, diagCaret) >= 0)
-            Global.tempLog("literal-arg", "compute exit off=" + offset + " caret=" + diagCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + " n=" + (result == null ? -1 : result.length) //$NON-NLS-1$
-                + " argCache=" + (literalArgListForCaret(logDoc, diagCaret) != null) //$NON-NLS-1$
-                + " dot=" + dot + " cacheOnly=" + Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " popup=" + isPopupVisible() //$NON-NLS-1$
-                + " caller=" + uiBlockCaller()); //$NON-NLS-1$
         // В каталог — полный кэш, не отфильтрованный return (лог 10:40:09 n=11).
         IDocument rememberDoc = viewer != null ? viewer.getDocument() : null;
         if (rememberDoc != null && !Boolean.TRUE.equals(CACHE_ONLY_COMPUTE.get()))
@@ -3261,6 +3249,9 @@ return;
      */
     private static boolean memberStockSkip(String reason)
     {
+        // #region agent log
+        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.skipBackground why=" + reason); //$NON-NLS-1$
+        // #endregion
         return false;
     }
 
@@ -4464,14 +4455,6 @@ return EMPTY;
             uiBlockLog("computeLiteralPassthrough.exit", "ms=" //$NON-NLS-1$ //$NON-NLS-2$
                 + ((System.nanoTime() - t0) / 1_000_000L) //$NON-NLS-1$
                 + " off=" + offset); //$NON-NLS-1$
-            // Временный замер (issue 628): цена литерального пути на UI.
-            Global.tempLog("literal-arg", "passthrough uiMs=" //$NON-NLS-1$ //$NON-NLS-2$
-                + ((System.nanoTime() - t0) / 1_000_000L)
-                + " caret=" + caret + " manual=" + ManualInvocationDetect.isActive() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + BslAssistSourceHeuristics.literalCallMethodName( //$NON-NLS-1$
-                    viewer != null ? viewer.getDocument() : null, caret)
-                + " argCache=" + (literalArgListForCaret( //$NON-NLS-1$
-                    viewer != null ? viewer.getDocument() : null, caret) != null));
         }
     }
 
@@ -4698,8 +4681,6 @@ return EMPTY;
             return false;
         if (literalArgPopupBaseForCaret(viewer, caret) != null)
         {
-            Global.tempLog("literal-arg", "schedule cacheHit why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " method=" + method + " n=" + literalArgList.length); //$NON-NLS-1$ //$NON-NLS-2$
             if (onReady != null && !ContentAssistSessionReloader.requestGatedShow(viewer,
                 "literalArgCached", onReady)) //$NON-NLS-1$
                 return false;
@@ -4717,15 +4698,10 @@ return EMPTY;
         {
             if (onReady != null)
                 literalArgJobOnReady = onReady;
-            Global.tempLog("literal-arg", "schedule inFlight why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " method=" + method + " typed=" + typed //$NON-NLS-1$ //$NON-NLS-2$
-                + " jobTyped=" + literalArgJobTyped); //$NON-NLS-1$
             return true;
         }
         if (isLiteralArgKnownEmpty(doc, quote, typed))
         {
-            Global.tempLog("literal-arg", "schedule skip knownEmpty why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " method=" + method + " typed=" + typed); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         if (BslQueryLiteralSupport.segmentKeyAt(doc, caret) == quote)
@@ -4733,8 +4709,6 @@ return EMPTY;
         warmBslDocumentListener(viewer);
         if (!BslDataEventGuard.install(doc))
         {
-            Global.tempLog("literal-arg", "schedule skip noGuard why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " method=" + method); //$NON-NLS-1$
             return false;
         }
         if (literalArgJob != null)
@@ -4790,7 +4764,6 @@ return EMPTY;
                     {
                         if (isCanceledByNewerRequest(e))
                         {
-                            Global.tempLog("literal-arg", "bg canceledByNewer caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                             return Status.CANCEL_STATUS;
                         }
                         error = e.getClass().getSimpleName() + ": " + e.getMessage(); //$NON-NLS-1$
@@ -4798,38 +4771,20 @@ return EMPTY;
                     }
                     if (error != null)
                     {
-                        Global.tempLog("literal-arg", "bg failed caret=" + caret + " err=" + error);
                         return Status.CANCEL_STATUS;
                     }
-                    long computeMs = (System.nanoTime() - tStart) / 1_000_000L;
                     final ICompletionProposal[] list = stripIrProposals(
                         unwrapProposals(raw == null ? EMPTY : raw));
                     final java.util.Map<Object, Object> dataEvents = events;
-                    Global.tempLog("literal-arg", "bg done why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " method=" + method + " typed=" + typed //$NON-NLS-1$ //$NON-NLS-2$
-                        + " queueMs=" + ((tStart - tSchedule) / 1_000_000L) //$NON-NLS-1$
-                        + " computeMs=" + computeMs //$NON-NLS-1$
-                        + " n=" + list.length //$NON-NLS-1$
-                        + " quote=" + quote //$NON-NLS-1$
-                        + " repl0=" + (list.length > 0 //$NON-NLS-1$
-                            && list[0] instanceof org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal cp0
-                            ? cp0.getReplacementOffset() + "/" + cp0.getReplacementLength() //$NON-NLS-1$
-                                + ":" + cp0.getReplacementString() //$NON-NLS-1$
-                            : "-") //$NON-NLS-1$
-                        + " events=" + dataEvents.size() //$NON-NLS-1$
-                        + (error != null ? " err=" + error : "")); //$NON-NLS-1$ //$NON-NLS-2$
                     if (monitor.isCanceled() || epoch != literalArgEpoch)
                         return Status.CANCEL_STATUS;
                     handedToUi = ContentAssistSessionReloader.requestGatedShow(viewer, "literalArg", //$NON-NLS-1$
                         () -> publishLiteralArgList(viewer, epoch, quote, doc, list, dataEvents,
                             tSchedule));
-                    if (!handedToUi)
-                        Global.tempLog("literal-arg", "publish skip noGate caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.OK_STATUS;
                 }
                 catch (StackOverflowError e)
                 {
-                    Global.tempLog("literal-arg", "bg soe caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
                     return Status.CANCEL_STATUS;
                 }
                 finally
@@ -4849,9 +4804,6 @@ return EMPTY;
         job.setPriority(Job.INTERACTIVE);
         literalArgJob = job;
         job.schedule();
-        Global.tempLog("literal-arg", "schedule bg why=" + why + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " method=" + method + " typed=" + typed //$NON-NLS-1$ //$NON-NLS-2$
-            + " uiMs=" + ((System.nanoTime() - tSchedule) / 1_000_000L)); //$NON-NLS-1$
         return true;
     }
 
@@ -4901,22 +4853,17 @@ return EMPTY;
         {
             if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, Integer.MAX_VALUE, abort))
             {
-                Global.tempLog("literal-arg", "bg modelReady canceled probe=" + probeOffset);
                 return null;
             }
             String text = doc.get();
             ICompletionProposal[] result = computeMemberStockViaSelectionProxy(viewer, probeOffset);
             boolean sameText = text.equals(doc.get());
             boolean currentModel = ContentAssistSessionReloader.isModelCurrent(doc);
-            Global.tempLog("literal-arg", "bg modelCheck probe=" + probeOffset
-                + " sameText=" + sameText + " currentModel=" + currentModel
-                + " n=" + (result == null ? -1 : result.length));
             if (sameText && currentModel)
                 return result;
             // Эти записи относятся к отброшенному ответу, в UI их переносить нельзя.
             BslDataEventGuard.drainIsolated(doc);
         }
-        Global.tempLog("literal-arg", "bg modelReady aborted probe=" + probeOffset);
         return null;
     }
 
@@ -4929,7 +4876,6 @@ return EMPTY;
                                        java.util.Map<Object, Object> dataEvents,
                                        long tSchedule)
     {
-        long totalMs = (System.nanoTime() - tSchedule) / 1_000_000L;
         Runnable onReady = literalArgJobOnReady;
         if (epoch == literalArgEpoch)
         {
@@ -4952,16 +4898,12 @@ return EMPTY;
         }
         if (drop != null)
         {
-            Global.tempLog("literal-arg", "publish drop=" + drop + " totalMs=" + totalMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " n=" + list.length + " liveCaret=" + liveCaret); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ICompletionProposal[] existing = literalArgListForCaret(liveDoc, liveCaret);
         if (existing != null && !containsOnlyTemplateProposals(existing)
             && containsOnlyTemplateProposals(list))
         {
-            Global.tempLog("literal-arg", "publish drop=weakerTemplateAnswer n=" + list.length
-                + " existingN=" + existing.length + " liveCaret=" + liveCaret);
             return;
         }
         BslDataEventGuard.mergeIntoReal(liveDoc, dataEvents);
@@ -4971,13 +4913,8 @@ return EMPTY;
         // В обёртках, как список слов (см. storeLiteralArgList).
         literalArgList = buildDelegateOrderedList(list);
         literalArgListConfirmed = true;
-        long tReady = System.nanoTime();
         if (onReady != null)
             onReady.run();
-        Global.tempLog("literal-arg", "publish ok totalMs=" + totalMs //$NON-NLS-1$ //$NON-NLS-2$
-            + " readyUiMs=" + ((System.nanoTime() - tReady) / 1_000_000L) //$NON-NLS-1$
-            + " n=" + list.length + " liveCaret=" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
-            + " popup=" + isPopupVisible()); //$NON-NLS-1$
     }
 
     private ICompletionProposal[] computeLiteralPassthroughImpl(ITextViewer viewer, int offset, int caret)
@@ -5143,7 +5080,6 @@ return EMPTY;
         if (dot >= 0)
             addProbeOffset(set, dot + 1);
         ICompletionProposal[] best = EMPTY;
-        long tAll = System.nanoTime();
         StringBuilder perOffset = new StringBuilder();
         for (Integer off : set)
         {
@@ -5157,12 +5093,6 @@ return EMPTY;
             if (count > best.length)
                 best = raw != null ? raw : EMPTY;
         }
-        // Временный замер (issue 628): безусловный, стоимость синхронного зонда в литерале.
-        Global.tempLog("literal-arg", "syncProbe ms=" + ((System.nanoTime() - tAll) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
-            + " ui=" + (org.eclipse.swt.widgets.Display.getCurrent() != null) //$NON-NLS-1$
-            + " method=" + BslAssistSourceHeuristics.literalCallMethodName(doc, caret) //$NON-NLS-1$
-            + " caret=" + caret + " n=" + best.length //$NON-NLS-1$ //$NON-NLS-2$
-            + " perOffset:" + perOffset); //$NON-NLS-1$
         return best;
     }
 
@@ -9422,6 +9352,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     if (raw == null)
                     {
                         uiBlockLog("memberStock.bg.lockBusyGiveUp", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #region agent log
+                        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.modelNotReady dot=" + dotContextKey //$NON-NLS-1$
+                            + " attempts=" + attempts + " receiver=" + contextReceiver); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #endregion
                         return Status.CANCEL_STATUS;
                     }
                     if (raw.length == 0)
@@ -9429,6 +9363,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
                             () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
                                 contextReceiver));
+                        // #region agent log
+                        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.empty dot=" + dotContextKey //$NON-NLS-1$
+                            + " attempts=" + attempts + " receiver=" + contextReceiver //$NON-NLS-1$ //$NON-NLS-2$
+                            + " | " + ReceiverTypeLabel.describeReceiverBeforeDot(doc, dotContextKey, probeOffset)); //$NON-NLS-1$
+                        // #endregion
                         return Status.CANCEL_STATUS;
                     }
                     final ICompletionProposal[] result = raw;
@@ -10597,6 +10536,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         CtorMinParamsInsert.bindSelectedFakeCtorBeforeApply(proposal, document);
     }
 
+    /** Набор параметров выбранного пункта списка: {@code FakeCtor}, {@code ParamSet} или {@code null}. */
+    static EObject selectedSignature(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        return raw instanceof ConfigurableCompletionProposal cp ? CtorMinParamsInsert.readSignatureObject(cp) : null;
+    }
+
     /**
      * Текст вставки EDT-{@code apply}: {@code CustomBslConfigurableCompletionProposal}
      * берёт {@code initialReplacementContent}, не {@code setReplacementString}.
@@ -11697,6 +11643,122 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             Expression receiver = findReceiverExpression(resource, dotOffset, offsetAfterDot);
             return receiver == null ? "" : formatExpressionTypes(receiver); //$NON-NLS-1$
         }
+
+        // #region agent log
+        /**
+         * Диагностика: получатель перед точкой — класс, текст, типы; для вызова — найденный
+         * метод и состояния его возврата (NORMAL/LIGHT). Только из фонового потока.
+         */
+        static String describeReceiverBeforeDot(IDocument doc, int dotOffset, int offsetAfterDot)
+        {
+            if (!(doc instanceof IXtextDocument xtextDoc))
+                return "noXtextDoc"; //$NON-NLS-1$
+            try
+            {
+                IUnitOfWork<String, XtextResource> work =
+                    resource -> describeReceiverInResource(resource, dotOffset, offsetAfterDot);
+                Object raw = Global.invoke(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+                return raw instanceof String s ? s : xtextDoc.readOnly(work);
+            }
+            catch (Throwable e)
+            {
+                return "ERR:" + e; //$NON-NLS-1$
+            }
+        }
+
+        private static String describeReceiverInResource(XtextResource resource, int dotOffset,
+            int offsetAfterDot)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (resource == null)
+                return "resource=null"; //$NON-NLS-1$
+            sb.append("parseErrors=").append(resource.getParseResult() == null ? "noParse" //$NON-NLS-1$ //$NON-NLS-2$
+                : String.valueOf(resource.getParseResult().hasSyntaxErrors()));
+            INode dotNode = findNodeAtOffset(resource, dotOffset);
+            sb.append(" dotNode=").append(dotNode == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                : "'" + dotNode.getText() + "'@" + dotNode.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " sem=" + simpleClass(dotNode.getSemanticElement())); //$NON-NLS-1$
+            Expression receiver = findReceiverExpression(resource, dotOffset, offsetAfterDot);
+            if (receiver == null)
+                return sb.append(" receiver=null").toString(); //$NON-NLS-1$
+            sb.append(" receiver=").append(simpleClass(receiver)) //$NON-NLS-1$
+                .append(" text='").append(formatExpressionSourceText(receiver)).append('\'') //$NON-NLS-1$
+                .append(" types=[").append(formatExpressionTypes(receiver)).append("]#") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(receiver.getTypes().size());
+            if (receiver instanceof com._1c.g5.v8.dt.bsl.model.Invocation invocation)
+            {
+                com._1c.g5.v8.dt.bsl.model.FeatureAccess access = invocation.getMethodAccess();
+                sb.append(" methodAccess=").append(simpleClass(access)); //$NON-NLS-1$
+                if (access != null)
+                    sb.append(" name=").append(access.getName()) //$NON-NLS-1$
+                        .append(" accessTypes=[").append(formatExpressionTypes(access)).append(']'); //$NON-NLS-1$
+                if (access instanceof StaticFeatureAccess sfa)
+                {
+                    sb.append(" entries=").append(sfa.getFeatureEntries().size()); //$NON-NLS-1$
+                    int i = 0;
+                    for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : sfa.getFeatureEntries())
+                    {
+                        EObject feature = entry == null ? null : entry.getFeature();
+                        sb.append(" [").append(i++).append("] feature=").append(simpleClass(feature)) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(" proxy=").append(feature != null && feature.eIsProxy()) //$NON-NLS-1$
+                            .append(" envs=").append(entry == null ? null : entry.getEnvironments()); //$NON-NLS-1$
+                        if (feature instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                        {
+                            sb.append(" method=").append(method.getName()) //$NON-NLS-1$
+                                .append(" sameResource=").append(method.eResource() == resource) //$NON-NLS-1$
+                                .append(" res=").append(method.eResource() == null ? null //$NON-NLS-1$
+                                    : method.eResource().getURI().lastSegment())
+                                .append(" declLine=").append(diagLine(method)) //$NON-NLS-1$
+                                .append(" dotLine=").append(dotNode == null ? -1 : dotNode.getStartLine()) //$NON-NLS-1$
+                                .append(" dotInMethod=").append(diagEnclosingMethod(receiver)) //$NON-NLS-1$
+                                .append(" incompleteModule=") //$NON-NLS-1$
+                                .append(BslStructureInsertCommentTypes.isIncompleteResourceForDiag(method.eResource()))
+                                .append(" deep=").append(BslDocCommentComputedTypes.diagReturnStateDeep(method)) //$NON-NLS-1$
+                                .append(" return{").append(BslDocCommentComputedTypes.describeFinalReturnState(method)) //$NON-NLS-1$
+                                .append('}');
+                            int r = 0;
+                            for (java.util.Iterator<EObject> it = method.eAllContents(); it.hasNext();)
+                            {
+                                if (!(it.next() instanceof com._1c.g5.v8.dt.bsl.model.ReturnStatement ret))
+                                    continue;
+                                Expression value = ret.getExpression();
+                                ICompositeNode retNode = NodeModelUtils.findActualNodeFor(ret);
+                                sb.append(" ret").append(r++).append("@") //$NON-NLS-1$ //$NON-NLS-2$
+                                    .append(retNode == null ? -1 : retNode.getStartLine())
+                                    .append("{expr=").append(simpleClass(value)) //$NON-NLS-1$
+                                    .append(" text='").append(value == null ? "" : formatExpressionSourceText(value)) //$NON-NLS-1$ //$NON-NLS-2$
+                                    .append("' types=[").append(value == null ? "" : formatExpressionTypes(value)) //$NON-NLS-1$ //$NON-NLS-2$
+                                    .append("]}"); //$NON-NLS-1$
+                            }
+                            sb.append(" returns=").append(r); //$NON-NLS-1$
+                        }
+                    }
+                }
+            }
+            return sb.toString();
+        }
+
+        private static String simpleClass(Object o)
+        {
+            return o == null ? "null" : o.getClass().getSimpleName(); //$NON-NLS-1$
+        }
+
+        private static int diagLine(EObject o)
+        {
+            ICompositeNode node = o == null ? null : NodeModelUtils.findActualNodeFor(o);
+            return node == null ? -1 : node.getStartLine();
+        }
+
+        private static String diagEnclosingMethod(EObject o)
+        {
+            for (EObject e = o; e != null; e = e.eContainer())
+            {
+                if (e instanceof com._1c.g5.v8.dt.bsl.model.Method m)
+                    return m.getName() + "@" + diagLine(m); //$NON-NLS-1$
+            }
+            return "null"; //$NON-NLS-1$
+        }
+        // #endregion
 
         /** Выражение-приёмник member-access по загруженному ресурсу (для принудительного расчёта типов). */
         static Expression receiverInResource(XtextResource resource, int dotOffset, int offsetAfterDot)

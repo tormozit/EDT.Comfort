@@ -2809,6 +2809,14 @@ public final class BslStructureInsertCommentTypes
         }
     }
 
+    // #region agent log
+    /** Диагностика: последний полный расчёт модуля отменён или упал. */
+    static boolean isIncompleteResourceForDiag(Resource resource)
+    {
+        return resource != null && ComfortTreeTypeSystem.INCOMPLETE_RESOURCES.contains(resource);
+    }
+    // #endregion
+
     /**
      * Система типов EDT плюс наш проход. Единственный потребитель — {@link #install()},
      * поэтому вложенный класс, а не отдельный файл.
@@ -2825,6 +2833,13 @@ public final class BslStructureInsertCommentTypes
             boolean scopeOwner = beginExportVarsScope();
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
+            // #region agent log
+            // Сторож на дефекты EDT вида «частичный расчёт стёр тип возврата непричастной
+            // функции» (20.10.2026, bsl 28.0.1: сброс вызываемых). Только частичный расчёт:
+            // у полного «до» состояний нет.
+            java.util.Set<String> diagTypedBefore = module != null && partialParseResult(module) != null
+                ? BslDocCommentComputedTypes.diagTypedReturnFunctions(module) : null;
+            // #endregion
             try
             {
                 if (isWorkbenchClosing())
@@ -2838,6 +2853,8 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
+                if (diagTypedBefore != null)
+                    logReturnLost(module, diagTypedBefore, complete);
                 if (resource != null)
                 {
                     if (complete)
@@ -2858,6 +2875,48 @@ public final class BslStructureInsertCommentTypes
          */
         private static final java.util.Set<Resource> INCOMPLETE_RESOURCES = java.util.Collections
             .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+        // #region agent log
+        /**
+         * Функция, у которой до частичного расчёта был тип возврата, а после — нет. Свой
+         * переразобранный метод сюда не попадает: у него новый объект и «до» нет.
+         */
+        private static void logReturnLost(Module module, java.util.Set<String> typedBefore, boolean complete)
+        {
+            if (typedBefore.isEmpty())
+                return;
+            java.util.Set<String> typedAfter = BslDocCommentComputedTypes.diagTypedReturnFunctions(module);
+            for (Method method : module.allMethods())
+            {
+                String name = method.getName();
+                if (name == null || !typedBefore.contains(name) || typedAfter.contains(name))
+                    continue;
+                Global.tempLog(SmartContentAssistProcessor.RECEIVER_TYPE_LOG, "returnLost function=" + name //$NON-NLS-1$
+                    + " module=" + (module.eResource() == null ? null : module.eResource().getURI()) //$NON-NLS-1$
+                    + " reparseMethod=" + diagReparseMethodName(module) //$NON-NLS-1$
+                    + " complete=" + complete //$NON-NLS-1$
+                    + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
+                    + " AFTER=" + BslDocCommentComputedTypes.diagReturnStateDeep(method)); //$NON-NLS-1$
+            }
+        }
+
+        private static String diagReparseMethodName(Module module)
+        {
+            try
+            {
+                Object parse = module == null || module.eResource() == null ? null
+                    : Global.invoke(module.eResource(), "getParseResult"); //$NON-NLS-1$
+                if (parse == null || !parse.getClass().getName().endsWith(".PartialParseResult")) //$NON-NLS-1$
+                    return "-"; //$NON-NLS-1$
+                Object m = Global.invoke(parse, "getReparseMethod"); //$NON-NLS-1$
+                return m instanceof com._1c.g5.v8.dt.bsl.model.Method method ? method.getName() : String.valueOf(m);
+            }
+            catch (Throwable e)
+            {
+                return "ERR:" + e; //$NON-NLS-1$
+            }
+        }
+        // #endregion
 
         private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
         {
@@ -2994,7 +3053,7 @@ public final class BslStructureInsertCommentTypes
                         for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
                             if (caller instanceof Method callerMethod)
                                 dropNormalStates(callerMethod);
-                        super.installTypeSystem(module, cancelIndicator);
+                        stockInstall(module, cancelIndicator);
                         BslFormTypeContextEnrichment.enrichMethod(dependent);
                         enrich(this, module, dependent);
                     }
@@ -3074,7 +3133,7 @@ public final class BslStructureInsertCommentTypes
                 for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
                     if (caller instanceof Method callerMethod)
                         dropNormalStates(callerMethod);
-                super.installTypeSystem(module, cancelIndicator);
+                stockInstall(module, cancelIndicator);
                 BslFormTypeContextEnrichment.enrichMethod(dependent);
                 enrich(this, module, dependent);
                 return true;
@@ -3357,9 +3416,27 @@ public final class BslStructureInsertCommentTypes
                 collector.removeMode(TypeSystemMode.NORMAL);
         }
 
+        /**
+         * Штатный {@code installTypeSystem} с сохранением типов возврата вызываемых функций:
+         * EDT 28.0.1 (сборка 2026-07) в частичном расчёте сбрасывает их, не пересчитывая тел
+         * (см. {@code BslDocCommentComputedTypes.seedCalleeReturnFromPartialParse}).
+         */
+        private void stockInstall(Module module, CancelIndicator cancelIndicator)
+        {
+            java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
+            try
+            {
+                super.installTypeSystem(module, cancelIndicator);
+            }
+            finally
+            {
+                BslDocCommentComputedTypes.releaseCalleeReturns(previous);
+            }
+        }
+
         private void installTypeSystemPass(Module module, CancelIndicator cancelIndicator)
         {
-            super.installTypeSystem(module, cancelIndicator);
+            stockInstall(module, cancelIndicator);
             ModuleVariableStates.fix(module);
             // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
             BslFormTypeContextEnrichment.enrichModule(module);

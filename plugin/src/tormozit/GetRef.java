@@ -30,7 +30,6 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
-import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
@@ -189,19 +188,27 @@ public class GetRef extends AbstractHandler implements IElementUpdater
             return;
         }
 
-        String ref1 = ctx.buildRef1(true);
-        String docRef = ctx.getModuleDocRef();
+        copyLineOrMethodRef(ctx, shell, "line ref"); //$NON-NLS-1$
+    }
 
-        Global.log("GetRef (line ref): " + ref1); //$NON-NLS-1$
+    /**
+     * На объявлении метода (не в его комментарии) копирует имя метода в формате «см.» без префикса;
+     * в остальных случаях — только ссылку на строку модуля.
+     */
+    private static void copyLineOrMethodRef(ModuleLineContext ctx, Shell shell, String logKind)
+    {
+        String methodRef = ctx.getMethodDeclarationRef();
+        if (methodRef != null)
+        {
+            Global.log("GetRef (" + logKind + ", method): " + methodRef); //$NON-NLS-1$ //$NON-NLS-2$
+            setClipboardText(methodRef, shell);
+            ToastNotification.show("Скопировано имя метода", methodRef);
+            return;
+        }
+        String ref1 = ctx.buildRef1(true);
+        Global.log("GetRef (" + logKind + "): " + ref1); //$NON-NLS-1$ //$NON-NLS-2$
         setClipboardText(ref1, shell);
         ToastNotification.show("Скопировано", ref1);
-
-        if (docRef != null)
-        {
-            final String docRefCopy = docRef;
-            ToastNotification.show("Имя метода", docRef, 4_000,
-                () -> copyToClipboard(docRefCopy), "Копировать"); //$NON-NLS-1$
-        }
     }
 
     /**
@@ -219,19 +226,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         if (ctx == null)
             return false;
 
-        String ref1 = ctx.buildRef1(true);
-        String docRef = ctx.getModuleDocRef();
-
-        Global.log("GetRef (compare line ref): " + ref1); //$NON-NLS-1$
-        setClipboardText(ref1, shell);
-        ToastNotification.show("Скопировано", ref1);
-
-        if (docRef != null)
-        {
-            final String docRefCopy = docRef;
-            ToastNotification.show("Имя метода", docRef, 4_000,
-                () -> copyToClipboard(docRefCopy), "Копировать"); //$NON-NLS-1$
-        }
+        copyLineOrMethodRef(ctx, shell, "compare line ref"); //$NON-NLS-1$
         return true;
     }
 
@@ -1033,15 +1028,6 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         finally { cb.dispose(); }
     }
 
-    private static void copyToClipboard(String text)
-    {
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed()) return;
-        Clipboard cb = new Clipboard(display);
-        try { cb.setContents(new Object[]{ text }, new Transfer[]{ TextTransfer.getInstance() }); }
-        finally { cb.dispose(); }
-    }
-
     // =========================================================================
     // Вспомогательные классы
     // =========================================================================
@@ -1081,25 +1067,20 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         }
 
         /**
-         * Строит ссылку на метод для документирующих комментариев.
-         * Использует {@link MdTypeMapping#directModuleName} — порт функции
-         * {@code ирОбщий.ПрямоеИмяМодуляИзПолного} из приложения ИР.
-         *
-         * <pre>
-         *   "Справочник.Валюты.МодульОбъекта" + "МойМетод"   → "см. СправочникОбъект.Валюты.МойМетод"
-         *   "Справочник.Валюты.МодульМенеджера" + "НайтиПоКоду" → "см. Справочники.Валюты.НайтиПоКоду"
-         *   "ОбщийМодуль.МойМодуль" + "МетодМодуля"          → "см. МойМодуль.МетодМодуля"
-         * </pre>
-         *
-         * @return ссылка вида «см. ПрямоеИмя.МетодИмя», или {@code null}
-         *         если курсор вне метода или прямое имя не определено
+         * Имя метода в формате «см.» без префикса, если каретка на строке объявления метода
+         * (не в комментарии над ним); иначе {@code null}. Прямое имя модуля —
+         * {@link MdTypeMapping#directModuleName} (порт {@code ирОбщий.ПрямоеИмяМодуляИзПолного}):
+         * «Справочник.Валюты.МодульМенеджера» + «НайтиПоКоду» → «Справочники.Валюты.НайтиПоКоду».
+         * Нет прямого имени — полное имя модуля и имя метода через точку.
          */
-        String getModuleDocRef()
+        String getMethodDeclarationRef()
         {
-            if (method == null) return null;
+            if (method == null || lineNumber != method.declarationLine1
+                || !METHOD_START.matcher(markedLine).find())
+                return null;
             String directName = MdTypeMapping.directModuleName(moduleRef.modulePath);
-            if (directName == null || directName.isBlank()) return null;
-            return "см. " + directName + "." + method.name; //$NON-NLS-1$ //$NON-NLS-2$
+            String owner = directName != null && !directName.isBlank() ? directName : moduleRef.modulePath;
+            return owner + "." + method.name; //$NON-NLS-1$
         }
     }
 

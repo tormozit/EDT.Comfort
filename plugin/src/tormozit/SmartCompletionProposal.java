@@ -17,6 +17,7 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension4;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension5;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
+import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
@@ -241,6 +242,10 @@ public class SmartCompletionProposal implements
         }
         else
             selection = delegate.getSelection(document);
+        Global.tempLog("param-hint-caret", "getSelection result=" + selection //$NON-NLS-1$ //$NON-NLS-2$
+            + " delegate=" + delegate.getClass().getSimpleName() //$NON-NLS-1$
+            + " delegateSel=" + delegate.getSelection(document) //$NON-NLS-1$
+            + " wordOnlyCaret=" + wordOnlyCaret + " overlapIrCaret=" + overlapIrCaret); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return selection;
     }
 
@@ -364,31 +369,49 @@ public class SmartCompletionProposal implements
         try
         {
             logApplyStart("viewer"); //$NON-NLS-1$
+            traceCaretAfterApply(viewer);
+            applyPathDiag("start", viewer, "irApply=" + irApply + " replaceParentOverlap=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + replaceParentOverlap + " caret=" + caret + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
             rebaseInspectExpressionReplacement(document, viewer, caret);
             rebaseEdtTemplateReplacement(document, viewer, caret);
             if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, viewer, offset))
+            {
+                applyPathDiag("edtOverlapReplaceParent", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (viewer != null && tryApplyWordOnly(document, viewer, offset, stateMask))
             {
                 logApplyWordOnly("viewer"); //$NON-NLS-1$
+                applyPathDiag("wordOnly", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (irApply
                 && tryApplyWithIrAdapter((IrCompletionProposal) delegate, viewer, offset))
+            {
+                applyPathDiag("irAdapter", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (!irApply && viewer != null && tryApplyGeneralIrOverlapAdapter(viewer, offset))
+            {
+                applyPathDiag("generalIrOverlapAdapter", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (tryApplyTemplate(document, viewer, caret, stateMask))
+            {
+                applyPathDiag("template", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, viewer, trigger, stateMask, caret);
+                applyPathDiag("irBareCtorOrDelegate", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (delegate instanceof ICompletionProposalExtension2)
                 ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
             else if (document != null)
                 apply(document, trigger, offset);
+            applyPathDiag("stockDelegate", viewer, ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
         finally
         {
@@ -840,6 +863,11 @@ public class SmartCompletionProposal implements
                 }
             }
             ir.setPendingCaretAfterApply(replaceFrom + plan.caretOffset);
+            Global.tempLog("param-hint-apply", "applyIrInsertion replaceFrom=" + replaceFrom //$NON-NLS-1$ //$NON-NLS-2$
+                + " replaceLen=" + replaceLen + " rangeAlreadyDeleted=" + rangeAlreadyDeleted //$NON-NLS-1$ //$NON-NLS-2$
+                + " planCaret=" + plan.caretOffset + " planLen=" + plan.text.length() //$NON-NLS-1$ //$NON-NLS-2$
+                + " hasParen=" + (plan.text.indexOf('(') >= 0) //$NON-NLS-1$
+                + " replaceParentOnInsert=" + ir.isReplaceParentOnInsert()); //$NON-NLS-1$
         }
         catch (BadLocationException e)
         {
@@ -1097,6 +1125,92 @@ public class SmartCompletionProposal implements
                 .getPrefixCompletionStart(document, completionOffset);
         return completionOffset;
 
+    }
+
+    /**
+     * Временная диагностика: все перемещения каретки с вершиной стека на время вставки и
+     * выборка положения каретки через 0/50/200/800 мс (кто и когда уводит её из-под скобок).
+     */
+    private void traceCaretAfterApply(ITextViewer viewer)
+    {
+        StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+        if (widget == null || widget.isDisposed())
+            return;
+        final long start = System.nanoTime();
+        final IDocument doc = viewer.getDocument();
+        final org.eclipse.swt.custom.CaretListener listener = event -> {
+            StringBuilder frames = new StringBuilder();
+            int shown = 0;
+            for (StackTraceElement frame : new Throwable().getStackTrace())
+            {
+                String cls = frame.getClassName();
+                if (cls.startsWith("org.eclipse.swt") || cls.startsWith("java.") //$NON-NLS-1$ //$NON-NLS-2$
+                    || cls.startsWith("jdk.") || cls.contains("SmartCompletionProposal$")) //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                frames.append(cls.substring(cls.lastIndexOf('.') + 1)).append('.')
+                    .append(frame.getMethodName()).append(':').append(frame.getLineNumber()).append(" < "); //$NON-NLS-1$
+                if (++shown >= 12)
+                    break;
+            }
+            Global.tempLog("param-hint-caret", "move widgetOffset=" + event.caretOffset //$NON-NLS-1$ //$NON-NLS-2$
+                + " +ms=" + (System.nanoTime() - start) / 1_000_000 + " stack=" + frames); //$NON-NLS-1$ //$NON-NLS-2$
+        };
+        widget.addCaretListener(listener);
+        Display display = widget.getDisplay();
+        int[] delays = {0, 50, 200, 800};
+        for (int i = 0; i < delays.length; i++)
+        {
+            final boolean last = i == delays.length - 1;
+            final int delay = delays[i];
+            display.timerExec(delay, () -> {
+                if (widget.isDisposed())
+                    return;
+                Point sel = viewer.getSelectedRange();
+                String around = ""; //$NON-NLS-1$
+                try
+                {
+                    if (doc != null && sel != null)
+                    {
+                        int from = Math.max(0, sel.x - 25);
+                        int to = Math.min(doc.getLength(), sel.x + 25);
+                        around = doc.get(from, sel.x - from) + "|" + doc.get(sel.x, to - sel.x); //$NON-NLS-1$
+                    }
+                }
+                catch (BadLocationException ignored)
+                {
+                }
+                Global.tempLog("param-hint-caret", "sample +" + delay + "ms modelCaret=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + (sel != null ? sel.x : -1) + " widgetCaret=" + widget.getCaretOffset() //$NON-NLS-1$
+                    + " linkedModel=" + (doc != null && LinkedModeModel.hasInstalledModel(doc)) //$NON-NLS-1$
+                    + " around=[" + around.replace('\n', ' ') + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (last)
+                    widget.removeCaretListener(listener);
+            });
+        }
+    }
+
+    /** Временная диагностика: какой путь вставки выбран и где каретка/флаги после него. */
+    private void applyPathDiag(String path, ITextViewer viewer, String extra)
+    {
+        int widgetCaret = -1;
+        int modelCaret = -1;
+        try
+        {
+            Point sel = viewer != null ? viewer.getSelectedRange() : null;
+            modelCaret = sel != null ? sel.x : -1;
+            if (viewer != null && viewer.getTextWidget() != null && !viewer.getTextWidget().isDisposed())
+                widgetCaret = viewer.getTextWidget().getCaretOffset();
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+        Global.tempLog("param-hint-apply", "path=" + path //$NON-NLS-1$ //$NON-NLS-2$
+            + " delegate=" + (delegate != null ? delegate.getClass().getSimpleName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+            + " modelCaret=" + modelCaret + " widgetCaret=" + widgetCaret //$NON-NLS-1$ //$NON-NLS-2$
+            + " applyFlag=" + Boolean.TRUE.equals(PROPOSAL_APPLY_IN_PROGRESS.get()) //$NON-NLS-1$
+            + " irFlag=" + Boolean.TRUE.equals(IR_PROPOSAL_APPLY_IN_PROGRESS.get()) //$NON-NLS-1$
+            + " replaceParentFlag=" + Boolean.TRUE.equals(IR_REPLACE_PARENT_APPLY.get()) //$NON-NLS-1$
+            + (extra == null || extra.isEmpty() ? "" : " " + extra)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void logApplyStart(String overload)

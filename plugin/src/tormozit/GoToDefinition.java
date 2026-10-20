@@ -847,6 +847,9 @@ public class GoToDefinition extends AbstractHandler
         MdLinkNormalizer.Result norm = MdLinkNormalizer.normalize(fullName, irSession);
         String normalizedRef = norm.normalizedRef();
 
+        if (openFormMethodOrAttribute(normalizedRef, v8Project, page, project))
+            return true;
+
         EObject eObject = resolveEObjectByQualifiedName(normalizedRef, v8Project);
         if (openResolvedMdEObject(eObject, norm, page, project))
             return true;
@@ -877,6 +880,43 @@ public class GoToDefinition extends AbstractHandler
             Global.log("GoToDefinition: IDE.openEditor(.mdo): " + e); //$NON-NLS-1$
             return false;
         }
+    }
+
+    /**
+     * Ссылка «Объект.Форма.ИмяФормы.Имя»: сначала метод модуля формы, затем реквизит формы.
+     * {@code false} — ссылка другого вида или ни метода, ни реквизита нет (открывается сама форма).
+     */
+    private static boolean openFormMethodOrAttribute(
+        String ref, IV8Project v8Project, IWorkbenchPage page, IProject project)
+    {
+        String[] seg = ref.split("\\.", -1); //$NON-NLS-1$
+        if (seg.length != 5 || !"Форма".equals(seg[2]) || seg[4].isEmpty()) //$NON-NLS-1$
+            return false;
+        String name = seg[4];
+        String formRef = String.join(".", seg[0], seg[1], seg[2], seg[3]); //$NON-NLS-1$
+
+        ModuleLineRef r = new ModuleLineRef();
+        r.modulePath = formRef + ".Форма"; //$NON-NLS-1$
+        String bslPath = moduleToBslPath(r.modulePath, null);
+        IFile file = bslPath == null ? null : findFileInWorkspace(bslPath, page, project);
+        if (file != null && bslFileContainsMethod(file, name))
+        {
+            r.method = name;
+            r.line = 1;
+            r.column = 0;
+            return openModuleRefViaUri(r, page, project);
+        }
+
+        if (resolveEObjectByQualifiedName(formRef, v8Project) instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm
+            && basicForm.getForm() instanceof com._1c.g5.v8.dt.form.model.Form model)
+        {
+            for (com._1c.g5.v8.dt.form.model.FormAttribute attribute : model.getAttributes())
+            {
+                if (name.equalsIgnoreCase(attribute.getName()))
+                    return openTopLevelFormElement(attribute, page);
+            }
+        }
+        return false;
     }
 
     /**

@@ -203,6 +203,8 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean pendingShowParamHintAfterInsert;
     private volatile int pendingParamHintDesiredCaret = -1;
+    /** Набор параметров вставленного пункта — для подсказки до готовности модели. */
+    private volatile org.eclipse.emf.ecore.EObject pendingParamHintSignature;
     /**
      * Ввод {@code (} или {@code ,} — открыть подсказку параметров метода,
      * если она не открыта (багфикс штатной логики).
@@ -1261,6 +1263,8 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintDesiredCaret = -1;
         final char hintKind = pendingParamHintKind;
         pendingParamHintKind = 0;
+        org.eclipse.emf.ecore.EObject insertedSignature = pendingParamHintSignature;
+        pendingParamHintSignature = null;
         if (desired < 0)
         {
             logLinkedMode("hint.skip", "{\"reason\":\"noDesired\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1324,6 +1328,11 @@ boolean inLiteral = endCaret >= 0
             logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + modelCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
+        // Сразу после вставки из списка — подсказка по сигнатуре пункта, без ожидания модели
+        // (её может держать проверка EDT); опрос ниже заменит её подсказкой по модели.
+        if (hintKind == 0 && insertedSignature != null && modelCaret == desired
+            && !isExpressionFieldViewer())
+            ParamHintHtmlModifier.showProvisionalParamHint(viewer, insertedSignature, desired - 1);
         // Опрос уже идёт (например, начатый при вставке метода) — не начинаем новый:
         // инкремент поколения убил бы предыдущий, и ожидание готовности AST началось бы
         // заново. Достаточно передать ему новую позицию каретки (лог 22:00:59: запятая
@@ -1356,6 +1365,8 @@ boolean inLiteral = endCaret >= 0
      * Первый проход часто пустой; повтор — когда модель уже досчитана.
      */
     private static final int PARAM_HINT_AST_TIMEOUT_MS = 2500;
+    /** Ожидание модели, пока видна предварительная подсказка по сигнатуре пункта. */
+    private static final int PARAM_HINT_PROVISIONAL_TIMEOUT_MS = 30_000;
     /** Пауза между повторными показами, чтобы не долбить readOnly каждые 20 мс. */
     private static final int PARAM_HINT_RETRY_MS = 200;
 
@@ -1551,7 +1562,10 @@ boolean inLiteral = endCaret >= 0
         long lastExecMs, char hintKind, String reason)
     {
         long waitMs = System.currentTimeMillis() - startedMs;
-        boolean expired = waitMs >= PARAM_HINT_AST_TIMEOUT_MS;
+        // Предварительная подсказка уже видна — модель ждём дольше: проверка EDT держит документ
+        // секундами, а без замены подсказка останется без уточнения.
+        boolean expired = ParamHintHtmlModifier.isProvisionalParamHintVisible()
+            ? waitMs >= PARAM_HINT_PROVISIONAL_TIMEOUT_MS : waitMs >= PARAM_HINT_AST_TIMEOUT_MS;
         Global.tempLog("param-hint-model-hold", "defer gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " reason=" + reason + " waitMs=" + waitMs + " expired=" + expired); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         StyledText st = viewer != null ? viewer.getTextWidget() : null;
@@ -1618,7 +1632,9 @@ boolean inLiteral = endCaret >= 0
         // Чужую/криво позиционированную подсказку (в т.ч. в навигаторе) снимаем всегда:
         // isParamHoverShellVisible специально игнорирует окна дальше 600px от каретки,
         // поэтому «вспышка в навигаторе» для опроса была невидима и открывалась вторая.
-        if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
+        // Предварительную подсказку по сигнатуре пункта держим до замены подсказкой по модели.
+        if ((isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
+            && !ParamHintHtmlModifier.isProvisionalParamHintVisible())
         {
             removeLinkedModeParamHintListeners("poll"); //$NON-NLS-1$
             ParamHintHtmlModifier.dismissAllVisible();
@@ -2265,14 +2281,18 @@ boolean inLiteral = endCaret >= 0
         {
             // Рядом с кареткой уже наша/нормальная — не дублируем.
             // Далеко (навигатор) или поле выражения — сносим и открываем заново.
-            if (!isExpressionFieldViewer() && isParamHoverShellVisible())
+            // Предварительная (по сигнатуре пункта) — не дубль: её заменяет подсказка по модели.
+            if (!isExpressionFieldViewer() && isParamHoverShellVisible()
+                && !ParamHintHtmlModifier.isProvisionalParamHintVisible())
             {
                 paramHintPostGen.incrementAndGet();
                 logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
             removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
-            ParamHintHtmlModifier.dismissAllVisible();
+            // Предварительную не закрываем: показ ниже уточнит её в том же окне.
+            if (!ParamHintHtmlModifier.isProvisionalParamHintVisible())
+                ParamHintHtmlModifier.dismissAllVisible();
         }
         ParamHoverProbe probe = new ParamHoverProbe();
         try
@@ -2298,7 +2318,8 @@ boolean inLiteral = endCaret >= 0
             // решён, а если снимать после показа, пользователь видит мигание — сначала
             // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
             forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
-            ParamHintHtmlModifier.dismissAllVisible();
+            if (!ParamHintHtmlModifier.isProvisionalParamHintVisible())
+                ParamHintHtmlModifier.dismissAllVisible();
             boolean focused = st.isFocusControl();
             Point caretDisp = null;
             try
@@ -2674,6 +2695,7 @@ boolean inLiteral = endCaret >= 0
                         selected = ContentAssistPopupSync.peekSelectedProposal(assistant);
                     ParamHintHtmlModifier.rememberSelectedConstructorSignature(selected, d,
                         pendingParamHintDesiredCaret);
+                    pendingParamHintSignature = SmartContentAssistProcessor.selectedSignature(selected);
                     forceRemoveLinkedModeParamHintListeners("postDoIt"); //$NON-NLS-1$
                     ParamHintHtmlModifier.dismissAllVisible();
                 }
@@ -4300,11 +4322,48 @@ boolean inLiteral = endCaret >= 0
                     .append(text.length() > 90 ? text.substring(0, 90) : text);
             }
             return "job=" + System.identityHashCode(job) + " всего=" + total //$NON-NLS-1$ //$NON-NLS-2$
-                + " ошибок=" + errors + first; //$NON-NLS-1$
+                + " ошибок=" + errors + " " + describeParseErrors(job) + first; //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (RuntimeException ex)
         {
             return "job=" + System.identityHashCode(job) + " сбой чтения аннотаций: " + ex; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Что лежит в разборе модуля в тот же момент: синтаксические ошибки есть, а аннотаций
+     * проверки нет — значит, их потеряла проверка, а не разбор.
+     */
+    private static String describeParseErrors(org.eclipse.core.runtime.jobs.Job job)
+    {
+        try
+        {
+            Object access = Global.getField(job, "xtextDocument"); //$NON-NLS-1$
+            if (!(access instanceof org.eclipse.xtext.util.concurrent.IReadAccess<?> read))
+                return "разбор=недоступен"; //$NON-NLS-1$
+            @SuppressWarnings("unchecked")
+            org.eclipse.xtext.util.concurrent.IReadAccess<org.eclipse.xtext.resource.XtextResource> resourceAccess =
+                (org.eclipse.xtext.util.concurrent.IReadAccess<org.eclipse.xtext.resource.XtextResource>)read;
+            return resourceAccess.tryReadOnly(resource ->
+            {
+                if (resource == null || resource.getParseResult() == null)
+                    return "разбор=нет"; //$NON-NLS-1$
+                StringBuilder syntax = new StringBuilder();
+                int count = 0;
+                for (org.eclipse.xtext.nodemodel.INode node : resource.getParseResult().getSyntaxErrors())
+                {
+                    if (++count <= 3)
+                        syntax.append(' ').append(node.getOffset()).append(':')
+                            .append(node.getSyntaxErrorMessage() == null ? "?" //$NON-NLS-1$
+                                : node.getSyntaxErrorMessage().getMessage());
+                }
+                return "разбор{синтаксических=" + count + " ресурсОшибок=" + resource.getErrors().size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + syntax + "}"; //$NON-NLS-1$
+            });
+        }
+        catch (RuntimeException ex)
+        {
+            return "разбор=сбой:" + ex; //$NON-NLS-1$
         }
     }
 
@@ -5801,8 +5860,6 @@ boolean inLiteral = endCaret >= 0
                 completionAutoOpenPending = false;
                 return;
             }
-            Global.tempLog("literal-arg", "autoOpen skip literalNoIr caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + BslAssistSourceHeuristics.literalCallMethodName(doc, caret)); //$NON-NLS-1$
             logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"literalNoIr\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"docLen\":" + docLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.skipLiteralNoIr", //$NON-NLS-1$
@@ -5896,7 +5953,6 @@ boolean inLiteral = endCaret >= 0
         if (live < 0)
             live = caret;
         boolean cachedOnly = processor.hasReadyLiteralArgListForCaret(viewer, live);
-        long tOpen = System.nanoTime();
         warmupAssistBrowserCreator(live);
         final int readyCaret = live;
         // __string остаётся штатной вне этого показа. Здесь список уже посчитан:
@@ -5911,10 +5967,6 @@ boolean inLiteral = endCaret >= 0
                 processor.scheduleLiteralArgListInBackground(viewer, readyCaret, "openCacheMiss",
                     () -> openLiteralArgPopup(readyCaret, autoOpenSeq));
         }
-        Global.tempLog("literal-arg", "open uiMs=" + ((System.nanoTime() - tOpen) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
-            + " caret=" + caret + " live=" + live //$NON-NLS-1$ //$NON-NLS-2$
-            + " cachedProcessor=" + supplied
-            + " visible=" + ContentAssistPopupSync.isPopupVisible(assistant)); //$NON-NLS-1$
     }
 
     /**

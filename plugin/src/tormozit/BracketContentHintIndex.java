@@ -14,6 +14,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.xtext.RuleCall;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.XtextResource;
 
@@ -68,6 +69,12 @@ final class BracketContentHintIndex
         if (root == null)
             return Collections.emptyList();
 
+        // После синтаксической ошибки разбор восстанавливается по-своему и отдаёт закрывающее
+        // слово чужой конструкции — подсказка у неё была бы неверной, лучше никакой.
+        List<Integer> errorOffsets = new ArrayList<>();
+        for (INode error : resource.getParseResult().getSyntaxErrors())
+            errorOffsets.add(error.getOffset());
+
         List<Entry> entries = new ArrayList<>();
         TreeIterator<EObject> iterator = root.eAllContents();
         while (iterator.hasNext())
@@ -76,7 +83,7 @@ final class BracketContentHintIndex
             EObject element = iterator.next();
             if (isTracked(element))
             {
-                Entry entry = toEntry(element, document, monitor);
+                Entry entry = toEntry(element, document, errorOffsets, monitor);
                 if (entry != null)
                     entries.add(entry);
             }
@@ -94,7 +101,8 @@ final class BracketContentHintIndex
             || element instanceof IfPreprocessor;
     }
 
-    private static Entry toEntry(EObject element, IDocument document, IProgressMonitor monitor)
+    private static Entry toEntry(EObject element, IDocument document, List<Integer> errorOffsets,
+        IProgressMonitor monitor)
     {
         ICompositeNode node = NodeModelUtils.getNode(element);
         if (node == null)
@@ -104,6 +112,11 @@ final class BracketContentHintIndex
         int endOffset = resolveEndOffset(element, node, monitor);
         if (endOffset < 0 || endOffset <= startOffset)
             return null;
+        for (int errorOffset : errorOffsets)
+        {
+            if (errorOffset >= startOffset && errorOffset < endOffset)
+                return null;
+        }
 
         try
         {

@@ -504,6 +504,7 @@ final class QueryBracketSupport
             return;
         }
         QueryPairMatcher wrapper = new QueryPairMatcher(stock);
+        wrapper.bind(editor, decoration);
         decoration.setCharacterPairMatcher(wrapper);
         Object painter = Global.getField(support, "fMatchingCharacterPainter"); //$NON-NLS-1$
         if (painter instanceof MatchingCharacterPainter matching)
@@ -518,11 +519,51 @@ final class QueryBracketSupport
     {
         private final ICharacterPairMatcher stock;
         private boolean queryMatch;
+        private boolean queryPending;
         private int anchor;
+        private BslXtextEditor editor;
+        private SourceViewerDecorationSupport decoration;
 
         QueryPairMatcher(ICharacterPairMatcher stock)
         {
             this.stock = stock;
+        }
+
+        /** Рисовальщик создаётся при включении подсветки скобок и пересоздаётся — брать его в момент перерисовки. */
+        void bind(BslXtextEditor editor, SourceViewerDecorationSupport decoration)
+        {
+            this.editor = editor;
+            this.decoration = decoration;
+        }
+
+        /** В модуле пару считает фон: рисовальщик не должен ждать блокировку документа. */
+        private IRegion pairForPaint(IDocument document, int offset)
+        {
+            return isBslDocument(document)
+                ? BslQueryLiteralSupport.cachedQueryBracketPair(document, offset, this::repaintLater)
+                : findPair(document, offset);
+        }
+
+        private void repaintLater()
+        {
+            if (editor == null || decoration == null || !PlatformUI.isWorkbenchRunning())
+            {
+                Global.tempLog("query-bracket-pair", "repaint skip unbound"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
+            {
+                ISourceViewer viewer = editor.getInternalSourceViewer();
+                StyledText widget = viewer == null ? null : viewer.getTextWidget();
+                Object painter = Global.getField(decoration, "fMatchingCharacterPainter"); //$NON-NLS-1$
+                // После dispose рисовальщик сбрасывает fMatcher — тогда рисовать нечего.
+                boolean ours = painter instanceof MatchingCharacterPainter
+                    && Global.getField(painter, "fMatcher") == this; //$NON-NLS-1$
+                Global.tempLog("query-bracket-pair", "repaint widget=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (widget != null && !widget.isDisposed()) + " painter=" + (painter != null) + " ours=" + ours); //$NON-NLS-1$ //$NON-NLS-2$
+                if (widget != null && !widget.isDisposed() && ours)
+                    ((MatchingCharacterPainter)painter).paint(IPainter.INTERNAL);
+            });
         }
 
         @Override
@@ -535,6 +576,7 @@ final class QueryBracketSupport
         public IRegion match(IDocument document, int offset, int length)
         {
             queryMatch = false;
+            queryPending = false;
             if (ComfortSettings.isQueryLiteralHighlightingEnabled() && document != null && Math.abs(length) <= 1)
             {
                 // Выбран один символ — он и есть опора; без выделения проверяем обе стороны каретки.
@@ -542,14 +584,18 @@ final class QueryBracketSupport
                     : new int[] { Math.min(offset, offset + length) };
                 for (int candidate : candidates)
                 {
-                    IRegion pair = QueryBracketSupport.findPair(document, candidate);
+                    IRegion pair = pairForPaint(document, candidate);
                     if (pair != null)
                     {
                         queryMatch = true;
                         anchor = candidate == pair.getOffset() ? LEFT : RIGHT;
                         return pair;
                     }
+                    queryPending |= BslQueryLiteralSupport.isQueryBracketPending(document, candidate);
                 }
+                // Нашу пару дорисует repaintLater; штатная успела бы показать чужую.
+                if (queryPending)
+                    return null;
             }
             return stock instanceof ICharacterPairMatcherExtension extension
                 ? extension.match(document, offset, length) : stock.match(document, offset);
@@ -563,6 +609,8 @@ final class QueryBracketSupport
         public IRegion findEnclosingPeerCharacters(IDocument document, int offset, int length)
         {
             queryMatch = false;
+            if (queryPending)
+                return null;
             return stock instanceof ICharacterPairMatcherExtension extension
                 ? extension.findEnclosingPeerCharacters(document, offset, length) : null;
         }
@@ -578,7 +626,7 @@ final class QueryBracketSupport
         public boolean isMatchedChar(char ch, IDocument document, int offset)
         {
             return ComfortSettings.isQueryLiteralHighlightingEnabled()
-                && QueryBracketSupport.findPair(document, offset) != null
+                && pairForPaint(document, offset) != null
                 || stock instanceof ICharacterPairMatcherExtension extension && extension.isMatchedChar(ch, document, offset);
         }
 

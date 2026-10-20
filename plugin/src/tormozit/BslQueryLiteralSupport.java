@@ -9,14 +9,19 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DefaultPositionUpdater;
@@ -73,6 +78,7 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper;
 import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.ui.editor.XtextSourceViewer;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
@@ -155,7 +161,6 @@ final class BslQueryLiteralSupport
     @SuppressWarnings("unchecked")
     static void addLiteralFolding(Object document, Object regionAcceptor)
     {
-        Global.tempLog("literal-folding", "calculate document=" + (document == null ? "null" : document.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         boolean queries = ComfortSettings.isLiteralFoldingEnabled(ComfortSettings.PREF_FOLD_BATCH_QUERIES);
         boolean texts = ComfortSettings.isLiteralFoldingEnabled(ComfortSettings.PREF_FOLD_TEXT_LITERALS);
         if ((!queries && !texts)
@@ -206,7 +211,7 @@ final class BslQueryLiteralSupport
         }
         catch (ReflectiveOperationException | RuntimeException | LinkageError error)
         {
-            Global.tempLogException("literal-folding", "calculate", error); //$NON-NLS-1$ //$NON-NLS-2$
+            // сворачивание литералов необязательно — штатное остаётся
         }
     }
 
@@ -295,7 +300,7 @@ final class BslQueryLiteralSupport
         }
         catch (org.eclipse.jface.text.BadLocationException | ReflectiveOperationException error)
         {
-            Global.tempLogException("literal-folding", "region " + start + ":" + end, error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // область пропускаем
         }
     }
 
@@ -499,6 +504,39 @@ final class BslQueryLiteralSupport
         return parse(doc, offset, whole, MAX_LINES);
     }
 
+    /**
+     * Текст литерала BSL от его начала до {@code offset} — в том виде, в каком его видит запрос
+     * ({@code ""} — одна кавычка, без {@code |} и строк {@code //} между строками продолжения).
+     * {@code null} — {@code offset} не внутри литерала.
+     */
+    static String literalTextBefore(IDocument doc, int offset)
+    {
+        Literal literal = parse(doc, offset, false);
+        return literal != null ? literal.text.substring(0, literal.probeIndex) : null;
+    }
+
+    /**
+     * {@code offset} внутри комментария {@code //} запроса в литерале BSL (строковые литералы
+     * самого запроса учитываются).
+     */
+    static boolean isInsideQueryComment(IDocument doc, int offset)
+    {
+        Literal literal = parse(doc, offset, true);
+        if (literal == null || literal.probeIndex < 0 || !literal.isQuery())
+            return false;
+        int lineStart = literal.text.lastIndexOf("\n", literal.probeIndex - 1) + 1; //$NON-NLS-1$
+        boolean inString = false;
+        for (int i = lineStart; i + 1 < literal.probeIndex; i++)
+        {
+            char c = literal.text.charAt(i);
+            if (c == '"')
+                inString = !inString;
+            else if (!inString && c == '/' && literal.text.charAt(i + 1) == '/')
+                return true;
+        }
+        return false;
+    }
+
     /** Связанные операторные слова из готового дерева QL, без запуска разбора запроса. */
     static List<int[]> queryLogicalBrackets(IDocument doc, int offset, int selectionLength)
         throws org.eclipse.jface.text.BadLocationException
@@ -522,8 +560,6 @@ final class BslQueryLiteralSupport
     /** Пара символов запроса из готового дерева, в координатах модуля. */
     static IRegion queryBracketPair(IDocument doc, int offset)
     {
-        Global.tempLog("query-literal-pairs", "lookup offset=" + offset + ", enabled=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + ComfortSettings.isQueryLiteralHighlightingEnabled());
         if (!ComfortSettings.isQueryLiteralHighlightingEnabled() || doc == null
             || offset < 0 || offset >= doc.getLength())
             return null;
@@ -533,16 +569,106 @@ final class BslQueryLiteralSupport
             if ("()[]{}".indexOf(symbol) < 0) //$NON-NLS-1$
                 return null;
             List<int[]> ranges = queryBracketRanges(doc, offset, true);
-            Global.tempLog("query-literal-pairs", "symbol=" + symbol + ", ranges=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (ranges == null ? "null" : ranges.size())); //$NON-NLS-1$
             if (ranges == null || ranges.size() != 2)
                 return null;
             return new Region(ranges.get(0)[0], ranges.get(1)[0] - ranges.get(0)[0] + 1);
         }
         catch (org.eclipse.jface.text.BadLocationException error)
         {
-            Global.tempLogException("query-literal-pairs", "lookup", error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
+        }
+    }
+
+    /**
+     * Пара для отрисовки в UI-потоке: только готовый кэш, документ не блокируется. Блокировку
+     * чтения BSL-документа подолгу держит штатная проверка модуля, и рисовальщик скобок
+     * останавливал ввод на секунды. Промах считается фоновым заданием, затем {@code onFound}.
+     */
+    static IRegion cachedQueryBracketPair(IDocument doc, int offset, Runnable onFound)
+    {
+        if (!ComfortSettings.isQueryLiteralHighlightingEnabled() || doc == null
+            || offset < 0 || offset >= doc.getLength() || !(doc instanceof IDocumentExtension4 stamped))
+            return null;
+        try
+        {
+            if ("()[]{}".indexOf(doc.getChar(offset)) < 0 //$NON-NLS-1$
+                || !TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION.equals(doc.getPartition(offset).getType()))
+                return null;
+        }
+        catch (org.eclipse.jface.text.BadLocationException error)
+        {
+            return null;
+        }
+        long stamp = stamped.getModificationStamp();
+        PairCache cache = PAIR_CACHE.get(doc);
+        if (cache == null || cache.stamp() != stamp)
+        {
+            cache = new PairCache(stamp, new ConcurrentHashMap<>());
+            PAIR_CACHE.put(doc, cache);
+        }
+        Optional<IRegion> known = cache.pairs().get(offset);
+        if (known == PAIR_PENDING)
+            return null;
+        if (known != null)
+            return known.orElse(null);
+        PairCache target = cache;
+        if (target.pairs().putIfAbsent(offset, PAIR_PENDING) == null)
+            new PairJob(doc, stamped, target, offset, onFound).schedule();
+        return null;
+    }
+
+    /** Скобка в литерале, пара ещё считается: штатный поиск нарисовал бы чужую пару до нашей. */
+    static boolean isQueryBracketPending(IDocument doc, int offset)
+    {
+        PairCache cache = doc == null ? null : PAIR_CACHE.get(doc);
+        return cache != null && doc instanceof IDocumentExtension4 stamped
+            && cache.stamp() == stamped.getModificationStamp() && cache.pairs().get(offset) == PAIR_PENDING;
+    }
+
+    /** Отдельный экземпляр: {@code Optional.empty()} — общий и означает «пары нет». */
+    private static final Optional<IRegion> PAIR_PENDING = Optional.of(new Region(-1, 0));
+    private static final Map<IDocument, PairCache> PAIR_CACHE = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static record PairCache(long stamp, Map<Integer, Optional<IRegion>> pairs) {}
+
+    /** Ждать блокировку документа здесь можно: UI-поток в это время свободен. */
+    private static final class PairJob extends Job
+    {
+        private final IDocument doc;
+        private final IDocumentExtension4 stamped;
+        private final PairCache cache;
+        private final int offset;
+        private final Runnable onFound;
+
+        PairJob(IDocument doc, IDocumentExtension4 stamped, PairCache cache, int offset, Runnable onFound)
+        {
+            super("Комфорт: парная скобка запроса"); //$NON-NLS-1$
+            this.doc = doc;
+            this.stamped = stamped;
+            this.cache = cache;
+            this.offset = offset;
+            this.onFound = onFound;
+            setSystem(true);
+            setPriority(SHORT);
+        }
+
+        @Override
+        protected IStatus run(IProgressMonitor monitor)
+        {
+            if (stamped.getModificationStamp() != cache.stamp())
+                return Status.OK_STATUS;
+            long started = System.nanoTime();
+            IRegion pair = queryBracketPair(doc, offset);
+            Global.tempLog("query-bracket-pair", "job offset=" + offset + " ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (System.nanoTime() - started) / 1_000_000L + " pair=" + pair //$NON-NLS-1$
+                + " stale=" + (stamped.getModificationStamp() != cache.stamp())); //$NON-NLS-1$
+            // Текст сменился во время расчёта — пара может относиться к старому тексту.
+            if (stamped.getModificationStamp() != cache.stamp())
+                return Status.OK_STATUS;
+            cache.pairs().put(offset, Optional.ofNullable(pair));
+            if (pair != null && onFound != null)
+                onFound.run();
+            return Status.OK_STATUS;
         }
     }
 
@@ -552,12 +678,27 @@ final class BslQueryLiteralSupport
             return null;
         return xtext.tryReadOnly(resource ->
         {
-            if (resource == null || resource.getParseResult() == null)
-                return null;
-            var helper = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
-            EObject object = helper.resolveContainedElementAt(resource, offset);
-            StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
-            return literal == null ? null : QueryBrackets.find(literal, offset, symbols);
+            try
+            {
+                if (resource == null || resource.getParseResult() == null)
+                {
+                    Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " resource=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (resource == null ? "null" : "noParse")); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                var helper = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+                EObject object = helper.resolveContainedElementAt(resource, offset);
+                StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+                Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
+                    + " object=" + (object == null ? "null" : object.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " literal=" + (literal != null)); //$NON-NLS-1$
+                return literal == null ? null : QueryBrackets.find(literal, offset, symbols);
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+                throw error;
+            }
         });
     }
 
@@ -568,7 +709,10 @@ final class BslQueryLiteralSupport
         {
             var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
             if (lines.isEmpty())
+            {
+                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " lines=0"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
+            }
             DefaultStringLiteralTextProvider text = new DefaultStringLiteralTextProvider(literal);
             String query = text.getText();
             QueryValidation validation = null;
@@ -585,13 +729,35 @@ final class BslQueryLiteralSupport
             }
             if (validation == null)
             {
+                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
+                    + " validation=none query=" + escapeForLog(query)); //$NON-NLS-1$
                 return null;
             }
             int base = lines.get(0).getOffset();
-            int queryOffset = queryOffset(text, literal, base, moduleOffset, query.length());
-            if (queryOffset < 0)
+            int rawQueryOffset = queryOffset(text, literal, base, moduleOffset, query.length());
+            if (rawQueryOffset < 0)
+            {
+                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
+                    + " base=" + base + " queryOffset=-1 query=" + escapeForLog(query)); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
-            queryOffset = lineEndingOffset(query, queryOffset, validation.query());
+            }
+            int queryOffset = lineEndingOffset(query, rawQueryOffset, validation.query());
+            {
+                StringBuilder map = new StringBuilder();
+                for (int i = Math.max(0, rawQueryOffset - 3); i <= Math.min(query.length() - 1, rawQueryOffset + 3); i++)
+                {
+                    var location = text.getLocation(i);
+                    map.append(i).append(':').append(escapeForLog(String.valueOf(query.charAt(i)))).append("->") //$NON-NLS-1$
+                        .append(location == null ? "null" : String.valueOf(base + location.getSecond())).append(' '); //$NON-NLS-1$
+                }
+                StringBuilder pairs = new StringBuilder();
+                for (int[] pair : validation.pairs())
+                    pairs.append(pair[0]).append('-').append(pair[1]).append(' ');
+                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
+                    + " base=" + base + " raw=" + rawQueryOffset + " q=" + queryOffset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " map=[" + map + "] pairs=[" + pairs + "] query=" + escapeForLog(query) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " validated=" + escapeForLog(validation.query())); //$NON-NLS-1$
+            }
             List<int[]> selected = null;
             if (symbols)
             {
@@ -628,7 +794,17 @@ final class BslQueryLiteralSupport
                     return null;
                 result.add(new int[] { base + from.getSecond(), to.getSecond() - from.getSecond() + 1 });
             }
+            StringBuilder found = new StringBuilder();
+            for (int[] range : result)
+                found.append(range[0]).append(':').append(range[1]).append(' ');
+            Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " result=[" + found + "]"); //$NON-NLS-1$ //$NON-NLS-2$
             return result;
+        }
+
+        private static String escapeForLog(String value)
+        {
+            return value == null ? "null" //$NON-NLS-1$
+                : value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         }
 
         /** Единственное различие представлений — LF в живой проверке и CRLF у провайдера BSL. */
@@ -1972,6 +2148,9 @@ final class BslQueryLiteralSupport
         IProject baselineProject;
         final IGitMarkerFilterManagerListener baselineListener = (project, path) -> refreshBaseline();
         int generation;
+        /** Склеенные литералы по готовому дереву; поля читаются и пишутся только в UI-потоке. */
+        ConcatenatedState concatenatedState;
+        String concatenatedPending;
 
         MarkerSession(BslXtextEditor editor, ISourceViewer viewer)
         {
@@ -2027,6 +2206,57 @@ final class BslQueryLiteralSupport
             {
                 // Редактор уже закрыт.
             }
+        }
+
+        /**
+         * Готовый ответ для текущего текста и набора литералов или {@code null}: тогда расчёт
+         * запущен в фоне и по готовности сам назначит новый проход.
+         */
+        private Set<Integer> concatenatedFromBackground(List<Literal> literals)
+        {
+            if (literals.isEmpty())
+                return Set.of();
+            if (!(document instanceof IDocumentExtension4 stamped))
+                return null;
+            long stamp = stamped.getModificationStamp();
+            int[][] bounds = new int[literals.size()][];
+            StringBuilder key = new StringBuilder().append(stamp);
+            for (int i = 0; i < bounds.length; i++)
+            {
+                bounds[i] = new int[] { literals.get(i).openQuote, literals.get(i).closeQuote };
+                key.append('|').append(bounds[i][0]).append(':').append(bounds[i][1]);
+            }
+            String request = key.toString();
+            ConcatenatedState state = concatenatedState;
+            if (state != null && state.key().equals(request))
+                return state.result();
+            if (request.equals(concatenatedPending))
+                return null;
+            concatenatedPending = request;
+            Job job = Job.create("Комфорт: склеенные литералы запроса", (org.eclipse.core.runtime.ICoreRunnable)monitor -> //$NON-NLS-1$
+            {
+                Set<Integer> result = concatenatedLiterals(document, bounds);
+                if (!PlatformUI.isWorkbenchRunning())
+                    return;
+                PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
+                {
+                    if (request.equals(concatenatedPending))
+                        concatenatedPending = null;
+                    if (!MARKER_SESSIONS.containsKey(editor) || stamped.getModificationStamp() != stamp)
+                        return; // новая правка сама назначит проход
+                    if (result == null)
+                    {
+                        // Дерево ещё не догнало текст — повторить, как раньше при занятом документе.
+                        schedule(MARKERS_DELAY_MS);
+                        return;
+                    }
+                    concatenatedState = new ConcatenatedState(request, result);
+                    schedule(0);
+                });
+            });
+            job.setSystem(true);
+            job.schedule();
+            return null;
         }
 
         void schedule(int delayMs)
@@ -2163,14 +2393,11 @@ final class BslQueryLiteralSupport
                 return;
             }
             List<Literal> literals = visibleQueryLiterals(document, top, bottom);
-            // Один неблокирующий доступ к актуальному AST для всех видимых литералов.
-            // При занятом документе сохраняем прежние отметки до следующего прохода.
-            Set<Integer> concatenated = concatenatedLiterals(document, literals);
+            // Дерево читается в фоне: блокировку документа подолгу держит проверка модуля EDT,
+            // и ожидание её здесь останавливало ввод. Пока ответа нет — прежние отметки на месте.
+            Set<Integer> concatenated = concatenatedFromBackground(literals);
             if (concatenated == null)
-            {
-                schedule(MARKERS_DELAY_MS);
                 return;
-            }
             IProject project = literals.isEmpty() ? null : resolveProject(editor);
             listenToBaseline(project);
             List<Annotation> remove = new ArrayList<>();
@@ -2204,6 +2431,8 @@ final class BslQueryLiteralSupport
                         continue;
                     }
                     ISSUES_CACHE.put(cacheKey, validation);
+                    // Пары скобок берутся из этой проверки: «пары нет» до неё уже неверно.
+                    PAIR_CACHE.clear();
                 }
                 if (coverage == null)
                 {
@@ -2468,11 +2697,15 @@ final class BslQueryLiteralSupport
             result.add(lit);
     }
 
-    /** Скобки не создают узла в BSL AST: родитель литерала сразу содержит операцию «+». */
-    private static Set<Integer> concatenatedLiterals(IDocument document, List<Literal> literals)
+    private static record ConcatenatedState(String key, Set<Integer> result) {}
+
+    /**
+     * Скобки не создают узла в BSL AST: родитель литерала сразу содержит операцию «+».
+     * Ждёт блокировку документа — только вне UI-потока. {@code bounds} — пары открывающей и
+     * закрывающей кавычки.
+     */
+    private static Set<Integer> concatenatedLiterals(IDocument document, int[][] bounds)
     {
-        if (literals.isEmpty())
-            return Set.of();
         if (!(document instanceof XtextDocument xtext))
             return null;
         return xtext.tryReadOnly(resource ->
@@ -2481,20 +2714,21 @@ final class BslQueryLiteralSupport
                 return null;
             Set<Integer> result = new HashSet<>();
             EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-            for (Literal literal : literals)
+            for (int[] literal : bounds)
             {
-                EObject object = helper.resolveContainedElementAt(resource, literal.openQuote + 1);
+                int openQuote = literal[0];
+                int closeQuote = literal[1];
+                EObject object = helper.resolveContainedElementAt(resource, openQuote + 1);
                 StringLiteral model = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
                 var nodes = model == null ? List.<org.eclipse.xtext.nodemodel.INode>of()
                     : NodeModelUtils.findNodesForFeature(model, BslPackage.Literals.STRING_LITERAL__LINES);
                 // Не применять результат AST, который ещё соответствует прежнему тексту.
                 // Узел самого объекта может включать окружающие скобки; нужны узлы строк.
-                if (nodes.isEmpty() || nodes.get(0).getOffset() != literal.openQuote
-                    || literal.closeQuote >= 0
-                        && nodes.get(nodes.size() - 1).getEndOffset() != literal.closeQuote + 1)
+                if (nodes.isEmpty() || nodes.get(0).getOffset() != openQuote
+                    || closeQuote >= 0 && nodes.get(nodes.size() - 1).getEndOffset() != closeQuote + 1)
                     return null;
                 if (isConcatenatedLiteral(model))
-                    result.add(literal.openQuote);
+                    result.add(openQuote);
             }
             return result;
         });

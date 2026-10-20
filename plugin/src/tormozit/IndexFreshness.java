@@ -118,7 +118,54 @@ final class IndexFreshness
         freshness.listen();
         label.addDisposeListener(e -> freshness.unlisten());
         freshness.startPolling();
+        if (shell == null)
+            label.getDisplay().timerExec(500, () -> dumpLayout(label));
     }
+
+    // #region agent log
+    /** Временная диагностика: где в окне «Поиск» стоят подпись индекса и флажок «Открыть результат…». */
+    private static void dumpLayout(Label label)
+    {
+        if (label.isDisposed())
+            return;
+        StringBuilder sb = new StringBuilder("label parents:\n");
+        for (Composite c = label.getParent(); c != null; c = c.getParent())
+            sb.append("  ").append(c.getClass().getName()).append(" layout=").append(describeLayout(c))
+                .append(" bounds=").append(c.getBounds()).append('\n');
+        Shell sh = label.getShell();
+        sb.append("label bounds=").append(label.getBounds()).append(" data=").append(label.getLayoutData())
+            .append("\ntree:\n");
+        dumpTree(sh, 0, sb);
+        Global.tempLog("indexFreshnessLayout", sb.toString());
+    }
+
+    private static String describeLayout(Composite c)
+    {
+        return c.getLayout() instanceof GridLayout g ? "Grid cols=" + g.numColumns + " eq=" + g.makeColumnsEqualWidth
+            : String.valueOf(c.getLayout());
+    }
+
+    private static void dumpTree(Composite parent, int depth, StringBuilder sb)
+    {
+        if (depth > 7)
+            return;
+        for (org.eclipse.swt.widgets.Control child : parent.getChildren())
+        {
+            sb.append("  ".repeat(depth)).append(child.getClass().getSimpleName()).append(" b=")
+                .append(child.getBounds()).append(" data=").append(child.getLayoutData());
+            if (child instanceof org.eclipse.swt.widgets.Button b)
+                sb.append(" text='").append(b.getText()).append('\'');
+            if (child instanceof Label l)
+                sb.append(" text='").append(l.getText()).append('\'');
+            if (child instanceof Composite c)
+                sb.append(" layout=").append(describeLayout(c));
+            sb.append('\n');
+            if (child instanceof Composite c && !(child instanceof org.eclipse.swt.widgets.Table)
+                && !(child instanceof org.eclipse.swt.widgets.Tree) && !(child instanceof org.eclipse.swt.widgets.Group))
+                dumpTree(c, depth + 1, sb);
+        }
+    }
+    // #endregion
 
     /** Начало отставания индекса событием статуса не сообщается — опрос, пока окно открыто. */
     private void startPolling()

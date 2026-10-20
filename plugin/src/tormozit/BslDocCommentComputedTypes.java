@@ -455,6 +455,8 @@ public final class BslDocCommentComputedTypes
             // метода каждого модуля, и всё, что здесь делается, множится на их число.
             if (!isFunction(methodObject))
                 return comment;
+            if (seedCalleeReturnFromPartialParse(comment, methodObject))
+                return comment;
             if (returnMark(comment) == MARK_BAN)
                 return comment;
             if (!isExtendedTypesEnabled(resolveProject(methodObject)))
@@ -478,6 +480,124 @@ public final class BslDocCommentComputedTypes
         {
         }
         return comment;
+    }
+
+    /**
+     * Обход дефекта EDT (bsl 28.0.1, сборка 2026-07; без плагина тоже): частичный расчёт NORMAL
+     * заново заводит состояние возврата не только у переразобранного метода и его вызывающих,
+     * но и у вызываемых им функций ({@code PartialParseResult.getCalleesMethod}), а тела вызываемых
+     * не пересчитывает. Начальный тип возврата в NORMAL берётся только из комментария
+     * ({@code computeReturnTypes}) — у функции без секции возврата он пуст, и после
+     * «Функция(…).» список членов пуст до полного расчёта модуля.
+     * <p>
+     * Запомненные EDT «прежние типы вызываемых» ({@code getCalleeMethodReturnType}) брать
+     * нельзя: {@code BslPartialParsingHelper.addTypesInformation} считает их не по вызываемой
+     * функции, а по переразобранному методу ({@code computeTypes(aload_2, …)}) — у вызываемой
+     * всплывал тип возврата вызывающего (20.10: «ОбсуждениеСистемыВзаимодействия» у функции,
+     * возвращающей пользователя). Собственный NORMAL-тип вызываемой снимается перед штатным
+     * расчётом ({@link #captureCalleeReturns}) и дописывается секцией возврата, когда
+     * {@code initFinalStateForMethod} разбирает её комментарий. Своя секция возврата у
+     * функции — не трогаем.
+     *
+     * @return {@code true}, если секция дописана
+     */
+    private static boolean seedCalleeReturnFromPartialParse(Object comment, EObject method)
+    {
+        java.util.Map<EObject, List<?>> captured = CALLEE_RETURNS.get();
+        if (captured == null || !captured.containsKey(method))
+            return false;
+        if (!(comment instanceof BslDocumentationComment documentation) || documentation.getReturnSection() != null)
+            return false;
+        Resource resource = method.eResource();
+        Object parse = resource == null ? null : Global.invoke(resource, "getParseResult"); //$NON-NLS-1$
+        if (parse == null || !parse.getClass().getName().endsWith(".PartialParseResult")) //$NON-NLS-1$
+            return false;
+        if (Global.invoke(parse, "getReparseMethod") == method) //$NON-NLS-1$
+            return false;
+        if (!(Global.invoke(parse, "getCalleesMethod") instanceof java.util.Collection<?> callees) //$NON-NLS-1$
+            || !callees.contains(method))
+            return false;
+        if (!initializingFinalState())
+            return false;
+        try
+        {
+            fillReturnSection(comment, new ArrayList<>(captured.get(method)), method);
+            return documentation.getReturnSection() != null;
+        }
+        catch (Throwable ignored)
+        {
+            return false;
+        }
+    }
+
+    /** Собственные NORMAL-типы возврата вызываемых функций, снятые до штатного частичного расчёта. */
+    private static final ThreadLocal<java.util.Map<EObject, List<?>>> CALLEE_RETURNS = new ThreadLocal<>();
+
+    /**
+     * Перед штатным {@code installTypeSystem}: при частичном разборе снять NORMAL-тип возврата
+     * каждой вызываемой функции ({@code PartialParseResult.getCalleesMethod}), пока EDT его не
+     * сбросила. Пара — {@link #releaseCalleeReturns}.
+     *
+     * @return прежнее значение для восстановления (вложенные расчёты)
+     */
+    static java.util.Map<EObject, List<?>> captureCalleeReturns(EObject module)
+    {
+        java.util.Map<EObject, List<?>> previous = CALLEE_RETURNS.get();
+        java.util.Map<EObject, List<?>> captured = new java.util.IdentityHashMap<>();
+        try
+        {
+            Resource resource = module == null ? null : module.eResource();
+            Object parse = resource == null ? null : Global.invoke(resource, "getParseResult"); //$NON-NLS-1$
+            if (parse != null && parse.getClass().getName().endsWith(".PartialParseResult") //$NON-NLS-1$
+                && Global.invoke(parse, "getCalleesMethod") instanceof java.util.Collection<?> callees) //$NON-NLS-1$
+            {
+                for (Object callee : new ArrayList<>(callees))
+                {
+                    if (!(callee instanceof EObject function) || !isFunction(function))
+                        continue;
+                    Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(function, "environments"); //$NON-NLS-1$
+                    Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(function, "getFinalReturnState"); //$NON-NLS-1$
+                    List<?> types = collector == null ? null : typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
+                    if (types != null && !types.isEmpty())
+                        captured.put(function, new ArrayList<>(types));
+                }
+            }
+        }
+        catch (Throwable ignored)
+        {
+        }
+        CALLEE_RETURNS.set(captured);
+        return previous;
+    }
+
+    /** Пара к {@link #captureCalleeReturns}. */
+    static void releaseCalleeReturns(java.util.Map<EObject, List<?>> previous)
+    {
+        if (previous == null)
+            CALLEE_RETURNS.remove();
+        else
+            CALLEE_RETURNS.set(previous);
+    }
+
+    /**
+     * Разбор комментария идёт из {@code BslTreeTypeSystem.initFinalStateForMethod} полного
+     * ({@code installTypeSystem}), а не облегчённого расчёта: в LIGHT EDT сама начинает
+     * с прежних типов вызываемой.
+     */
+    private static boolean initializingFinalState()
+    {
+        String owner = "com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem"; //$NON-NLS-1$
+        boolean[] seen = new boolean[2]; // [0] initFinalStateForMethod, [1] lightInstallingTypeSystem
+        StackWalker.getInstance().forEach(frame ->
+        {
+            if (!owner.equals(frame.getClassName()))
+                return;
+            if ("initFinalStateForMethod".equals(frame.getMethodName())) //$NON-NLS-1$
+                seen[0] = true;
+            else if ("lightInstallingTypeSystem".equals(frame.getMethodName())) //$NON-NLS-1$
+                seen[1] = true;
+        });
+        return seen[0] && !seen[1];
     }
 
     /** Разрешается ли сейчас ссылка «см. …» ({@code BslDocumentationComment.computeTypesByLinkPart}). */
@@ -1224,6 +1344,220 @@ public final class BslDocCommentComputedTypes
             return null;
         }
     }
+
+    // #region agent log
+    /**
+     * Диагностика: полный снимок NORMAL возврата функции — каждое последнее состояние,
+     * словарь его подсостояний по средам ({@code subStates}), у каждого подсостояния
+     * объект, число хранимых типов ({@code typesState}), число типов после фильтра
+     * ({@code getTypes}) и фильтры {@code skipTypes}/{@code allowedTypes}.
+     */
+    static String diagReturnStateDeep(EObject function)
+    {
+        StringBuilder sb = new StringBuilder("{");
+        try
+        {
+            Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(function, "environments"); //$NON-NLS-1$
+            sb.append("envs=").append(envs); //$NON-NLS-1$
+            if (function instanceof Method method)
+            {
+                sb.append(" callers=["); //$NON-NLS-1$
+                for (Object caller : new ArrayList<>(method.getCallers()))
+                {
+                    sb.append(caller instanceof Method m ? m.getName() : String.valueOf(caller));
+                    if (caller instanceof EObject eo && eo.eResource() != null && eo.eResource() != function.eResource())
+                        sb.append("@OTHER:").append(eo.eResource().getURI()); //$NON-NLS-1$
+                    sb.append(',');
+                }
+                sb.append(']');
+            }
+            Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(function, "getFinalReturnState"); //$NON-NLS-1$
+            if (collector == null)
+                return sb.append(" collector=null}").toString(); //$NON-NLS-1$
+            Class<?> modeClass = Class.forName(
+                "com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode", true, bslClassLoader()); //$NON-NLS-1$
+            @SuppressWarnings({ "unchecked", "rawtypes" })
+            Object normal = Enum.valueOf((Class<Enum>)modeClass.asSubclass(Enum.class), "NORMAL"); //$NON-NLS-1$
+            Object provider = Global.invoke(collector, "get", normal); //$NON-NLS-1$
+            if (provider == null)
+                return sb.append(" NORMAL=null}").toString(); //$NON-NLS-1$
+            Object all = BslDocCommentDescriptionFix.invokeCommentGetter(provider, "getLastState"); //$NON-NLS-1$
+            sb.append(" provider@").append(diagId(provider)); //$NON-NLS-1$
+            if (!(all instanceof List<?> states))
+                return sb.append(" lastState=").append(all).append('}').toString(); //$NON-NLS-1$
+            int i = 0;
+            for (Object state : states)
+            {
+                sb.append(" last[").append(i++).append("]=").append(diagStateBrief(state)); //$NON-NLS-1$ //$NON-NLS-2$
+                Object map = diagField(state, "subStates"); //$NON-NLS-1$
+                if (map instanceof java.util.Map<?, ?> subStates)
+                {
+                    sb.append(" subStates#").append(subStates.size()).append('{'); //$NON-NLS-1$
+                    for (java.util.Map.Entry<?, ?> entry : new ArrayList<>(subStates.entrySet()))
+                        sb.append(entry.getKey()).append("->").append(diagStateBrief(entry.getValue())).append("; "); //$NON-NLS-1$ //$NON-NLS-2$
+                    sb.append('}');
+                }
+                Object picked = Global.invoke(state, "getSubStates", envs); //$NON-NLS-1$
+                if (picked instanceof List<?> list)
+                {
+                    sb.append(" getSubStates(envs)=["); //$NON-NLS-1$
+                    for (Object s : list)
+                        sb.append('@').append(diagId(s)).append(' ');
+                    sb.append(']');
+                }
+            }
+        }
+        catch (Throwable e)
+        {
+            sb.append(" ERR:").append(e); //$NON-NLS-1$
+        }
+        return sb.append('}').toString();
+    }
+
+    private static String diagStateBrief(Object state)
+    {
+        if (state == null)
+            return "null"; //$NON-NLS-1$
+        Object stored = diagField(state, "typesState"); //$NON-NLS-1$
+        Object skip = diagField(state, "skipTypes"); //$NON-NLS-1$
+        Object allowed = diagField(state, "allowedTypes"); //$NON-NLS-1$
+        int visible = -1;
+        try
+        {
+            Object types = Global.invoke(state, "getTypes"); //$NON-NLS-1$
+            if (types instanceof Iterable<?> it)
+            {
+                visible = 0;
+                for (Object ignored : it)
+                    visible++;
+            }
+        }
+        catch (Throwable ignored)
+        {
+        }
+        StringBuilder names = new StringBuilder();
+        if (stored instanceof java.util.Collection<?> c)
+            for (Object t : new ArrayList<>(c))
+                names.append(t instanceof TypeItem ti ? com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(ti) : String.valueOf(t))
+                    .append(',');
+        return state.getClass().getSimpleName() + "@" + diagId(state) //$NON-NLS-1$
+            + "(stored=" + (stored instanceof java.util.Collection<?> c ? c.size() : -1) //$NON-NLS-1$
+            + "[" + names + "] visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
+            + " skip=" + skip + " allowed=" + allowed + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static Object diagField(Object target, String name)
+    {
+        for (Class<?> c = target.getClass(); c != null; c = c.getSuperclass())
+        {
+            try
+            {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(target);
+            }
+            catch (NoSuchFieldException e)
+            {
+                // выше по иерархии
+            }
+            catch (Throwable e)
+            {
+                return "ERR:" + e; //$NON-NLS-1$
+            }
+        }
+        return "noField"; //$NON-NLS-1$
+    }
+
+    private static String diagId(Object o)
+    {
+        return Integer.toHexString(System.identityHashCode(o));
+    }
+
+    /** Диагностика: имена функций модуля, у которых в NORMAL возврата есть типы. */
+    static java.util.Set<String> diagTypedReturnFunctions(com._1c.g5.v8.dt.bsl.model.Module module)
+    {
+        java.util.Set<String> result = new java.util.HashSet<>();
+        if (module == null)
+            return result;
+        for (Method method : new ArrayList<>(module.allMethods()))
+        {
+            if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function) || method.getName() == null)
+                continue;
+            try
+            {
+                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(method, "environments"); //$NON-NLS-1$
+                Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
+                List<?> types = collector == null ? null : typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
+                if (types != null && !types.isEmpty())
+                    result.add(method.getName());
+            }
+            catch (Throwable ignored)
+            {
+                // Не читается — считаем «с типом», чтобы не дать ложный returnLost.
+                result.add(method.getName());
+            }
+        }
+        return result;
+    }
+
+    /** Диагностика: состояния возврата метода по режимам — {@code NORMAL=[…] LIGHT=[…]}. */
+    static String describeFinalReturnState(EObject method)
+    {
+        if (method == null)
+            return "method=null"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        try
+        {
+            Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(method, "environments"); //$NON-NLS-1$
+            Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
+            sb.append("envs=").append(envs).append(" collector=") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(collector == null ? "null" : collector.getClass().getSimpleName()); //$NON-NLS-1$
+            if (collector == null)
+                return sb.toString();
+            for (String mode : new String[] { "NORMAL", "LIGHT" }) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                sb.append(' ').append(mode).append('=');
+                try
+                {
+                    Class<?> modeClass = Class.forName(
+                        "com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode", true, bslClassLoader()); //$NON-NLS-1$
+                    @SuppressWarnings({ "unchecked", "rawtypes" })
+                    Object modeValue = Enum.valueOf((Class<Enum>)modeClass.asSubclass(Enum.class), mode);
+                    Object provider = Global.invoke(collector, "get", modeValue); //$NON-NLS-1$
+                    Object last = provider == null ? null : Global.invoke(provider, "getLastState", envs); //$NON-NLS-1$
+                    Object allLast = provider == null ? null
+                        : BslDocCommentDescriptionFix.invokeCommentGetter(provider, "getLastState"); //$NON-NLS-1$
+                    Object sub = last == null ? null : Global.invoke(last, "getSubStates", envs); //$NON-NLS-1$
+                    sb.append("{provider=").append(provider == null ? "null" : provider.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" last=").append(last == null ? "null" : last.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" lastAll=").append(allLast instanceof List<?> l ? "#" + l.size() : String.valueOf(allLast)) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" sub=").append(sub instanceof List<?> l2 ? "#" + l2.size() : String.valueOf(sub)) //$NON-NLS-1$ //$NON-NLS-2$
+                        .append("} "); //$NON-NLS-1$
+                }
+                catch (Throwable e)
+                {
+                    sb.append("{ERR:").append(e).append("} "); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                try
+                {
+                    List<?> types = typesFromReturnProvider(collector, mode, envs);
+                    sb.append(types == null ? "null" : SmartContentAssistProcessor.ReceiverTypeLabel //$NON-NLS-1$
+                        .formatTypeItems(types.stream().filter(TypeItem.class::isInstance)
+                            .map(TypeItem.class::cast).toList()) + "#" + types.size()); //$NON-NLS-1$
+                }
+                catch (Throwable e)
+                {
+                    sb.append("ERR:").append(e); //$NON-NLS-1$
+                }
+            }
+        }
+        catch (Throwable e)
+        {
+            sb.append(" ERR:").append(e); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+    // #endregion
 
     private static List<?> typesFromReturnProvider(Object collector, String modeName, Object envs)
         throws Exception

@@ -40,6 +40,7 @@ import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
@@ -747,6 +748,79 @@ public class ConfigSearchDialogHook implements IStartup
         }
         final Group scopeGroup = scopeGroupFound;
 
+        // Ручная правка списков проектов/типов имеет смысл только в области «Выбранные группы»:
+        // при активном нашем варианте области переключаемся на неё (штатный обработчик радио
+        // сам обновит модель, а наш снимет отметки дополнительных вариантов).
+        final Object searchData = Global.getField(page, "searchData"); //$NON-NLS-1$
+        final Object projectSet = searchData != null
+            ? Global.invoke(searchData, "getSearchProjectScope") : null; //$NON-NLS-1$
+        final Object typeSet = searchData != null
+            ? Global.invoke(searchData, "getSearchTypeScope") : null; //$NON-NLS-1$
+        // Снимок пометок после последней правки пользователем. Штатный performAction вне области
+        // «Выбранные группы» очищает оба списка и сохраняет их пустыми — при закрытии окна
+        // возвращаем пометки из снимка, иначе они теряются при следующем открытии.
+        final List<Object> projectSnapshot = new ArrayList<>();
+        final List<Object> typeSnapshot = new ArrayList<>();
+        final Runnable takeSnapshot = () -> {
+            if (projectSet instanceof java.util.Collection<?> c)
+            {
+                projectSnapshot.clear();
+                projectSnapshot.addAll(c);
+            }
+            if (typeSet instanceof java.util.Collection<?> c)
+            {
+                typeSnapshot.clear();
+                typeSnapshot.addAll(c);
+            }
+        };
+        takeSnapshot.run();
+        root.addDisposeListener(e -> {
+            if (SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.NONE)
+                return;
+            try
+            {
+                if (projectSet instanceof java.util.Collection<?> c && !projectSnapshot.isEmpty())
+                {
+                    c.clear();
+                    @SuppressWarnings("unchecked")
+                    java.util.Collection<Object> target = (java.util.Collection<Object>) c;
+                    target.addAll(projectSnapshot);
+                }
+                if (typeSet instanceof java.util.Collection<?> c && !typeSnapshot.isEmpty())
+                {
+                    c.clear();
+                    @SuppressWarnings("unchecked")
+                    java.util.Collection<Object> target = (java.util.Collection<Object>) c;
+                    target.addAll(typeSnapshot);
+                }
+                Global.invoke(searchData, "save", Global.invoke(page, "getDialogSettings")); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("searchScopeRestore", "restored projects=" + projectSnapshot.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " types=" + typeSnapshot.size()); //$NON-NLS-1$
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLog("searchScopeRestore", "failed: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+
+        Runnable switchToCustomScope = () -> {
+            takeSnapshot.run();
+            if (customScopeRadio == null || customScopeRadio.isDisposed()
+                || !customScopeRadio.isEnabled()
+                || SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.NONE)
+                return;
+            for (Control sibling : customScopeRadio.getParent().getChildren())
+            {
+                if (sibling instanceof Button b && (b.getStyle() & SWT.RADIO) != 0)
+                    b.setSelection(b == customScopeRadio);
+            }
+            customScopeRadio.notifyListeners(SWT.Selection, new Event());
+        };
+        Listener checkListener = e -> {
+            if (e.detail == SWT.CHECK && e.display != null)
+                e.display.asyncExec(switchToCustomScope);
+        };
+
         Runnable refresh = () -> {
             if (titleLabel.isDisposed() || typesTable.isDisposed())
                 return;
@@ -767,6 +841,7 @@ public class ConfigSearchDialogHook implements IStartup
         if (projectsTable != null && projectsLabel != null)
         {
             projectsTable.addListener(SWT.Selection, e -> refresh.run());
+            projectsTable.addListener(SWT.Selection, checkListener);
             Composite projectsSection = projectsLabel.getParent();
             if (projectsSection != null && !projectsSection.isDisposed())
             {
@@ -775,8 +850,10 @@ public class ConfigSearchDialogHook implements IStartup
                     if (child instanceof org.eclipse.swt.widgets.ToolBar toolbar)
                     {
                         for (org.eclipse.swt.widgets.ToolItem item : toolbar.getItems())
-                            item.addListener(SWT.Selection,
-                                e -> projectsSection.getDisplay().asyncExec(refresh));
+                            item.addListener(SWT.Selection, e -> {
+                                projectsSection.getDisplay().asyncExec(refresh);
+                                projectsSection.getDisplay().asyncExec(switchToCustomScope);
+                            });
                     }
                 }
             }
@@ -801,6 +878,7 @@ public class ConfigSearchDialogHook implements IStartup
         }
 
         typesTable.addListener(SWT.Selection, e -> refresh.run());
+        typesTable.addListener(SWT.Selection, checkListener);
         Composite section = titleLabel.getParent();
         if (section != null && !section.isDisposed())
         {
@@ -809,7 +887,10 @@ public class ConfigSearchDialogHook implements IStartup
                 if (child instanceof org.eclipse.swt.widgets.ToolBar toolbar)
                 {
                     for (org.eclipse.swt.widgets.ToolItem item : toolbar.getItems())
-                        item.addListener(SWT.Selection, e -> section.getDisplay().asyncExec(refresh));
+                        item.addListener(SWT.Selection, e -> {
+                            section.getDisplay().asyncExec(refresh);
+                            section.getDisplay().asyncExec(switchToCustomScope);
+                        });
                 }
             }
         }
@@ -1240,9 +1321,10 @@ public class ConfigSearchDialogHook implements IStartup
 
         /**
          * Наши варианты области не относятся к штатному {@code UiSearchScope}: ставим модель в
-         * {@code WORKSPACE} (валидное значение — привязка не «откатывает» на прежнее) и очищаем
-         * списки проектов/типов, чтобы {@code performAction} искал по всей рабочей области.
-         * Ограничение результатов — уже наше, на уровне сборщика.
+         * {@code WORKSPACE} (валидное значение — привязка не «откатывает» на прежнее), чтобы
+         * {@code performAction} искал по всей рабочей области. Списки проектов/типов не трогаем —
+         * пометки пользователя переживают смену области. Ограничение результатов — наше, на
+         * уровне сборщика.
          */
         private static void broadenNativeScope(Object searchData)
         {
@@ -1253,12 +1335,6 @@ public class ConfigSearchDialogHook implements IStartup
                 "com._1c.g5.v8.dt.internal.search.ui.dialog.UiSearchScope", "WORKSPACE"); //$NON-NLS-1$ //$NON-NLS-2$
             if (scope != null && workspaceValue != null)
                 Global.invoke(scope, "setValue", new Object[] {workspaceValue}); //$NON-NLS-1$
-            for (String getter : new String[] {"getSearchProjectScope", "getSearchTypeScope"}) //$NON-NLS-1$ //$NON-NLS-2$
-            {
-                Object set = Global.invoke(searchData, getter);
-                if (set != null)
-                    Global.invoke(set, "clear"); //$NON-NLS-1$
-            }
         }
 
         private static Object enumConstant(String className, String name)

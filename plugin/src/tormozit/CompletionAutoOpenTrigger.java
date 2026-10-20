@@ -67,6 +67,11 @@ public final class CompletionAutoOpenTrigger
             return null;
         }
 
+        // Комментарий запроса внутри литерала — без автооткрытия (Ctrl+Space работает).
+        if (linePrefix.contains("//") && BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix) //$NON-NLS-1$
+            && BslQueryLiteralSupport.isInsideQueryComment(doc, insertOffset))
+            return null;
+
         if (popupWasOpen && insertedChar != '.')
             return null;
         if (isPrintableKey(stateMask, insertedChar))

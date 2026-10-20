@@ -1110,12 +1110,24 @@ public final class CallHierarchyViewHook implements IStartup
             }
             if (serverCall)
             {
-                boolean noContext = method != null && BslUtil.hasPragma(method,
-                    Symbols.AT_SERVER_NO_CONTEXT_INTNL, Symbols.AT_SERVER_NO_CONTEXT_RUS);
+                // Контекстным серверный вызов бывает только у метода формы/команды (&НаСервере);
+                // метод общего и прочих модулей контекста не имеет — это всегда «С».
+                boolean noContext = method != null && (BslUtil.hasPragma(method,
+                    Symbols.AT_SERVER_NO_CONTEXT_INTNL, Symbols.AT_SERVER_NO_CONTEXT_RUS)
+                    || !hasFormContext(method));
                 kind = noContext ? SERVER_NO_CONTEXT : SERVER_CONTEXT;
             }
             serverBySource.put(uri, kind);
             return kind;
+        }
+
+        private static boolean hasFormContext(Method method)
+        {
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            if (module == null)
+                return true;
+            ModuleType type = module.getModuleType();
+            return type == ModuleType.FORM_MODULE || type == ModuleType.COMMAND_MODULE;
         }
 
         /** Разрешённый объект вызова (метод модуля или метод общего модуля из контекста) либо null. */

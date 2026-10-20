@@ -62,7 +62,7 @@
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.DynamicListSettingsDialogHook"/>
-    <startup class="tormozit.QueryConstructorFilterHook"/>
+    <startup class="tormozit.QueryWizardHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.DebugRequestsHook"/>
     <startup class="tormozit.TreeExpander"/>
@@ -532,6 +532,11 @@
         categoryId="tormozit.commands.global"
         description="Сравнить выделенный объект с одноимённым в другом проекте (Комфорт)"/>
     <command
+        id="tormozit.httpServiceMethod.openHandler"
+        name="Открыть обработчик метода HTTP-сервиса"
+        categoryId="tormozit.commands.global"
+        description="Перейти к функции-обработчику метода HTTP-сервиса (Комфорт)"/>
+    <command
         id="tormozit.PasteWithCompare"
         name="Вставить со сравнением"
         categoryId="tormozit.commands.global"
@@ -978,6 +983,10 @@
         commandId="tormozit.navigator.compareMergeSingle">
     </handler>
     <handler
+        class="tormozit.MdHandlerOpenHandler"
+        commandId="tormozit.httpServiceMethod.openHandler">
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.PasteWithCompareHandler"
         commandId="tormozit.PasteWithCompare">
     </handler>
@@ -1289,6 +1298,28 @@
                     <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.MdObject"/>
                     <test property="tormozit.comfort.hasPeerInOtherProject"/>
                   </and>
+                </iterate>
+              </and>
+            </with>
+          </visibleWhen>
+        </command>
+      </menuContribution>
+      <!-- Списки AEF редакторов объектов метаданных (DtTreeView/DtTableView): меню
+           наполняются через IMenuService, рядом со штатными «Открыть форму»/«Открыть модуль»
+           (com._1c.g5.v8.dt.md.ui/plugin.xml). Метод — только в «Шаблонах URL» HTTP-сервиса. -->
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.aef.editors.list?after=com._1c.g5.v8.dt.ui.separator.editGroup">
+        <command
+            commandId="tormozit.httpServiceMethod.openHandler"
+            label="Открыть обработчик"
+            icon="platform:/plugin/com._1c.g5.v8.dt.md.ui.shared/$nl$/icons/etool16/open_module_co.png"
+            style="push"
+            tooltip="Перейти к функции-обработчику метода HTTP-сервиса (Комфорт)">
+          <visibleWhen checkEnabled="false">
+            <with variable="selection">
+              <and>
+                <count value="1"/>
+                <iterate ifEmpty="false">
+                  <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.Method"/>
                 </iterate>
               </and>
             </with>

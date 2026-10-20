@@ -450,7 +450,6 @@ public final class BslEditorFoldingHook
     /** Поля в обе штатные группы страницы сворачивания (#841). */
     private static void addFoldingPreferences(Object page, Object fieldParent, boolean initially)
     {
-        Global.tempLog("literal-folding-settings", "create page=" + page.getClass().getName() + " initially=" + initially); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!(page instanceof FieldEditorPreferencePage) || !(fieldParent instanceof Composite parent)
             || parent.isDisposed() || Boolean.TRUE.equals(parent.getData(PROP_FOLDING_PREFERENCES)))
             return;
@@ -469,13 +468,12 @@ public final class BslEditorFoldingHook
             {
                 var field = new FoldingFieldEditor(key, parent);
                 addField.invoke(page, field);
-                Global.tempLog("literal-folding-settings", "added " + key); //$NON-NLS-1$ //$NON-NLS-2$
             }
             parent.setData(PROP_FOLDING_PREFERENCES, Boolean.TRUE);
         }
         catch (ReflectiveOperationException | RuntimeException error)
         {
-            Global.tempLogException("literal-folding-settings", "create", error); //$NON-NLS-1$ //$NON-NLS-2$
+            // страница без доработки — штатный вид
         }
     }
 
@@ -505,7 +503,6 @@ public final class BslEditorFoldingHook
         {
             super.store();
             ComfortSettings.setAndSave(getPreferenceName(), getBooleanValue());
-            Global.tempLog("literal-folding-settings", "store " + getPreferenceName() + "=" + getBooleanValue()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
     }
 

@@ -35,6 +35,8 @@ final class MetadataTypeMenu
     private static final Pattern ANCHOR = Pattern.compile("(?is)<a\\b[^>]*>(.*?)</a>"); //$NON-NLS-1$
     private static final Pattern TYPE_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)+"); //$NON-NLS-1$
     private static final Map<String, Request> REQUESTS = new LinkedHashMap<>();
+    /** Конец открывающего тега обёртки: сразу за ним — обёрнутая ссылка. */
+    private static final String WRAP_TAIL = "onmouseleave=\"comfortHideParamMenu(this)\">"; //$NON-NLS-1$
 
     private static final class Request
     {
@@ -166,9 +168,10 @@ final class MetadataTypeMenu
     /** Существующие ссылки BSL: добавляем только действие наведения вокруг исходного anchor. */
     static String decorate(String html, ITextViewer viewer, BslXtextEditor source)
     {
+        // Подсказка параметров перестраивает строки поверх уже размеченного HTML:
+        // новые ссылки размечаются, уже обёрнутые пропускаются.
         if (html == null || source == null || viewer == null
-            || !(viewer.getDocument() instanceof IXtextDocument document)
-            || html.contains("comfort-meta-type")) //$NON-NLS-1$
+            || !(viewer.getDocument() instanceof IXtextDocument document))
             return html;
         String decorated = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
             if (resource == null || resource.getContents().isEmpty())
@@ -192,6 +195,8 @@ final class MetadataTypeMenu
                 if (object != null && object.eIsProxy())
                     object = EcoreUtil.resolve(object, resource);
                 String replacement = matcher.group();
+                if (html.startsWith(WRAP_TAIL, matcher.start() - WRAP_TAIL.length()))
+                    object = null;
                 if (object instanceof TypeItem type && BslEditorHyperlinkHook.typeProducer(type) != null)
                 {
                     replacement = wrap(type, source, replacement);
@@ -239,7 +244,7 @@ final class MetadataTypeMenu
             + "comfortTrackParamSelection(event);if(comfortParamMenuBlocked(this))return;" //$NON-NLS-1$
             + "this.lastElementChild.innerHTML=" + FUNCTION + "('" + token + "','menu')||'';" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + "if(this.lastElementChild.childElementCount){comfortShowParamMenu(this)}" //$NON-NLS-1$
-            + "else{this.lastElementChild.style.display='none'}\" onmouseleave=\"comfortHideParamMenu(this)\">" //$NON-NLS-1$
+            + "else{this.lastElementChild.style.display='none'}\" " + WRAP_TAIL //$NON-NLS-1$
             + anchor + "<span class=\"comfort-param-menu\"></span></span>"; //$NON-NLS-1$
     }
 

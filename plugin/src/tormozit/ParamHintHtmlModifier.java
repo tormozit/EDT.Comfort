@@ -814,6 +814,9 @@ public final class ParamHintHtmlModifier
         {
             if (info == null)
                 return false;
+            // Предварительная подсказка видна — уточняем её в том же окне, без закрытия.
+            if (refineProvisionalInPlace(handler, viewer, info, site))
+                return true;
             Object oldControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
             if (oldControl != null)
                 Global.invoke(oldControl, "dispose"); //$NON-NLS-1$
@@ -1700,42 +1703,7 @@ public final class ParamHintHtmlModifier
                 : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
             if (!(feature instanceof Method method))
                 continue;
-            Object group = Global.invoke(documentationLocal, "getHoverDocumentationPages", //$NON-NLS-1$
-                method, lang);
-            int before = caPages.size();
-            FindMissSupport.collectContentAssistPages(group, caPages);
-            // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
-            // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
-            if (caPages.size() == before)
-                FindMissSupport.collectCaPagesFromMethodPlatformId(documentationLocal,
-                    method, lang, caPages);
-            if (caPages.size() == before)
-                FindMissSupport.recoverCaPagesFromErrorGroup(documentationLocal, group,
-                    lang, caPages);
-            if (caPages.size() == before)
-                FindMissSupport.collectCaFromViewDocumentation(documentationLocal, method,
-                    lang, caPages);
-            if (caPages.size() == before)
-            {
-                EList<ParamSet> setsDirect = method.getParamSet();
-                if (setsDirect != null)
-                {
-                    for (ParamSet set : setsDirect)
-                    {
-                        if (set == null)
-                            continue;
-                        Object setGroup = Global.invoke(documentationLocal,
-                            "getHoverDocumentationPages", set, lang); //$NON-NLS-1$
-                        FindMissSupport.collectContentAssistPages(setGroup, caPages);
-                        if (caPages.size() == before)
-                            FindMissSupport.recoverCaPagesFromErrorGroup(
-                                documentationLocal, setGroup, lang, caPages);
-                    }
-                }
-            }
-            if (caPages.size() == before)
-                FindMissSupport.collectSyntheticCaPages(documentationLocal, method, lang,
-                    caPages);
+            collectMethodPages(documentationLocal, method, lang, caPages);
             EList<ParamSet> sets = method.getParamSet();
             if (sets != null)
             {
@@ -1788,6 +1756,209 @@ public final class ParamHintHtmlModifier
 
         return new RecoveredParamHint(info, documentationLocal, languageProviderLocal,
             caPages, paramNumber, siteInfo);
+    }
+
+    /** Страницы описания метода для подсказки: штатные, а при их отсутствии — восстановленные. */
+    private static void collectMethodPages(Object documentation, Method method, String lang,
+        List<Object> caPages)
+    {
+        Object group = Global.invoke(documentation, "getHoverDocumentationPages", //$NON-NLS-1$
+            method, lang);
+        int before = caPages.size();
+        FindMissSupport.collectContentAssistPages(group, caPages);
+        // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
+        // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
+        if (caPages.size() == before)
+            FindMissSupport.collectCaPagesFromMethodPlatformId(documentation,
+                method, lang, caPages);
+        if (caPages.size() == before)
+            FindMissSupport.recoverCaPagesFromErrorGroup(documentation, group,
+                lang, caPages);
+        if (caPages.size() == before)
+            FindMissSupport.collectCaFromViewDocumentation(documentation, method,
+                lang, caPages);
+        if (caPages.size() == before)
+        {
+            EList<ParamSet> setsDirect = method.getParamSet();
+            if (setsDirect != null)
+            {
+                for (ParamSet set : setsDirect)
+                {
+                    if (set == null)
+                        continue;
+                    Object setGroup = Global.invoke(documentation,
+                        "getHoverDocumentationPages", set, lang); //$NON-NLS-1$
+                    FindMissSupport.collectContentAssistPages(setGroup, caPages);
+                    if (caPages.size() == before)
+                        FindMissSupport.recoverCaPagesFromErrorGroup(
+                            documentation, setGroup, lang, caPages);
+                }
+            }
+        }
+        if (caPages.size() == before)
+            FindMissSupport.collectSyntheticCaPages(documentation, method, lang,
+                caPages);
+    }
+
+    /** Окно подсказки, показанное по сигнатуре выбранного пункта до готовности модели. */
+    private static java.lang.ref.WeakReference<Object> provisionalControl =
+        new java.lang.ref.WeakReference<>(null);
+
+    /**
+     * Подсказка сразу после вставки метода из списка, без чтения дерева модуля: его блокировку
+     * может держать проверка EDT. Сигнатура берётся из выбранного пункта, границы вызова — из
+     * вставленного текста. Подсказку по готовой модели опрос показывает поверх этой.
+     *
+     * @param openParen смещение «(» вставленного вызова
+     */
+    static boolean showProvisionalParamHint(ITextViewer viewer, EObject signature, int openParen)
+    {
+        try
+        {
+            if (viewer == null || !(signature instanceof ParamSet set)
+                || !(set.eContainer() instanceof Method method))
+                return false;
+            IDocument document = viewer.getDocument();
+            if (document == null || openParen < 0 || openParen >= document.getLength()
+                || document.getChar(openParen) != '(')
+                return false;
+            int close = openParen + 1;
+            while (close < document.getLength() && document.getChar(close) != ')')
+                close++;
+            if (close >= document.getLength())
+                return false;
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler == null || !PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
+                return false;
+            Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
+            Object languageProvider = Global.getField(handler, "languageProvider"); //$NON-NLS-1$
+            if (documentation == null)
+                return false;
+            String lang = asString(Global.invoke(languageProvider, "getLanguage")); //$NON-NLS-1$
+            if (lang == null || lang.isBlank())
+                lang = "ru"; //$NON-NLS-1$
+            List<Object> pages = new ArrayList<>();
+            collectMethodPages(documentation, method, lang, pages);
+            if (pages.isEmpty())
+                return false;
+            int paramSize = 0;
+            int maxParam = 0;
+            for (ParamSet candidate : method.getParamSet())
+            {
+                if (candidate == null || candidate.getParams() == null)
+                    continue;
+                int n = candidate.getParams().size();
+                paramSize = Math.max(paramSize, n);
+                maxParam = Math.max(maxParam, Math.max(n, candidate.getMaxParams()));
+            }
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            org.eclipse.ui.IWorkbenchPart part = window != null && window.getActivePage() != null
+                ? window.getActivePage().getActivePart() : null;
+            org.eclipse.ui.IWorkbenchSite site = part != null ? part.getSite() : null;
+            if (site == null)
+                return false;
+            Class<?> infoClass = Class.forName(
+                "com._1c.g5.v8.dt.bsl.ui.contentassist.InvocationParametersHoverHandler$ParameterInfo"); //$NON-NLS-1$
+            java.lang.reflect.Constructor<?> ctor = infoClass.getDeclaredConstructor();
+            ctor.setAccessible(true);
+            Object info = ctor.newInstance();
+            Global.setFieldForce(info, "pages", pages); //$NON-NLS-1$
+            Global.setFieldForce(info, "paramNumber", Integer.valueOf(0)); //$NON-NLS-1$
+            Global.setFieldForce(info, "paramSize", Integer.valueOf(paramSize)); //$NON-NLS-1$
+            Global.setFieldForce(info, "maxParam", Integer.valueOf(maxParam)); //$NON-NLS-1$
+            // Пустой список, не null: иначе штатный CustomCaretListener сразу закроет подсказку.
+            Global.setFieldForce(info, "commaPosition", new ArrayList<Integer>()); //$NON-NLS-1$
+            Global.setFieldForce(info, "initialOffset", Integer.valueOf(openParen)); //$NON-NLS-1$
+            Global.setFieldForce(info, "firstAvailablePosition", Integer.valueOf(openParen)); //$NON-NLS-1$
+            Global.setFieldForce(info, "lastAvailablePosition", Integer.valueOf(close + 1)); //$NON-NLS-1$
+            Object oldControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+            if (oldControl != null)
+                Global.invoke(oldControl, "dispose"); //$NON-NLS-1$
+            Global.setFieldForce(handler, "infoControl", null); //$NON-NLS-1$
+            sigPickOnOpenPending.set(true);
+            boolean shown = showParamInfoViaHandler(handler, viewer, info, site, true, false);
+            if (shown)
+            {
+                provisionalControl = new java.lang.ref.WeakReference<>(Global.getField(handler, "infoControl")); //$NON-NLS-1$
+                provisionalInfo = new java.lang.ref.WeakReference<>(info);
+            }
+            ContentAssistSessionReloader.logLinkedMode("hint.provisional", "{\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"pages\":" + pages.size() + ",\"open\":" + openParen + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return shown;
+        }
+        catch (Exception | LinkageError ex)
+        {
+            // Модель метода могла меняться параллельно — тогда подсказку покажет опрос.
+            ContentAssistSessionReloader.logLinkedMode("hint.provisional.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** {@code ParameterInfo} предварительной подсказки: его держат её слушатели каретки и позиций. */
+    private static java.lang.ref.WeakReference<Object> provisionalInfo =
+        new java.lang.ref.WeakReference<>(null);
+
+    /**
+     * Уточняет предварительную подсказку в том же окне. Штатный {@code showControlInfo} при
+     * существующем {@code infoControl} окно не пересоздаёт, а только перерисовывает страницу
+     * ({@code showPage}); слушатели при этом остаются со старым {@code ParameterInfo} — поэтому
+     * точные данные переписываются в него же.
+     *
+     * @return {@code false} — предварительной подсказки уже нет, показывать обычным путём
+     */
+    private static boolean refineProvisionalInPlace(Object handler, ITextViewer viewer, Object fresh,
+        org.eclipse.ui.IWorkbenchSite site)
+    {
+        Object target = provisionalInfo.get();
+        Object control = provisionalControl.get();
+        if (target == null || control == null || fresh == null || target.getClass() != fresh.getClass()
+            || !isParamHintShellVisible())
+            return false;
+        if (Global.getField(handler, "infoControl") != control) //$NON-NLS-1$
+        {
+            // Окно принадлежит другому экземпляру обработчика — уточнить на месте нельзя,
+            // а оставлять его рядом с новым нельзя тем более.
+            Global.invoke(control, "dispose"); //$NON-NLS-1$
+            provisionalControl = new java.lang.ref.WeakReference<>(null);
+            provisionalInfo = new java.lang.ref.WeakReference<>(null);
+            return false;
+        }
+        try
+        {
+            for (java.lang.reflect.Field field : target.getClass().getDeclaredFields())
+            {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+                    continue;
+                field.setAccessible(true);
+                field.set(target, field.get(fresh));
+            }
+            sigPickOnOpenPending.set(true);
+            boolean shown = showParamInfoViaHandler(handler, viewer, target, site, true, false);
+            ContentAssistSessionReloader.logLinkedMode("hint.provisional.refine", "{\"shown\":" + shown + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return shown;
+        }
+        catch (Exception | LinkageError ex)
+        {
+            ContentAssistSessionReloader.logLinkedMode("hint.provisional.refineErr", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
+            return false;
+        }
+        finally
+        {
+            provisionalControl = new java.lang.ref.WeakReference<>(null);
+            provisionalInfo = new java.lang.ref.WeakReference<>(null);
+        }
+    }
+
+    /** Видна ли ещё подсказка, показанная по сигнатуре пункта, а не по модели. */
+    static boolean isProvisionalParamHintVisible()
+    {
+        Object control = provisionalControl.get();
+        if (control == null || !isParamHintShellVisible())
+            return false;
+        Object handler = resolveParamHoverHandlerForMiss();
+        return handler != null && Global.getField(handler, "infoControl") == control; //$NON-NLS-1$
     }
 
     private static final class RecoveredParamHint
@@ -3538,6 +3709,7 @@ public final class ParamHintHtmlModifier
 
             ensureCurrentParamCaretSync(browser);
             ensureParameterBrowserFunction(browser);
+            MetadataTypeMenu.installBrowser(browser);
             ensureParamHintLinkLocationListener(browser);
 
             boolean hasMeta = html.indexOf(COMFORT_META_MARKER) >= 0
@@ -4472,7 +4644,24 @@ public final class ParamHintHtmlModifier
     {
         if (browser == null || browser.isDisposed() || html == null)
             return;
-        browser.setText(html);
+        browser.setText(decorateTypeLinks(html));
+    }
+
+    /** Меню у ссылок на типы — как в подсказке при наведении ({@link MetadataTypeMenu}). */
+    private static String decorateTypeLinks(String html)
+    {
+        try
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window == null ? null : window.getActivePage();
+            BslXtextEditor editor = page == null ? null : GetRef.getActiveBslEditor(page.getActiveEditor());
+            return editor == null ? html
+                : MetadataTypeMenu.decorate(html, editor.getInternalSourceViewer(), editor);
+        }
+        catch (RuntimeException | LinkageError error)
+        {
+            return html;
+        }
     }
 
     /**
@@ -4603,7 +4792,8 @@ public final class ParamHintHtmlModifier
             + "span." + PARAM_MENU_CLASS //$NON-NLS-1$
             + "{display:none;position:fixed;z-index:2147483647;width:max-content;" //$NON-NLS-1$
             + "max-width:calc(100vw - 8px);box-sizing:border-box;overflow:hidden;" //$NON-NLS-1$
-            + "padding:2px 0;white-space:nowrap;" //$NON-NLS-1$
+            // text-indent наследуется от штатного «.parameter{text-indent:-2em}» и сдвигает пункты влево.
+            + "padding:2px 0;white-space:nowrap;text-indent:0;" //$NON-NLS-1$
             + "font-weight:normal;color:" + foreground + ";background:" + background //$NON-NLS-1$ //$NON-NLS-2$
             + ";border:1px solid " + headingPrefixColorHex() //$NON-NLS-1$
             + ";box-shadow:1px 2px 4px rgba(0,0,0,.25);}" //$NON-NLS-1$
