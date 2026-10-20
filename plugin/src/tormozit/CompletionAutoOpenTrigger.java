@@ -20,14 +20,33 @@ public final class CompletionAutoOpenTrigger
     {
         if (doc == null || insertedChar == 0 || caretAfter < 0)
             return null;
-        if (popupWasOpen && insertedChar != '.')
+        if (popupWasOpen && insertedChar != '.' && insertedChar != ' ')
             return null;
 
         String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
             doc, caretAfter, insertedChar, insertOffset);
         if (BslAssistSourceHeuristics.isInsideLineComment(linePrefix))
         {
-            // В комментарии разрешаем только member-access: точка после идентификатора, или буквы после точки
+            // Пока список готовится после «см. », ввод имени не должен отменять открытие.
+            int nameStart = linePrefix.length();
+            while (nameStart > 0)
+            {
+                char c = linePrefix.charAt(nameStart - 1);
+                if (!Character.isLetterOrDigit(c) && c != '_')
+                    break;
+                nameStart--;
+            }
+            if ((insertedChar == ' ' || isPrintableKey(stateMask, insertedChar)) && nameStart >= 4
+                && linePrefix.regionMatches(true, nameStart - 4, "см. ", 0, 4)) //$NON-NLS-1$
+            {
+                int start = nameStart - 4;
+                if (start == 0 || (!Character.isLetterOrDigit(linePrefix.charAt(start - 1))
+                    && linePrefix.charAt(start - 1) != '_'))
+                    return "commentLink"; //$NON-NLS-1$
+            }
+            if (popupWasOpen && insertedChar != '.')
+                return null;
+            // Остальные триггеры комментария — member-access.
             if (insertedChar == '.')
             {
                 if (!BslAssistSourceHeuristics.lastTwoCharsNotEqual(
@@ -48,6 +67,8 @@ public final class CompletionAutoOpenTrigger
             return null;
         }
 
+        if (popupWasOpen && insertedChar != '.')
+            return null;
         if (isPrintableKey(stateMask, insertedChar))
             return "printable"; //$NON-NLS-1$
 

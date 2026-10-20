@@ -5394,9 +5394,11 @@ boolean inLiteral = endCaret >= 0
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
         String skipText = event == null ? null : event.getText();
-        if (skipText != null && skipText.endsWith(".") //$NON-NLS-1$
-            && Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
-            scheduleAutoOpenAfterIrDot(event);
+        boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
+        if (skipText != null && proposalApply && (skipText.endsWith(".") //$NON-NLS-1$
+            || (skipText.length() >= 4
+                && skipText.regionMatches(true, skipText.length() - 4, "см. ", 0, 4)))) //$NON-NLS-1$
+            scheduleAutoOpenAfterProposalTrigger(event);
         boolean inLiteral = false;
         dotBeforeWordCaret = -1;
         if (".".equals(skipText) && event != null && viewer != null //$NON-NLS-1$
@@ -5412,7 +5414,7 @@ boolean inLiteral = endCaret >= 0
         }
         // «.» при открытом попапе слов: VerifyKey не ставит pending (popupWasOpen).
         // Без kickDoc окно остаётся со словарём (скрин 11.09.2026: «ф.» → шаблоны на «ф»).
-        if (".".equals(skipText) && processor != null && event != null
+        if (".".equals(skipText) && processor != null && event != null && !proposalApply
             && ComfortSettings.isReplaceListFiltersEnabled())
         {
             IDocument d = viewer != null ? viewer.getDocument() : null;
@@ -5555,22 +5557,26 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    /** Точка из шаблона ИР должна пройти то же правило, что и набранная вручную. */
-    private void scheduleAutoOpenAfterIrDot(DocumentEvent event)
+    /** Точка или «см. » из предложения проходят то же правило, что и набранные вручную. */
+    private void scheduleAutoOpenAfterProposalTrigger(DocumentEvent event)
     {
         StyledText text = viewer != null ? viewer.getTextWidget() : null;
         if (text == null || text.isDisposed())
             return;
         IDocument doc = event.getDocument();
-        int caret = event.getOffset() + event.getText().length();
+        int eventCaret = event.getOffset() + event.getText().length();
+        boolean irApply = Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
         // JFace устанавливает выделение через getSelection уже после apply. До этого
         // момента не открывать новый список и не менять состояние завершаемой сессии.
         text.getDisplay().asyncExec(() ->
         {
-            if (text.isDisposed() || viewer.getDocument() != doc || modelCaretOffset() != caret)
+            if (text.isDisposed() || viewer.getDocument() != doc)
             {
                 return;
             }
+            int caret = modelCaretOffset();
+            if (irApply && caret != eventCaret)
+                return;
             ContentAssistSettings settings = ContentAssistSettings.getInstance();
             if (!ComfortSettings.isReplaceListFiltersEnabled() || settings == null || !settings.isEnabled())
             {
@@ -5578,16 +5584,19 @@ boolean inLiteral = endCaret >= 0
             }
             try
             {
-                if (caret <= 0 || caret > doc.getLength() || doc.getChar(caret - 1) != '.'
-                    || !CompletionAutoOpenTrigger.shouldFetchDocument(doc, '.', caret - 1, caret,
-                        ContentAssistPopupSync.isPopupVisible(assistant)))
+                if (caret <= 0 || caret > doc.getLength())
+                    return;
+                char inserted = doc.getChar(caret - 1);
+                String branch = CompletionAutoOpenTrigger.diagnoseFetch(doc, inserted, caret - 1, caret,
+                    ContentAssistPopupSync.isPopupVisible(assistant), 0);
+                if (!"dot".equals(branch) && !"commentLink".equals(branch)) //$NON-NLS-1$ //$NON-NLS-2$
                 {
                     return;
                 }
                 pendingAutoOpen = false;
                 suppressDocumentAutoOpenAfterSession = false;
-                dotBeforeWordCaret = wordRightOfCaret(doc, caret).isEmpty() ? -1 : caret;
-                cancelPendingOrdinaryAssist("irDot"); //$NON-NLS-1$
+                dotBeforeWordCaret = inserted != '.' || wordRightOfCaret(doc, caret).isEmpty() ? -1 : caret;
+                cancelPendingOrdinaryAssist("proposalDot"); //$NON-NLS-1$
                 scheduleCompletionAutoOpen(caret, completionAutoOpenSeq.incrementAndGet());
             }
             catch (org.eclipse.jface.text.BadLocationException e)

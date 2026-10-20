@@ -111,11 +111,9 @@ public final class IrDeclareExpressionTypeHandler
             if (viewer == null || document == null || !editor.isEditable())
                 return;
             int caret = viewer.getSelectedRange().x;
-            Global.tempLog("declare-expression-type", "invoke caret=" + caret);
             try
             {
                 Edit edit = document.readOnly(resource -> plan(resource, document, caret));
-                Global.tempLog("declare-expression-type", "plan=" + edit);
                 if (edit == null)
                 {
                     toast(MENU_LABEL, "Не найдено присвоение выражению в текущей ветви или объявление параметра/результата");
@@ -130,7 +128,6 @@ public final class IrDeclareExpressionTypeHandler
             }
             catch (Exception e)
             {
-                Global.tempLog("declare-expression-type", "error=" + e);
                 toast(MENU_LABEL, "Не удалось объявить тип: " + e.getMessage(), 5_000);
             }
         }
@@ -200,14 +197,10 @@ public final class IrDeclareExpressionTypeHandler
                 return edit;
             Environmental owner = EcoreUtil2.getContainerOfType(target, Environmental.class);
             if (owner == null || owner.environments() == null)
-            {
-                Global.tempLog("declare-expression-type", "computed type: no environments, target=" + target);
                 return edit;
-            }
             var types = resource.getResourceServiceProvider().get(TypesComputer.class)
                 .computeTypes(target, owner.environments());
             String computed = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(types);
-            Global.tempLog("declare-expression-type", "computed type=" + computed);
             if (computed.isBlank())
                 return edit;
             return insertComputedType(edit, computed);
@@ -275,7 +268,6 @@ public final class IrDeclareExpressionTypeHandler
             {
                 // После // уже есть место ввода: повторный вызов не меняет документ.
                 String addition = insert == start + 2 ? " " : "";
-                Global.tempLog("declare-expression-type", "empty side comment, addSpace=" + !addition.isEmpty());
                 return new Edit(insert, addition, insert + addition.length(), 0);
             }
             return new Edit(insert, " - ", insert + 1, 0);
@@ -423,8 +415,6 @@ public final class IrDeclareExpressionTypeHandler
                         {
                             String addition = (raw.equals("//") ? " " : "") + parameterIndent;
                             int insert = next + raw.length();
-                            Global.tempLog("declare-expression-type", "return indent="
-                                + addition.replace("\t", "\\t").replace(" ", "·"));
                             return new Edit(insert, addition, insert + addition.length(), 0);
                         }
                         return new Edit(0, "", next + raw.length(), 0);
@@ -450,9 +440,6 @@ public final class IrDeclareExpressionTypeHandler
                         }
                     }
             }
-            Global.tempLog("declare-expression-type", "target="
-                + (parameter == null ? "return" : parameter.getName())
-                + ", prefix=" + entryPrefix.replace("\t", "\\t").replace(" ", "·"));
             String text = separator + indent + entryPrefix;
             if (section == null)
                 text = prefix + (parameter == null ? "Возвращаемое значение:" : "Параметры:")

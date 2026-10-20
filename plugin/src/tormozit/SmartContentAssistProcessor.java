@@ -71,10 +71,14 @@ import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IConfigurationAware;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.FakeCtor;
 import com._1c.g5.v8.dt.mcore.FakeParameter;
+import com._1c.g5.v8.dt.mcore.ITypeNameMapping;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Parameter;
@@ -3941,7 +3945,9 @@ return probeDelegateOnce(viewer, offset);
             }
             restoreCtorTypeCatalog(doc, caret);
             String filter = computeIdentifierFilter(doc, caret);
-            if (backgroundPopupList.length > 0 && backgroundPopupFilter.equals(filter))
+            boolean unfilteredText = !SmartAssistFilterState.isSmartFilterEnabled()
+                && (isCommentAssistContext(doc, caret) || isStringLiteralAssistContext(doc, caret));
+            if (!unfilteredText && backgroundPopupList.length > 0 && backgroundPopupFilter.equals(filter))
             {
                 // #region agent log
                 uiBlockLog("cacheOnly.ready", "filter=" + filter //$NON-NLS-1$ //$NON-NLS-2$
@@ -3960,7 +3966,7 @@ return probeDelegateOnce(viewer, offset);
             ICompletionProposal[] cached;
             try
             {
-                cached = filter.isEmpty()
+                cached = filter.isEmpty() || unfilteredText
                     ? unwrapProposals(fullListCache) : filterAndSort(fullListCache, filter);
             }
             catch (RuntimeException ex)
@@ -4183,8 +4189,8 @@ return EMPTY;
     }
 
     /**
-     * Комментарий BSL: список типов даёт штатный процессор EDT (у нас там нет своего
-     * источника), но фильтр, сортировка и подсветка — наши, как в коде. База кэшируется
+     * Комментарий BSL: штатные предложения дополнены именами типов и общих модулей.
+     * Фильтр, сортировка и подсветка — наши, как в коде. База кэшируется
      * <b>не сужённой</b> префиксом: делегат опрашивается с начала набранного слова, иначе
      * многословному фильтру нечего было бы искать — делегат отдаёт только элементы с этим
      * префиксом. Позиции замены переносит на текущее слово {@code fetchDelegateList}.
@@ -4200,12 +4206,10 @@ return EMPTY;
         String filter = SmartFilterTracker.getCurrentFilter();
         ICompletionProposal[] base = ensureCommentBaseList(viewer, doc, offset, caret);
         ICompletionProposal[] result;
-        if (filter.isEmpty())
+        if (filter.isEmpty() || !SmartAssistFilterState.isSmartFilterEnabled())
             result = unwrapProposals(base);
-        else if (SmartAssistFilterState.isSmartFilterEnabled())
-            result = filterAndSort(base, filter);
         else
-            result = prefixFilterCtorCatalog(base, filter);
+            result = filterAndSort(base, filter);
         // #region agent log
         uiBlockLog("compute.comment", "caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + " filter=" + filter //$NON-NLS-1$
@@ -4237,6 +4241,212 @@ return EMPTY;
         fullListComplete = raw.length > 0;
         assignFullListCache(raw);
         return fullListCache;
+    }
+
+    /** Имена для свободного текста (issue 844); все позиции — модельные. */
+    private static final class TextNameProposals
+    {
+        static ICompletionProposal[] merge(ITextViewer viewer, int caret, ICompletionProposal[] stock)
+        {
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            boolean comment = isCommentAssistContext(doc, caret);
+            if (!(doc instanceof IXtextDocument xdoc) || caret < 0
+                || (!comment && !isStringLiteralAssistContext(viewer, caret))
+                || (!comment && isQueryLiteralSegment(doc, caret)))
+                return stock;
+            if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(resolveEditorForLiteralAudit(viewer),
+                viewer instanceof SourceViewer sv ? sv : null) != null)
+                return stock;
+            if (hasNativeVariants(stock))
+                return stock;
+            try
+            {
+                return xdoc.readOnly(resource ->
+                {
+                    if (resource == null || resource.getContents().isEmpty())
+                        return stock;
+                    EObject root = resource.getContents().get(0);
+                    var projects = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+                    var project = projects != null ? projects.getProject(resource.getURI()) : null;
+                    boolean english = project != null && project.getScriptVariant() == ScriptVariant.ENGLISH;
+                    Map<String, String> names = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+                    String receiver = receiverAt(doc, caret);
+                    Type receiverType = null;
+                    IScopeProvider scopes = resource.getResourceServiceProvider().get(IScopeProvider.class);
+                    IScope scope = scopes.getScope(root, McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+                    for (IEObjectDescription desc : scope.getAllElements())
+                    {
+                        // СправочникСсылка — группа, а СправочникСсылка.Имя — конкретный тип.
+                        // Иерархию имён берём из того же scope EDT, не из списка видов МД.
+                        if (receiver != null && desc.getName() != null)
+                        {
+                            String exportedName = desc.getName().toString();
+                            String localizedName = ITypeNameMapping.DEFAULT.getRussianTypeName(exportedName);
+                            String child = childTypeName(receiver, exportedName);
+                            if (child == null)
+                                child = childTypeName(receiver, localizedName);
+                            if (child != null)
+                                names.put(child, "Тип"); //$NON-NLS-1$
+                        }
+                        if (!McorePackage.Literals.TYPE.isSuperTypeOf(desc.getEClass()))
+                            continue;
+                        EObject object = EcoreUtil.resolve(desc.getEObjectOrProxy(), resource);
+                        if (object instanceof Type type && !type.eIsProxy())
+                        {
+                            String name = english ? type.getName() : type.getNameRu();
+                            if (name == null || name.isBlank())
+                                name = type.getName();
+                            if (!english && name != null)
+                                name = ITypeNameMapping.DEFAULT.getRussianTypeName(name);
+                            if (receiver != null)
+                            {
+                                String en = type.getName();
+                                String ru = type.getNameRu();
+                                String child = name != null ? childTypeName(receiver, name) : null;
+                                if (child != null)
+                                    names.put(child, "Тип"); //$NON-NLS-1$
+                                if (receiver.equalsIgnoreCase(name) || receiver.equalsIgnoreCase(en)
+                                    || receiver.equalsIgnoreCase(ru)
+                                    || (en != null && en.startsWith("CommonModule.") //$NON-NLS-1$
+                                        && receiver.equalsIgnoreCase(en.substring("CommonModule.".length())))) //$NON-NLS-1$
+                                {
+                                    receiverType = type;
+                                    break;
+                                }
+                                continue;
+                            }
+                            // Общие модули ниже добавляются короткими именами из конфигурации.
+                            // Тип CommonModule нужен для разрешения членов, но не как вторая строка списка.
+                            if (isCommonModuleTypeName(type.getName()))
+                                continue;
+                            if (name != null && !name.isBlank())
+                                names.put(name, "Тип"); //$NON-NLS-1$
+                        }
+                    }
+                    if (receiver != null)
+                    {
+                        if (receiverType == null && names.isEmpty())
+                            return stock;
+                        var context = receiverType != null ? receiverType.getContextDef() : null;
+                        if (context != null)
+                        {
+                            for (var property : context.allProperties())
+                                addMember(names, property, english, "Свойство"); //$NON-NLS-1$
+                            for (var method : context.allMethods())
+                                addMember(names, method, english, "Метод"); //$NON-NLS-1$
+                        }
+                    }
+                    else if (project instanceof IConfigurationAware aware && aware.getConfiguration() != null)
+                        for (var module : aware.getConfiguration().getCommonModules())
+                            names.put(module.getName(), "Общий модуль"); //$NON-NLS-1$
+                    List<ICompletionProposal> result = new ArrayList<>();
+                    Set<String> existing = new HashSet<>();
+                    if (receiver == null && stock != null)
+                        for (ICompletionProposal proposal : stock)
+                        {
+                            String name = filterMatchName(proposal);
+                            if (isCommonModuleTypeName(name))
+                            {
+                                continue;
+                            }
+                            result.add(proposal);
+                            existing.add(name.toLowerCase(java.util.Locale.ROOT));
+                        }
+                    int start = computeIdentifierWordStart(doc, caret);
+                    for (var entry : names.entrySet())
+                    {
+                        String name = entry.getKey();
+                        if (!existing.add(name.toLowerCase(java.util.Locale.ROOT)))
+                            continue;
+                        boolean method = "Метод".equals(entry.getValue()); //$NON-NLS-1$
+                        String display = method ? name + "()" : name; //$NON-NLS-1$
+                        result.add(new NameProposal(name, start, caret - start,
+                            name.length(), null, new StyledString(display), null, entry.getValue()));
+                    }
+                    return result.toArray(ICompletionProposal[]::new);
+                });
+            }
+            catch (Exception ex)
+            {
+                return stock;
+            }
+        }
+
+        private static String childTypeName(String parent, String qualifiedName)
+        {
+            int start = parent.length() + 1;
+            if (qualifiedName.length() <= start
+                || !qualifiedName.regionMatches(true, 0, parent + '.', 0, start)
+                || qualifiedName.indexOf('.', start) >= 0)
+                return null;
+            return qualifiedName.substring(start);
+        }
+
+        private static boolean isCommonModuleTypeName(String name)
+        {
+            return name != null && (name.startsWith("CommonModule.") //$NON-NLS-1$
+                || name.startsWith("ОбщийМодуль.")); //$NON-NLS-1$
+        }
+
+        /** Отмечает наши предложения для validate: снятый флажок отменяет и префиксный отбор. */
+        private static final class NameProposal extends ConfigurableCompletionProposal
+        {
+            NameProposal(String replacement, int offset, int length, int cursor,
+                Image image, StyledString display, IContextInformation context, String info)
+            {
+                super(replacement, offset, length, cursor, image, display, context, info);
+            }
+        }
+
+        private static void addMember(Map<String, String> names, DuallyNamedElement member,
+            boolean english, String kind)
+        {
+            String name = english ? member.getName() : member.getNameRu();
+            if (name == null || name.isBlank())
+                name = member.getName();
+            if (name != null && !name.isBlank())
+                names.put(name, kind);
+        }
+
+        /** Только имя непосредственно перед точкой; границы строки/комментария не пересекаем. */
+        private static String receiverAt(IDocument doc, int caret) throws org.eclipse.jface.text.BadLocationException
+        {
+            int wordStart = computeIdentifierWordStart(doc, caret);
+            if (wordStart <= 0 || doc.getChar(wordStart - 1) != '.')
+                return null;
+            int end = wordStart - 1;
+            int start = end;
+            while (start > 0)
+            {
+                char c = doc.getChar(start - 1);
+                if (c != '.' && c != '_' && !Character.isLetterOrDigit(c))
+                    break;
+                start--;
+            }
+            return start < end ? doc.get(start, end - start) : null;
+        }
+
+        /** Вызывается только после завершения штатного computeCompletionProposals. */
+        private static boolean hasNativeVariants(ICompletionProposal[] stock)
+        {
+            if (stock == null)
+                return true;
+            // Тем же значком EDT помечает простые шаблоны «см. …» и имена полей.
+            Image templateImage = BslSharedImages.getImage(
+                "com._1c.g5.v8.dt.bsl.ui/obj16/templateprop_co.png"); //$NON-NLS-1$
+            for (ICompletionProposal proposal : stock)
+            {
+                ICompletionProposal raw = unwrapProposal(proposal);
+                if (raw == null || isEmptyPlaceholderProposal(raw))
+                    continue;
+                if (NaparnikAssistRow.isRow(raw) || raw.getClass().getName().startsWith("com.e1c.edt.ai.")) //$NON-NLS-1$
+                    continue;
+                if (isTemplateProposal(raw) || (templateImage != null && raw.getImage() == templateImage))
+                    continue;
+                return true;
+            }
+            return false;
+        }
     }
 
     /** В литерале — delegate + merge ИР; EDT пуст + ИР in-flight → EMPTY без beep. */
@@ -7992,6 +8202,9 @@ return result;
 if (!SmartAssistFilterState.isSmartFilterEnabled())
         {
             ICompletionProposal raw = unwrapProposal(proposal);
+            if (raw instanceof TextNameProposals.NameProposal
+                || isCommentAssistContext(document, resolveFilterCaret(document, offset, event)))
+                return true;
             if (raw instanceof IrCompletionProposal ir)
                 return matchesIrStockPrefixFilter(ir, document, offset, event);
             return matchesStockDelegateFilter(proposal, document, offset, event);
@@ -8537,10 +8750,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
             }
         }
+        boolean delegateCompleted = false;
         try
         {
             raw = delegate.computeCompletionProposals(viewer, off);
             BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
+            delegateCompleted = true;
         }
         catch (NullPointerException npe)
         {
@@ -8554,6 +8769,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         {
             endKeywordProbe(keywordProbe);
         }
+        if (delegateCompleted)
+            raw = TextNameProposals.merge(viewer, off, raw);
         // Ключевые слова — в каретке, из контекстов этого же опроса. После «&» грамматика
         // допускает только аннотации, и ответ EDT там окончательный. Грамматика EDT
         // (Bsl.xtext, PreprocessorLiteralName) объявляет «НаКлиенте» и «НаСервере»
