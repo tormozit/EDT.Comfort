@@ -73,20 +73,6 @@ final class DebugCollectionColumnModel
         return withVisibleAll(cols);
     }
 
-    /** Искусственная схема для окна-скелета (тест UI). */
-    static DebugCollectionColumnModel skeleton(int propertyColumnCount)
-    {
-        List<Column> cols = new ArrayList<>();
-        cols.add(new Column(Kind.INDEX, INDEX_HEADER, null, 0));
-        int count = Math.max(0, propertyColumnCount);
-        for (int i = 1; i <= count; i++)
-        {
-            String name = "Col" + String.format("%02d", i); //$NON-NLS-1$ //$NON-NLS-2$
-            cols.add(new Column(Kind.PROPERTY, name, name, cols.size()));
-        }
-        return withVisibleAll(cols);
-    }
-
     static DebugCollectionColumnModel fromContextVariables(IBslVariable[] contextVars)
     {
         if (contextVars == null || contextVars.length == 0)

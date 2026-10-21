@@ -11,7 +11,12 @@ import org.eclipse.core.runtime.IConfigurationElement;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.e4.ui.model.application.MApplication;
+import org.eclipse.e4.ui.model.application.commands.MBindingTable;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
@@ -36,6 +41,8 @@ public final class ComfortStartup implements IStartup
     public void earlyStartup()
     {
         Bundle bundle = FrameworkUtil.getBundle(ComfortStartup.class);
+        IWorkbench workbench = PlatformUI.getWorkbench();
+        workbench.getDisplay().asyncExec(() -> removeObsoleteCollectionCommand(workbench, bundle));
         String pointId = bundle.getSymbolicName() + ".startup"; //$NON-NLS-1$
         IConfigurationElement[] hooks;
         try
@@ -97,6 +104,33 @@ public final class ComfortStartup implements IStartup
         if (failed > 0)
             platformLog(bundle, IStatus.ERROR,
                 "старт хуков: ok=" + ok + ", с ошибкой=" + failed, null); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Удалённая из plugin.xml команда остаётся в сохранённой модели workbench.xmi. */
+    private static void removeObsoleteCollectionCommand(IWorkbench workbench, Bundle bundle)
+    {
+        String commandId = "tormozit.CollectionSkeleton"; //$NON-NLS-1$
+        try
+        {
+            MApplication application = workbench.getService(MApplication.class);
+            if (application != null)
+            {
+                for (MBindingTable table : application.getBindingTables())
+                {
+                    table.getBindings().removeIf(binding -> binding.getCommand() != null
+                        && commandId.equals(binding.getCommand().getElementId()));
+                }
+                application.getCommands().removeIf(command -> commandId.equals(command.getElementId()));
+            }
+            ICommandService commandService = workbench.getService(ICommandService.class);
+            boolean defined = commandService != null && commandService.getCommand(commandId).isDefined();
+            if (defined)
+                commandService.getCommand(commandId).undefine();
+        }
+        catch (Throwable t)
+        {
+            fail(bundle, "удаление устаревшей команды коллекции", t); //$NON-NLS-1$
+        }
     }
 
     private static void fail(Bundle bundle, String context, Throwable error)
