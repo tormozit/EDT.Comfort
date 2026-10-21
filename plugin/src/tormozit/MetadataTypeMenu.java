@@ -1,6 +1,8 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -18,6 +20,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.scoping.IScope;
 import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHoverProvider;
 import org.eclipse.xtext.ui.editor.hover.html.DefaultEObjectHoverProvider;
@@ -27,6 +31,9 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.platform.IEObjectProvider;
+import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
+import com._1c.g5.v8.dt.platform.version.Version;
 
 /** Меню метатипа в обеих подсказках; штатный клик по существующей ссылке сохраняется. */
 final class MetadataTypeMenu
@@ -34,6 +41,13 @@ final class MetadataTypeMenu
     private static final String FUNCTION = "comfortMetadataTypeAction"; //$NON-NLS-1$
     private static final Pattern ANCHOR = Pattern.compile("(?is)<a\\b[^>]*>(.*?)</a>"); //$NON-NLS-1$
     private static final Pattern TYPE_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)+"); //$NON-NLS-1$
+    private static final String METADATA_OBJECT_PREFIX = "ОбъектМетаданных:"; //$NON-NLS-1$
+    /** Ссылка, текст которой начинается с «ОбъектМетаданных: »; группа 1 — всё до приставки. */
+    private static final Pattern METADATA_OBJECT_ANCHOR = Pattern.compile(
+        "(?i)(<a\\b[^>]*>(?:\\s|<[^>]*>)*)ОбъектМетаданных:(?:\\s|&nbsp;)*"); //$NON-NLS-1$
+    /** Цепочка ссылок подряд: между ними только теги, пробелы и разделители типов. */
+    private static final Pattern TYPE_ANCHOR_RUN = Pattern.compile(
+        "(?is)<a\\b[^>]*>.*?</a>(?:(?:\\s|&nbsp;|[|,]|</?(?:span|font|b|i|wbr)\\b[^>]*>)*<a\\b[^>]*>.*?</a>)*"); //$NON-NLS-1$
     private static final Map<String, Request> REQUESTS = new LinkedHashMap<>();
     /** Конец открывающего тега обёртки: сразу за ним — обёрнутая ссылка. */
     private static final String WRAP_TAIL = "onmouseleave=\"comfortHideParamMenu(this)\">"; //$NON-NLS-1$
@@ -166,24 +180,27 @@ final class MetadataTypeMenu
     }
 
     /** Существующие ссылки BSL: добавляем только действие наведения вокруг исходного anchor. */
-    static String decorate(String html, ITextViewer viewer, BslXtextEditor source)
+    static String decorate(String sourceHtml, ITextViewer viewer, BslXtextEditor source)
     {
+        String abbreviated = abbreviateMetadataObjectTypes(sourceHtml);
         // Подсказка параметров перестраивает строки поверх уже размеченного HTML:
         // новые ссылки размечаются, уже обёрнутые пропускаются.
-        if (html == null || source == null || viewer == null
+        if (sourceHtml == null || source == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
-            return html;
+            return abbreviated;
         String decorated = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
             if (resource == null || resource.getContents().isEmpty())
-                return html;
+                return abbreviated;
             var services = resource.getResourceServiceProvider();
             var scopes = services.get(IScopeProvider.class);
             var converter = services.get(IQualifiedNameConverter.class);
             if (scopes == null || converter == null)
-                return html;
+                return abbreviated;
             var scope = scopes.getScope(resource.getContents().get(0), McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
             if (scope == null)
-                return html;
+                return abbreviated;
+            // Порядок определяется по полным именам, поэтому сортировка — до сокращения «ОМ: ».
+            String html = abbreviateMetadataObjectTypes(sortTypeRuns(sourceHtml, resource, scope, converter));
             var matcher = ANCHOR.matcher(html);
             StringBuilder result = new StringBuilder();
             while (matcher.find())
@@ -206,7 +223,113 @@ final class MetadataTypeMenu
             matcher.appendTail(result);
             return result.toString();
         });
-        return decorated == null || decorated.equals(html) ? html : style(decorated);
+        return decorated == null || decorated.equals(abbreviated) ? abbreviated : style(decorated);
+    }
+
+    /**
+     * Ссылки каждой цепочки типов переставляются в порядке ячеек и полей ввода
+     * ({@link TypeDescriptionPresentationHook#displayOrder}); разделители остаются на месте.
+     * Цепочка, где хоть одна ссылка не тип, или уже обёрнутая меню, не меняется.
+     */
+    private static String sortTypeRuns(String html, XtextResource resource, IScope scope,
+        IQualifiedNameConverter converter)
+    {
+        var runs = TYPE_ANCHOR_RUN.matcher(html);
+        StringBuilder result = new StringBuilder();
+        while (runs.find())
+        {
+            String run = runs.group();
+            boolean wrapped = run.contains(WRAP_TAIL) || html.startsWith(WRAP_TAIL, runs.start() - WRAP_TAIL.length());
+            String replacement = wrapped ? run : sortRun(run, resource, scope, converter);
+            runs.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        runs.appendTail(result);
+        return result.toString();
+    }
+
+    private static String sortRun(String run, XtextResource resource, IScope scope, IQualifiedNameConverter converter)
+    {
+        var anchors = ANCHOR.matcher(run);
+        List<int[]> bounds = new ArrayList<>();
+        List<TypeItem> types = new ArrayList<>();
+        IEObjectProvider platformTypes = null;
+        while (anchors.find())
+        {
+            String name = anchors.group(1).replaceAll("<[^>]*>", "").replace("&nbsp;", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            if (name.isEmpty())
+                return run;
+            var description = scope.getSingleElement(converter.toQualifiedName(name));
+            // Типы вроде «ОбъектМетаданных: ОпределяемыйТип» не входят в область описания типов
+            // реквизита — их ищем среди платформенных типов версии проекта. В модели имя слитное:
+            // «ОбъектМетаданныхОпределяемыйТип» / MetadataObjectDefinedType.
+            if (description == null)
+            {
+                if (platformTypes == null)
+                    platformTypes = platformTypes(resource);
+                if (platformTypes != null)
+                {
+                    description = platformTypes.getEObjectDescription(name);
+                    if (description == null)
+                        description = platformTypes.getEObjectDescription(name.replaceFirst(":\\s*", "")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            var object = description == null ? null : description.getEObjectOrProxy();
+            if (object != null && object.eIsProxy())
+                object = EcoreUtil.resolve(object, resource);
+            if (!(object instanceof TypeItem type) || object.eIsProxy())
+                return run;
+            bounds.add(new int[] {anchors.start(), anchors.end()});
+            types.add(type);
+        }
+        if (types.size() < 2)
+            return run;
+        int[] order = TypeDescriptionPresentationHook.displayOrder(types, resource.getContents().get(0));
+        if (order == null)
+            return run;
+        StringBuilder result = new StringBuilder();
+        int tail = 0;
+        for (int i = 0; i < bounds.size(); i++)
+        {
+            result.append(run, tail, bounds.get(i)[0]);
+            int[] moved = bounds.get(order[i]);
+            result.append(run, moved[0], moved[1]);
+            tail = bounds.get(i)[1];
+        }
+        result.append(run.substring(tail));
+        return result.toString();
+    }
+
+    /** Платформенные типы версии проекта ({@code null}, если версия или провайдер недоступны). */
+    private static IEObjectProvider platformTypes(XtextResource resource)
+    {
+        IRuntimeVersionSupport versions = resource.getResourceServiceProvider().get(IRuntimeVersionSupport.class);
+        Version version = versions == null ? Version.LATEST
+            : versions.getRuntimeVersionOrDefault(resource.getContents().get(0), Version.LATEST);
+        return IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
+    }
+
+    /**
+     * Если в тексте ссылок на типы «ОбъектМетаданных: X» встречается больше одного раза подряд
+     * (ссылки разделены только тегами, пробелами и «|»/«,»), приставка в этих ссылках сокращается до «ОМ: ».
+     */
+    private static String abbreviateMetadataObjectTypes(String html)
+    {
+        if (html == null || html.indexOf(METADATA_OBJECT_PREFIX) < 0)
+            return html;
+        var matcher = TYPE_ANCHOR_RUN.matcher(html);
+        StringBuilder result = new StringBuilder();
+        while (matcher.find())
+        {
+            String run = matcher.group();
+            var prefixes = METADATA_OBJECT_ANCHOR.matcher(run);
+            int count = 0;
+            while (prefixes.find())
+                count++;
+            String replacement = count < 2 ? run : METADATA_OBJECT_ANCHOR.matcher(run).replaceAll("$1ОМ: "); //$NON-NLS-1$
+            matcher.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(result);
+        return result.toString();
     }
 
     /** Типы QL ещё не имеют ссылки: клик открывает штатное описание типа EDT. */

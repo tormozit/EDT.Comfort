@@ -29,6 +29,7 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
@@ -246,20 +247,11 @@ final class TypeDescriptionPresentationHook
             Map<String, TypeOrder> orders = new HashMap<>();
             for (TypeItem item : type.getTypes())
             {
-                String name = McoreUtil.getTypeName(item);
-                String nameRu = McoreUtil.getTypeNameRu(item);
-                if (name == null || name.isBlank())
+                TypeOrder order = typeOrder(item, english, classifiers, false);
+                if (order == null)
                     continue;
-                // PropertyCategoryTypeInfoProvider.createTypeInfo использует первый
-                // сегмент имени и признак TypeSet для того же классификатора EDT.
-                int dot = name.indexOf('.');
-                String category = dot < 0 ? name : name.substring(0, dot);
-                int priority = classifiers.priority(category, item instanceof TypeSet);
-                String sortName = english ? name : nameRu;
-                QualifiedName sortCode = sortName != null && !sortName.isBlank()
-                    ? QualifiedName.create(sortName.split("\\.")) : null; //$NON-NLS-1$
-                TypeOrder order = new TypeOrder(priority, sortCode);
-                orders.put(name, order);
+                orders.put(McoreUtil.getTypeName(item), order);
+                String nameRu = McoreUtil.getTypeNameRu(item);
                 if (nameRu != null && !nameRu.isBlank())
                     orders.put(nameRu, order);
             }
@@ -280,6 +272,77 @@ final class TypeDescriptionPresentationHook
         {
             return text;
         }
+    }
+
+    /**
+     * Порядок показа типов составного типа в подсказках — тот же, что в ячейках и полях ввода.
+     *
+     * @return индексы {@code types} в порядке показа или {@code null}, если порядок не определить
+     */
+    static int[] displayOrder(List<TypeItem> types, EObject context)
+    {
+        try
+        {
+            IV8ProjectManager manager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+            IV8Project v8project = manager != null && context != null ? manager.getProject(context) : null;
+            if (v8project == null)
+                return null;
+            boolean english = v8project.getScriptVariant() == ScriptVariant.ENGLISH;
+            SelectedClassifiers classifiers = SelectedClassifiers.get();
+            TypeOrder[] orders = new TypeOrder[types.size()];
+            for (int i = 0; i < orders.length; i++)
+            {
+                orders[i] = typeOrder(types.get(i), english, classifiers, true);
+                if (orders[i] == null)
+                    return null;
+            }
+            return java.util.stream.IntStream.range(0, orders.length).boxed()
+                .sorted((left, right) -> orders[left].compareTo(orders[right]))
+                .mapToInt(Integer::intValue).toArray();
+        }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Ключ TypeInfoSorter EDT для типа; {@code null}, если у типа нет имени.
+     *
+     * @param unclassifiedLast тип без классификатора у себя и предков (объекты метаданных —
+     *            в поле «Тип» их не бывает) ставится после всех классифицированных; иначе — исключение
+     */
+    private static TypeOrder typeOrder(TypeItem item, boolean english, SelectedClassifiers classifiers,
+        boolean unclassifiedLast) throws ReflectiveOperationException
+    {
+        String name = McoreUtil.getTypeName(item);
+        if (name == null || name.isBlank())
+            return null;
+        // PropertyCategoryTypeInfoProvider.createTypeInfo использует первый
+        // сегмент имени и признак TypeSet для того же классификатора EDT.
+        // Наследники без своего классификатора (ОбъектМетаданныхДокумент → … → ОбъектМетаданных)
+        // берут приоритет ближайшего предка.
+        Integer priority = null;
+        TypeItem current = item;
+        for (int depth = 0; current != null && priority == null && depth < 32; depth++)
+        {
+            String currentName = McoreUtil.getTypeName(current);
+            if (currentName != null && !currentName.isBlank())
+            {
+                int dot = currentName.indexOf('.');
+                String category = dot < 0 ? currentName : currentName.substring(0, dot);
+                priority = classifiers.findPriority(category, current instanceof TypeSet);
+            }
+            current = current instanceof Type type ? type.getParentType() : null;
+        }
+        if (priority == null && unclassifiedLast)
+            priority = Integer.MAX_VALUE;
+        if (priority == null)
+            throw new IllegalArgumentException("Нет классификатора типа " + name); //$NON-NLS-1$
+        String sortName = english ? name : McoreUtil.getTypeNameRu(item);
+        QualifiedName sortCode = sortName != null && !sortName.isBlank()
+            ? QualifiedName.create(sortName.split("\\.")) : null; //$NON-NLS-1$
+        return new TypeOrder(priority, sortCode);
     }
 
     /** Штатный классификатор EDT; приоритеты категорий не зависят от проекта и списка типов. */
@@ -328,19 +391,17 @@ final class TypeDescriptionPresentationHook
             }
         }
 
-        private synchronized int priority(String category, boolean typeSet)
+        /** Приоритет категории или {@code null}, если у неё нет классификатора. */
+        private synchronized Integer findPriority(String category, boolean typeSet)
             throws ReflectiveOperationException
         {
             ClassifierKey key = new ClassifierKey(category, typeSet);
-            Integer cached = priorities.get(key);
-            if (cached != null)
+            if (priorities.containsKey(key))
             {
-                return cached;
+                return priorities.get(key);
             }
             Object classifier = getClassifier.invoke(service, category, typeSet);
-            if (classifier == null)
-                throw new IllegalArgumentException("Нет классификатора типа " + category + ", typeSet=" + typeSet); //$NON-NLS-1$ //$NON-NLS-2$
-            int result = priority.getInt(classifier);
+            Integer result = classifier == null ? null : priority.getInt(classifier);
             priorities.put(key, result);
             return result;
         }

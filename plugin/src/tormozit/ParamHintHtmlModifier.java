@@ -1420,7 +1420,8 @@ public final class ParamHintHtmlModifier
                     FindMissSupport.collectContentAssistPages(Global.invoke(provider,
                         "getHoverDocumentationPages", method, language), memberPages); //$NON-NLS-1$
                     if (memberPages.isEmpty())
-                        FindMissSupport.collectCaPagesFromMethodPlatformId(provider, method, language, memberPages);
+                        FindMissSupport.collectCaPagesFromMethodPlatformId(provider, method, language, memberPages,
+                            contextResource);
                     if (memberPages.isEmpty())
                         FindMissSupport.collectCaFromViewDocumentation(provider, method, language, memberPages);
                 }
@@ -8343,6 +8344,16 @@ public final class ParamHintHtmlModifier
         static void collectCaPagesFromMethodPlatformId(Object provider, Method method,
             String language, List<Object> out)
         {
+            collectCaPagesFromMethodPlatformId(provider, method, language, out, null);
+        }
+
+        /**
+         * @param contextResource ресурс редактора: у копии платформенного типа собственный ресурс может быть
+         *            без load options, и {@code getTypeItemByName} падает NPE.
+         */
+        static void collectCaPagesFromMethodPlatformId(Object provider, Method method,
+            String language, List<Object> out, Resource contextResource)
+        {
             if (provider == null || method == null || out == null)
                 return;
             String lang = language != null && !language.isBlank() ? language : "ru"; //$NON-NLS-1$
@@ -8382,7 +8393,8 @@ public final class ParamHintHtmlModifier
                 int methodCode = method.getCode();
                 if (typeCode <= 0 || methodCode <= 0)
                 {
-                    int[] resolved = resolvePlatformCodes(provider, method, ownerType);
+                    int[] resolved = resolvePlatformCodes(provider, method, ownerType,
+                        contextResource);
                     if (resolved != null)
                     {
                         typeCode = resolved[0];
@@ -8423,11 +8435,12 @@ public final class ParamHintHtmlModifier
         }
 
         /** @return int[]{typeCode, methodCode} или null */
-        private static int[] resolvePlatformCodes(Object provider, Method method, Type ownerType)
+        private static int[] resolvePlatformCodes(Object provider, Method method, Type ownerType,
+            Resource contextResource)
         {
             try
             {
-                Resource res = method.eResource();
+                Resource res = contextResource != null ? contextResource : method.eResource();
                 if (res == null)
                     res = ownerType.eResource();
                 String[] typeNames = {

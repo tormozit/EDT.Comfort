@@ -3964,6 +3964,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             Object info = bslHover.getHoverInfo2(viewer, region);
             if (info == null)
                 return null;
+            info = BslEditorHoverHook.recoverMemberDocumentation(viewer, region.getOffset(), info);
             String html = IrBslHoverHtml.readHtml(info);
             if (html == null || html.isBlank())
                 return null;

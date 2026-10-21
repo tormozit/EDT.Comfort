@@ -713,6 +713,22 @@ public final class BslEditorHoverHook implements IStartup
         return new IrBslTextHoverWrapper(hover, editor, suppressPointerHover);
     }
 
+    /** Подмена страницы ошибки описания члена — общая для наведения и кнопки аннотации. */
+    static Object recoverMemberDocumentation(ITextViewer textViewer, int offset, Object info)
+    {
+        if (!ParamHintHtmlModifier.needsMemberDocumentationRecovery(info)
+            || !(textViewer.getDocument() instanceof IXtextDocument document))
+            return info;
+        Object recovered = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+        {
+            if (resource == null)
+                return info;
+            EObject source = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+            return ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource);
+        });
+        return recovered != null ? recovered : info;
+    }
+
     /** Доработки описания из кнопки аннотации — те же, что при наведении. */
     static java.util.function.Consumer<IInformationControl> createIdentifierDocDecorator(
         ISourceViewer viewer, IRegion region, Object info)
@@ -891,20 +907,7 @@ public final class BslEditorHoverHook implements IStartup
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
             final int offset = hoverRegion.getOffset();
-            if (ParamHintHtmlModifier.needsMemberDocumentationRecovery(info)
-                && textViewer.getDocument() instanceof IXtextDocument document)
-            {
-                final Object baseDocumentation = info;
-                Object recovered = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                {
-                    if (resource == null)
-                        return baseDocumentation;
-                    EObject source = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
-                    return ParamHintHtmlModifier.recoverMemberDocumentation(baseDocumentation, source, resource);
-                });
-                if (recovered != null)
-                    info = recovered;
-            }
+            info = recoverMemberDocumentation(textViewer, offset, info);
             BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
             prepareHoverDecorations(textViewer, hoverRegion, info);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
