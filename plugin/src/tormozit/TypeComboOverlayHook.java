@@ -743,7 +743,7 @@ public class TypeComboOverlayHook implements IStartup
         if (view == null || !coversProperty(propertyLabel))
             return false;
         OverlayState state = PROPERTY_OVERLAYS.get(view);
-        if (state == null || state.text == null || state.text.isDisposed())
+        if (state == null || state.text == null || state.text.isDisposed() || !state.container.getVisible())
             return false;
         boolean focused = state.text.setFocus();
         if (focused)
@@ -934,10 +934,11 @@ public class TypeComboOverlayHook implements IStartup
                 + "), похоже на переходное состояние AEF — пропуск"); //$NON-NLS-1$
             return null;
         }
-        // Резервируем справа полосу под нативную кнопку «...» — не перекрываем её своим
-        // container'ом (см. RIGHT_RESERVED_WIDTH).
+        // Резервируем справа полосу под нативные кнопки «...»/«×» — не перекрываем их своим
+        // container'ом (см. rightReservedWidth).
         realBounds = new Rectangle(realBounds.x, realBounds.y,
-            Math.max(20, realBounds.width - RIGHT_RESERVED_WIDTH), realBounds.height);
+            Math.max(20, realBounds.width - rightReservedWidth(hostComposite, nativeControl, realBounds)),
+            realBounds.height);
 
         List<TypeEntry> entries = loadTypeEntries(typeModel, viewModel);
         if (entries.isEmpty())
@@ -1046,6 +1047,7 @@ public class TypeComboOverlayHook implements IStartup
         state.lastCommittedText = initialText;
 
         installBehaviour(state);
+        syncNativeUsable(state);
 
         // TAB из предыдущего поля мастера по-прежнему приводит фокус на ШТАТНЫЙ LightCombo
         // (мы его не трогаем/не скрываем — он остаётся законной целью traversal, только
@@ -1065,7 +1067,7 @@ public class TypeComboOverlayHook implements IStartup
             // зацикливание (FocusIn на nativeControl → редирект на text → F4-обработчик снова
             // фокусирует nativeControl → ...). state.suppressFocusRedirect выставляется на время
             // этой операции именно для такого случая.
-            if (state.suppressFocusRedirect)
+            if (state.suppressFocusRedirect || !state.container.getVisible())
                 return;
             Display d = state.text.getDisplay();
             d.asyncExec(() ->
@@ -1198,6 +1200,7 @@ public class TypeComboOverlayHook implements IStartup
                 if (!container.isDisposed())
                     container.moveAbove(null);
                 repositionOverlay(state);
+                syncNativeUsable(state);
                 checkExternalChange(state);
             }
             catch (Exception ex)
@@ -1383,12 +1386,56 @@ public class TypeComboOverlayHook implements IStartup
         state.detachedTicks = 0;
         detachRebindCount = 0;
         realBounds = new Rectangle(realBounds.x, realBounds.y,
-            Math.max(20, realBounds.width - RIGHT_RESERVED_WIDTH), realBounds.height);
+            Math.max(20, realBounds.width - rightReservedWidth(state.hostComposite, nativeControl, realBounds)),
+            realBounds.height);
         if (realBounds.equals(container.getBounds()))
             return;
         container.setBounds(realBounds);
         container.layout(true, true);
         diag("repositionOverlay: новый realBounds=" + realBounds + " (nativeControl.bounds сейчас=" + ownBounds + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Ширина правой полосы штатного поля, которую оверлей оставляет открытой: кнопки поля правее
+     * собственной стрелки {@code LightCombo} (она первая в {@code getRightSide()}, наш оверлей её
+     * заменяет своей). У «Тип» реквизита это «...», у «Тип параметра команды» — «...» и «×»
+     * (issue 857). Если стрелку найти не удалось — прежняя полоса на одну кнопку.
+     */
+    private static int rightReservedWidth(Object hostComposite, Object nativeControl, Rectangle realBounds)
+    {
+        Object arrow = Global.invoke(nativeControl, "getArrowButton"); //$NON-NLS-1$
+        Rectangle arrowOwn = arrow != null ? rectangleOf(Global.invoke(arrow, "getBounds")) : null; //$NON-NLS-1$
+        if (arrowOwn == null)
+            return RIGHT_RESERVED_WIDTH;
+        Rectangle arrowReal = rectangleOf(Global.invoke(hostComposite, "translateRectangleFromControl", //$NON-NLS-1$
+            arrow, new Rectangle(0, 0, arrowOwn.width, arrowOwn.height)));
+        if (arrowReal == null)
+            return RIGHT_RESERVED_WIDTH;
+        int reserved = realBounds.x + realBounds.width - (arrowReal.x + arrowReal.width);
+        return reserved > 0 && reserved < realBounds.width / 2 ? reserved : RIGHT_RESERVED_WIDTH;
+    }
+
+    /**
+     * Штатное поле доступно для ввода. «Тип параметра команды» недоступен, пока команда не в
+     * параметризуемой группе (issue 857), — тогда оверлей прячется и видно штатное недоступное поле.
+     */
+    private static boolean isNativeUsable(Object nativeControl)
+    {
+        return !Boolean.FALSE.equals(Global.invoke(nativeControl, "isEnabled")) //$NON-NLS-1$
+            && !Boolean.FALSE.equals(Global.invoke(nativeControl, "isEditable")); //$NON-NLS-1$
+    }
+
+    private static void syncNativeUsable(OverlayState state)
+    {
+        Composite container = state.container;
+        if (container.isDisposed())
+            return;
+        boolean usable = isNativeUsable(state.nativeControl);
+        if (usable == container.getVisible())
+            return;
+        if (!usable)
+            hidePopup(state, "штатное поле недоступно"); //$NON-NLS-1$
+        container.setVisible(usable);
     }
 
     /** Пара «объект типа + отображаемое имя + иконка» — {@code label}/{@code icon} сопоставлены по индексу. */
