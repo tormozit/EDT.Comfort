@@ -170,6 +170,7 @@
     <startup class="tormozit.LaunchSaveDirtyEditorsHook"/>
     <startup class="tormozit.SaveResourceDialogHook"/>
     <startup class="tormozit.PlatformMinBuildRequirementHook"/>
+    <startup class="tormozit.DynamicFeatureAccessComputerHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>

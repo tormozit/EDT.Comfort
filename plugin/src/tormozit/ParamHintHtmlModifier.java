@@ -277,12 +277,6 @@ public final class ParamHintHtmlModifier
             Point showSize = shell.getSize();
             Rectangle mon = paramHintMonitorClient(shell);
             boolean giant = isGiantParamHintSize(showSize, HOVER_FALLBACK_SIZE, mon);
-            // #region agent log
-            StyledText showAnchor = paramHintAnchorWidget(hoverForBounds);
-            Global.tempLog("param-hint-geometry", "show shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
-                + " bounds=" + shell.getBounds() + " monitor=" + mon + " giant=" + giant //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " caret=" + caretDisplayLocation(showAnchor)); //$NON-NLS-1$
-            // #endregion
             if (showLoc.x <= 8 || giant)
             {
                 int prevAlpha = 255;
@@ -296,15 +290,7 @@ public final class ParamHintHtmlModifier
                 catch (Exception ignored)
                 {
                 }
-                boolean moved = ensureParamHintShellGeometry(shell,
-                    paramHintAnchorWidget(hoverForBounds));
-                ContentAssistSessionReloader.logLinkedMode("show.relocate", //$NON-NLS-1$
-                    "{\"before\":\"" + showLoc.x + "," + showLoc.y //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\",\"after\":\"" + shell.getLocation().x + "," + shell.getLocation().y //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\",\"size\":\"" + shell.getSize().x + "x" + shell.getSize().y //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\",\"moved\":" + moved //$NON-NLS-1$
-                        + ",\"giant\":" + giant //$NON-NLS-1$
-                        + ",\"alpha\":" + alphaHidden + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                ensureParamHintShellGeometry(shell, paramHintAnchorWidget(hoverForBounds));
                 if (alphaHidden)
                 {
                     try
@@ -398,8 +384,6 @@ public final class ParamHintHtmlModifier
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
                     boolean alreadyVisible = isParamHintAlreadyVisible();
-                    ContentAssistSessionReloader.logLinkedMode("cmd.post", "{\"visible\":" //$NON-NLS-1$ //$NON-NLS-2$
-                        + alreadyVisible + "}"); //$NON-NLS-1$
                     // Синхронно и только при реальном промахе — без asyncExec (иначе
                     // подмена comfort→EDT через ~50мс в основном режиме).
                     if (!alreadyVisible)
@@ -776,8 +760,6 @@ public final class ParamHintHtmlModifier
 
         void compute(XtextResource resource, int caret)
         {
-            Global.tempLog("param-hint-info", "compute caret=" + caret + " thread=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + Thread.currentThread().getName() + " resource=" + resource.getURI()); //$NON-NLS-1$
             // Та же подготовка первого аргумента, что у openParamHintWithoutHighlight,
             // но по уже захваченному ресурсу: без обращения к активному SWT-редактору.
             EObject invocation = findInvocationLikeAt(resource, caret);
@@ -801,8 +783,6 @@ public final class ParamHintHtmlModifier
                 {
                 }
             }
-            Global.tempLog("param-hint-info", "computed caret=" + caret + " info=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (info != null ? info.getClass().getName() : "null")); //$NON-NLS-1$
         }
 
         boolean isReady()
@@ -849,8 +829,6 @@ public final class ParamHintHtmlModifier
                     resource, caret));
             if (info == null)
             {
-                ContentAssistSessionReloader.logLinkedMode("openFast.skip", //$NON-NLS-1$
-                    "{\"reason\":\"noInfo\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
             Object oldControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
@@ -867,8 +845,6 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ex)
         {
-            ContentAssistSessionReloader.logLinkedMode("openFast.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return false;
         }
     }
@@ -1149,15 +1125,10 @@ public final class ParamHintHtmlModifier
             // null из-за ошибки рефлексии, не отличая её от штатного отсутствия подсказки.
             @SuppressWarnings("unchecked")
             IUnitOfWork<Object, XtextResource> work = (IUnitOfWork<Object, XtextResource>) unit;
-            Object info = work.exec(resource);
-            Global.tempLog("param-hint-info", "stock result caret=" + caret + " present=" + (info != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return info;
+            return work.exec(resource);
         }
         catch (Exception | LinkageError ex)
         {
-            Global.tempLogException("param-hint-info", "stockParameterInfo caret=" + caret, ex); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistSessionReloader.logLinkedMode("stockInfo.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return null;
         }
     }
@@ -1199,9 +1170,6 @@ public final class ParamHintHtmlModifier
             "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider", filled); //$NON-NLS-1$
         fillHandlerService(handler, rsp, "languageProvider", //$NON-NLS-1$
             "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider", filled); //$NON-NLS-1$
-        if (filled.length() > 0)
-            ContentAssistSessionReloader.logLinkedMode("stockInfo.inject", "{\"filled\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + filled.toString().trim() + "\"}"); //$NON-NLS-1$
     }
 
     /** UI-сервисы отсутствуют в ресурсном инжекторе; источник — UI-инжектор языка BSL. */
@@ -1219,9 +1187,6 @@ public final class ParamHintHtmlModifier
             if (provider != null)
                 Global.setFieldForce(handler, "languageProvider", provider); //$NON-NLS-1$
         }
-        Global.tempLog("param-hint-info", "ui services documentation=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (Global.getField(handler, "documentation") != null) //$NON-NLS-1$
-            + " languageProvider=" + (Global.getField(handler, "languageProvider") != null)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void fillHandlerService(Object handler, IResourceServiceProvider rsp,
@@ -1335,8 +1300,6 @@ public final class ParamHintHtmlModifier
             Object handler = resolveParamHoverHandlerForMiss();
             if (handler == null)
             {
-                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                    "{\"reason\":\"handlerNull\"}"); //$NON-NLS-1$
                 return false;
             }
             Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
@@ -1353,8 +1316,6 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ex)
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return false;
         }
     }
@@ -1550,25 +1511,12 @@ public final class ParamHintHtmlModifier
         CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
         if (siteInfo == null)
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"noCallSite\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         if (expressionStart >= 0 && siteInfo.methodAccessEnd < expressionStart)
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"wrapperCall\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"methodEnd\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
-                    + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
-        ContentAssistSessionReloader.logLinkedMode("miss.site", "{\"owner\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + (siteInfo.owner != null && siteInfo.owner.eClass() != null
-                ? siteInfo.owner.eClass().getName() : "null") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"caret\":" + caret //$NON-NLS-1$
-            + ",\"first\":" + siteInfo.methodAccessEnd //$NON-NLS-1$
-            + ",\"last\":" + siteInfo.callEnd //$NON-NLS-1$
-            + ",\"seps\":" + siteInfo.separatorOffsets + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // Вызов берём тот же, чьи границы посчитаны в siteInfo: отдельный
         // поиск по каретке давал вложенный вызов, начинающийся ровно у неё,
         // и подсказка расходилась с границами.
@@ -1587,14 +1535,7 @@ public final class ParamHintHtmlModifier
             invocation = findInvocationNear(resolved);
         }
         if (ctorOwner == null && (invocation == null || invocation.getMethodAccess() == null))
-        {
-            String resolvedName = resolved != null && resolved.eClass() != null
-                ? resolved.eClass().getName() : "null"; //$NON-NLS-1$
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"noInvocation\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"resolved\":\"" + ContentAssistDebug.jsonEscapeForLog(resolvedName) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
         FeatureAccess methodAccess = invocation != null ? invocation.getMethodAccess() : null;
         IResourceServiceProvider rsp = resource.getURI() != null
             ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
@@ -1608,8 +1549,6 @@ public final class ParamHintHtmlModifier
         // прямо в типе (Type.getCtors), как и у штатного обработчика.
         if (ctorOwner == null && (computer == null || environments == null))
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"noComputer\"}"); //$NON-NLS-1$
             return null;
         }
 
@@ -1641,8 +1580,6 @@ public final class ParamHintHtmlModifier
         }
         if (documentationLocal == null)
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"noDoc\"}"); //$NON-NLS-1$
             return null;
         }
         String lang = asString(Global.invoke(languageProviderLocal, "getLanguage")); //$NON-NLS-1$
@@ -1661,11 +1598,6 @@ public final class ParamHintHtmlModifier
             EList<Ctor> ctors = ctorType != null ? ctorType.getCtors() : null;
             if (ctors == null || ctors.isEmpty())
             {
-                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                    "{\"reason\":\"noCtors\",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ContentAssistDebug.jsonEscapeForLog(String.valueOf(
-                            ctorType != null ? Global.invoke(ctorType, "getName") : null)) //$NON-NLS-1$
-                        + "\"}"); //$NON-NLS-1$
                 return null;
             }
             for (Ctor ctorDef : ctors)
@@ -1691,8 +1623,6 @@ public final class ParamHintHtmlModifier
                 methodAccess, environments);
             if (!(plain instanceof List<?> resolvedEntries) || resolvedEntries.isEmpty())
             {
-                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                    "{\"reason\":\"noEntries\"}"); //$NON-NLS-1$
                 return null;
             }
             entries = resolvedEntries;
@@ -1725,8 +1655,6 @@ public final class ParamHintHtmlModifier
         }
         if (caPages.isEmpty())
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                "{\"reason\":\"noPages\"}"); //$NON-NLS-1$
             return null;
         }
 
@@ -1883,15 +1811,11 @@ public final class ParamHintHtmlModifier
                 provisionalControl = new java.lang.ref.WeakReference<>(Global.getField(handler, "infoControl")); //$NON-NLS-1$
                 provisionalInfo = new java.lang.ref.WeakReference<>(info);
             }
-            ContentAssistSessionReloader.logLinkedMode("hint.provisional", "{\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"pages\":" + pages.size() + ",\"open\":" + openParen + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return shown;
         }
         catch (Exception | LinkageError ex)
         {
             // Модель метода могла меняться параллельно — тогда подсказку покажет опрос.
-            ContentAssistSessionReloader.logLinkedMode("hint.provisional.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return false;
         }
     }
@@ -1936,13 +1860,10 @@ public final class ParamHintHtmlModifier
             }
             sigPickOnOpenPending.set(true);
             boolean shown = showParamInfoViaHandler(handler, viewer, target, site, true, false);
-            ContentAssistSessionReloader.logLinkedMode("hint.provisional.refine", "{\"shown\":" + shown + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return shown;
         }
         catch (Exception | LinkageError ex)
         {
-            ContentAssistSessionReloader.logLinkedMode("hint.provisional.refineErr", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return false;
         }
         finally
@@ -1996,8 +1917,6 @@ public final class ParamHintHtmlModifier
             Object handler = resolveParamHoverHandlerForMiss();
             if (handler == null)
             {
-                ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                    "{\"reason\":\"handlerNull\"}"); //$NON-NLS-1$
                 return false;
             }
             Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
@@ -2038,26 +1957,16 @@ public final class ParamHintHtmlModifier
                     if (expressionStart >= 0 && firstPos instanceof Integer first
                         && first.intValue() < expressionStart)
                     {
-                        ContentAssistSessionReloader.logLinkedMode("miss.skip", //$NON-NLS-1$
-                            "{\"reason\":\"wrapperCall\",\"path\":\"stock\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                                + ",\"methodEnd\":" + first //$NON-NLS-1$
-                                + ",\"exprStart\":" + expressionStart + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                         return Boolean.FALSE;
                     }
                     if (hasParamInfoPages(stockInfo))
                     {
                         boolean stockShown = showParamInfoViaHandler(handlerRef, viewer, stockInfo,
                             site, true, true);
-                        ContentAssistSessionReloader.logLinkedMode("miss.stock", "{\"shown\":" //$NON-NLS-1$ //$NON-NLS-2$
-                            + stockShown + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                         if (stockShown)
                             return Boolean.TRUE;
                     }
                 }
-                ContentAssistSessionReloader.logLinkedMode("miss.stock", //$NON-NLS-1$
-                    "{\"shown\":false,\"reason\":\"" //$NON-NLS-1$
-                        + (stockInfo == null ? "noInfo" : "noPages") //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
 
                 RecoveredParamHint recovered = recoverParamHint(resource, caret, expressionStart,
                     documentation, languageProvider);
@@ -2077,14 +1986,10 @@ public final class ParamHintHtmlModifier
                 }
                 return Boolean.valueOf(shown);
             });
-            ContentAssistSessionReloader.logLinkedMode("miss.open", "{\"opened\":" + opened //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return Boolean.TRUE.equals(opened);
         }
         catch (Exception ex)
         {
-            ContentAssistSessionReloader.logLinkedMode("miss.err", "{\"ex\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$
             return false;
         }
     }
@@ -2522,10 +2427,6 @@ public final class ParamHintHtmlModifier
             // положение посчитано по другому размеру. Иначе — по обычным правилам, иначе
             // окно ездило бы за кареткой при каждой смене параметра (вспышки в модуле).
             relocateNearParamHintAnchor(shell, paramHintAnchorWidget(control), resized);
-            // #region agent log
-            Global.tempLog("param-hint-geometry", "updateSize shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
-                + " intended=" + intended + " resized=" + resized + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
         }
         catch (Exception | LinkageError ignored)
         {
@@ -3504,10 +3405,6 @@ public final class ParamHintHtmlModifier
             changed |= relocateParamHintShellNearCaret(shell, st, shrunk);
         else
             changed |= relocateParamHintShellNearCaret(shell, shrunk);
-        // #region agent log
-        Global.tempLog("param-hint-geometry", "ensure shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
-            + " shrunk=" + shrunk + " changed=" + changed + " bounds=" + shell.getBounds()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         return changed;
 
 
@@ -3578,9 +3475,6 @@ public final class ParamHintHtmlModifier
         Point caret = caretDisplayLocation(st);
         if (caret == null)
         {
-            // #region agent log
-            Global.tempLog("param-hint-geometry", "relocate noCaret shell=" + System.identityHashCode(shell)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return false;
         }
         Point size = shell.getSize();
@@ -3600,14 +3494,6 @@ public final class ParamHintHtmlModifier
         if (target == null)
             return false;
         Point now = shell.getLocation();
-        // #region agent log
-        Global.tempLog("param-hint-geometry", "relocate shell=" + System.identityHashCode(shell) //$NON-NLS-1$ //$NON-NLS-2$
-            + " caret=" + caret + " widgetCaret=" + st.getCaretOffset() + " top=" + st.getTopIndex() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " now=" + now + " size=" + size + " actualSize=" + shell.getSize() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " target=" + target + " force=" + force //$NON-NLS-1$ //$NON-NLS-2$
-            + " far=" + (Math.abs(now.x - caret.x) > 200 || Math.abs(now.y - caret.y) > 200 || now.x <= 8) //$NON-NLS-1$
-            + " wrongSide=" + (now.y > caret.y && target.y + size.y <= caret.y)); //$NON-NLS-1$
-        // #endregion
         if (Math.abs(now.x - target.x) <= 8 && Math.abs(now.y - target.y) <= 8)
         {
             return false;
@@ -4593,8 +4479,6 @@ public final class ParamHintHtmlModifier
             // перерисуется штатным showPage при переходе каретки в другой параметр.
             return;
         }
-        Global.tempLog("param-hint-prefix", "branch=change prev=" + prev //$NON-NLS-1$ //$NON-NLS-2$
-            + " desired=" + desired); //$NON-NLS-1$
         Object page = ctx.pages.get(ctx.pageIndex);
         Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
         List<?> params = paramsObj instanceof List<?> typed ? typed : Collections.emptyList();
@@ -4620,8 +4504,6 @@ public final class ParamHintHtmlModifier
         // Перерисовка уже применяет номер из ctx. Не оставлять от предыдущего showPage
         // отложенную пометку: следующий Progress иначе вернёт старый формальный параметр.
         browser.setData(CURRENT_PARAM_INDEX_MARK, null);
-        Global.tempLog("param-hint-current", "render current=" + ctx.currentArgIndex //$NON-NLS-1$ //$NON-NLS-2$
-            + " stockPageParam=" + ctx.paramIndex); //$NON-NLS-1$
         String html = browser.getText();
         String heading = rewriteHeadingOptionalParams(html, ctx);
         if (heading == null)
@@ -5653,16 +5535,6 @@ public final class ParamHintHtmlModifier
             isOut = null;
         }
 
-        // #region agent log
-        Global.tempLog("param-hint-prefix", "page=" + ctxPageIndex(ctx) //$NON-NLS-1$
-            + " hl=" + highlightSafe(ctx) //$NON-NLS-1$
-            + " name=" + (paramName == null ? "-" : paramName) //$NON-NLS-1$
-            + " virt=" + virtualParam //$NON-NLS-1$
-            + " method=" + (ctx == null || ctx.method == null) //$NON-NLS-1$
-            + " pidx=" + (ctx == null ? -1 : ctx.paramIndex) //$NON-NLS-1$
-            + " isOut=" + isOut + " prefix=\"" + buildDirectionPrefix(isOut) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " caller=" + modifyContentCaller()); //$NON-NLS-1$
-        // #endregion
         String directionPrefix = buildDirectionPrefix(isOut);
         boolean copy = Boolean.TRUE.equals(isOut) && ctx != null && ctx.serverCall;
         if (copy)
@@ -5903,8 +5775,6 @@ public final class ParamHintHtmlModifier
                     language != null ? language : "ru"); //$NON-NLS-1$
                 List<Object> pages = new ArrayList<>();
                 FindMissSupport.collectContentAssistPages(group, pages);
-                Global.tempLog("param-hint-documentation", "source=" + capture.methodUri //$NON-NLS-1$ //$NON-NLS-2$
-                    + " nativeComment=" + (capture.comment != null) + " pages=" + pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (pages.isEmpty())
                     return null;
                 NativeDocumentation result = new NativeDocumentation(capture.comment, pages.get(0));
@@ -5930,8 +5800,6 @@ public final class ParamHintHtmlModifier
                 for (Object parameter : list)
                     if (name.equalsIgnoreCase(asString(Global.invoke(parameter, "getName")))) //$NON-NLS-1$
                     {
-                        Global.tempLog("param-hint-documentation", "parameter=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                            + " types=" + formatParamContentTypes(parameter)); //$NON-NLS-1$
                         return parameter;
                     }
             return null;
@@ -6100,8 +5968,6 @@ public final class ParamHintHtmlModifier
                         {
                             INode node = NodeModelUtils.findActualNodeFor(access.getSource());
                             String sourceText = node != null ? NodeModelUtils.getTokenText(node).trim() : null;
-                            Global.tempLog("param-hint-documentation", "receiver=" + sourceText //$NON-NLS-1$ //$NON-NLS-2$
-                                + " sourceOffset=" + (node != null ? node.getOffset() : -1)); //$NON-NLS-1$
                             return sourceText;
                         }
                         return null;
@@ -6550,39 +6416,6 @@ public final class ParamHintHtmlModifier
         return isOut.booleanValue() ? "Вых. - " : "Вх. - "; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static int ctxPageIndex(HoverContext ctx)
-    {
-        return ctx == null || ctx.pageIndex < 0 ? -1 : ctx.pageIndex;
-    }
-
-    private static int highlightSafe(HoverContext ctx)
-    {
-        try
-        {
-            if (ctx == null || ctx.pages == null || ctx.pages.isEmpty()
-                || ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
-                return -1;
-            return currentParamHighlightIndex(ctx, countPageParams(ctx.pages.get(ctx.pageIndex)));
-        }
-        catch (Exception | LinkageError ignored)
-        {
-            return -2;
-        }
-    }
-
-    private static String modifyContentCaller()
-    {
-        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-        for (int i = 1; i < stack.length; i++)
-        {
-            String name = stack[i].getMethodName();
-            if ("modifyContentHtml".equals(name) || "invoke0".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
-                continue;
-            return name;
-        }
-        return "?"; //$NON-NLS-1$
-    }
-
     private static String buildMetaSuffix(String defaultDescription, String description)
     {
         StringBuilder sb = new StringBuilder();
@@ -6926,13 +6759,9 @@ public final class ParamHintHtmlModifier
         // AST может отставать и для обычного метода, где кэша ключей структуры нет.
         // Номер берём из живых запятых открытой подсказки, в том числе за последним
         // формальным параметром: такой слот рисуется как жирный «?».
-        int snapshotArg = ctx.currentArgIndex;
         int liveArg = stockArgIndexAtCaret();
         if (liveArg >= 0)
             ctx.currentArgIndex = liveArg;
-        Global.tempLog("param-hint-current", "snapshot=" + snapshotArg + " live=" + liveArg //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " current=" + ctx.currentArgIndex + " stockPageParam=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$
-            + " invocationFound=" + ctx.invocationFound + " commas=" + stockCommas()); //$NON-NLS-1$ //$NON-NLS-2$
         return ctx;
     }
 

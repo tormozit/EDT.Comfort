@@ -974,14 +974,6 @@ boolean inLiteral = endCaret >= 0
                 try
                 {
                     resetAssistFilterPrefixOnNonFilterChar(event);
-                    try
-                    {
-                        logAssistInsertDocumentChanged(event);
-                        logParamHintDocumentChanged(event);
-                    }
-                    catch (Exception ignored)
-                    {
-                    }
                     scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
                     maybeShowParamHintOnChar();
                     onDocumentChangedForCompletionAutoOpen(event);
@@ -1048,11 +1040,6 @@ boolean inLiteral = endCaret >= 0
             return;
         if (!insertInProgress)
         {
-            logLinkedMode("prepare.skip", "{\"reason\":\"notInsert\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
-                + ",\"applyFlag\":" //$NON-NLS-1$
-                + Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         // ИР-вставка: не трогать EDT DataEvent/LinkedMode (ключ Структура() после trim).
@@ -1067,10 +1054,6 @@ boolean inLiteral = endCaret >= 0
                 pendingParamHintDesiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
                 scheduleParamHintAfterInsert();
             }
-            logLinkedMode("prepare.skip", "{\"reason\":\"irApply\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"replaceParent\":" + replaceParent //$NON-NLS-1$
-                + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (text.isEmpty() || !hasParen)
@@ -1080,14 +1063,11 @@ boolean inLiteral = endCaret >= 0
         IDocumentListener bslListener = findBslDocumentListener(doc);
         if (bslListener == null)
         {
-            logLinkedMode("prepare.skip", "{\"reason\":\"noBslListener\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         pendingBslDocumentListener = bslListener;
-        DataEventDiag before = readDataEventDiag(bslListener, text);
-        int clearedChoices = clearProposalPositionChoices(bslListener, text);
-        int filtered = sanitizeDataEventObjectsWithoutRsp(bslListener, text);
+        clearProposalPositionChoices(bslListener, text);
+        sanitizeDataEventObjectsWithoutRsp(bslListener, text);
         DataEventDiag after = readDataEventDiag(bslListener, text);
         int open = text.indexOf('(');
         int desiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
@@ -1112,16 +1092,7 @@ boolean inLiteral = endCaret >= 0
         // показана наша (см. runInvocationParametersHoverCommand): иначе при любом
         // промахе нашего показа пользователь остаётся вообще без подсказки — так и вышло
         // с вводом «(» (лог 00:59:15: dropped → poll.skip caretMismatch → пусто).
-        logLinkedMode("prepare", "{\"offset\":" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"desired\":" + desiredCaret //$NON-NLS-1$
-            + ",\"clearedChoices\":" + clearedChoices //$NON-NLS-1$
-            + ",\"filtered\":" + filtered //$NON-NLS-1$
-            + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
-            + ",\"before\":" + before.toJson() //$NON-NLS-1$
-            + ",\"after\":" + after.toJson() //$NON-NLS-1$
-            + ",\"mapKeys\":" + sampleDataEventMapKeys(bslListener, 8) //$NON-NLS-1$
-            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
+        scheduleDropLinkedModeHintAfterDoIt(doc, event.getOffset(), text);
     }
 
     /** Подсказка параметров после вставки, для которой штатный DataEvent не поднимается. */
@@ -1141,8 +1112,7 @@ boolean inLiteral = endCaret >= 0
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
             return;
-        final int desired = pendingParamHintDesiredCaret;
-        display.asyncExec(() -> maybeShowParamHintAfterInsert(desired));
+        display.asyncExec(this::maybeShowParamHintAfterInsert);
     }
 
     /**
@@ -1208,8 +1178,6 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintOnChar = false;
         int caret = pendingParamHintOnCharCaret;
         pendingParamHintOnCharCaret = -1;
-        char hintKind = pendingParamHintKind;
-        int modelCaret = modelCaretOffset();
         boolean applyInProgress =
             Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
         boolean hoverVisible = isParamHoverShellVisible() || isParamHoverInfoControlVisible();
@@ -1219,23 +1187,13 @@ boolean inLiteral = endCaret >= 0
         if (caret < 0 || applyInProgress || suppressDocumentAutoOpenAfterSession || hoverBlocks)
         {
             pendingParamHintKind = 0;
-            logLinkedMode("hint.onChar.skip", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
-                + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"apply\":" + applyInProgress //$NON-NLS-1$
-                + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
-                + ",\"hover\":" + hoverVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         pendingShowParamHintAfterInsert = true;
         pendingParamHintDesiredCaret = caret;
         // Если LinkedMode успел показать свою — снимаем: показываем только нашу.
-        forceRemoveLinkedModeParamHintListeners("onChar"); //$NON-NLS-1$
-        logLinkedMode("hint.onChar", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
-            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        maybeShowParamHintAfterInsert(caret);
+        forceRemoveLinkedModeParamHintListeners();
+        maybeShowParamHintAfterInsert();
     }
 
     /**
@@ -1243,20 +1201,13 @@ boolean inLiteral = endCaret >= 0
      * не поднимается. Ждём AST ({@code Invocation} у каретки), затем один
      * {@code executeCommand(InvocationParametersHover)}.
      */
-    private void maybeShowParamHintAfterInsert(int caret)
+    private void maybeShowParamHintAfterInsert()
     {
         boolean pending = pendingShowParamHintAfterInsert;
         int desired = pendingParamHintDesiredCaret;
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
         int modelCaret = modelCaretOffset();
         if (!pending)
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"notPending\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"passed\":" + caret //$NON-NLS-1$
-                + ",\"desired\":" + desired //$NON-NLS-1$
-                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-                + ",\"hover\":" + isParamHoverShellVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         pendingShowParamHintAfterInsert = false;
@@ -1267,13 +1218,11 @@ boolean inLiteral = endCaret >= 0
         pendingParamHintSignature = null;
         if (desired < 0)
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"noDesired\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"passed\":" + caret + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         // LinkedMode-автоподсказку снимаем синхронно до опроса: иначе первый тик
         // видит чужое окно и раньше выходил (см. poll.dismissHover).
-        forceRemoveLinkedModeParamHintListeners("afterInsert"); //$NON-NLS-1$
+        forceRemoveLinkedModeParamHintListeners();
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
             ParamHintHtmlModifier.dismissAllVisible();
         // Каретка ещё после «)» — подвинем до старта опроса (не ждать async1).
@@ -1302,7 +1251,8 @@ boolean inLiteral = endCaret >= 0
             // не обновлён, и setSelectedRange падает с IllegalArgumentException
             // (Index out of bounds), унося с собой весь показ подсказки — подсказка по
             // «,» гасла и не возвращалась, по «(» не открывалась вовсе. Каретка виджета
-            // догоняет набранный символ сама, к началу опроса (см. poll.caretAdopt).
+            // догоняет набранный символ сама, к началу опроса (см. подстройку каретки
+            // в pollAstReadyThenShowParamHint).
             if (hintKind == 0 && (isExpressionFieldViewer() || modelCaret == insertEnd))
             {
                 try
@@ -1312,20 +1262,13 @@ boolean inLiteral = endCaret >= 0
                 }
                 catch (RuntimeException ex)
                 {
-                    logLinkedMode("hint.restoreCaret.err", "{\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) //$NON-NLS-1$
-                        + "\"}"); //$NON-NLS-1$
                 }
-                logLinkedMode("hint.restoreCaret", "{\"from\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"desired\":" + desired + ",\"after\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + modelCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         // Сразу после вставки из списка — подсказка по сигнатуре пункта, без ожидания модели
@@ -1340,8 +1283,6 @@ boolean inLiteral = endCaret >= 0
         if (paramHintPollActive)
         {
             paramHintPollDesired = desired;
-            logLinkedMode("hint.poll.reuse", "{\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"kind\":\"" + hintKind + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         final int desiredCaret = desired;
@@ -1349,12 +1290,6 @@ boolean inLiteral = endCaret >= 0
         paramHintPollActive = true;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
-        logLinkedMode("hint.poll", "{\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"desired\":" + desiredCaret //$NON-NLS-1$
-            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"mismatch\":" + (modelCaret != desiredCaret) //$NON-NLS-1$
-            + ",\"gen\":" + gen //$NON-NLS-1$
-            + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         display.timerExec(0,
             () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs, 0L, hintKind));
     }
@@ -1403,13 +1338,12 @@ boolean inLiteral = endCaret >= 0
             if (prepared != null && !prepared.done)
             {
                 prepared.job.cancel();
-                deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "cancelPrevious"); //$NON-NLS-1$
+                deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind);
                 return;
             }
             ParamHintHtmlModifier.PreparedParamHint hint = ParamHintHtmlModifier.captureParamHint(viewer);
             if (hint == null)
             {
-                Global.tempLog("param-hint-background", "no handler gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
                 paramHintPollActive = false;
                 paramHintPollDesired = -1;
                 return;
@@ -1417,7 +1351,6 @@ boolean inLiteral = endCaret >= 0
             boolean syncRead = isExpressionFieldViewer();
             ParamHintPreparation request = new ParamHintPreparation(doc, gen, caret, stamp, hint);
             request.job = org.eclipse.core.runtime.jobs.Job.create("Комфорт: подготовка подсказки параметров", monitor -> { //$NON-NLS-1$
-                Global.tempLog("param-hint-background", "begin gen=" + gen + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 java.util.function.BooleanSupplier obsolete = () -> monitor.isCanceled()
                     || gen != paramHintPostGen.get() || paramHintDocumentStamp(doc) != request.stamp;
                 try
@@ -1435,9 +1368,6 @@ boolean inLiteral = endCaret >= 0
                                 // уже в тексте, но ещё не в AST — подсказка выделила бы прежний
                                 // параметр и так и осталась бы с ним.
                                 request.modelStale = isParseBehindDocument(resource, doc);
-                                Global.tempLog("param-hint-info", "ast gen=" + gen + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                                    + " description=" + request.ast + " model=" + describeModelState(doc) //$NON-NLS-1$ //$NON-NLS-2$
-                                    + " around=" + SmartContentAssistProcessor.uiBlockAround(doc, caret)); //$NON-NLS-1$
                                 if (!obsolete.getAsBoolean())
                                     request.hint.compute(resource, caret);
                             }
@@ -1453,13 +1383,10 @@ boolean inLiteral = endCaret >= 0
                 }
                 catch (Exception e)
                 {
-                    Global.tempLogException("param-hint-background", "prepare gen=" + gen, e); //$NON-NLS-1$ //$NON-NLS-2$
                     return org.eclipse.core.runtime.Status.CANCEL_STATUS;
                 }
                 finally
                 {
-                    Global.tempLog("param-hint-background", "end gen=" + gen + " ready=" + hint.isReady() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " obsolete=" + obsolete.getAsBoolean()); //$NON-NLS-1$
                     request.done = true;
                 }
             });
@@ -1481,13 +1408,13 @@ boolean inLiteral = endCaret >= 0
         {
             if (System.currentTimeMillis() - startedMs >= PARAM_HINT_AST_TIMEOUT_MS)
                 prepared.job.cancel();
-            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "background"); //$NON-NLS-1$
+            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind);
             return;
         }
         if (prepared.ast == null || !prepared.hint.isReady())
         {
             prepared.used = true;
-            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind, "noInfo"); //$NON-NLS-1$
+            deferParamHintForModel(caret, gen, attempt, startedMs, lastExecMs, hintKind);
             return;
         }
         pollAstReadyThenShowParamHintInternal(caret, gen, attempt, startedMs, lastExecMs, hintKind, prepared);
@@ -1529,7 +1456,6 @@ boolean inLiteral = endCaret >= 0
                 catch (RuntimeException e)
                 {
                     // EDT успела поставить задание между проверкой состояния и setRule.
-                    Global.tempLogException("param-hint-model-hold", "attach rule", e); //$NON-NLS-1$ //$NON-NLS-2$
                     return null;
                 }
             }
@@ -1553,21 +1479,18 @@ boolean inLiteral = endCaret >= 0
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException("param-hint-model-hold", "acquire rule", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
 
     private void deferParamHintForModel(int desiredCaret, int gen, int attempt, long startedMs,
-        long lastExecMs, char hintKind, String reason)
+        long lastExecMs, char hintKind)
     {
         long waitMs = System.currentTimeMillis() - startedMs;
         // Предварительная подсказка уже видна — модель ждём дольше: проверка EDT держит документ
         // секундами, а без замены подсказка останется без уточнения.
         boolean expired = ParamHintHtmlModifier.isProvisionalParamHintVisible()
             ? waitMs >= PARAM_HINT_PROVISIONAL_TIMEOUT_MS : waitMs >= PARAM_HINT_AST_TIMEOUT_MS;
-        Global.tempLog("param-hint-model-hold", "defer gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " reason=" + reason + " waitMs=" + waitMs + " expired=" + expired); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         StyledText st = viewer != null ? viewer.getTextWidget() : null;
         if (expired || st == null || st.isDisposed())
         {
@@ -1602,8 +1525,6 @@ boolean inLiteral = endCaret >= 0
             // вставленного символа), а каретка виджета к этому моменту ещё не сдвинулась —
             // отсюда расхождение ровно в один символ, из-за которого показ по «(» ждал
             // до таймаута и не срабатывал (лог 00:59:18: caret=281 desired=282).
-            logLinkedMode("poll.caretAdopt", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"desired\":" + desiredResolved + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             desiredResolved = caret;
             paramHintPollDesired = caret;
         }
@@ -1612,11 +1533,6 @@ boolean inLiteral = endCaret >= 0
         {
             if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
             {
-                if (attempt == 0)
-                {
-                    logLinkedMode("poll.waitCaret", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
                     () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
                         lastExecMs, hintKind));
@@ -1624,9 +1540,6 @@ boolean inLiteral = endCaret >= 0
             }
             paramHintPollActive = false;
             paramHintPollDesired = -1;
-            logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-                + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         // Чужую/криво позиционированную подсказку (в т.ч. в навигаторе) снимаем всегда:
@@ -1636,10 +1549,8 @@ boolean inLiteral = endCaret >= 0
         if ((isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
             && !ParamHintHtmlModifier.isProvisionalParamHintVisible())
         {
-            removeLinkedModeParamHintListeners("poll"); //$NON-NLS-1$
+            removeLinkedModeParamHintListeners();
             ParamHintHtmlModifier.dismissAllVisible();
-            logLinkedMode("poll.dismissHover", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"caret\":" + caret + ",\"kind\":\"" + hintKind + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         // После автооткрытого списка shell попапа ещё активен / фокус не в StyledText —
         // штатный computeLocation тогда сажает окно у левого края монитора (навигатор).
@@ -1652,14 +1563,6 @@ boolean inLiteral = endCaret >= 0
             boolean caretReady = ParamHintHtmlModifier.isCaretDisplayReady(st);
             if ((assistOpen || !focused || !caretReady) && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
             {
-                if (attempt == 0)
-                {
-                    logLinkedMode("poll.waitFocus", "{\"assistOpen\":" + assistOpen //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"focused\":" + focused //$NON-NLS-1$
-                        + ",\"caretReady\":" + caretReady //$NON-NLS-1$
-                        + ",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                            describeActiveShell()) + "\"}"); //$NON-NLS-1$
-                }
                 if (!focused)
                     st.setFocus();
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
@@ -1674,8 +1577,7 @@ boolean inLiteral = endCaret >= 0
         String modelBusy = paramHintModelBusyReason(pollDoc);
         if (modelBusy != null)
         {
-            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
-                "beforeAst:" + modelBusy); //$NON-NLS-1$
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind);
             return;
         }
         String astAt = prepared.ast;
@@ -1684,8 +1586,7 @@ boolean inLiteral = endCaret >= 0
         modelBusy = paramHintModelBusyReason(pollDoc);
         if (modelBusy != null)
         {
-            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
-                "afterAst:" + modelBusy); //$NON-NLS-1$
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind);
             return;
         }
         boolean ownOpen = isOwnCallOpenParen(astAt, desiredCaret);
@@ -1696,10 +1597,6 @@ boolean inLiteral = endCaret >= 0
             astReady = true;
         if (prepared.modelStale)
             astReady = false;
-        Global.tempLog("param-hint-poll", "check gen=" + gen + " attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " stale=" + prepared.modelStale //$NON-NLS-1$
-            + " caret=" + caret + " kind=" + hintKind + " ownOpen=" + ownOpen //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " callCovers=" + callCovers + " astReady=" + astReady + " ast=" + astAt); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // Разбор может догнать документ без изменения его stamp. Повторный опрос
         // обязан подготовить новый ответ, а не ждать с тем же отрицательным AST.
         if (!astReady || (hintKind == ',' && !callCovers))
@@ -1709,11 +1606,6 @@ boolean inLiteral = endCaret >= 0
         {
             if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
             {
-                if (attempt == 0)
-                {
-                    logLinkedMode("poll.waitOwnParen", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
                     () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
                         lastExecMs, hintKind));
@@ -1721,21 +1613,12 @@ boolean inLiteral = endCaret >= 0
             }
             paramHintPollActive = false;
             paramHintPollDesired = -1;
-            logLinkedMode("poll.skip", "{\"reason\":\"notOwnParen\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-                + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (hintKind == ',' && !callCovers)
         {
             if (waitMs < PARAM_HINT_AST_TIMEOUT_MS)
             {
-                if (attempt == 0)
-                {
-                    logLinkedMode("poll.waitCall", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
                 display.timerExec(PARAM_HINT_AST_POLL_MS,
                     () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
                         lastExecMs, hintKind));
@@ -1743,20 +1626,10 @@ boolean inLiteral = endCaret >= 0
             }
             paramHintPollActive = false;
             paramHintPollDesired = -1;
-            logLinkedMode("poll.skip", "{\"reason\":\"notInCall\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-                + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
-            if (attempt == 0)
-            {
-                logLinkedMode("poll.waitAst", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"timeoutMs\":" + PARAM_HINT_AST_TIMEOUT_MS + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
             display.timerExec(PARAM_HINT_AST_POLL_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs,
                     lastExecMs, hintKind));
@@ -1772,23 +1645,14 @@ boolean inLiteral = endCaret >= 0
                     lastExecMs, hintKind));
             return;
         }
-        logLinkedMode("poll.run", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-            + ",\"kind\":\"" + hintKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"ownOpen\":" + ownOpen //$NON-NLS-1$
-            + ",\"astReady\":" + astReady //$NON-NLS-1$
-            + ",\"ast\":\"" + ContentAssistDebug.jsonEscapeForLog(astAt) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(caret)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         modelBusy = paramHintModelBusyReason(pollDoc);
         if (modelBusy != null)
         {
-            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind,
-                "beforeCommand:" + modelBusy); //$NON-NLS-1$
+            deferParamHintForModel(desiredCaret, gen, attempt, startedMs, lastExecMs, hintKind);
             return;
         }
         prepared.used = true;
-        runInvocationParametersHoverCommand(desiredCaret, gen, attempt, prepared);
+        runInvocationParametersHoverCommand(desiredCaret, gen, prepared);
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPollActive = false;
@@ -1799,11 +1663,7 @@ boolean inLiteral = endCaret >= 0
         Shell far = findParamHintShell(false);
         if (far != null && !far.isDisposed())
         {
-            boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(far, st);
-            logLinkedMode("poll.relocate", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"moved\":" + moved //$NON-NLS-1$
-                + ",\"loc\":\"" + far.getLocation().x + "," + far.getLocation().y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ",\"size\":\"" + far.getSize().x + "x" + far.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ParamHintHtmlModifier.ensureParamHintShellGeometry(far, st);
             if (isParamHoverShellVisible())
             {
                 paramHintPollActive = false;
@@ -2066,23 +1926,6 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    private String clipAroundCaret(int caret)
-    {
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        if (doc == null || caret < 0)
-            return ""; //$NON-NLS-1$
-        try
-        {
-            int from = Math.max(0, caret - 40);
-            int to = Math.min(doc.getLength(), caret + 20);
-            return doc.get(from, to - from);
-        }
-        catch (Exception ignored)
-        {
-            return ""; //$NON-NLS-1$
-        }
-    }
-
     /** Видимый shell подсказки параметров рядом с кареткой (probe по handler врёт). */
     private boolean isParamHoverShellVisible()
     {
@@ -2149,31 +1992,6 @@ boolean inLiteral = endCaret >= 0
         return null;
     }
 
-    private static String describeActiveShell()
-    {
-        try
-        {
-            Display display = Display.getCurrent();
-            if (display == null)
-                display = Display.getDefault();
-            if (display == null || display.isDisposed())
-                return "noDisplay"; //$NON-NLS-1$
-            Shell active = display.getActiveShell();
-            if (active == null || active.isDisposed())
-                return "null"; //$NON-NLS-1$
-            Point loc = active.getLocation();
-            Point size = active.getSize();
-            String text = active.getText();
-            return active.getClass().getSimpleName() + "@" + loc.x + "," + loc.y //$NON-NLS-1$ //$NON-NLS-2$
-                + " " + size.x + "x" + size.y //$NON-NLS-1$ //$NON-NLS-2$
-                + (text == null || text.isEmpty() ? "" : " \"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-        catch (Exception ex)
-        {
-            return "err:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
-        }
-    }
-
     private static boolean hasBrowserDescendant(Control root)
     {
         if (root == null || root.isDisposed())
@@ -2199,28 +2017,28 @@ boolean inLiteral = endCaret >= 0
      * собственный метод {@code removeListenersDispose} и закрывает окно, и снимает
      * слушателей — зовём его, а показ делаем своим путём.
      */
-    private void dropLinkedModeParamHint(String reason)
+    private void dropLinkedModeParamHint()
     {
         StyledText text = viewer != null && viewer.getTextWidget() instanceof StyledText st ? st : null;
         Display display = text != null && !text.isDisposed() ? text.getDisplay() : null;
         if (display == null || display.isDisposed())
             return;
         // Слушателя EDT создаёт по ходу вставки — снимаем следующим тактом.
-        display.asyncExec(() -> removeLinkedModeParamHintListeners(reason));
+        display.asyncExec(() -> removeLinkedModeParamHintListeners());
     }
 
     /** Снятие без проверки «наша уже показана»: зовём непосредственно перед своим показом. */
-    private void forceRemoveLinkedModeParamHintListeners(String reason)
+    private void forceRemoveLinkedModeParamHintListeners()
     {
-        removeLinkedModeParamHintListeners(reason, true);
+        removeLinkedModeParamHintListeners(true);
     }
 
-    private void removeLinkedModeParamHintListeners(String reason)
+    private void removeLinkedModeParamHintListeners()
     {
-        removeLinkedModeParamHintListeners(reason, false);
+        removeLinkedModeParamHintListeners(false);
     }
 
-    private void removeLinkedModeParamHintListeners(String reason, boolean force)
+    private void removeLinkedModeParamHintListeners(boolean force)
     {
         try
         {
@@ -2230,24 +2048,17 @@ boolean inLiteral = endCaret >= 0
             // caretMismatch → пусто).
             if (!force && !ParamHintHtmlModifier.isHandlerParamHintVisible())
             {
-                logLinkedMode("linkedModeHint.kept", "{\"reason\":\"" + reason //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"why\":\"ownHintNotShown\"}"); //$NON-NLS-1$
                 return;
             }
             if (!(Global.getField(viewer, "fTextListeners") instanceof java.util.List<?> listeners)) //$NON-NLS-1$
                 return;
-            int dropped = 0;
             for (Object listener : new java.util.ArrayList<>(listeners))
             {
                 if (listener == null
                     || !listener.getClass().getName().endsWith("BslSelectionChangedListener")) //$NON-NLS-1$
                     continue;
                 Global.invoke(listener, "removeListenersDispose"); //$NON-NLS-1$
-                dropped++;
             }
-            if (dropped > 0)
-                logLinkedMode("linkedModeHint.dropped", "{\"reason\":\"" + reason //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"n\":" + dropped + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError ignored)
         {
@@ -2262,7 +2073,7 @@ boolean inLiteral = endCaret >= 0
             || DebugInspectorHook.isInspectExpressionViewer(viewer);
     }
 
-    private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt,
+    private void runInvocationParametersHoverCommand(int desiredCaret, int gen,
         ParamHintPreparation prepared)
     {
         if (gen != paramHintPostGen.get())
@@ -2273,8 +2084,6 @@ boolean inLiteral = endCaret >= 0
         int caret = modelCaretOffset();
         if (caret != desiredCaret)
         {
-            logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (isAnyParamHintShellVisible() || isParamHoverInfoControlVisible())
@@ -2286,19 +2095,16 @@ boolean inLiteral = endCaret >= 0
                 && !ParamHintHtmlModifier.isProvisionalParamHintVisible())
             {
                 paramHintPostGen.incrementAndGet();
-                logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
-            removeLinkedModeParamHintListeners("hover"); //$NON-NLS-1$
+            removeLinkedModeParamHintListeners();
             // Предварительную не закрываем: показ ниже уточнит её в том же окне.
             if (!ParamHintHtmlModifier.isProvisionalParamHintVisible())
                 ParamHintHtmlModifier.dismissAllVisible();
         }
-        ParamHoverProbe probe = new ParamHoverProbe();
         try
         {
             boolean inspect = isExpressionFieldViewer();
-            boolean assistOpen = ContentAssistPopupSync.isPopupVisible(assistant);
             if (!inspect)
             {
                 IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
@@ -2317,46 +2123,21 @@ boolean inLiteral = endCaret >= 0
             // Слушателя LinkedMode-подсказки снимаем здесь же и безусловно: показ уже
             // решён, а если снимать после показа, пользователь видит мигание — сначала
             // чужое окно, потом наше (жалоба 13.09.2026 про «каждое второе открытие»).
-            forceRemoveLinkedModeParamHintListeners("beforeShow"); //$NON-NLS-1$
+            forceRemoveLinkedModeParamHintListeners();
             if (!ParamHintHtmlModifier.isProvisionalParamHintVisible())
                 ParamHintHtmlModifier.dismissAllVisible();
-            boolean focused = st.isFocusControl();
-            Point caretDisp = null;
-            try
-            {
-                caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
-            }
-            catch (Exception ignored)
-            {
-            }
-            logLinkedMode("hover.pre", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inspect\":" + inspect //$NON-NLS-1$
-                + ",\"focused\":" + focused //$NON-NLS-1$
-                + ",\"assistOpen\":" + assistOpen //$NON-NLS-1$
-                + ",\"caretReady\":" + ParamHintHtmlModifier.isCaretDisplayReady(st) //$NON-NLS-1$
-                + ",\"caretDisp\":\"" + (caretDisp == null ? "null" : caretDisp.x + "," + caretDisp.y) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + "\",\"activeShell\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    describeActiveShell()) + "\"}"); //$NON-NLS-1$
             // Активация редактора/фокус выше могли вызвать вложенные события UI.
             if (gen != paramHintPostGen.get() || viewer.getDocument() != prepared.document
                 || paramHintDocumentStamp(prepared.document) != prepared.stamp
                 || modelCaretOffset() != prepared.caret)
             {
-                Global.tempLog("param-hint-background", "skip stale before show gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
-            try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
-            {
-                boolean opened = prepared.hint.show(viewer);
-                probe.execOk = opened;
-                probe.popupShown = opened || isParamHoverShellVisible();
-            }
-            if (!probe.popupShown && isParamHoverShellVisible())
-                probe.popupShown = true;
+            boolean popupShown = prepared.hint.show(viewer) || isParamHoverShellVisible();
             // Пересчёт положения после загрузки содержимого — для любого пути показа,
             // включая штатную команду: иначе окно остаётся снизу от каретки, потому что
             // в момент расчёта Browser пуст и высота почти нулевая.
-            if (probe.popupShown)
+            if (popupShown)
                 ParamHintHtmlModifier.repositionShownParamHint();
             Shell shown = findParamHintShell(false);
             // Границы только что показанной подсказки считает EDT, и правую она ставит
@@ -2366,216 +2147,33 @@ boolean inLiteral = endCaret >= 0
                     viewer.getDocument());
             if (shown != null && !shown.isDisposed())
             {
-                boolean moved = ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
-                Point loc = shown.getLocation();
-                logLinkedMode("hover.shell", "{\"near\":" + (findParamHintShell(true) != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"moved\":" + moved //$NON-NLS-1$
-                    + ",\"loc\":\"" + loc.x + "," + loc.y + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + ",\"size\":\"" + shown.getSize().x + "x" + shown.getSize().y + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                ParamHintHtmlModifier.ensureParamHintShellGeometry(shown, st);
                 if (findParamHintShell(true) != null)
-                    probe.popupShown = true;
+                    popupShown = true;
             }
-            if (probe.popupShown)
+            if (popupShown)
                 paramHintPostGen.incrementAndGet();
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            probe.execOk = false;
-            probe.err = String.valueOf(ex);
         }
-        logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"caret\":" + caret //$NON-NLS-1$
-            + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
-            + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-            + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-
-
     }
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
     private static final String INVOCATION_PARAMETERS_HOVER_COMMAND =
         "com._1c.g5.v8.dt.bsl.ui.hover.InvocationParametersHover"; //$NON-NLS-1$
 
-    private static final class ParamHoverProbe
-    {
-        boolean execOk;
-        boolean popupShown;
-        String handlerClass;
-        String infoControlState;
-        String err;
-    }
-
-    // #region agent log
-    /** Стеки UI и владельцев его блокировок во время штатной команды, без чтения SWT из фона. */
-    private static final class ParamHintCommandTrace implements AutoCloseable
-    {
-        private final long threadId = Thread.currentThread().getId();
-        private final long startedNs = System.nanoTime();
-        private final java.util.Timer timer = new java.util.Timer("Comfort: parameter hint diagnostics", true); //$NON-NLS-1$
-        private final java.util.Map<Long, Long> previousCpuNs = new java.util.HashMap<>();
-        private volatile boolean finished;
-
-        ParamHintCommandTrace()
-        {
-            Global.tempLog("param-hint-ui", "begin request=" + startedNs + " thread=" + threadId); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            timer.schedule(new java.util.TimerTask()
-            {
-                @Override
-                public void run()
-                {
-                    sample();
-                }
-            }, 150, 1000);
-        }
-
-        private void sample()
-        {
-            if (finished)
-                return;
-            try
-            {
-                long captureStartedNs = System.nanoTime();
-                java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
-                StringBuilder text = new StringBuilder("sample request=").append(startedNs) //$NON-NLS-1$
-                    .append(" elapsedNs=").append(System.nanoTime() - startedNs); //$NON-NLS-1$
-                java.util.Set<Long> visited = new java.util.HashSet<>();
-                long next = threadId;
-                while (next >= 0 && visited.add(next))
-                {
-                    // Owned-monitor enumeration scans the JVM heap; measured capture was 0.7–2.4 s.
-                    // The plain stack query still reports the awaited lock and its Java owner.
-                    java.lang.management.ThreadInfo info = bean.getThreadInfo(next, Integer.MAX_VALUE);
-                    if (info == null)
-                        break;
-                    text.append("\nthread=").append(next).append(' ').append(info.getThreadName()) //$NON-NLS-1$
-                        .append(" state=").append(info.getThreadState()).append(" waitsFor=").append(info.getLockInfo()) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" ownerId=").append(info.getLockOwnerId()); //$NON-NLS-1$
-                    appendCpu(text, bean, next);
-                    for (StackTraceElement frame : info.getStackTrace())
-                        text.append("\n  at ").append(frame); //$NON-NLS-1$
-                    for (java.lang.management.MonitorInfo monitor : info.getLockedMonitors())
-                        text.append("\n  holdsMonitor ").append(monitor).append(" at ").append(monitor.getLockedStackFrame()); //$NON-NLS-1$ //$NON-NLS-2$
-                    for (java.lang.management.LockInfo lock : info.getLockedSynchronizers())
-                        text.append("\n  holdsSynchronizer ").append(lock); //$NON-NLS-1$
-                    next = info.getLockOwnerId();
-                }
-                // COM waits have no Java lock owner. Include the IR/Jacob threads independently.
-                // Enumerate Thread references without requesting a JVM-wide ThreadInfo snapshot.
-                Thread[] threads = new Thread[Math.max(32, Thread.activeCount() * 2)];
-                int threadCount = Thread.enumerate(threads);
-                for (int i = 0; i < threadCount; i++)
-                {
-                    Thread candidate = threads[i];
-                    if (candidate == null || visited.contains(candidate.getId()))
-                        continue;
-                    String name = candidate.getName();
-                    if (!name.startsWith("IR-COMThread-") && !name.toLowerCase(java.util.Locale.ROOT).contains("jacob")) //$NON-NLS-1$ //$NON-NLS-2$
-                        continue;
-                    java.lang.management.ThreadInfo info = bean.getThreadInfo(candidate.getId(), Integer.MAX_VALUE);
-                    if (info == null)
-                        continue;
-                    text.append("\nirComThread=").append(info.getThreadId()).append(' ').append(name) //$NON-NLS-1$
-                        .append(" state=").append(info.getThreadState()).append(" waitsFor=").append(info.getLockInfo()) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(" ownerId=").append(info.getLockOwnerId()); //$NON-NLS-1$
-                    appendCpu(text, bean, info.getThreadId());
-                    for (StackTraceElement frame : info.getStackTrace())
-                        text.append("\n  at ").append(frame); //$NON-NLS-1$
-                }
-                text.append("\ncaptureNs=").append(System.nanoTime() - captureStartedNs); //$NON-NLS-1$
-                text.append("\nfinished=").append(finished); //$NON-NLS-1$
-                Global.tempLog("param-hint-ui", text.toString()); //$NON-NLS-1$
-            }
-            catch (Throwable t)
-            {
-                Global.tempLogException("param-hint-ui", "sample failed", t); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        private void appendCpu(StringBuilder text, java.lang.management.ThreadMXBean bean, long id)
-        {
-            long cpu = bean.isThreadCpuTimeSupported() && bean.isThreadCpuTimeEnabled()
-                ? bean.getThreadCpuTime(id) : -1;
-            Long previous = cpu >= 0 ? previousCpuNs.put(id, cpu) : null;
-            text.append(" cpuNs=").append(cpu).append(" cpuDeltaNs=") //$NON-NLS-1$ //$NON-NLS-2$
-                .append(previous != null ? cpu - previous : -1);
-        }
-
-        @Override
-        public void close()
-        {
-            finished = true;
-            timer.cancel();
-            Global.tempLog("param-hint-ui", "end request=" + startedNs //$NON-NLS-1$ //$NON-NLS-2$
-                + " elapsedNs=" + (System.nanoTime() - startedNs)); //$NON-NLS-1$
-        }
-    }
-    // #endregion
-
-    private ParamHoverProbe executeInvocationParametersHoverCommand()
-    {
-        ParamHoverProbe probe = new ParamHoverProbe();
-        try
-        {
-            org.eclipse.ui.IWorkbenchWindow window =
-                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            if (window == null)
-            {
-                probe.err = "windowNull"; //$NON-NLS-1$
-                return probe;
-            }
-            org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
-            org.eclipse.ui.handlers.IHandlerService handlers = null;
-            if (site != null)
-                handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
-            if (handlers == null)
-                handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
-            if (handlers == null)
-            {
-                probe.err = "handlersNull"; //$NON-NLS-1$
-                return probe;
-            }
-            try (ParamHintCommandTrace trace = new ParamHintCommandTrace())
-            {
-                handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
-            }
-            probe.execOk = true;
-            fillParamHoverInfoControlProbe(probe);
-            return probe;
-        }
-        catch (Exception ex)
-        {
-            probe.execOk = false;
-            probe.err = String.valueOf(ex);
-            return probe;
-        }
-
-
-    }
-
-    private static boolean isParamHoverInfoControlVisible()
-    {
-        ParamHoverProbe probe = new ParamHoverProbe();
-        fillParamHoverInfoControlProbe(probe);
-        return probe.popupShown;
-    }
-
     /**
      * {@code infoControl != null} только если EDT вызвал {@code showControlInfo}.
      * Реальный handler — через e4 {@code lookUpHandler} / ключ {@code handler::id}.
      */
-    private static void fillParamHoverInfoControlProbe(ParamHoverProbe probe)
+    private static boolean isParamHoverInfoControlVisible()
     {
         try
         {
             org.eclipse.core.commands.IHandler handler = resolveInvocationParametersHoverHandler();
             if (handler == null)
-            {
-                probe.infoControlState = "handlerNull"; //$NON-NLS-1$
-                return;
-            }
-            probe.handlerClass = handler.getClass().getName();
+                return false;
             Field infoField = null;
             Class<?> cls = handler.getClass();
             while (cls != null && infoField == null)
@@ -2590,25 +2188,13 @@ boolean inLiteral = endCaret >= 0
                 }
             }
             if (infoField == null)
-            {
-                probe.infoControlState = "fieldMissing"; //$NON-NLS-1$
-                return;
-            }
+                return false;
             infoField.setAccessible(true);
-            Object infoControl = infoField.get(handler);
-            if (infoControl == null)
-            {
-                probe.infoControlState = "null"; //$NON-NLS-1$
-                probe.popupShown = false;
-                return;
-            }
-            probe.infoControlState = infoControl.getClass().getSimpleName();
-            probe.popupShown = true;
+            return infoField.get(handler) != null;
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            probe.infoControlState = "probeError:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
-            probe.err = String.valueOf(ex);
+            return false;
         }
     }
 
@@ -2671,10 +2257,12 @@ boolean inLiteral = endCaret >= 0
     }
 
     /**
-     * Снимок сразу после всех {@code documentChanged} (включая {@code DataEvent.doIt}),
-     * до JFace {@code getSelection}/{@code setSelectedRange} в insertProposal.
+     * Сразу после всех {@code documentChanged} (включая {@code DataEvent.doIt}), до JFace
+     * {@code getSelection}/{@code setSelectedRange} в insertProposal: если ждём своего показа
+     * подсказки параметров — запомнить сигнатуру выбранного конструктора и снять подсказку
+     * LinkedMode вместе с чужими окнами подсказки.
      */
-    private void schedulePostDoItLinkedModeDiag(IDocument doc, int insertOffset, String text)
+    private void scheduleDropLinkedModeHintAfterDoIt(IDocument doc, int insertOffset, String text)
     {
         if (!(doc instanceof IDocumentExtension ext) || completionAutoOpenDocumentListener == null)
             return;
@@ -2696,10 +2284,10 @@ boolean inLiteral = endCaret >= 0
                     ParamHintHtmlModifier.rememberSelectedConstructorSignature(selected, d,
                         pendingParamHintDesiredCaret);
                     pendingParamHintSignature = SmartContentAssistProcessor.selectedSignature(selected);
-                    forceRemoveLinkedModeParamHintListeners("postDoIt"); //$NON-NLS-1$
+                    forceRemoveLinkedModeParamHintListeners();
                     ParamHintHtmlModifier.dismissAllVisible();
                 }
-                logLinkedModeDiagPhase("postDoIt", d, offset, inserted); //$NON-NLS-1$
+                restoreCaretInsideCallParens("postDoIt", d, offset, inserted); //$NON-NLS-1$
             });
         }
         catch (Exception ex)
@@ -2754,7 +2342,12 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    private void logLinkedModeDiagPhase(String phase, IDocument doc, int insertOffset, String text)
+    /**
+     * После вставки вызова вернуть каретку внутрь {@code ()}, если JFace/LinkedMode увели её
+     * за {@code )}. Восстанавливает только в фазах {@code async*}; {@code postDoIt} — лишь
+     * отладочная запись {@code H-INSERT}.
+     */
+    private void restoreCaretInsideCallParens(String phase, IDocument doc, int insertOffset, String text)
     {
         try
         {
@@ -2784,20 +2377,6 @@ boolean inLiteral = endCaret >= 0
                         text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             boolean expressionField = isExpressionFieldViewer();
             boolean inspect = DebugInspectorHook.isInspectExpressionViewer(viewer);
-            logLinkedMode("diag." + phase, "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
-                + ",\"desired\":" + desired //$NON-NLS-1$
-                + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
-                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-                + ",\"hover\":" + isParamHoverShellVisible() //$NON-NLS-1$
-                + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
-                + ",\"bslPresent\":" + bslPresent //$NON-NLS-1$
-                + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
-                + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
-                + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
-                + ",\"allInfo\":" + mapDiag.allInfoSize //$NON-NLS-1$
-                + ",\"posStart\":" + mapDiag.posStart //$NON-NLS-1$
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             // После вставки proposal часто ставит каретку после «)», desired — внутри «()».
             // Без restore опрос подсказки ждёт совпадения и падает с caretMismatch.
             // Раньше только поля выражений; то же бывает в модуле, когда LinkedMode
@@ -2815,10 +2394,6 @@ boolean inLiteral = endCaret >= 0
             if (needRestore)
             {
                 viewer.setSelectedRange(desired, 0);
-                int after = modelCaretOffset();
-                logLinkedMode("restoreCaret", "{\"phase\":\"" + phase + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"from\":" + modelCaret + ",\"desired\":" + desired //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"after\":" + after + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (hasModel && inspect)
                     bindInspectLinkedModeUi(doc, desired);
             }
@@ -2871,8 +2446,8 @@ boolean inLiteral = endCaret >= 0
             return;
         }
         display.asyncExec(() -> ensureBslDocumentListenerReadded(doc, remembered, offset, text));
-        display.timerExec(1, () -> logLinkedModeDiagPhase("async1", doc, offset, text)); //$NON-NLS-1$
-        display.timerExec(10, () -> logLinkedModeDiagPhase("async10", doc, offset, text)); //$NON-NLS-1$
+        display.timerExec(1, () -> restoreCaretInsideCallParens("async1", doc, offset, text)); //$NON-NLS-1$
+        display.timerExec(10, () -> restoreCaretInsideCallParens("async10", doc, offset, text)); //$NON-NLS-1$
     }
 
     /**
@@ -2887,13 +2462,11 @@ boolean inLiteral = endCaret >= 0
         if (pendingBslDocumentListener == remembered)
             pendingBslDocumentListener = null;
         boolean present = findBslDocumentListener(doc) != null;
-        boolean readded = false;
         if (!present)
         {
             try
             {
                 doc.addDocumentListener(remembered);
-                readded = true;
             }
             catch (Exception ex)
             {
@@ -2901,21 +2474,8 @@ boolean inLiteral = endCaret >= 0
                     "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
-        boolean hasModel = LinkedModeModel.hasInstalledModel(doc);
-        StyledText st = viewer != null ? viewer.getTextWidget() : null;
-        int widgetCaret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
-        int caret = modelCaretOffset();
-        IDocumentListener bslNow = findBslDocumentListener(doc);
-        DataEventDiag mapDiag = readDataEventDiag(bslNow != null ? bslNow : remembered, text);
-        logLinkedMode("ensureBsl", "{\"present\":" + present //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"readded\":" + readded //$NON-NLS-1$
-            + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-            + ",\"caret\":" + caret //$NON-NLS-1$
-            + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
-            + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
-            + ",\"objects\":" + mapDiag.objectsSize + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
-        maybeShowParamHintAfterInsert(modelCaretOffset());
+        restoreCaretInsideCallParens("async0", doc, insertOffset, text); //$NON-NLS-1$
+        maybeShowParamHintAfterInsert();
     }
 
     /**
@@ -2974,12 +2534,6 @@ boolean inLiteral = endCaret >= 0
             return true;
         return Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
             || Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
-    }
-
-    /** Временная диагностика причин показа и отмены подсказки параметров. */
-    static void logLinkedMode(String location, String json)
-    {
-        Global.tempLog("param-hint-poll", location + " " + json); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -4645,26 +4199,6 @@ boolean inLiteral = endCaret >= 0
         return text.length() > 80 ? text.substring(0, 80) : text;
     }
 
-    private void logAssistInsertDocumentChanged(DocumentEvent event)
-    {
-        if (event == null || event.getText() == null)
-            return;
-        String text = event.getText();
-        if (text.indexOf('(') < 0 || text.length() > 120)
-            return;
-        IDocument doc = event.getDocument();
-        StyledText st = viewer != null ? viewer.getTextWidget() : null;
-        int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
-        boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
-        logLinkedMode("docChanged", "{\"offset\":" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"caret\":" + caret //$NON-NLS-1$
-            + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-            + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
-            + ",\"applyFlag\":" //$NON-NLS-1$
-            + Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
-            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
     private static final String BSL_DOCUMENT_LISTENER_SIMPLE =
         "BslProposalProvider$BslDocumentListener"; //$NON-NLS-1$
 
@@ -4674,36 +4208,23 @@ boolean inLiteral = endCaret >= 0
         final int mapSize;
         final int posStart;
         final int length;
-        final int stopPos;
         final int allInfoSize;
         final int objectsSize;
 
-        DataEventDiag(boolean hasKey, int mapSize, int posStart, int length, int stopPos,
+        DataEventDiag(boolean hasKey, int mapSize, int posStart, int length,
             int allInfoSize, int objectsSize)
         {
             this.hasKey = hasKey;
             this.mapSize = mapSize;
             this.posStart = posStart;
             this.length = length;
-            this.stopPos = stopPos;
             this.allInfoSize = allInfoSize;
             this.objectsSize = objectsSize;
         }
 
-        String toJson()
-        {
-            return "{\"hasKey\":" + hasKey //$NON-NLS-1$
-                + ",\"mapSize\":" + mapSize //$NON-NLS-1$
-                + ",\"posStart\":" + posStart //$NON-NLS-1$
-                + ",\"length\":" + length //$NON-NLS-1$
-                + ",\"stopPos\":" + stopPos //$NON-NLS-1$
-                + ",\"allInfo\":" + allInfoSize //$NON-NLS-1$
-                + ",\"objects\":" + objectsSize + "}"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
         static DataEventDiag missing()
         {
-            return new DataEventDiag(false, -1, -1, -1, -1, -1, -1);
+            return new DataEventDiag(false, -1, -1, -1, -1, -1);
         }
     }
 
@@ -4721,51 +4242,19 @@ boolean inLiteral = endCaret >= 0
                 return DataEventDiag.missing();
             int mapSize = map.size();
             if (replacementText == null)
-                return new DataEventDiag(false, mapSize, -1, -1, -1, -1, -1);
+                return new DataEventDiag(false, mapSize, -1, -1, -1, -1);
             Object dataEvent = map.get(replacementText);
             if (dataEvent == null)
-                return new DataEventDiag(false, mapSize, -1, -1, -1, -1, -1);
+                return new DataEventDiag(false, mapSize, -1, -1, -1, -1);
             int posStart = readIntField(dataEvent, "posStart"); //$NON-NLS-1$
             int length = readIntField(dataEvent, "length"); //$NON-NLS-1$
-            int stopPos = readIntField(dataEvent, "stopPos"); //$NON-NLS-1$
             int allInfo = readListSizeField(dataEvent, "allInfo"); //$NON-NLS-1$
             int objects = readListSizeField(dataEvent, "objects"); //$NON-NLS-1$
-            return new DataEventDiag(true, mapSize, posStart, length, stopPos, allInfo, objects);
+            return new DataEventDiag(true, mapSize, posStart, length, allInfo, objects);
         }
         catch (Exception ex)
         {
             return DataEventDiag.missing();
-        }
-    }
-
-    private static String sampleDataEventMapKeys(IDocumentListener bslListener, int max)
-    {
-        if (bslListener == null)
-            return "[]"; //$NON-NLS-1$
-        try
-        {
-            Field mapField = bslListener.getClass().getDeclaredField("map"); //$NON-NLS-1$
-            mapField.setAccessible(true);
-            Object mapObj = mapField.get(bslListener);
-            if (!(mapObj instanceof Map<?, ?> map) || map.isEmpty())
-                return "[]"; //$NON-NLS-1$
-            StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
-            int n = 0;
-            for (Object key : map.keySet())
-            {
-                if (n > 0)
-                    sb.append(',');
-                sb.append('"').append(ContentAssistDebug.jsonEscapeForLog(clipLogText(String.valueOf(key))))
-                    .append('"');
-                n++;
-                if (n >= max)
-                    break;
-            }
-            return sb.append(']').toString();
-        }
-        catch (Exception ex)
-        {
-            return "[]"; //$NON-NLS-1$
         }
     }
 
@@ -4911,10 +4400,6 @@ boolean inLiteral = endCaret >= 0
                 idx++;
             }
             objectsDiag.append(']');
-            logLinkedMode("sanitize", "{\"filtered\":" + filtered //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"kept\":" + kept.size() //$NON-NLS-1$
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(replacementText)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"objects\":" + objectsDiag + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             if (filtered == 0)
                 return 0;
             objectsField.set(dataEvent, kept);
@@ -5187,15 +4672,10 @@ boolean inLiteral = endCaret >= 0
             suppressDocumentAutoOpenAfterSession = false;
         }
         char insertedPeek = event.character == 0 ? 0 : (char)event.character;
-        boolean hintChar = insertedPeek == '(' || insertedPeek == ','
-            || event.keyCode == '(' || event.keyCode == ',';
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
             SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
                 "why=listsOff ch=" + (int)insertedPeek); //$NON-NLS-1$
-            if (hintChar)
-                logLinkedMode("verify.skip", "{\"reason\":\"listsOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
@@ -5203,9 +4683,6 @@ boolean inLiteral = endCaret >= 0
         {
             SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
                 "why=autoOpenOff ch=" + (int)insertedPeek); //$NON-NLS-1$
-            if (hintChar)
-                logLinkedMode("verify.skip", "{\"reason\":\"autoOpenOff\",\"ch\":" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (int)insertedPeek + ",\"key\":" + event.keyCode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         char inserted = insertedPeek;
@@ -5213,9 +4690,6 @@ boolean inLiteral = endCaret >= 0
         {
             SmartContentAssistProcessor.uiBlockLog("autoOpen.verify.skip", //$NON-NLS-1$
                 "why=char0 key=" + event.keyCode); //$NON-NLS-1$
-            if (hintChar)
-                logLinkedMode("verify.skip", "{\"reason\":\"char0\",\"key\":" + event.keyCode //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 //        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
@@ -5246,35 +4720,7 @@ boolean inLiteral = endCaret >= 0
                 pendingParamHintOnCharCaret = caretAfter;
                 pendingParamHintKind = inserted;
             }
-            logLinkedMode("verify.char", "{\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"start\":" + startOffset //$NON-NLS-1$
-                + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$
-                + ",\"popup\":" + popupWasOpen //$NON-NLS-1$
-                + ",\"inComment\":" + inComment //$NON-NLS-1$
-                + ",\"inString\":" + inString //$NON-NLS-1$
-                + ",\"callParen\":" + callParen //$NON-NLS-1$
-                + ",\"pending\":" + pendingParamHintOnChar //$NON-NLS-1$
-                + ",\"mask\":" + event.stateMask + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-    }
-
-    private void logParamHintDocumentChanged(DocumentEvent event)
-    {
-        if (event == null || event.getText() == null)
-            return;
-        String text = event.getText();
-        if (!",".equals(text) && !"(".equals(text)) //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        StyledText st = viewer != null ? viewer.getTextWidget() : null;
-        int widgetCaret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
-        int modelCaret = modelCaretOffset();
-        logLinkedMode("docChanged.char", "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(text) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + ",\"offset\":" + event.getOffset() //$NON-NLS-1$
-            + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
-            + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
-            + ",\"pendingOnChar\":" + pendingParamHintOnChar //$NON-NLS-1$
-            + ",\"pendingCaret\":" + pendingParamHintOnCharCaret //$NON-NLS-1$
-            + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(clipAroundCaret(event.getOffset() + text.length())) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
