@@ -122,7 +122,7 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         return item != null ? item.getData() : null;
     }
 
-    /** Узел без своего редактора: реквизит, значение перечисления или метод HTTP-сервиса. */
+    /** Узел без своего редактора: реквизит, измерение/ресурс, значение перечисления или метод HTTP-сервиса. */
     static boolean isMetadataAttributeNode(Object element)
     {
         if (element == null || NavigatorTreeElementLabels.isGroupNode(element))
@@ -137,7 +137,8 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         EObject eObject = NavigatorElementModels.resolveEObject(element);
         if (eObject == null)
             return false;
-        if (eObject instanceof com._1c.g5.v8.dt.metadata.mdclass.Method)
+        // Измерения и ресурсы регистров — тоже без своего редактора, как реквизит.
+        if (OpenHelperAttributePropertiesHook.isMdObjectAttribute(eObject))
             return true;
         String typeName = eObject.eClass().getName();
         return typeName != null

@@ -217,7 +217,7 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
         BslXtextDocumentHook.install();
-        StaticFeatureAccessReplacement.start();
+        BuiltinCheckReplacements.start();
         QueryParameterAutoCloseFix.install();
     }
 
@@ -225,7 +225,7 @@ public class Activator extends AbstractUIPlugin
     public void stop(BundleContext context) throws Exception
     {
         CheckRecomputeNotifications.stop();
-        StaticFeatureAccessReplacement.stop();
+        BuiltinCheckReplacements.stop();
         IRApplication.disconnectAll();
 
         ContentAssistManager mgr = ContentAssistManager.getInstance();
@@ -377,18 +377,20 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
-     * Штатная проверка не должна выдавать те же проблемы, что её замены: если в проекте включена
-     * хотя бы одна из пяти замен, штатная отключается (и снова отключается при её включении).
-     * Об этом сказано в описаниях всех шести проверок.
+     * Штатные проверки, целиком заменённые проверками «Комфорта» ({@link ComfortCheckIds#REPLACED_BUILTIN_CHECKS}),
+     * всегда выключены: иначе их проблемы дублируют замены. На странице «Проверки» их не включить
+     * ({@code ValidationChecksFilterHook}); здесь — выключение при запуске и после любого изменения
+     * настроек другим путём. Об этом сказано в описаниях штатных проверок и их замен.
      */
-    private static final class StaticFeatureAccessReplacement
+    private static final class BuiltinCheckReplacements
     {
-        private static final String BUILTIN_ID = "bsl-legacy-check-static-feature-access"; //$NON-NLS-1$
-        private static final String[] REPLACEMENT_IDS = { ComfortCheckIds.STATIC_ACCESS_PARAMETERS,
-            ComfortCheckIds.STATIC_ACCESS_OBSOLETE, ComfortCheckIds.STATIC_ACCESS_COMPATIBILITY,
-            ComfortCheckIds.STATIC_ACCESS_VARIABLE, ComfortCheckIds.STATIC_ACCESS_EVENT_HANDLER };
         private static volatile boolean active;
         private static volatile ICheckRepository repository;
+        /** Повторы, пока реестр не загрузил проверки проектов: до 5 минут после запуска. */
+        private static final int MAX_RETRIES = 30;
+        private static final long RETRY_DELAY_MS = 10_000;
+        private static final java.util.concurrent.atomic.AtomicInteger retries =
+            new java.util.concurrent.atomic.AtomicInteger();
 
         private static final IResourceChangeListener PROJECTS = event -> {
             IResourceDelta delta = event.getDelta();
@@ -419,7 +421,7 @@ public class Activator extends AbstractUIPlugin
             }
         };
 
-        private static final Job JOB = new Job("Замена штатной проверки доступа к свойствам") //$NON-NLS-1$
+        private static final Job JOB = new Job("Замена штатных проверок") //$NON-NLS-1$
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
@@ -440,30 +442,35 @@ public class Activator extends AbstractUIPlugin
                     checks.addChangeListener(SETTINGS);
                     repository = checks;
                 }
+                boolean notLoaded = false;
                 for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
                 {
                     if (!project.isAccessible() || monitor.isCanceled())
                         continue;
                     try
                     {
-                        if (!isAnyReplacementEnabled(checks, project))
-                            continue;
-                        Set<CheckUid> uids = checks.getCheckUidForCheckId(BUILTIN_ID, project);
                         List<ICheckSettings> changes = new ArrayList<>();
-                        for (CheckUid uid : uids)
+                        for (String builtinId : ComfortCheckIds.REPLACED_BUILTIN_CHECKS)
                         {
-                            ICheckSettings settings = checks.getSettings(uid, project);
-                            if (settings != null && settings.isEnabled())
+                            Set<CheckUid> uids = checks.getCheckUidForCheckId(builtinId, project);
+                            // Сразу после запуска реестр ещё не знает проверок проекта: повторить позже
+                            if (uids.isEmpty())
+                                notLoaded = true;
+                            for (CheckUid uid : uids)
                             {
-                                settings.setEnabled(false);
-                                changes.add(settings);
+                                ICheckSettings settings = checks.getSettings(uid, project);
+                                if (settings != null && settings.isEnabled())
+                                {
+                                    settings.setEnabled(false);
+                                    changes.add(settings);
+                                }
                             }
                         }
                         if (!changes.isEmpty())
                         {
                             checks.applyChanges(changes, project);
                             Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
-                                "отключена штатная проверка: " + project.getName()); //$NON-NLS-1$
+                                "отключены штатные проверки (" + changes.size() + "): " + project.getName()); //$NON-NLS-1$ //$NON-NLS-2$
                         }
                     }
                     catch (RuntimeException failure)
@@ -472,21 +479,14 @@ public class Activator extends AbstractUIPlugin
                             project.getName() + ": " + failure); //$NON-NLS-1$
                     }
                 }
+                // Проект без проверок EDT (не 1С) тоже даёт пустой набор — поэтому число повторов ограничено
+                if (notLoaded && retries.incrementAndGet() <= MAX_RETRIES)
+                    JOB.schedule(RETRY_DELAY_MS);
+                else if (!notLoaded)
+                    retries.set(0);
                 return Status.OK_STATUS;
             }
         };
-
-        private static boolean isAnyReplacementEnabled(ICheckRepository checks, IProject project)
-        {
-            for (String id : REPLACEMENT_IDS)
-                for (CheckUid uid : checks.getCheckUidForCheckId(id, project))
-                {
-                    ICheckSettings settings = checks.getSettings(uid, project);
-                    if (settings != null && settings.isEnabled())
-                        return true;
-                }
-            return false;
-        }
 
         static void start()
         {
@@ -507,8 +507,10 @@ public class Activator extends AbstractUIPlugin
 
         private static void schedule()
         {
-            if (active)
-                JOB.schedule(2_000);
+            if (!active)
+                return;
+            retries.set(0);
+            JOB.schedule(2_000);
         }
     }
 

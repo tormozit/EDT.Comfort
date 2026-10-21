@@ -194,6 +194,8 @@ public final class GitStagingViewHook implements IStartup
         if (first instanceof Button commit && second instanceof Button push)
         {
             pending.remove(view);
+            CommitButtonsDebug.step("patch", "view attempt=" + attempt + " commit=" + CommitButtonsDebug.button(commit)
+                + " push=" + CommitButtonsDebug.button(push));
             if (commit.isDisposed() || push.isDisposed())
                 return;
             RepositorySelection.install(view, commit);
@@ -208,6 +210,7 @@ public final class GitStagingViewHook implements IStartup
         {
             pending.remove(view);
             Global.tempLog(LOG, "buttons unavailable view=" + view.getClass().getName());
+            CommitButtonsDebug.problem("buttons unavailable view=" + view.getClass().getName());
             return;
         }
         Display.getDefault().timerExec(attempt < 30 ? 100 : 500, () -> patch(view, attempt + 1));
@@ -359,6 +362,7 @@ public final class GitStagingViewHook implements IStartup
             constructor.setAccessible(true);
             Object possible = Global.invoke(view, "isCommitPossible", constructor.newInstance(repository));
             Global.tempLog(LOG, "native isCommitPossible=" + possible);
+            CommitButtonsDebug.step("commitPossible", "native=" + possible);
             if (!(possible instanceof Boolean))
                 throw new IllegalStateException("Не удалось определить режим кнопки фиксации");
             return Boolean.TRUE.equals(possible);
@@ -877,6 +881,43 @@ public final class GitStagingViewHook implements IStartup
         }
     }
 
+    /**
+     * Журнал «Комфорт» для кнопок «Фиксировать» / «Фиксировать и отправить» / «Отправить HEAD...» (#865).
+     * <p>Включение: параметры → Комфорт → «Вести журнал».
+     */
+    private static final class CommitButtonsDebug
+    {
+        private static final String TAG = "GitCommitButtons"; //$NON-NLS-1$
+
+        static void step(String phase, String detail)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, detail == null || detail.isEmpty() ? phase : phase + " " + detail); //$NON-NLS-1$
+        }
+
+        static void problem(String msg)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
+        }
+
+        static void error(String msg, Throwable error)
+        {
+            if (Global.isLogEnabled())
+                Global.logError(TAG, "[!] " + msg, error); //$NON-NLS-1$
+        }
+
+        static String button(Button button)
+        {
+            if (button == null)
+                return "null"; //$NON-NLS-1$
+            if (button.isDisposed())
+                return "<disposed>"; //$NON-NLS-1$
+            return "'" + button.getText() + "' enabled=" + button.getEnabled() //$NON-NLS-1$ //$NON-NLS-2$
+                + " listeners=" + button.getListeners(SWT.Selection).length; //$NON-NLS-1$
+        }
+    }
+
     private static final class CommitButtons
     {
         private final CheckSource source;
@@ -894,27 +935,41 @@ public final class GitStagingViewHook implements IStartup
         void install(Button button)
         {
             if (button.getData(BUTTON_KEY) != null)
+            {
+                CommitButtonsDebug.step("install", "already hooked " + CommitButtonsDebug.button(button));
                 return;
+            }
             Listener[] original = button.getListeners(SWT.Selection);
             if (original.length == 0)
+            {
+                CommitButtonsDebug.problem("install skipped: no selection listeners " + CommitButtonsDebug.button(button));
                 return;
+            }
             button.setData(BUTTON_KEY, this);
             for (Listener listener : original)
                 button.removeListener(SWT.Selection, listener);
             button.addListener(SWT.Selection, event -> selected(button, event, original));
             Global.tempLog(LOG, "button hooked text=" + button.getText() + " listeners=" + original.length);
+            CommitButtonsDebug.step("install", "hooked source=" + source.getClass().getSimpleName() + " "
+                + CommitButtonsDebug.button(button) + " original=" + original.length);
         }
 
         private void selected(Button button, Event event, Listener[] original)
         {
             Global.tempLog(LOG, "selection button=" + button.getText() + " running=" + running
                 + " control=" + ComfortSettings.isControlMdReferencesEnabled());
+            CommitButtonsDebug.step("click", CommitButtonsDebug.button(button) + " running=" + running
+                + " control=" + ComfortSettings.isControlMdReferencesEnabled()
+                + " source=" + source.getClass().getSimpleName()
+                + " commit=" + CommitButtonsDebug.button(commit) + " push=" + CommitButtonsDebug.button(push));
             if (running)
+            {
+                CommitButtonsDebug.problem("click ignored: previous check still running");
                 return;
+            }
             if (!ComfortSettings.isControlMdReferencesEnabled())
             {
-                for (Listener listener : original)
-                    listener.handleEvent(event);
+                runOriginal(button, event, original);
                 return;
             }
             running = true;
@@ -925,6 +980,7 @@ public final class GitStagingViewHook implements IStartup
                 @Override
                 public void lock()
                 {
+                    CommitButtonsDebug.step("lock", null);
                     commit.setEnabled(false);
                     push.setEnabled(false);
                 }
@@ -937,6 +993,8 @@ public final class GitStagingViewHook implements IStartup
                     try { if (!push.isDisposed()) push.setEnabled(pushEnabled); }
                     catch (Throwable ignored) { /* Штатная операция должна продолжиться. */ }
                     running = false;
+                    CommitButtonsDebug.step("unlock", "restored commitEnabled=" + commitEnabled
+                        + " pushEnabled=" + pushEnabled);
                 }
 
                 @Override public boolean gone() { return button.isDisposed(); }
@@ -944,12 +1002,33 @@ public final class GitStagingViewHook implements IStartup
                 @Override
                 public void proceed()
                 {
-                    for (Listener listener : original)
-                        listener.handleEvent(event);
+                    runOriginal(button, event, original);
                 }
             });
             try { attempt.begin(); }
-            catch (Throwable error) { attempt.finish(error); }
+            catch (Throwable error)
+            {
+                CommitButtonsDebug.error("begin failed", error);
+                attempt.finish(error);
+            }
+        }
+
+        /** Штатные обработчики кнопки; исключение не глотается, только попадает в журнал. */
+        private static void runOriginal(Button button, Event event, Listener[] original)
+        {
+            CommitButtonsDebug.step("native", "start " + CommitButtonsDebug.button(button)
+                + " original=" + original.length);
+            try
+            {
+                for (Listener listener : original)
+                    listener.handleEvent(event);
+            }
+            catch (RuntimeException | Error error)
+            {
+                CommitButtonsDebug.error("native handler failed", error);
+                throw error;
+            }
+            CommitButtonsDebug.step("native", "done " + CommitButtonsDebug.button(button));
         }
 
         private static void reportSkipped(String title, String message, Throwable error)
@@ -1025,19 +1104,25 @@ public final class GitStagingViewHook implements IStartup
             {
                 Repository selected = source.repository();
                 Global.tempLog(LOG, "begin source=" + source.getClass().getSimpleName() + " repository=" + selected);
+                CommitButtonsDebug.step("begin", "source=" + source.getClass().getSimpleName()
+                    + " repository=" + selected);
                 if (selected == null)
                 {
+                    CommitButtonsDebug.step("begin", "no repository: native handling");
                     Display.getDefault().asyncExec(() -> finish(null));
                     return;
                 }
                 repository = selected;
-                if (!source.commitPossible(repository))
+                boolean possible = source.commitPossible(repository);
+                CommitButtonsDebug.step("begin", "commitPossible=" + possible);
+                if (!possible)
                 {
                     Display.getDefault().asyncExec(() -> finish(null));
                     return;
                 }
                 if (!source.saveEditors(repository))
                 {
+                    CommitButtonsDebug.step("begin", "saveEditors canceled");
                     finished = true;
                     requester.unlock();
                     return;
@@ -1128,15 +1213,21 @@ public final class GitStagingViewHook implements IStartup
             {
                 // Оба завершения выполняются в UI: вопрос и ответ фоновой проверки конкурируют только здесь.
                 if (finished)
+                {
+                    CommitButtonsDebug.step("finish", "already finished error=" + error);
                     return;
+                }
                 if (askingCancellation)
                 {
+                    CommitButtonsDebug.step("finish", "deferred: question open error=" + error);
                     deferredFinish = () -> finish(error);
                     return;
                 }
                 finished = true;
                 Global.tempLog(LOG, "finish ms=" + (started == 0 ? 0 : (System.nanoTime() - started) / 1_000_000)
                     + " error=" + error);
+                CommitButtonsDebug.step("finish", "ms=" + (started == 0 ? 0 : (System.nanoTime() - started) / 1_000_000)
+                    + " error=" + error + " commitCanceled=" + commitCanceled + " gone=" + requester.gone());
                 cancellation.setCanceled(true);
                 boolean proceed = !commitCanceled;
                 boolean verifyFiles = false;
@@ -1171,6 +1262,7 @@ public final class GitStagingViewHook implements IStartup
                 {
                     if (source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty())
                         proceed = false;
+                    CommitButtonsDebug.error("finish failed proceed=" + proceed, failure);
                     skipped(!proceed ? words.canceled() + " Не удалось завершить проверку ссылок."
                         : "Проверка ссылок недоступна. " + words.proceeds(), failure);
                 }
@@ -1179,6 +1271,8 @@ public final class GitStagingViewHook implements IStartup
                     // Сверка файлов перед фиксацией идёт в фоне: кнопки разблокирует она.
                     verifyFiles = proceed && !commitCanceled && !requester.gone()
                         && source instanceof StagingSource staging && !staging.workingModelProjects.isEmpty();
+                    CommitButtonsDebug.step("finish", "proceed=" + proceed + " commitCanceled=" + commitCanceled
+                        + " verifyFiles=" + verifyFiles + " gone=" + requester.gone());
                     if (!verifyFiles)
                         requester.unlock();
                 }
@@ -1214,6 +1308,8 @@ public final class GitStagingViewHook implements IStartup
 
             private void proceedChecked(boolean filesUnchanged, Throwable failure)
             {
+                CommitButtonsDebug.step("fileCheck", "filesUnchanged=" + filesUnchanged + " failure=" + failure
+                    + " gone=" + requester.gone());
                 try
                 {
                     if (requester.gone())
@@ -1225,6 +1321,7 @@ public final class GitStagingViewHook implements IStartup
                     }
                     if (!filesUnchanged || !source.unchanged(repository, snapshot))
                     {
+                        CommitButtonsDebug.step("fileCheck", "canceled: changed");
                         skipped(words.canceled() + " " + words.changed(), null);
                         return;
                     }

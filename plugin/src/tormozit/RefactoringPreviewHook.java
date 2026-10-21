@@ -266,6 +266,9 @@ public final class RefactoringPreviewHook
         }
         try
         {
+            // Страницу мог подключить переход по кнопке мастера раньше показа окна, а колонке
+            // «Подходит» полное имя нужно уже при установке.
+            RefactoringWizardTitleHook.prepareRenameContext(shell);
             PreviewTablePane.install(treeViewer);
         }
         catch (RuntimeException e)
@@ -588,10 +591,18 @@ public final class RefactoringPreviewHook
                     // отбора отдаёт cellText.
                     return ""; //$NON-NLS-1$
                 }
+
+                @Override
+                public Image getImage(Object element)
+                {
+                    if (treeLabels == null || !(element instanceof PreviewRow row))
+                        return null;
+                    return treeLabels.getImage(row.node);
+                }
             });
-            // Колонка «Пометка» — только флажок: фиксированная минимальная ширина, без ручного
+            // Колонка «Пометка» — флажок и значок изменения: фиксированная ширина, без ручного
             // ресайза и без заголовка (в такую ширину он не встанет); смысл — в подсказке заголовка.
-            FormTableInteraction.applyIconColumn(markColumn.getColumn(), columnLayout, 6);
+            FormTableInteraction.applyCheckIconColumn(markColumn.getColumn(), columnLayout);
             markColumn.getColumn().setToolTipText(TooltipText.wrap(table,
                 "Пометка" + Global.pluginSignForTooltip())); //$NON-NLS-1$
 
@@ -603,14 +614,6 @@ public final class RefactoringPreviewHook
                 public String getText(Object element)
                 {
                     return element instanceof PreviewRow row ? row.text : ""; //$NON-NLS-1$
-                }
-
-                @Override
-                public Image getImage(Object element)
-                {
-                    if (treeLabels == null || !(element instanceof PreviewRow row))
-                        return null;
-                    return treeLabels.getImage(row.node);
                 }
 
                 @Override

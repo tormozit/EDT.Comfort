@@ -1004,10 +1004,22 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         applyIconColumn(column, layout, 0);
     }
 
+    /** Запас ширины первой колонки таблицы {@code SWT.CHECK} под пометку строки. */
+    private static final int CHECK_MARK_WIDTH = 22;
+
     /**
-     * @param extraWidthPx запас к ширине значка — нужен первой колонке таблицы со
-     * стилем {@code SWT.CHECK}: там рядом со значком система рисует ещё и пометку
-     * строки (см. таблицу проверок в {@code ValidationChecksFilterHook}).
+     * Первая колонка таблицы {@code SWT.CHECK}: пометка строки и значок. Значок таблицы — только
+     * сюда. Windows в таблице со списком картинок всегда держит в первой колонке место под значок
+     * сразу за пометкой — даже если значка в ней нет. Узкая первая колонка это место не вмещает,
+     * и пустое место значка перекрывает начало соседней колонки: значок там срезан слева.
+     */
+    static void applyCheckIconColumn(TableColumn column, TableColumnLayout layout)
+    {
+        applyIconColumn(column, layout, CHECK_MARK_WIDTH);
+    }
+
+    /**
+     * @param extraWidthPx запас к ширине значка
      */
     static void applyIconColumn(TableColumn column, TableColumnLayout layout, int extraWidthPx)
     {
@@ -3832,9 +3844,11 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         int x;
         if (table.getItemCount() > 0)
         {
-            // getBounds(creationIndex) уже учитывает columnOrder и горизонтальный скролл.
+            // getBounds(creationIndex) уже учитывает columnOrder и горизонтальный скролл. Левый край
+            // считаем от правого: у первой колонки таблицы SWT.CHECK ячейка начинается за пометкой
+            // строки, а шапка — от края колонки; правый край у них общий.
             Rectangle cell = table.getItem(0).getBounds(column);
-            x = cell.x;
+            x = cell.x + cell.width - width;
         }
         else
         {

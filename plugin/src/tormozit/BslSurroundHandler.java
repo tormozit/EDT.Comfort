@@ -4,7 +4,6 @@ import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
-import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -105,21 +104,9 @@ final class BslSurroundHandler
                 cursorPos = offset + indent.length() + kind.before.length();
             }
 
-            if (doc instanceof IXtextDocument xtextDoc)
-            {
-                int off = offset;
-                int len = length;
-                String rep = replacement;
-                xtextDoc.modify(resource ->
-                {
-                    xtextDoc.replace(off, len, rep);
-                    return null;
-                });
-            }
-            else
-            {
-                doc.replace(offset, length, replacement);
-            }
+            // Не через IXtextDocument.modify: правка текста внутри него не согласуется с моделью,
+            // проверка модуля не запускается и маркеры ошибок залипают (как в IRSession.replaceDocumentRange).
+            doc.replace(offset, length, replacement);
 
             viewer.setSelectedRange(cursorPos, 0);
             viewer.getSelectionProvider().setSelection(

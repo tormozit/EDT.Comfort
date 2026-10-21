@@ -56,6 +56,19 @@
 
 Итог — в системном свойстве `tormozit.bslXtextDoc.lockerPatch` (`woven wait=1 read=1`).
 
+### 1С:Напарник в режиме «Ручной» (#378)
+
+Классы завершения кода Напарника (`CodeCompletionViewModel`, `CodeCompletionContext`, `HintPainter`) грузятся раньше активации основного бандла; вплетение оттуда не срабатывало (временный лог 21.10.2026: ни одного `weave`, `instrumentation=false`), и после вставки из буфера Напарник снова показывал подсказку.
+
+- `CodeCompletionContext.replace` и `HintPainter.setHintAt` — ранний выход, если функция `tormozit.naparnik.replace` / `tormozit.naparnik.hint` вернула `false`. Функции ставит `tormozit.NaparnikManualModeHook`; до этого методы штатные.
+- `CodeCompletionViewModel.documentChanged` и `askNew` — выход при `!isBalanced()`; без полного набора ожидаемых членов класс остаётся штатным.
+
+Итог — в системном свойстве `tormozit.naparnik.patch` (`ViewModel=woven Context=woven HintPainter=woven`).
+
+### Полнотекстовый проход переименования и поиска ссылок (#860)
+
+`BslTextSearchSupplier.filterMatcherForSemanticObject` первой проверкой `semantic.eContainer() instanceof Invocation && !isMethod` отбрасывал не только вызов `X.Имя()`, но и аргумент вызова `Ф(X.Имя)` — такие вхождения не попадали ни в мастер переименования, ни в «Найти ссылки на объект». Единственная инструкция `instanceof Invocation` (после `aload_3; eContainer()`) заменена функцией `tormozit.bslTextSearch.dropAsCall`: «родитель — вызов, и обращение — сам вызываемый метод». Функцию ставит этот бандл (рефлексия, без типов модели BSL). Аргумент вызова проходит к остальным правилам того же фильтра EDT. Ветвлений вставка не добавляет. Итог — в системном свойстве `tormozit.bslTextSearch.invocationPatch` (`woven`; `skipped: bytecode differs` — метод не тот, класс оставлен штатным).
+
 ## Системный журнал и уведомления о полном пересчёте проверок (#832)
 
 `Activator.CheckRecomputeNotifications` безусловно пишет в штатный журнал EDT (`.metadata/.log`)

@@ -41,6 +41,8 @@ public final class Activator
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
+        context.registerService(WeavingHook.class, new NaparnikWeaving(), null);
+        TextSearchInvocationWeaving.install(context);
     }
 
     @Override
@@ -194,6 +196,396 @@ public final class Activator
             method.visitInsn(Opcodes.POP);
             method.visitLabel(proceed);
             method.visitFrame(Opcodes.F_NEW, locals.length, locals, 0, new Object[0]);
+        }
+    }
+
+    /**
+     * Полнотекстовый проход переименования и поиска ссылок (issue #860):
+     * {@code BslTextSearchSupplier.filterMatcherForSemanticObject} первой проверкой
+     * {@code semantic.eContainer() instanceof Invocation && !isMethod} отбрасывает не только вызов
+     * {@code X.Имя()}, но и аргумент вызова {@code Ф(X.Имя)}. Эта единственная инструкция
+     * {@code instanceof} заменена функцией {@link #PROP_DROP_AS_CALL}: «родитель — вызов, и обращение —
+     * сам вызываемый метод». Аргумент вызова проходит к остальным правилам того же фильтра.
+     * Ветвлений и локальных переменных вставка не добавляет — кадры стека прежние.
+     */
+    private static final class TextSearchInvocationWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchSupplier"; //$NON-NLS-1$
+        private static final String METHOD = "filterMatcherForSemanticObject"; //$NON-NLS-1$
+        private static final String METHOD_DESC = "(Lorg/eclipse/emf/ecore/EObject;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/search/core/text/TextSearchFileMatch;Lorg/eclipse/emf/ecore/EObject;Z" //$NON-NLS-1$
+            + "Ljava/lang/String;Lorg/eclipse/xtext/scoping/IScope;Lorg/eclipse/emf/common/util/URI;" //$NON-NLS-1$
+            + "Ljava/util/Collection;)V"; //$NON-NLS-1$
+        private static final String INVOCATION = "com/_1c/g5/v8/dt/bsl/model/Invocation"; //$NON-NLS-1$
+        /** Номер локальной переменной семантического объекта вхождения (третий параметр). */
+        private static final int SEMANTIC_SLOT = 3;
+        static final String PROP_DROP_AS_CALL = "tormozit.bslTextSearch.dropAsCall"; //$NON-NLS-1$
+        static final String STATUS = "tormozit.bslTextSearch.invocationPatch"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(PROP_DROP_AS_CALL,
+                (BiFunction<Object, Object, Object>) TextSearchInvocationWeaving::isCalledMethod);
+            context.registerService(WeavingHook.class, new TextSearchInvocationWeaving(), null);
+        }
+
+        /**
+         * {@code container} — вызов ({@code Invocation}), а {@code semantic} — его вызываемый метод
+         * ({@code getMethodAccess()}). Типы модели BSL здесь недоступны — по имени интерфейса и рефлексией.
+         */
+        private static Object isCalledMethod(Object container, Object semantic)
+        {
+            if (container == null || semantic == null || !implementsInvocation(container.getClass()))
+                return Boolean.FALSE;
+            try
+            {
+                return container.getClass().getMethod("getMethodAccess").invoke(container) == semantic; //$NON-NLS-1$
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                // Штатное поведение: любой вызов-родитель отбрасывает вхождение.
+                return Boolean.TRUE;
+            }
+        }
+
+        private static boolean implementsInvocation(Class<?> type)
+        {
+            for (Class<?> current = type; current != null; current = current.getSuperclass())
+            {
+                for (Class<?> face : current.getInterfaces())
+                {
+                    if (INVOCATION.replace('/', '.').equals(face.getName()) || implementsInvocation(face))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                System.setProperty(STATUS, transformed != null ? "woven" : "skipped: bytecode differs"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                System.setProperty(STATUS, "error " + error); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Заменяется только первая проверка метода: {@code ALOAD 3; INVOKEINTERFACE eContainer;
+         * INSTANCEOF Invocation}. Стек {@code [container]} → {@code [boolean]}, как у {@code instanceof}.
+         */
+        private static byte[] transform(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[1];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !METHOD.equals(name) || !METHOD_DESC.equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        /** 0 — ждём ALOAD 3, 1 — ждём eContainer, 2 — ждём INSTANCEOF, -1 — первая проверка позади. */
+                        private int state;
+
+                        @Override
+                        public void visitVarInsn(int opcode, int varIndex)
+                        {
+                            super.visitVarInsn(opcode, varIndex);
+                            if (state >= 0)
+                                state = opcode == Opcodes.ALOAD && varIndex == SEMANTIC_SLOT ? 1 : -1;
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
+                            boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                            if (state >= 0)
+                                state = state == 1 && "eContainer".equals(name) //$NON-NLS-1$
+                                    && "()Lorg/eclipse/emf/ecore/EObject;".equals(descriptor) ? 2 : -1; //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void visitTypeInsn(int opcode, String type)
+                        {
+                            if (state == 2 && opcode == Opcodes.INSTANCEOF && INVOCATION.equals(type))
+                            {
+                                state = -1;
+                                // [container] -> [container, semantic, function] -> [function, container, semantic].
+                                super.visitVarInsn(Opcodes.ALOAD, SEMANTIC_SLOT);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PROP_DROP_AS_CALL);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X2);
+                                super.visitInsn(Opcodes.POP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                touched[0]++;
+                                return;
+                            }
+                            super.visitTypeInsn(opcode, type);
+                            if (state >= 0)
+                                state = -1;
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            super.visitInsn(opcode);
+                            if (state >= 0)
+                                state = -1;
+                        }
+
+                        @Override
+                        public void visitJumpInsn(int opcode, Label label)
+                        {
+                            super.visitJumpInsn(opcode, label);
+                            if (state >= 0)
+                                state = -1;
+                        }
+
+                        @Override
+                        public void visitFieldInsn(int opcode, String owner, String name, String descriptor)
+                        {
+                            super.visitFieldInsn(opcode, owner, name, descriptor);
+                            if (state >= 0)
+                                state = -1;
+                        }
+
+                        @Override
+                        public void visitLdcInsn(Object value)
+                        {
+                            super.visitLdcInsn(value);
+                            if (state >= 0)
+                                state = -1;
+                        }
+                    };
+                }
+            }, 0);
+            // Метод изменился — класс остаётся штатным, частичный патч не применяем.
+            return touched[0] == 1 ? writer.toByteArray() : null;
+        }
+    }
+
+    /**
+     * 1С:Напарник в режиме «Ручной» (issue #378): классы завершения кода грузятся раньше активации
+     * основного бандла, вплетение оттуда не срабатывало (временный лог 21.10.2026: ни одного
+     * {@code weave}, {@code instrumentation=false}).
+     *
+     * <p>{@code CodeCompletionContext.replace} и {@code HintPainter.setHintAt} — ранний выход, если
+     * функция {@link #PROP_REPLACE} / {@link #PROP_HINT} вернула {@code false}; функций нет (основной
+     * бандл не стартовал) — штатно. {@code CodeCompletionViewModel.documentChanged} и {@code askNew} —
+     * выход при {@code !isBalanced()}.
+     */
+    private static final class NaparnikWeaving implements WeavingHook
+    {
+        /** Совпадает с {@code NaparnikManualModeHook.PROP_REPLACE}. */
+        private static final String PROP_REPLACE = "tormozit.naparnik.replace"; //$NON-NLS-1$
+        /** Совпадает с {@code NaparnikManualModeHook.PROP_HINT}. */
+        private static final String PROP_HINT = "tormozit.naparnik.hint"; //$NON-NLS-1$
+        /** Итог по классам: {@code ViewModel=woven Context=woven HintPainter=woven}, иначе причина. */
+        private static final String STATUS = "tormozit.naparnik.patch"; //$NON-NLS-1$
+
+        private static final String VM = "com.e1c.edt.ai.ui.CodeCompletionViewModel"; //$NON-NLS-1$
+        private static final String VM_INTERNAL = "com/e1c/edt/ai/ui/CodeCompletionViewModel"; //$NON-NLS-1$
+        private static final String CTX = "com.e1c.edt.ai.ui.CodeCompletionContext"; //$NON-NLS-1$
+        private static final String PAINTER = "com.e1c.edt.ai.ui.HintPainter"; //$NON-NLS-1$
+
+        private static final String CLIPBOARD_DESC = "Lcom/e1c/edt/ai/ui/IClipboard;"; //$NON-NLS-1$
+        private static final String DOCUMENT_CHANGED_DESC = "(Lorg/eclipse/jface/text/DocumentEvent;)V"; //$NON-NLS-1$
+        private static final String REPLACE_DESC = "(IILjava/lang/String;)V"; //$NON-NLS-1$
+        private static final String SET_HINT_DESC = "(Ljava/lang/String;Ljava/lang/String;I)V"; //$NON-NLS-1$
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING)
+                return;
+            String name = woven.getClassName();
+            String label = VM.equals(name) ? "ViewModel" : CTX.equals(name) ? "Context" //$NON-NLS-1$ //$NON-NLS-2$
+                : PAINTER.equals(name) ? "HintPainter" : null; //$NON-NLS-1$
+            if (label == null)
+                return;
+            String result;
+            try
+            {
+                byte[] transformed = VM.equals(name) ? transformViewModel(woven.getBytes())
+                    : CTX.equals(name) ? transformPredicate(woven.getBytes(), "replace", REPLACE_DESC, PROP_REPLACE, 3) //$NON-NLS-1$
+                    : transformPredicate(woven.getBytes(), "setHintAt", SET_HINT_DESC, PROP_HINT, 1); //$NON-NLS-1$
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                result = transformed != null ? "woven" : "skipped"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                result = "error(" + error + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            synchronized (NaparnikWeaving.class)
+            {
+                String previous = System.getProperty(STATUS);
+                System.setProperty(STATUS, (previous == null ? "" : previous + " ") + label + "=" + result); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+        }
+
+        private static byte[] transformViewModel(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            if (!hasViewModelMembers(reader))
+                return null;
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null)
+                        return null;
+                    if (!("documentChanged".equals(name) && DOCUMENT_CHANGED_DESC.equals(descriptor) //$NON-NLS-1$
+                        || "askNew".equals(name) && "()V".equals(descriptor))) //$NON-NLS-1$ //$NON-NLS-2$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            Label ok = new Label();
+                            visitVarInsn(Opcodes.ALOAD, 0);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, VM_INTERNAL, "isBalanced", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            visitJumpInsn(Opcodes.IFNE, ok);
+                            visitInsn(Opcodes.RETURN);
+                            visitLabel(ok);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /** Ранний {@code return}, если функция {@code prop} вернула {@code false} на аргумент {@code textLocal}. */
+        private static byte[] transformPredicate(byte[] bytes, String method, String methodDesc, String prop,
+            int textLocal)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !method.equals(name) || !methodDesc.equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            visitLdcInsn(prop);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            Label skip = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, skip);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitVarInsn(Opcodes.ALOAD, textLocal);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            Label ok = new Label();
+                            visitJumpInsn(Opcodes.IFNE, ok);
+                            visitInsn(Opcodes.RETURN);
+                            visitLabel(ok);
+                            Label end = new Label();
+                            visitJumpInsn(Opcodes.GOTO, end);
+                            visitLabel(skip);
+                            visitInsn(Opcodes.POP);
+                            visitLabel(end);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        private static ClassWriter writer(ClassReader reader)
+        {
+            return new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
+            {
+                @Override
+                protected String getCommonSuperClass(String type1, String type2)
+                {
+                    return "java/lang/Object"; //$NON-NLS-1$
+                }
+            };
+        }
+
+        /** Сверка с версией Напарника, под которую написана вставка: иначе класс остаётся штатным. */
+        private static boolean hasViewModelMembers(ClassReader reader)
+        {
+            boolean[] found = new boolean[6];
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public FieldVisitor visitField(int access, String name, String descriptor, String signature,
+                    Object value)
+                {
+                    if ("clipboard".equals(name) && CLIPBOARD_DESC.equals(descriptor)) //$NON-NLS-1$
+                        found[0] = true;
+                    return null;
+                }
+
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    if ("isEnabled".equals(name) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        found[1] = true;
+                    else if ("isBalanced".equals(name) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        found[2] = true;
+                    else if ("reset".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        found[3] = true;
+                    else if ("documentChanged".equals(name) && DOCUMENT_CHANGED_DESC.equals(descriptor)) //$NON-NLS-1$
+                        found[4] = true;
+                    else if ("askNew".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        found[5] = true;
+                    return null;
+                }
+            }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            for (boolean f : found)
+                if (!f)
+                    return false;
+            return true;
         }
     }
 

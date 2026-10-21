@@ -1685,7 +1685,7 @@
         lightweight="true"
         state="true"
         class="tormozit.CommandDecorator">
-      <description>К имени команды добавляется суффикс «(Парам)», если у команды задан тип параметра, в навигаторе и в дереве команд редактора объекта.</description>
+      <description>К имени команды добавляется суффикс «(Парам)», если у команды задан тип параметра, в навигаторе и в дереве команд редактора объекта. Тот же суффикс — у групп, допускающих параметризуемые команды, в окне «Выбор группы команд».</description>
       <enablement>
         <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicCommand"/>
       </enablement>

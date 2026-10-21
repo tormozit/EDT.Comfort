@@ -9,18 +9,25 @@ import org.eclipse.ui.IDecoratorManager;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
 
+import com._1c.g5.v8.dt.mcore.CommandGroupCategory;
+import com._1c.g5.v8.dt.mcore.StandardCommandGroup;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
+import com._1c.g5.v8.dt.metadata.mdclass.CommandGroup;
 
 /**
  * Суффикс «(Парам)» у параметризуемой команды (общей и команды объекта метаданных), то есть
  * такой, у которой задан тип параметра команды. Показывается везде, где EDT применяет декораторы
  * к {@link BasicCommand} (навигатор, дерево команд редактора объекта и т.п.).
+ *
+ * <p>Тот же суффикс — у группы команд, в которой может стоять параметризуемая команда, в окне
+ * «Выбор группы команд» ({@link #groupSuffix}, подключение — {@link FormMainAttributeTypeDecorator}).
  */
 public final class CommandDecorator extends LabelProvider implements ILightweightLabelDecorator, IStartup
 {
     private static final String DECORATOR_ID = "tormozit.commandParameterDecorator"; //$NON-NLS-1$
     private static final String PREF_AUTO_ENABLED = "tormozit.commandParameterDecorator.autoEnabled"; //$NON-NLS-1$
+    private static final String PARAM = "Парам"; //$NON-NLS-1$
 
     /** См. {@link TemplateTypeSuffixDecorator#earlyStartup()}: одноразовое принудительное включение. */
     @Override
@@ -61,6 +68,36 @@ public final class CommandDecorator extends LabelProvider implements ILightweigh
             return;
         TypeDescription description = command.getCommandParameterType();
         if (description != null && !description.getTypes().isEmpty())
-            decoration.addSuffix(" (Парам)");
+            decoration.addSuffix(" (" + PARAM + ")");
+    }
+
+    /**
+     * Суффикс (без скобок) группы команд, допускающей параметризуемые команды; {@code null} — у прочих
+     * элементов или при выключенном декораторе.
+     */
+    static String groupSuffix(Object element)
+    {
+        if (!allowsParameter(element))
+            return null;
+        try
+        {
+            return PlatformUI.getWorkbench().getDecoratorManager().getEnabled(DECORATOR_ID) ? PARAM : null;
+        }
+        catch (RuntimeException ex)
+        {
+            return PARAM;
+        }
+    }
+
+    /** Группа панели навигации формы или командной панели формы (стандартная либо своя). */
+    static boolean allowsParameter(Object group)
+    {
+        CommandGroupCategory category = null;
+        if (group instanceof StandardCommandGroup standard)
+            category = standard.getCategory();
+        else if (group instanceof CommandGroup custom)
+            category = custom.getCategory();
+        return category == CommandGroupCategory.FORM_NAVIGATION_PANEL
+            || category == CommandGroupCategory.FORM_COMMAND_BAR;
     }
 }

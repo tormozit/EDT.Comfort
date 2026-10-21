@@ -22,7 +22,6 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.texteditor.ITextEditor;
-import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
@@ -475,32 +474,16 @@ public final class TextEditor
         if (doc == null)
             return;
 
-        if (doc instanceof IXtextDocument xtextDoc)
+        // Не через IXtextDocument.modify: правка текста внутри него не согласуется с моделью,
+        // проверка модуля не запускается и маркеры ошибок залипают (как в IRSession.replaceDocumentRange).
+        try
         {
-            xtextDoc.modify(resource ->
-            {
-                try
-                {
-                    xtextDoc.replace(ctx.offset, ctx.length, newText);
-                }
-                catch (BadLocationException e)
-                {
-                    throw new RuntimeException("Ошибка замены текста", e); //$NON-NLS-1$
-                }
-                return null;
-            });
+            doc.replace(ctx.offset, ctx.length, newText);
         }
-        else
+        catch (BadLocationException e)
         {
-            try
-            {
-                doc.replace(ctx.offset, ctx.length, newText);
-            }
-            catch (BadLocationException e)
-            {
-                Global.log("TextEditor.replaceSelectionAndSelect: " + e); //$NON-NLS-1$
-                return;
-            }
+            Global.log("TextEditor.replaceSelectionAndSelect: " + e); //$NON-NLS-1$
+            return;
         }
 
         int newLength = newText.length();

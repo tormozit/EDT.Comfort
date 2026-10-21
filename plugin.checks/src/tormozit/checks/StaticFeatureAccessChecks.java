@@ -49,7 +49,8 @@ import tormozit.ComfortCheckIds;
 import tormozit.Global;
 
 /**
- * Копия веток {@code BslJavaValidator.checkStaticFeatureAccess} из EDT 28.0.1.
+ * Копия веток {@code BslJavaValidator.checkStaticFeatureAccess} из бандла {@code com._1c.g5.v8.dt.bsl 28.0.1}
+ * (квалификатор при копировании не записан: {@code v202605050943} или {@code v202607090722}).
  * Каждая вложенная проверка исполняет только свою группу. Позиции и тексты взяты из
  * штатной проверки; одинаковый результат разных FeatureEntry выдаётся один раз.
  */
@@ -82,8 +83,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         }
     }
 
-    private static final String REPLACEMENT_NOTE = "<br><br>Заменяет диагностику штатной проверки "
-        + "bsl-legacy-check-static-feature-access: если включена хотя бы одна из этой группы, штатная проверка отключается, чтобы проблемы не дублировались.";
+    private static final String REPLACEMENT_NOTE = "<br><br>Заменяет штатную bsl-legacy-check-static-feature-access, её включить нельзя.";
 
     private static final IMessages MESSAGES = IMessages.INSTANCE;
 

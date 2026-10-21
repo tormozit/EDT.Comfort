@@ -1184,10 +1184,40 @@ public class FormEditorHook implements IStartup
                     : target instanceof FormCommand ? FormEditorComponent.FORM_COMMANDS : FormEditorComponent.PARAMETERS;
                 requests.remove(key, target);
                 page.setSelection(component, true, target);
+                if (target instanceof FormAttribute || target instanceof FormCommand)
+                    scheduleGoTo(editor, page, target);
             }
             // Элемент выбран — показываем его свойства (панель активируется после текущего события UI).
             OpenHelperAttributePropertiesHook.scheduleActivateProperties();
             return true;
+        }
+
+        /** После применения выделения EDT выполняем штатный переход к связанному элементу. */
+        private static void scheduleGoTo(FormEditor editor, FormEditorPage page, EObject target)
+        {
+            page.getSite().getShell().getDisplay().asyncExec(() -> {
+                String viewerField = target instanceof FormAttribute ? "attributesViewer" : "formCommandsViewer"; //$NON-NLS-1$ //$NON-NLS-2$
+                if (formViewerControl(page, viewerField) == null
+                    || editor.getSite().getPage().getActiveEditor() != editor)
+                    return;
+                String groupField = target instanceof FormAttribute
+                    ? "attributeActionsGroup" : "formCommandsActionsGroup"; //$NON-NLS-1$ //$NON-NLS-2$
+                Object group = Global.getField(page, groupField);
+                Object targets = group == null ? null
+                    : Global.invoke(group, "calculateAvailablesGoToTtems"); //$NON-NLS-1$
+                if (targets instanceof List<?> list && !list.isEmpty())
+                    Global.invokeVoid(group, "runGoToAction"); //$NON-NLS-1$
+                // «Перейти» выбирает связанный элемент. Возвращаем только фокус к источнику,
+                // сохраняя выбор элемента формы и исходной команды/реквизита в своих списках.
+                page.getSite().getShell().getDisplay().asyncExec(() -> {
+                    Control sourceControl = formViewerControl(page, viewerField);
+                    if (sourceControl == null || editor.getSite().getPage().getActiveEditor() != editor)
+                        return;
+                    page.setActiveComponent(target instanceof FormAttribute
+                        ? FormEditorComponent.ATTRIBUTES : FormEditorComponent.FORM_COMMANDS);
+                    sourceControl.setFocus();
+                });
+            });
         }
     }
 

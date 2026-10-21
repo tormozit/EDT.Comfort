@@ -729,6 +729,8 @@ public final class BslDocCommentTypeMerge
         else if (source.getEnvironments() != null)
             copy.setEnvironments(new Environments(source.getEnvironments().toArray()));
         copy.setCreatedByNewOperator(source.isCreatedByNewOperator());
+        // Без признака копия таблицы/массива для проверки «Для каждого» — не коллекция
+        copy.setIterable(source.isIterable());
         ContextDefWithRefItem ctx = McoreFactory.eINSTANCE.createContextDefWithRefItem();
         LinkedHashSet<Method> methods = new LinkedHashSet<>();
         LinkedHashSet<Property> properties = new LinkedHashSet<>();

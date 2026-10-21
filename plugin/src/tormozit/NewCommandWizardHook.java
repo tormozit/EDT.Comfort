@@ -1,7 +1,13 @@
 package tormozit;
 
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.IPageChangeProvider;
+import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredContentProvider;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.window.Window;
 import org.eclipse.jface.wizard.IWizard;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
@@ -13,22 +19,32 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.PlatformUI;
 
-import com._1c.g5.v8.dt.mcore.CommandGroupCategory;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.StandardCommandGroup;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
-import com._1c.g5.v8.dt.metadata.mdclass.CommandGroup;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
- * Окно «Новая команда» (мастер {@code CommandWizard} — команда объекта метаданных, не общая):
- * если команда создаётся у объекта со ссылочным типом, под полем «Группа» добавляется флажок
- * «Параметризованная». Включённый флажок ставит типом параметра команды ссылку на этот объект
- * (issue 706).
+ * Окна «Новая команда» и «Новая общая команда» (мастера {@code CommandWizard} и
+ * {@code CommonCommandWizard}): если команда создаётся у объекта со ссылочным типом, под полем
+ * «Группа» добавляется флажок «Параметризованная». Включённый флажок ставит типом параметра
+ * команды ссылку на этот объект (issue 706). У общей команды родитель — конфигурация, флажка нет.
+ *
+ * <p>После «Готово» открывается панель «Свойства» с созданной командой (issue 859). Мастер сам
+ * выделяет команду во всех частях-получателях ({@code WorkbenchUtils.selectAndReveal}, через два
+ * {@code asyncExec}), а общей команде ещё и открывает редактор; если активная часть команду не
+ * выделила, активируется навигатор.
  *
  * <p>Механика (проверено декомпиляцией {@code com._1c.g5.v8.dt.md.ui}):
  * <ul>
@@ -50,7 +66,8 @@ public final class NewCommandWizardHook implements IStartup
     /** Ключ {@link Shell#setData}: сеанс хука либо отметка «не наш мастер». */
     private static final String SESSION_KEY = "tormozit.newCommandWizardSession"; //$NON-NLS-1$
 
-    private static final String WIZARD_CLASS = "com._1c.g5.v8.dt.md.ui.wizards.CommandWizard"; //$NON-NLS-1$
+    /** Общий предок мастеров команды объекта ({@code CommandWizard}) и общей команды ({@code CommonCommandWizard}). */
+    private static final String WIZARD_CLASS = "com._1c.g5.v8.dt.md.ui.wizards.AbstractCommandWizard"; //$NON-NLS-1$
 
     /** Компонент главной страницы мастера — {@code AbstractCommandWizard$CommandWizardPage}. */
     private static final String PAGE_COMPONENT_SUFFIX = "$CommandWizardPage"; //$NON-NLS-1$
@@ -95,6 +112,8 @@ public final class NewCommandWizardHook implements IStartup
             // Со страницей выбора родителя главная страница строится позже — ловим её по смене страницы.
             if (container instanceof IPageChangeProvider provider)
                 provider.addPageChangedListener(e -> session.sync());
+            if (container instanceof Window window)
+                shell.addListener(SWT.Dispose, e -> session.onClosed(window));
             scheduleAttach(display, session, 0);
         };
         display.addFilter(SWT.Activate, listener);
@@ -182,6 +201,66 @@ public final class NewCommandWizardHook implements IStartup
             }
         }
 
+        /** Окно закрыто; после «Готово» показывает созданную команду в панели «Свойства». */
+        void onClosed(Window window)
+        {
+            if (window.getReturnCode() != Window.OK)
+                return;
+            try
+            {
+                if (!(Global.invoke(Global.invoke(wizard, "getContext"), "getModel") instanceof EObject command)) //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                Display display = shell.getDisplay();
+                // Мастер выделяет команду в asyncExec, а получатели выделения — в следующем asyncExec.
+                display.asyncExec(() -> display.asyncExec(() -> showInProperties(command)));
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(TAG, "onClosed", e); //$NON-NLS-1$
+            }
+        }
+
+        private static void showInProperties(EObject command)
+        {
+            try
+            {
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage page = window != null ? window.getActivePage() : null;
+                if (page == null)
+                    return;
+                if (!selects(page.getActivePart(), command))
+                {
+                    IViewPart navigator = page.findView(Global.NAVIGATOR_VIEW_ID);
+                    if (navigator != null && selects(navigator, command))
+                        page.activate(navigator);
+                    else
+                        Global.log(TAG, "созданная команда не выделена ни в активной части, ни в навигаторе"); //$NON-NLS-1$
+                }
+                page.showView(IPageLayout.ID_PROP_SHEET, null, IWorkbenchPage.VIEW_VISIBLE);
+            }
+            catch (PartInitException | RuntimeException e)
+            {
+                Global.logError(TAG, "showInProperties", e); //$NON-NLS-1$
+            }
+        }
+
+        /** Выделение части содержит эту команду. */
+        private static boolean selects(IWorkbenchPart part, EObject command)
+        {
+            ISelectionProvider provider = part != null && part.getSite() != null
+                ? part.getSite().getSelectionProvider() : null;
+            if (provider == null || !(provider.getSelection() instanceof IStructuredSelection selection))
+                return false;
+            URI uri = EcoreUtil.getURI(command);
+            for (Object element : selection.toList())
+            {
+                EObject model = NavigatorElementModels.resolveEObject(element);
+                if (model == command || model != null && uri != null && uri.equals(EcoreUtil.getURI(model)))
+                    return true;
+            }
+            return false;
+        }
+
         private void apply(BasicCommand model, TypeItem refType)
         {
             if (button.getSelection())
@@ -216,7 +295,7 @@ public final class NewCommandWizardHook implements IStartup
             try
             {
                 Object groupModel = Global.invoke(Global.getField(wizard, "model"), "getCommandGroup"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (groupModel == null || allowsParameter(Global.invoke(groupModel, "get"))) //$NON-NLS-1$
+                if (groupModel == null || CommandDecorator.allowsParameter(Global.invoke(groupModel, "get"))) //$NON-NLS-1$
                     return;
                 if (!(Global.invoke(groupModel, "getContentProvider") instanceof IStructuredContentProvider provider)) //$NON-NLS-1$
                     return;
@@ -235,18 +314,6 @@ public final class NewCommandWizardHook implements IStartup
             {
                 Global.logError(TAG, "ensureParameterizableGroup", e); //$NON-NLS-1$
             }
-        }
-
-        /** Группа панели навигации формы или командной панели формы (стандартная либо своя). */
-        private static boolean allowsParameter(Object group)
-        {
-            CommandGroupCategory category = null;
-            if (group instanceof StandardCommandGroup standard)
-                category = standard.getCategory();
-            else if (group instanceof CommandGroup custom)
-                category = custom.getCategory();
-            return category == CommandGroupCategory.FORM_NAVIGATION_PANEL
-                || category == CommandGroupCategory.FORM_COMMAND_BAR;
         }
 
         /** Добавляет флажок последней строкой раскладки главной страницы; {@code false} — страница не готова. */

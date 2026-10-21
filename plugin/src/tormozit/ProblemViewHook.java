@@ -41,7 +41,6 @@ import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.e4.ui.model.application.ui.menu.MHandledToolItem;
 import org.eclipse.e4.ui.model.application.ui.menu.MToolBar;
 import org.eclipse.e4.ui.model.application.ui.menu.MToolBarElement;
-import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -52,8 +51,6 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.browser.Browser;
-import org.eclipse.swt.browser.ProgressListener;
 import org.eclipse.swt.custom.CCombo;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
@@ -2966,7 +2963,6 @@ public final class ProblemViewHook implements IStartup
             return;
         }
         CheckSettingsWindowTrace.install(dialog.getShell());
-        installCheckDescriptionRefresh(dialog);
         dialog.open();
         CheckSettingsWindowTrace.log("open-returned", target);
     }
@@ -3018,12 +3014,6 @@ public final class ProblemViewHook implements IStartup
                 + ", parent=" + (parent == null ? "null"
                     : Integer.toHexString(System.identityHashCode(parent))) + "}";
         }
-    }
-
-    /** Общий путь обновления описания при программном открытии страницы проверок. */
-    static void installCheckDescriptionRefresh(PreferenceDialog dialog)
-    {
-        CheckDescriptionRefresh.install(dialog);
     }
 
     /** Открывает страницу параметров проекта с идентификатором {@code pageId}. */
@@ -4416,63 +4406,6 @@ public final class ProblemViewHook implements IStartup
                     throw e;
                 }
             }
-        }
-    }
-
-    /**
-     * Описание проверки (HTML) на странице «Проверки» параметров проекта рисуется
-     * через {@code Browser.execute("document.body.innerHTML = …")}. При открытии
-     * страницы с уже выбранной проверкой ({@code applyData}) описание пустое: EDT
-     * вызывает {@code execute} сразу после {@code setText} начального документа, а
-     * до окончания его загрузки {@code execute} молча ничего не делает. Повторяем
-     * отрисовку по событию загрузки документа — состояние {@code CheckViewer}
-     * (проект и настройка проверки) к этому моменту уже проставлено.
-     *
-     * <p>Диалог сюда приходит уже созданным: {@code PropertyDialog.createDialogOn}
-     * внутри {@link PreferencesUtil#createPropertyDialogOn} сам вызывает
-     * {@code create()}. Повторный {@code create()} создаёт второй shell и теряет
-     * выбранную страницу вместе с отбором по проекту — вызывать его нельзя.
-     * Поэтому, кроме слушателя, планируем и разовую перерисовку в очереди UI:
-     * документ мог загрузиться ещё до установки слушателя.
-     */
-    private static final class CheckDescriptionRefresh
-    {
-        private CheckDescriptionRefresh() {}
-
-        static void install(PreferenceDialog dialog)
-        {
-            Object page = dialog.getSelectedPage();
-            if (!(page instanceof IPreferencePage preferencePage))
-                return;
-            Browser browser = findBrowser(preferencePage.getControl());
-            if (browser == null)
-            {
-                Debug.log("CheckDescriptionRefresh: no browser on checks page"); //$NON-NLS-1$
-                return;
-            }
-            Composite checkViewer = browser.getParent();
-            Runnable refresh = () -> {
-                if (!browser.isDisposed())
-                    Global.invokeVoid(checkViewer, "updateHtmlContent"); //$NON-NLS-1$
-            };
-            browser.addProgressListener(ProgressListener.completedAdapter(e -> refresh.run()));
-            browser.getDisplay().asyncExec(refresh);
-        }
-
-        private static Browser findBrowser(Control control)
-        {
-            if (control instanceof Browser browser)
-                return browser;
-            if (control instanceof Composite composite)
-            {
-                for (Control child : composite.getChildren())
-                {
-                    Browser found = findBrowser(child);
-                    if (found != null)
-                        return found;
-                }
-            }
-            return null;
         }
     }
 

@@ -1,9 +1,6 @@
 package tormozit;
 
-import java.lang.instrument.ClassFileTransformer;
-import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
-import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -52,17 +49,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.texteditor.ITextEditor;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
 import org.osgi.framework.Bundle;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.FrameworkUtil;
-import org.osgi.framework.hooks.weaving.WeavingHook;
-import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -78,8 +65,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  */
 public final class NaparnikManualModeHook implements IStartup
 {
-    /** Временная диагностика issue 378 приглушена по просьбе пользователя. */
-    private static final boolean LOG_ENABLED = false;
+    /** Временная диагностика issue 378: подсказка Напарника после вставки в режиме «Ручной». */
+    private static final boolean LOG_ENABLED = true;
     private static final String LOG = "naparnik-378"; //$NON-NLS-1$
 
     /**
@@ -89,24 +76,16 @@ public final class NaparnikManualModeHook implements IStartup
      */
     private static final boolean PATCH_ENABLED = true;
 
+    /** Функции для вставок в классы Напарника — их делает ранний бандл ({@code tormozit.early.Activator.NaparnikWeaving}). */
     static final String PROP_REPLACE = "tormozit.naparnik.replace"; //$NON-NLS-1$
     static final String PROP_HINT = "tormozit.naparnik.hint"; //$NON-NLS-1$
+    /** Итог вплетения из раннего бандла. */
+    private static final String PROP_PATCH = "tormozit.naparnik.patch"; //$NON-NLS-1$
 
     private static final String PREF_NODE = "com.e1c.edt.ai.ui"; //$NON-NLS-1$
     private static final String PREF_KEY = "stringPreferenceCodeCompletionPolicy"; //$NON-NLS-1$
 
     private static final String VM = "com.e1c.edt.ai.ui.CodeCompletionViewModel"; //$NON-NLS-1$
-    private static final String VM_INTERNAL = "com/e1c/edt/ai/ui/CodeCompletionViewModel"; //$NON-NLS-1$
-    private static final String CTX = "com.e1c.edt.ai.ui.CodeCompletionContext"; //$NON-NLS-1$
-    private static final String CTX_INTERNAL = "com/e1c/edt/ai/ui/CodeCompletionContext"; //$NON-NLS-1$
-    private static final String PAINTER = "com.e1c.edt.ai.ui.HintPainter"; //$NON-NLS-1$
-    private static final String PAINTER_INTERNAL = "com/e1c/edt/ai/ui/HintPainter"; //$NON-NLS-1$
-
-    private static final String CLIPBOARD_DESC = "Lcom/e1c/edt/ai/ui/IClipboard;"; //$NON-NLS-1$
-    private static final String DOCUMENT_CHANGED_DESC =
-        "(Lorg/eclipse/jface/text/DocumentEvent;)V"; //$NON-NLS-1$
-    private static final String REPLACE_DESC = "(IILjava/lang/String;)V"; //$NON-NLS-1$
-    private static final String SET_HINT_DESC = "(Ljava/lang/String;Ljava/lang/String;I)V"; //$NON-NLS-1$
 
     private static final String CMD_PASTE = "org.eclipse.ui.edit.paste"; //$NON-NLS-1$
     private static final String CMD_SUGGEST = "com.e1c.edt.ai.ui.commands.suggest.ai"; //$NON-NLS-1$
@@ -132,7 +111,15 @@ public final class NaparnikManualModeHook implements IStartup
     private static volatile boolean policyListenerInstalled;
 
     private static final AtomicBoolean booted = new AtomicBoolean();
-    private static final AtomicInteger allowApply = new AtomicInteger();
+    /**
+     * Принятие подсказки Напарника (Tab, Ctrl+Enter, команды «принять») разрешено на
+     * {@link #APPLY_WINDOW_MS} от последнего такого события. Окно, а не счётчик: штатный Tab
+     * запускает и клавишу, и команды Напарника, у которых не всегда есть парное завершение, —
+     * счётчик зависал на 1 и выключал защиту до конца сеанса (лог 21.10.2026 15:27).
+     */
+    private static final long APPLY_WINDOW_MS = 800;
+    private static volatile long applyGrantedNanos;
+    private static volatile boolean applyGranted;
     private static final AtomicInteger allowSuggest = new AtomicInteger();
     private static final AtomicInteger pasteActive = new AtomicInteger();
     private static final AtomicBoolean reverting = new AtomicBoolean();
@@ -152,10 +139,11 @@ public final class NaparnikManualModeHook implements IStartup
         System.getProperties().put(PROP_HINT, (Predicate<Object>) NaparnikManualModeHook::allowHint);
         if (LOG_ENABLED)
         {
-            Global.tempLog(LOG, "bootFromActivator patch=" + PATCH_ENABLED); //$NON-NLS-1$
+            Bundle common = Platform.getBundle("com.e1c.edt.ai.ui.common"); //$NON-NLS-1$
+            Global.tempLog(LOG, "bootFromActivator patch=" + PATCH_ENABLED + " напарник=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (common != null ? common.getVersion() + " state=" + common.getState() : "нет") //$NON-NLS-1$ //$NON-NLS-2$
+                + " вплетение=" + System.getProperty(PROP_PATCH)); //$NON-NLS-1$
         }
-        registerWeavingHook();
-        registerTransformer();
     }
 
     @Override
@@ -379,10 +367,6 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void attachDocument(IDocument document)
     {
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "attachDocument document=" + System.identityHashCode(document)); //$NON-NLS-1$
-        }
         if (document == null)
             return;
         synchronized (guards)
@@ -400,28 +384,59 @@ public final class NaparnikManualModeHook implements IStartup
         return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
     }
 
+    private static void grantApply()
+    {
+        applyGrantedNanos = System.nanoTime();
+        applyGranted = true;
+    }
+
+    /** Остаток окна принятия, мс; {@code 0} — принятие не разрешено. */
+    private static long applyLeftMs()
+    {
+        if (!applyGranted)
+            return 0;
+        long left = APPLY_WINDOW_MS * 1_000_000L - (System.nanoTime() - applyGrantedNanos);
+        return left > 0 ? left / 1_000_000L + 1 : 0;
+    }
+
     static boolean allowReplace(Object text)
     {
-        boolean allow = !isRestrictedPolicy() || allowApply.get() > 0;
+        boolean allow = !isRestrictedPolicy() || applyLeftMs() > 0;
         if (LOG_ENABLED)
         {
             Global.tempLog(LOG, "allowReplace allow=" + (!PATCH_ENABLED || allow) + " policy=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
-                + " allowApply=" + allowApply.get() + " послеВставки=" + sinceLastPaste()); //$NON-NLS-1$ //$NON-NLS-2$
+                + " allowApply=" + applyLeftMs() + " послеВставки=" + sinceLastPaste()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return !PATCH_ENABLED || allow;
     }
 
     static boolean allowHint(Object text)
     {
-        boolean allow = !isRestrictedPolicy() || allowSuggest.get() > 0 || allowApply.get() > 0;
+        boolean allow = !isRestrictedPolicy() || allowSuggest.get() > 0 || applyLeftMs() > 0;
         boolean result = !PATCH_ENABLED || allow;
-        if (LOG_ENABLED)
+        // Скрытие подсказки (текст null) — сотни строк без пользы, пишем только показ.
+        if (LOG_ENABLED && text != null)
         {
             Global.tempLog(LOG, "ПОКАЗ ПОДСКАЗКИ: пропущен=" + result + " политика=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
                 + " послеВставки=" + sinceLastPaste() + " allowSuggest=" + allowSuggest.get() //$NON-NLS-1$ //$NON-NLS-2$
-                + " allowApply=" + allowApply.get() + " длина=" + (text instanceof String s ? s.length() : -1)); //$NON-NLS-1$ //$NON-NLS-2$
+                + " allowApply=" + applyLeftMs() + " длина=" + (text instanceof String s ? s.length() : -1) //$NON-NLS-1$ //$NON-NLS-2$
+                + " поток=" + Thread.currentThread().getName() + " стек=" + callerFrames()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return result;
+    }
+
+    /** Кадры Напарника и Комфорта в стеке вызова — кто дошёл до показа подсказки. */
+    private static String callerFrames()
+    {
+        return STACK_WALKER.walk(frames -> frames
+            .filter(f -> f.getClassName().startsWith(NAPARNIK_PACKAGE)
+                || f.getClassName().startsWith("tormozit.") //$NON-NLS-1$
+                    && !f.getClassName().startsWith(NaparnikManualModeHook.class.getName()))
+            .limit(12)
+            .map(f -> f.getClassName().substring(f.getClassName().lastIndexOf('.') + 1) + "." + f.getMethodName() //$NON-NLS-1$
+                + ":" + f.getLineNumber()) //$NON-NLS-1$
+            .reduce((a, b) -> a + " < " + b) //$NON-NLS-1$
+            .orElse("-")); //$NON-NLS-1$
     }
 
     /** Сколько прошло с последней вставки, для строки о показе подсказки. */
@@ -446,15 +461,16 @@ public final class NaparnikManualModeHook implements IStartup
         boolean suggest = isSuggestHotkey(event);
         if (!accept && !suggest)
             return;
-        if (!isHookedEditorStyledText(event.widget))
+        boolean hooked = isHookedEditorStyledText(event.widget);
+        if (LOG_ENABLED)
+        {
+            Global.tempLog(LOG, "клавиша accept=" + accept + " suggest=" + suggest + " редактор=" + hooked //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " type=" + event.type + " allowApply=" + applyLeftMs() + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        if (!hooked)
             return;
         if (accept)
-        {
-            allowApply.incrementAndGet();
-            Display display = event.display != null ? event.display : Display.getCurrent();
-            if (display != null)
-                display.timerExec(800, () -> allowApply.updateAndGet(v -> Math.max(0, v - 1)));
-        }
+            grantApply();
         if (suggest)
             allowSuggest.incrementAndGet();
     }
@@ -473,20 +489,15 @@ public final class NaparnikManualModeHook implements IStartup
                 boolean ours = isHookedEditorStyledText(focus);
                 if (LOG_ENABLED)
                 {
+                    Global.tempLog(LOG, "paste вплетение=" + System.getProperty(PROP_PATCH)); //$NON-NLS-1$
                     Global.tempLog(LOG, "paste ours=" + ours + " policy=" + readPolicy() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " allowApply=" + allowApply.get() + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$ //$NON-NLS-2$
+                        + " allowApply=" + applyLeftMs() + " allowSuggest=" + allowSuggest.get() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " pasteActive=" + pasteActive.get() + " фокус=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (focus != null ? focus.getClass().getName() : "null")); //$NON-NLS-1$
                 }
                 if (ours)
                 {
                     lastPasteNanos = System.nanoTime();
-                    if (isRestrictedPolicy())
-                        if (LOG_ENABLED)
-                        {
-                            Global.tempLog(LOG, "вставка из буфера"); //$NON-NLS-1$
-                        }
-                }
-                if (ours)
-                {
                     pasteActive.incrementAndGet();
                     allowSuggest.set(0);
                     scheduleSuppress(null);
@@ -496,7 +507,12 @@ public final class NaparnikManualModeHook implements IStartup
                 allowSuggest.incrementAndGet();
             if (CMD_ACCEPT.equals(commandId) || CMD_ACCEPT_PART.equals(commandId)
                 || CMD_ACCEPT_LINE.equals(commandId))
-                allowApply.incrementAndGet();
+                grantApply();
+            if (LOG_ENABLED && (commandId.startsWith(NAPARNIK_PACKAGE) || commandId.contains("paste"))) //$NON-NLS-1$
+            {
+                Global.tempLog(LOG, "команда " + commandId + " allowApply=" + applyLeftMs() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$
+            }
         }
 
         @Override
@@ -522,15 +538,10 @@ public final class NaparnikManualModeHook implements IStartup
     {
         if (CMD_PASTE.equals(commandId))
             pasteActive.updateAndGet(v -> Math.max(0, v - 1));
+        // Окно — от завершения команды: запись в документ идёт и после preExecute.
         if (CMD_ACCEPT.equals(commandId) || CMD_ACCEPT_PART.equals(commandId)
             || CMD_ACCEPT_LINE.equals(commandId))
-        {
-            Display display = Display.getCurrent();
-            if (display != null)
-                display.timerExec(800, () -> allowApply.updateAndGet(v -> Math.max(0, v - 1)));
-            else
-                allowApply.updateAndGet(v -> Math.max(0, v - 1));
-        }
+            grantApply();
     }
 
     private static void scheduleSuppress(IDocument document)
@@ -557,12 +568,7 @@ public final class NaparnikManualModeHook implements IStartup
             {
                 try
                 {
-                    if (LOG_ENABLED)
-                    {
-                        Global.tempLog(LOG, "suppress timer delay=" + delay + " allowApply=" + allowApply.get() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " allowSuggest=" + allowSuggest.get()); //$NON-NLS-1$
-                    }
-                    if (allowApply.get() > 0 || allowSuggest.get() > 0)
+                    if (applyLeftMs() > 0 || allowSuggest.get() > 0)
                         return;
                     suppressViewModel(pendingSuppressDoc);
                 }
@@ -578,11 +584,6 @@ public final class NaparnikManualModeHook implements IStartup
 
     private static void suppressViewModel(IDocument document)
     {
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "suppressViewModel document=" + System.identityHashCode(document) //$NON-NLS-1$
-                + " policy=" + readPolicy()); //$NON-NLS-1$
-        }
         if (!isRestrictedPolicy())
             return;
         List<Object> found = new ArrayList<>();
@@ -603,10 +604,6 @@ public final class NaparnikManualModeHook implements IStartup
         {
             collectViewModels(widget.getListeners(ST.VerifyKey), found);
             collectViewModels(widget.getListeners(SWT.Modify), found);
-        }
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "suppressViewModel found=" + found.size() + " widget=" + (widget != null)); //$NON-NLS-1$ //$NON-NLS-2$
         }
         for (Object vm : found)
         {
@@ -651,6 +648,10 @@ public final class NaparnikManualModeHook implements IStartup
     static void allowHintByUserAction()
     {
         allowSuggest.incrementAndGet();
+        if (LOG_ENABLED)
+        {
+            Global.tempLog(LOG, "allowHintByUserAction allowSuggest=" + allowSuggest.get() + " стек=" + callerFrames()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /** Политика завершения кода Напарника ({@code off}, {@code manual}, …); {@code ?} — не прочитана. */
@@ -683,11 +684,6 @@ public final class NaparnikManualModeHook implements IStartup
         Object inner = Global.invoke(listener, "getEventListener"); //$NON-NLS-1$
         if (inner != null)
             actual = inner;
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "collectViewModels listener=" + listener.getClass().getName() //$NON-NLS-1$
-                + " actual=" + actual.getClass().getName()); //$NON-NLS-1$
-        }
         if (VM.equals(actual.getClass().getName()) && !found.contains(actual))
             found.add(actual);
     }
@@ -831,17 +827,18 @@ public final class NaparnikManualModeHook implements IStartup
                 return;
             String inserted = event.getText() != null ? event.getText() : ""; //$NON-NLS-1$
             boolean naparnik = stackHasNaparnik();
-            if (LOG_ENABLED)
+            // Обычный ввод — по строке на символ; пишем только вставку и правки Напарника.
+            if (LOG_ENABLED && (naparnik || pasteActive.get() > 0))
             {
                 Global.tempLog(LOG, "documentChanged document=" + System.identityHashCode(event.getDocument()) //$NON-NLS-1$
                     + " offset=" + event.getOffset() + " removed=" + event.getLength() + " inserted=" + inserted.length() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " naparnik=" + naparnik + " pasteActive=" + pasteActive.get() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " allowApply=" + allowApply.get() + " policy=" + readPolicy()); //$NON-NLS-1$ //$NON-NLS-2$
+                    + " allowApply=" + applyLeftMs() + " policy=" + readPolicy()); //$NON-NLS-1$ //$NON-NLS-2$
             }
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
             boolean revert = PATCH_ENABLED
-                && isRestrictedPolicy() && naparnik && allowApply.get() == 0 && pasteActive.get() == 0;
+                && isRestrictedPolicy() && naparnik && applyLeftMs() == 0 && pasteActive.get() == 0;
             if (!revert)
                 return;
             IDocument document = event.getDocument();
@@ -988,360 +985,6 @@ public final class NaparnikManualModeHook implements IStartup
         {
         }
         return null;
-    }
-
-    private static void registerWeavingHook()
-    {
-        try
-        {
-            Bundle bundle = FrameworkUtil.getBundle(NaparnikManualModeHook.class);
-            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
-            if (context == null)
-            {
-                if (LOG_ENABLED)
-                {
-                    Global.tempLog(LOG, "[!] плетение: нет BundleContext"); //$NON-NLS-1$
-                }
-                return;
-            }
-            context.registerService(WeavingHook.class, new ManualWeavingHook(), null);
-            if (LOG_ENABLED)
-            {
-                Global.tempLog(LOG, "registerWeavingHook registered"); //$NON-NLS-1$
-            }
-        }
-        catch (Throwable t)
-        {
-            if (LOG_ENABLED)
-            {
-                Global.tempLogException(LOG, "[!] плетение: ошибка", t); //$NON-NLS-1$
-            }
-        }
-    }
-
-    private static void registerTransformer()
-    {
-        boolean registered = BslDocCommentDescriptionFix.registerExtraTransformer(new ManualModeTransformer(), VM, CTX, PAINTER);
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "registerTransformer registered=" + registered); //$NON-NLS-1$
-        }
-        retransformLoaded();
-    }
-
-    private static void retransformLoaded()
-    {
-        try
-        {
-            Field field = BslDocCommentDescriptionFix.class.getDeclaredField("instrumentation"); //$NON-NLS-1$
-            field.setAccessible(true);
-            Object value = field.get(null);
-            if (LOG_ENABLED)
-            {
-                Global.tempLog(LOG, "retransformLoaded instrumentation=" + (value instanceof Instrumentation)); //$NON-NLS-1$
-            }
-            if (!(value instanceof Instrumentation inst))
-                return;
-            for (Class<?> c : inst.getAllLoadedClasses())
-            {
-                String name = c.getName();
-                if (!VM.equals(name) && !CTX.equals(name) && !PAINTER.equals(name))
-                    continue;
-                if (!inst.isModifiableClass(c))
-                    continue;
-                try
-                {
-                    inst.retransformClasses(c);
-                }
-                catch (Throwable ignored)
-                {
-                }
-            }
-        }
-        catch (Throwable ignored)
-        {
-        }
-    }
-
-    static byte[] transformClass(String internal, byte[] classfileBuffer)
-    {
-        byte[] result;
-        if (VM_INTERNAL.equals(internal))
-            result = transformViewModel(classfileBuffer);
-        else if (CTX_INTERNAL.equals(internal))
-            result = transformReplace(classfileBuffer);
-        else if (PAINTER_INTERNAL.equals(internal))
-            result = transformHint(classfileBuffer);
-        else
-            return null;
-        if (LOG_ENABLED)
-        {
-            Global.tempLog(LOG, "transformClass class=" + internal + " transformed=" + (result != null)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        return result;
-    }
-
-    static byte[] transformViewModel(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        if (!hasViewModelMembers(reader))
-            return null;
-        ClassWriter writer = writer(reader);
-        AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if ("documentChanged".equals(name) && DOCUMENT_CHANGED_DESC.equals(descriptor) //$NON-NLS-1$
-                    || "askNew".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                {
-                    return new MethodVisitor(Opcodes.ASM9, mv)
-                    {
-                        @Override
-                        public void visitCode()
-                        {
-                            super.visitCode();
-                            emitUnbalancedReturn(this);
-                            touched.set(true);
-                        }
-                    };
-                }
-                return mv;
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    static byte[] transformReplace(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        if (!hasMethod(reader, "replace", REPLACE_DESC)) //$NON-NLS-1$
-            return null;
-        ClassWriter writer = writer(reader);
-        AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (!"replace".equals(name) || !REPLACE_DESC.equals(descriptor)) //$NON-NLS-1$
-                    return mv;
-                return new MethodVisitor(Opcodes.ASM9, mv)
-                {
-                    @Override
-                    public void visitCode()
-                    {
-                        super.visitCode();
-                        emitPredicateReturnIfFalse(this, PROP_REPLACE, 3);
-                        touched.set(true);
-                    }
-                };
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    static byte[] transformHint(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        if (!hasMethod(reader, "setHintAt", SET_HINT_DESC)) //$NON-NLS-1$
-            return null;
-        ClassWriter writer = writer(reader);
-        AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (!"setHintAt".equals(name) || !SET_HINT_DESC.equals(descriptor)) //$NON-NLS-1$
-                    return mv;
-                return new MethodVisitor(Opcodes.ASM9, mv)
-                {
-                    @Override
-                    public void visitCode()
-                    {
-                        super.visitCode();
-                        emitPredicateReturnIfFalse(this, PROP_HINT, 1);
-                        touched.set(true);
-                    }
-                };
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    private static ClassWriter writer(ClassReader reader)
-    {
-        return new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
-        {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2)
-            {
-                return "java/lang/Object"; //$NON-NLS-1$
-            }
-        };
-    }
-
-    private static void emitPredicateReturnIfFalse(MethodVisitor mv, String prop, int textLocal)
-    {
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
-            "()Ljava/util/Properties;", false); //$NON-NLS-1$
-        mv.visitLdcInsn(prop);
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
-        mv.visitInsn(Opcodes.DUP);
-        Label skip = new Label();
-        mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Predicate"); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, skip);
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
-        mv.visitVarInsn(Opcodes.ALOAD, textLocal);
-        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
-        Label ok = new Label();
-        mv.visitJumpInsn(Opcodes.IFNE, ok);
-        mv.visitInsn(Opcodes.RETURN);
-        mv.visitLabel(ok);
-        Label end = new Label();
-        mv.visitJumpInsn(Opcodes.GOTO, end);
-        mv.visitLabel(skip);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitLabel(end);
-    }
-
-    private static void emitUnbalancedReturn(MethodVisitor mv)
-    {
-        Label ok = new Label();
-        mv.visitVarInsn(Opcodes.ALOAD, 0);
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, VM_INTERNAL, "isBalanced", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
-        mv.visitJumpInsn(Opcodes.IFNE, ok);
-        mv.visitInsn(Opcodes.RETURN);
-        mv.visitLabel(ok);
-    }
-
-    private static boolean hasViewModelMembers(ClassReader reader)
-    {
-        AtomicBoolean clipboard = new AtomicBoolean();
-        AtomicBoolean isEnabled = new AtomicBoolean();
-        AtomicBoolean isBalanced = new AtomicBoolean();
-        AtomicBoolean reset = new AtomicBoolean();
-        AtomicBoolean documentChanged = new AtomicBoolean();
-        AtomicBoolean askNew = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9)
-        {
-            @Override
-            public org.objectweb.asm.FieldVisitor visitField(int access, String name, String descriptor,
-                String signature, Object value)
-            {
-                if ("clipboard".equals(name) && CLIPBOARD_DESC.equals(descriptor)) //$NON-NLS-1$
-                    clipboard.set(true);
-                return null;
-            }
-
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                if ("isEnabled".equals(name) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                    isEnabled.set(true);
-                else if ("isBalanced".equals(name) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                    isBalanced.set(true);
-                else if ("reset".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                    reset.set(true);
-                else if ("documentChanged".equals(name) && DOCUMENT_CHANGED_DESC.equals(descriptor)) //$NON-NLS-1$
-                    documentChanged.set(true);
-                else if ("askNew".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                    askNew.set(true);
-                return null;
-            }
-        }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-        return clipboard.get() && isEnabled.get() && isBalanced.get() && reset.get()
-            && documentChanged.get() && askNew.get();
-    }
-
-    private static boolean hasMethod(ClassReader reader, String methodName, String methodDesc)
-    {
-        AtomicBoolean found = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                if (methodName.equals(name) && methodDesc.equals(descriptor))
-                    found.set(true);
-                return null;
-            }
-        }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-        return found.get();
-    }
-
-    private static final class ManualModeTransformer implements ClassFileTransformer
-    {
-        @Override
-        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-            ProtectionDomain protectionDomain, byte[] classfileBuffer)
-        {
-            if (!VM_INTERNAL.equals(className) && !CTX_INTERNAL.equals(className)
-                && !PAINTER_INTERNAL.equals(className))
-                return null;
-            try
-            {
-                return transformClass(className, classfileBuffer);
-            }
-            catch (Throwable t)
-            {
-                if (LOG_ENABLED)
-                {
-                    Global.tempLogException(LOG, "transform " + className, t); //$NON-NLS-1$
-                }
-                return null;
-            }
-        }
-    }
-
-    private static final class ManualWeavingHook implements WeavingHook
-    {
-        @Override
-        public void weave(WovenClass wovenClass)
-        {
-            String name = wovenClass.getClassName();
-            if (!VM.equals(name) && !CTX.equals(name) && !PAINTER.equals(name))
-                return;
-            if (LOG_ENABLED)
-            {
-                Global.tempLog(LOG, "weave class=" + name + " state=" + wovenClass.getState()); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            if (wovenClass.getState() != WovenClass.TRANSFORMING)
-            {
-                return;
-            }
-            try
-            {
-                byte[] transformed = transformClass(name.replace('.', '/'), wovenClass.getBytes());
-                if (transformed != null)
-                    wovenClass.setBytes(transformed);
-            }
-            catch (Throwable t)
-            {
-                if (LOG_ENABLED)
-                {
-                    Global.tempLogException(LOG, "[!] плетение: ошибка " + name, t); //$NON-NLS-1$
-                }
-            }
-        }
     }
 
     /**

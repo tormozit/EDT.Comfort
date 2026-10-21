@@ -38,6 +38,9 @@ import com._1c.g5.v8.dt.ui.dialog.ListItemSelectionDialog;
  * ({@link ListItemSelectionDialog}, например выбор общей формы в свойстве).
  * Берётся первый фрагмент русского имени типа до точки в короткой форме, например
  * «СправочникОбъект.Номенклатура» → «Объект», «ДинамическийСписок» → «Список».
+ *
+ * <p>Обёртка подписей того же диалога добавляет и суффикс группы команд
+ * ({@link CommandDecorator#groupSuffix}) — окно «Выбор группы команд».
  */
 public final class FormMainAttributeTypeDecorator extends LabelProvider implements ILightweightLabelDecorator, IStartup
 {
@@ -378,7 +381,7 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
         @Override
         public String getText(Object element)
         {
-            return withSuffix(getStyledText(element).getString(), element);
+            return getStyledText(element).getString();
         }
 
         @Override
@@ -398,6 +401,8 @@ public final class FormMainAttributeTypeDecorator extends LabelProvider implemen
                 styled = new StyledString();
 
             String suffix = suffixForElement(element);
+            if (suffix == null)
+                suffix = CommandDecorator.groupSuffix(element);
             String add = suffix != null ? " (" + suffix + ")" : null;
             if (add != null && styled.getString().endsWith(add))
                 return styled; // суффикс уже есть в базовом тексте — не дублировать

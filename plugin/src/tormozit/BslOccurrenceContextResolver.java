@@ -823,19 +823,31 @@ public final class BslOccurrenceContextResolver
         TYPE_CACHE.clear();
     }
 
-    private static String resolveTypeFromModel(IFile file, String content, int dotOffset, int offset)
+    /**
+     * Модуль, разобранный и связанный как в редакторе: набор ресурсов с живым индексом, пакетное
+     * связывание и производное состояние — без них типы выражений не вычисляются.
+     *
+     * @return {@code null}, если файл не модуль BSL или набор ресурсов недоступен
+     */
+    static XtextResource loadLinkedResource(IFile file)
     {
         URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
         IResourceServiceProvider provider =
             IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
         if (provider == null)
-            return ""; //$NON-NLS-1$
+            return null;
         ResourceSet resourceSet = resourceSet(provider, file.getProject());
         if (resourceSet == null)
-            return ""; //$NON-NLS-1$
+            return null;
+        return loadLinkedResource(uri, resourceSet);
+    }
+
+    /** То же для указанного набора ресурсов (например, нового из {@link #newLiveResourceSet}). */
+    static XtextResource loadLinkedResource(URI uri, ResourceSet resourceSet)
+    {
         Resource resource = resourceSet.getResource(uri, true);
         if (!(resource instanceof XtextResource xtextResource))
-            return ""; //$NON-NLS-1$
+            return null;
         // Конвейер редактора/сборщика, без которого TypesComputer даёт пустоту: пакетное
         // связывание и производное состояние ресурса (окружения операторов, контекст модуля
         // его объектом-владельцем, установки обращений) — BslDerivedStateComputer.
@@ -846,6 +858,14 @@ public final class BslOccurrenceContextResolver
                 bslResource.linkBatched(null);
             bslResource.installDerivedState(false);
         }
+        return xtextResource;
+    }
+
+    private static String resolveTypeFromModel(IFile file, String content, int dotOffset, int offset)
+    {
+        XtextResource xtextResource = loadLinkedResource(file);
+        if (xtextResource == null)
+            return ""; //$NON-NLS-1$
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
@@ -863,7 +883,8 @@ public final class BslOccurrenceContextResolver
         // У загруженного нами ресурса типы в самом выражении пустые (их проставляет конвейер
         // редактора), поэтому берём результат вычислителя, а не состояние модели.
         String computed = sanitizeComputedTypes(
-            SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(computeTypes(provider, receiver)));
+            SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(
+                computeTypes(xtextResource.getResourceServiceProvider(), receiver)));
         logType("  receiver computed types=«" + computed + "»"); //$NON-NLS-1$ //$NON-NLS-2$
         if (!computed.isEmpty())
             return refineFormDataType(computed, xtextResource, content, offset);
@@ -1113,6 +1134,18 @@ public final class BslOccurrenceContextResolver
         ResourceSet cached = RESOURCE_SETS.get(project);
         if (cached != null)
             return cached;
+        ResourceSet created = newLiveResourceSet(provider, project);
+        if (created == null)
+            return null;
+        RESOURCE_SETS.put(project, created);
+        return created;
+    }
+
+    /** Новый набор ресурсов проекта, без кэша — освобождает вызывающий. */
+    static ResourceSet newLiveResourceSet(IResourceServiceProvider provider, IProject project)
+    {
+        if (project == null)
+            return null;
         // Набор с живым индексом: ссылки разрешаются по всем ресурсам рабочего пространства
         // по требованию. Простой IResourceSetProvider даёт набор без этой привязки — владелец
         // модуля не разрешается, контекст модуля пуст и типы выражений не вычисляются.
@@ -1127,9 +1160,6 @@ public final class BslOccurrenceContextResolver
             if (setProvider != null)
                 created = setProvider.get(project);
         }
-        if (created == null)
-            return null;
-        RESOURCE_SETS.put(project, created);
         return created;
     }
 

@@ -102,6 +102,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.text.edits.TextEdit;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -179,6 +180,7 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.bsl.ui.quickfix.AbstractExternalQuickfixProvider;
 import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
@@ -3055,6 +3057,247 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
     }
 
+    /**
+     * issue #862: «Заменить на функцию» для «Процедура не может возвращать значение» и
+     * «Заменить на процедуру» для «Оператор 'Возврат' в функции должен возвращать определенное значение».
+     * Проблемы — legacy-проверка EDT: код аннотации короткий SU…, поэтому штатный
+     * {@code @Fix} по коду валидатора их не находит — только живое предложение здесь.
+     */
+    private static final class MethodKindFix extends AbstractExternalQuickfixProvider
+    {
+        /** Идентификатор проверки: префикс {@code bsl-legacy-} плюс имя метода {@code BslJavaValidator}. */
+        private static final String CHECK_ID = "bsl-legacy-check-return-statement"; //$NON-NLS-1$
+        /** Коды тех же проблем в самом валидаторе — на случай, когда реестр не подменил их коротким. */
+        private static final Set<String> VALIDATOR_CODES =
+            Set.of("procedure-return-value", "return-without-expression"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        static ICompletionProposal proposal(XtextAnnotation annotation, Image icon)
+        {
+            Issue issue = annotation.getIssue();
+            IXtextDocument document = annotation.getDocument();
+            if (issue == null || document == null || issue.getOffset() == null || issue.getCode() == null)
+                return null;
+            int offset = issue.getOffset();
+            String code = issue.getCode();
+            try
+            {
+                com._1c.g5.v8.dt.bsl.model.Method method = document.readOnly(
+                    (IUnitOfWork<com._1c.g5.v8.dt.bsl.model.Method, XtextResource>) resource -> {
+                        if (!isReturnCheck(resource, code))
+                            return null;
+                        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                        com._1c.g5.v8.dt.bsl.model.Method target =
+                            leaf == null ? null : method(NodeModelUtils.findActualSemanticObjectFor(leaf));
+                        return edit(target) == null ? null : target;
+                    });
+                return method == null ? null : new Proposal(document, issue, method.getName(),
+                    method instanceof com._1c.g5.v8.dt.bsl.model.Procedure, icon);
+            }
+            catch (RuntimeException e)
+            {
+                // Документ или аннотация уже недоступны — исправление не предлагается.
+                return null;
+            }
+        }
+
+        private static boolean isReturnCheck(XtextResource resource, String code)
+        {
+            if (VALIDATOR_CODES.contains(code))
+                return true;
+            URI uri = resource.getURI();
+            if (uri == null || !uri.isPlatformResource())
+                return false;
+            IProject project = ResourcesPlugin.getWorkspace().getRoot()
+                .getFile(new Path(uri.toPlatformString(true))).getProject();
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            CheckUid uid = repository == null ? null : repository.getUidForShortUid(code, project);
+            return uid != null && CHECK_ID.equals(uid.getCheckId());
+        }
+
+        /**
+         * Метод для исправления: процедура с «Возврат» со значением либо функция с «Возврат» без значения.
+         * Та же проверка выдаёт и проблему «Возврат» вне метода — она отсеивается здесь.
+         */
+        private static com._1c.g5.v8.dt.bsl.model.Method method(EObject element)
+        {
+            com._1c.g5.v8.dt.bsl.model.ReturnStatement statement =
+                EcoreUtil2.getContainerOfType(element, com._1c.g5.v8.dt.bsl.model.ReturnStatement.class);
+            com._1c.g5.v8.dt.bsl.model.Method method = statement == null ? null
+                : EcoreUtil2.getContainerOfType(statement, com._1c.g5.v8.dt.bsl.model.Method.class);
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Procedure)
+                return statement.getExpression() != null ? method : null;
+            if (method instanceof com._1c.g5.v8.dt.bsl.model.Function)
+                return statement.getExpression() == null ? method : null;
+            return null;
+        }
+
+        /** Смещения берутся из модели узлов: свёртки редактора на них не влияют. */
+        private static TextEdit edit(com._1c.g5.v8.dt.bsl.model.Method method)
+        {
+            if (method == null || method.getName() == null)
+                return null;
+            boolean toFunction = method instanceof com._1c.g5.v8.dt.bsl.model.Procedure;
+            List<com._1c.g5.v8.dt.bsl.model.ReturnStatement> returns =
+                EcoreUtil2.getAllContentsOfType(method, com._1c.g5.v8.dt.bsl.model.ReturnStatement.class);
+            // Значения возврата не выбрасываем: функция, где они есть, процедурой не становится.
+            if (!toFunction && returns.stream().anyMatch(statement -> statement.getExpression() != null))
+                return null;
+            ICompositeNode methodNode = NodeModelUtils.findActualNodeFor(method);
+            if (methodNode == null)
+                return null;
+            for (INode node : methodNode.getAsTreeIterable())
+            {
+                if (node.getSyntaxErrorMessage() != null)
+                    return null;
+            }
+            String ruStart = toFunction ? "Процедура" : "Функция"; //$NON-NLS-1$ //$NON-NLS-2$
+            String enStart = toFunction ? "Procedure" : "Function"; //$NON-NLS-1$ //$NON-NLS-2$
+            String ruEnd = toFunction ? "КонецПроцедуры" : "КонецФункции"; //$NON-NLS-1$ //$NON-NLS-2$
+            String enEnd = toFunction ? "EndProcedure" : "EndFunction"; //$NON-NLS-1$ //$NON-NLS-2$
+            // Только ключевые слова самого метода, не вложенных операторов.
+            ILeafNode start = null;
+            ILeafNode end = null;
+            for (ILeafNode leaf : methodNode.getLeafNodes())
+            {
+                if (leaf.isHidden() || NodeModelUtils.findActualSemanticObjectFor(leaf) != method)
+                    continue;
+                String text = leaf.getText();
+                if (start == null && (ruStart.equalsIgnoreCase(text) || enStart.equalsIgnoreCase(text)))
+                    start = leaf;
+                else if (ruEnd.equalsIgnoreCase(text) || enEnd.equalsIgnoreCase(text))
+                    end = leaf;
+            }
+            if (start == null || end == null)
+                return null;
+            org.eclipse.text.edits.MultiTextEdit edits = new org.eclipse.text.edits.MultiTextEdit();
+            edits.addChild(new org.eclipse.text.edits.ReplaceEdit(start.getOffset(), start.getLength(),
+                sameCase(start.getText(), enStart.equalsIgnoreCase(start.getText())
+                    ? (toFunction ? "Function" : "Procedure") : (toFunction ? "Функция" : "Процедура")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            // В функции «Возврат;» без значения — ошибка, поэтому дополняем.
+            for (com._1c.g5.v8.dt.bsl.model.ReturnStatement statement : returns)
+            {
+                if (!toFunction || statement.getExpression() != null)
+                    continue;
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(statement);
+                ILeafNode keyword = null;
+                if (node != null)
+                {
+                    for (ILeafNode leaf : node.getLeafNodes())
+                    {
+                        if (!leaf.isHidden())
+                        {
+                            keyword = leaf;
+                            break;
+                        }
+                    }
+                }
+                if (keyword == null)
+                    return null;
+                edits.addChild(new org.eclipse.text.edits.InsertEdit(keyword.getEndOffset(),
+                    "Return".equalsIgnoreCase(keyword.getText()) ? " Undefined" : " Неопределено")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            edits.addChild(new org.eclipse.text.edits.ReplaceEdit(end.getOffset(), end.getLength(),
+                sameCase(end.getText(), enEnd.equalsIgnoreCase(end.getText())
+                    ? (toFunction ? "EndFunction" : "EndProcedure") : (toFunction ? "КонецФункции" : "КонецПроцедуры")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return edits;
+        }
+
+        /** Регистр замены — как у исходного слова, если оно целиком в одном регистре. */
+        private static String sameCase(String original, String replacement)
+        {
+            if (original.equals(original.toUpperCase(java.util.Locale.ROOT)))
+                return replacement.toUpperCase(java.util.Locale.ROOT);
+            if (original.equals(original.toLowerCase(java.util.Locale.ROOT)))
+                return replacement.toLowerCase(java.util.Locale.ROOT);
+            return replacement;
+        }
+
+        private static final class Proposal implements ICompletionProposal
+        {
+            private final IXtextDocument document;
+            private final Issue issue;
+            private final String name;
+            private final boolean toFunction;
+            private final Image icon;
+
+            Proposal(IXtextDocument document, Issue issue, String name, boolean toFunction, Image icon)
+            {
+                this.document = document;
+                this.issue = issue;
+                this.name = name;
+                this.toFunction = toFunction;
+                this.icon = icon;
+            }
+
+            @Override
+            public void apply(IDocument target)
+            {
+                if (target != document)
+                    return;
+                try
+                {
+                    // Штатное применение с поддержкой отмены, как ModuleAccessibilityAtClientFix.LiveProposal.
+                    new ExternalQuickfixModification<EObject>(issue, EObject.class, element -> {
+                        // Аннотация могла устареть, пока список исправлений был открыт.
+                        com._1c.g5.v8.dt.bsl.model.Method current = method(element);
+                        return current != null && name.equals(current.getName())
+                            && toFunction == current instanceof com._1c.g5.v8.dt.bsl.model.Procedure
+                            ? edit(current) : null;
+                    }).apply(new org.eclipse.xtext.ui.editor.model.edit.IModificationContext() {
+                        @Override
+                        public IXtextDocument getXtextDocument()
+                        {
+                            return document;
+                        }
+
+                        @Override
+                        public IXtextDocument getXtextDocument(URI uri)
+                        {
+                            return document;
+                        }
+                    });
+                }
+                catch (Exception e)
+                {
+                    // Исправление не применено — документ остался прежним.
+                }
+            }
+
+            @Override
+            public String getDisplayString()
+            {
+                return toFunction ? "Заменить на функцию" : "Заменить на процедуру"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
+            public String getAdditionalProposalInfo()
+            {
+                return (toFunction
+                    ? "Сделать «" + name + "» функцией. Операторы «Возврат» без значения " //$NON-NLS-1$ //$NON-NLS-2$
+                        + "дополняются значением «Неопределено»." //$NON-NLS-1$
+                    : "Сделать «" + name + "» процедурой.") + Global.pluginSignForTooltip(); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
+            public Image getImage()
+            {
+                return icon;
+            }
+
+            @Override
+            public Point getSelection(IDocument target)
+            {
+                return null;
+            }
+
+            @Override
+            public IContextInformation getContextInformation()
+            {
+                return null;
+            }
+        }
+    }
+
     static ICompletionProposal[] proposalsForAnnotation(Annotation annotation, ISourceViewer viewer,
         ICompletionProposal[] nonSpellingFallback)
     {
@@ -3087,6 +3330,19 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 base = Arrays.copyOf(base, base.length + 1);
                 base[base.length - 1] = create;
+            }
+            ICompletionProposal methodKind = MethodKindFix.proposal(createAnnotation, fallbackIcon);
+            if (methodKind != null)
+            {
+                base = Arrays.copyOf(base, base.length + 1);
+                base[base.length - 1] = methodKind;
+            }
+            ICompletionProposal addParameter =
+                CreateParameterQuickfixProvider.addParameterProposal(createAnnotation, fallbackIcon);
+            if (addParameter != null)
+            {
+                base = Arrays.copyOf(base, base.length + 1);
+                base[base.length - 1] = addParameter;
             }
         }
         ICompletionProposal extra = null;

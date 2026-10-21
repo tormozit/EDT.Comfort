@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.Set;
+
 /**
  * Идентификаторы проверок, которые плагин добавляет в EDT.
  *
@@ -32,8 +34,20 @@ public final class ComfortCheckIds
     /** {@code tormozit.checks.BslPreprocessorStraddleCheck} — {@code #Если}, разрывающая оператор. */
     public static final String BSL_PREPROCESSOR_STRADDLE = "comfort-bsl-preprocessor-straddle"; //$NON-NLS-1$
 
+    /** {@code tormozit.checks.BslForEachCollectionCheck} — «Для каждого» по выражению, не являющемуся коллекцией. */
+    public static final String BSL_FOR_EACH_COLLECTION = "comfort-bsl-for-each-collection"; //$NON-NLS-1$
+
     /** Неизвестное поле выборки с достоверно рассчитанной схемой запроса. */
     public static final String BSL_QUERY_RESULT_FIELD = "comfort-bsl-query-result-field"; //$NON-NLS-1$
+
+    /**
+     * Штатные проверки EDT, которые целиком заменены проверками «Комфорта». Включить их нельзя:
+     * страница «Проверки» сразу возвращает им «выключено», а при запуске и изменении настроек
+     * их выключает {@code Activator}.
+     */
+    public static final Set<String> REPLACED_BUILTIN_CHECKS = Set.of(
+        "bsl-legacy-check-static-feature-access", //$NON-NLS-1$
+        "bsl-legacy-check-for-each-statetement-collection"); //$NON-NLS-1$
 
     private ComfortCheckIds() {}
 }

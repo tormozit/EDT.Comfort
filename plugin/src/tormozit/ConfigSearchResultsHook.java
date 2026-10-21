@@ -2528,7 +2528,9 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         String simpleName = new Path(qualifiedName.replace('.', '/')).lastSegment();
         int generation = searchGeneration;
-        List<MatchRow> nativeRows = new ArrayList<>(rows);
+        // Все штатные совпадения результата, а не строки таблицы: таблица показывает только
+        // выделенный узел дерева, и до выделения она пуста — сверять дубли было бы не с чем.
+        List<Object> nativeMatches = allMatchesOf(searchResult);
         fullTextAugmentRunning = true;
         Job job = new Job("Комфорт: полнотекстовые вхождения ссылок") //$NON-NLS-1$
         {
@@ -2547,24 +2549,38 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (model == null)
                         throw new IllegalStateException("Не найдена модель проекта " + project.getName());
                     List<Match> matches = new ArrayList<>();
-                    java.util.Set<String> nativeLines = new java.util.HashSet<>();
                     java.util.Set<String> offsets = new java.util.HashSet<>();
-                    for (MatchRow row : nativeRows)
+                    // Области штатных ссылок из индекса (BslReferenceMatch): ни смещения, ни номера
+                    // строки у них нет — область узла ссылки в модуле вычисляем.
+                    Map<String, List<int[]>> nativeRegions = new java.util.HashMap<>();
+                    for (Object match : nativeMatches)
                     {
-                        if (row.file == null)
+                        if (monitor.isCanceled())
+                            return Status.CANCEL_STATUS;
+                        if (match instanceof TextSearchFileMatch fileMatch)
+                        {
+                            if (fileMatch.getFile() != null)
+                                offsets.add(fileMatch.getFile().getFullPath() + "@" + fileMatch.getFileOffset());
                             continue;
-                        if (row.directOffset >= 0)
-                            offsets.add(row.file.getFullPath() + "@" + row.directOffset);
-                        else if (row.lineNumber > 0)
-                            nativeLines.add(row.file.getFullPath() + "#" + row.lineNumber);
+                        }
+                        if (!(match instanceof BslReferenceMatch ref))
+                            continue;
+                        IFile file = bslReferenceMatchFile(ref);
+                        int[] region = file != null && ref.getSourceURI() != null
+                            ? BslOccurrenceContextResolver.referenceNodeRegion(file, ref.getSourceURI(),
+                                ref.getReference(), ref.getIndexInList())
+                            : null;
+                        if (region != null)
+                            nativeRegions.computeIfAbsent(file.getFullPath().toString(), k -> new ArrayList<>())
+                                .add(region);
                     }
                     for (MatchRow row : extra)
                     {
                         if (monitor.isCanceled())
                             return Status.CANCEL_STATUS;
-                        boolean code = BslOccurrenceContextResolver.KIND_METHOD.equals(row.syntaxKind)
-                            || BslOccurrenceContextResolver.KIND_PROPERTY.equals(row.syntaxKind);
-                        if (code && nativeLines.contains(row.file.getFullPath() + "#" + row.lineNumber))
+                        boolean byRegion = insideAnyRegion(
+                            nativeRegions.get(row.file.getFullPath().toString()), row.directOffset);
+                        if (byRegion)
                             continue;
                         if (!offsets.add(row.file.getFullPath() + "@" + row.directOffset))
                             continue;
@@ -2607,6 +2623,36 @@ public final class ConfigSearchResultsHook implements IStartup
         new FullTextSearchProgress(treeViewer, searchResult, job, qualifiedName, generation).start();
         job.setSystem(true);
         job.schedule();
+    }
+
+    /** Все совпадения результата поиска EDT — по всем его элементам, независимо от выделения в дереве. */
+    private static List<Object> allMatchesOf(Object searchResult)
+    {
+        List<Object> all = new ArrayList<>();
+        if (!(Global.invoke(searchResult, "getElements") instanceof Iterable<?> elements)) //$NON-NLS-1$
+            return all;
+        for (Object element : elements)
+        {
+            if (Global.invoke(searchResult, "getMatches", element) instanceof Iterable<?> matches) //$NON-NLS-1$
+            {
+                for (Object match : matches)
+                    all.add(match);
+            }
+        }
+        return all;
+    }
+
+    /** Смещение попадает в одну из областей {@code [начало, начало + длина)} штатных ссылок. */
+    private static boolean insideAnyRegion(List<int[]> regions, int offset)
+    {
+        if (regions == null || offset < 0)
+            return false;
+        for (int[] region : regions)
+        {
+            if (offset >= region[0] && offset < region[0] + Math.max(region[1], 1))
+                return true;
+        }
+        return false;
     }
 
     private static IProject fullTextSearchProject(TreeViewer treeViewer, List<MatchRow> rows)

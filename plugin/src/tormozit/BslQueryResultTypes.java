@@ -83,7 +83,44 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, false);
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
-        return plan == null ? List.of() : plan.types.getOrDefault(invocation, List.of());
+        List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
+        if (planned != null)
+            return planned;
+        return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
+    }
+
+    /**
+     * Отключено 21.10.2026: мигание предупреждения «Для каждого» устранила замена штатной проверки
+     * ({@code comfort-bsl-for-each-collection}), а расчёт без плана стоит облегчённого плана метода на
+     * каждый {@code Х.Выполнить()}, в том числе при сборке. Оставлено на случай, если понадобится.
+     */
+    private static final boolean TYPE_WITHOUT_PLAN = false;
+
+    /**
+     * Тип {@code Запрос.Выполнить()}, пока плана нет: тот же признак запроса, что у плана, но без
+     * разбора текста запроса — поэтому без полей. Иначе у вызова штатный {@code [QueryResult, Undefined]},
+     * и проверка «Для каждого» молчит до готовности плана, а после — предупреждает (мигание маркера).
+     */
+    private static List<TypeItem> queryResultWithoutPlan(Method method, Invocation invocation)
+    {
+        if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access))
+            return List.of();
+        String name = lower(access.getName());
+        if (!name.equals("execute") && !name.equals("выполнить")) //$NON-NLS-1$ //$NON-NLS-2$
+            return List.of();
+        try
+        {
+            Plan plan = new Plan(method, ""); //$NON-NLS-1$
+            plan.originsOnly = true;
+            Shape shape = plan.shape(invocation, Collections.newSetFromMap(new IdentityHashMap<>()));
+            if (shape == null || !shape.kind.equals("QueryResult")) //$NON-NLS-1$
+                return List.of();
+            return List.of(plan.baseType("QueryResult")); //$NON-NLS-1$
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return List.of();
+        }
     }
 
     /** Только происхождение обращения к полю; схемы и типы запросов здесь не рассчитываются. */

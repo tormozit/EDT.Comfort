@@ -636,54 +636,66 @@ public final class BslEditorHoverHook implements IStartup
         static void install(Display display)
         {
             display.addFilter(org.eclipse.swt.SWT.Show, event -> {
-                if (!(event.widget instanceof org.eclipse.swt.widgets.Shell shell))
-                    return;
-                Browser browser = IrBslHoverHtml.findControlBrowser(shell);
-                if (browser == null || browser.getData(FUNCTION) != null)
-                    return;
-                org.eclipse.swt.browser.BrowserFunction function =
-                    new org.eclipse.swt.browser.BrowserFunction(browser, FUNCTION)
+                if (event.widget instanceof org.eclipse.swt.widgets.Shell shell)
+                    installBrowser(IrBslHoverHtml.findControlBrowser(shell));
+            });
+        }
+
+        static void installBrowser(Browser browser)
+        {
+            if (browser == null || browser.isDisposed() || browser.getData(FUNCTION) != null)
+                return;
+            Display display = browser.getDisplay();
+            org.eclipse.swt.widgets.Shell shell = browser.getShell();
+            org.eclipse.swt.browser.BrowserFunction function =
+                new org.eclipse.swt.browser.BrowserFunction(browser, FUNCTION)
+                {
+                    @Override
+                    public Object function(Object[] arguments)
                     {
-                        @Override
-                        public Object function(Object[] arguments)
+                        if (arguments == null || arguments.length != 1
+                            || !(arguments[0] instanceof String encoded))
+                            return Boolean.FALSE;
+                        if (encoded.startsWith("formhandler:"))
                         {
-                            if (arguments == null || arguments.length != 1
-                                || !(arguments[0] instanceof String encoded))
+                            Runnable action = formHandlerActions.get(encoded);
+                            if (action == null)
                                 return Boolean.FALSE;
-                            if (encoded.startsWith("formhandler:"))
-                            {
-                                Runnable action = formHandlerActions.get(encoded);
-                                if (action == null)
-                                    return Boolean.FALSE;
-                                display.asyncExec(() -> {
-                                    if (!shell.isDisposed())
-                                        shell.setVisible(false);
-                                    action.run();
-                                });
-                                return Boolean.TRUE;
-                            }
-                            org.eclipse.emf.common.util.URI uri = org.eclipse.emf.common.util.URI.createURI(
-                                java.net.URLDecoder.decode(encoded, java.nio.charset.StandardCharsets.UTF_8));
                             display.asyncExec(() -> {
-                                org.eclipse.xtext.resource.IResourceServiceProvider provider =
-                                    org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
-                                        .getResourceServiceProvider(org.eclipse.emf.common.util.URI.createURI("*.bsl"));
-                                org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
-                                    : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
-                                if (opener != null)
-                                {
-                                    if (!shell.isDisposed())
-                                        shell.setVisible(false);
-                                    opener.open(uri, true);
-                                }
+                                if (!shell.isDisposed())
+                                    shell.setVisible(false);
+                                action.run();
                             });
                             return Boolean.TRUE;
                         }
-                    };
-                browser.setData(FUNCTION, function);
-            });
+                        org.eclipse.emf.common.util.URI uri = org.eclipse.emf.common.util.URI.createURI(
+                            java.net.URLDecoder.decode(encoded, java.nio.charset.StandardCharsets.UTF_8));
+                        display.asyncExec(() -> {
+                            org.eclipse.xtext.resource.IResourceServiceProvider provider =
+                                org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                                    .getResourceServiceProvider(org.eclipse.emf.common.util.URI.createURI("*.bsl"));
+                            org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
+                                : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
+                            if (opener != null)
+                            {
+                                if (!shell.isDisposed())
+                                    shell.setVisible(false);
+                                opener.open(uri, true);
+                            }
+                        });
+                        return Boolean.TRUE;
+                    }
+                };
+            browser.setData(FUNCTION, function);
         }
     }
+
+    /** Мост {@code comfortOpenMethodDefinition} для браузера подсказки параметров. */
+    static void installMethodDefinitionFunction(Browser browser)
+    {
+        MethodDefinitionLink.installBrowser(browser);
+    }
+
     /** Ctrl+F2 (INFORMATION_PROPOSAL) — {@code XtextInformationProvider.hover}, не из {@code fTextHovers}. */
     private static boolean wrapInformationProviderHover(BslXtextEditor editor)
     {
@@ -1132,13 +1144,6 @@ public final class BslEditorHoverHook implements IStartup
                 editor.getInternalSourceViewer(), editor);
         }
 
-        /** Ищем имена только в тексте HTML, пропуская существующие ссылки, теги и скрипты. */
-        private static final java.util.regex.Pattern DEFINED_TYPE_TEXT = java.util.regex.Pattern.compile(
-            "(<a\\b[^>]*>[\\s\\S]*?</a\\s*>|<script\\b[^>]*>[\\s\\S]*?</script\\s*>"
-                + "|<style\\b[^>]*>[\\s\\S]*?</style\\s*>|<[^>]*>)"
-                + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*)",
-            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
-
         private String resolveMemberSeeLinksHtml(ITextViewer textViewer, IRegion region)
         {
             try
@@ -1157,62 +1162,16 @@ public final class BslEditorHoverHook implements IStartup
 
         private Map<String, String> resolveDefinedTypeLinks(String html)
         {
-            Set<String> names = new java.util.LinkedHashSet<>();
-            java.util.regex.Matcher text = DEFINED_TYPE_TEXT.matcher(html);
-            while (text.find())
-                if (text.group(2) != null)
-                    names.add(text.group(2));
+            Set<String> names = DefinedTypeLinks.names(html);
             if (names.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                 return Map.of();
-            return document.readOnly((IUnitOfWork<Map<String, String>, XtextResource>) resource -> {
-                if (resource == null || resource.getContents().isEmpty())
-                    return Map.of();
-                var provider = resource.getResourceServiceProvider();
-                var scopes = provider.get(org.eclipse.xtext.scoping.IScopeProvider.class);
-                var converter = provider.get(org.eclipse.xtext.naming.IQualifiedNameConverter.class);
-                if (scopes == null || converter == null)
-                    return Map.of();
-                var scope = scopes.getScope(resource.getContents().get(0),
-                    com._1c.g5.v8.dt.mcore.McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
-                Map<String, String> links = new java.util.LinkedHashMap<>();
-                for (String name : names)
-                {
-                    var description = scope.getSingleElement(converter.toQualifiedName(name));
-                    EObject object = description == null ? null : description.getEObjectOrProxy();
-                    if (object != null && object.eIsProxy())
-                        object = org.eclipse.emf.ecore.util.EcoreUtil.resolve(object, resource);
-                    if (!(object instanceof com._1c.g5.v8.dt.mcore.TypeSet type))
-                        continue;
-                    var producer = BslEditorHyperlinkHook.typeProducer(type);
-                    if (!(producer instanceof com._1c.g5.v8.dt.metadata.mdclass.DefinedType))
-                        continue;
-                    var uri = resource.getResourceSet().getURIConverter().normalize(
-                        org.eclipse.emf.ecore.util.EcoreUtil.getURI(producer));
-                    links.put(name, java.net.URLEncoder.encode(uri.toString(),
-                        java.nio.charset.StandardCharsets.UTF_8));
-                }
-                return Map.copyOf(links);
-            });
+            return document.readOnly((IUnitOfWork<Map<String, String>, XtextResource>) resource ->
+                DefinedTypeLinks.resolve(names, resource));
         }
 
         private String injectDefinedTypeLinks(String html)
         {
-            Map<String, String> links = lastDefinedTypeLinks;
-            if (links.isEmpty())
-                return html;
-            java.util.regex.Matcher text = DEFINED_TYPE_TEXT.matcher(html);
-            StringBuilder result = new StringBuilder();
-            while (text.find())
-            {
-                String name = text.group(2);
-                String uri = name == null ? null : links.get(name);
-                String replacement = uri == null ? text.group()
-                    : "<a class=\"comfort-defined-type\" href=\"#\" onclick=\""
-                        + "comfortOpenMethodDefinition('" + uri + "');return false;\">" + name + "</a>";
-                text.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement));
-            }
-            text.appendTail(result);
-            return result.toString();
+            return DefinedTypeLinks.inject(html, lastDefinedTypeLinks);
         }
 
         /** Сбрасывает delayed input на штатный base, чтобы родный HTML обновлялся при смене слова. */

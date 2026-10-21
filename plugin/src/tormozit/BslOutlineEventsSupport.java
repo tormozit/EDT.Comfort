@@ -3225,18 +3225,9 @@ public final class BslOutlineEventsSupport
         String content = proposal.content;
         int offset = proposal.offset;
         int clearLength = proposal.clearLength;
-        document.modify(resource ->
-        {
-            try
-            {
-                document.replace(offset, clearLength, content);
-            }
-            catch (BadLocationException e)
-            {
-                throw new RuntimeException(e);
-            }
-            return null;
-        });
+        // Не через IXtextDocument.modify: правка текста внутри него не согласуется с моделью,
+        // проверка модуля не запускается и маркеры ошибок залипают (как в IRSession.replaceDocumentRange).
+        document.replace(offset, clearLength, content);
         Global.invoke(eventElement, "setHandler", Boolean.TRUE); //$NON-NLS-1$
         int revealOffset = offset;
         int revealLength = content != null ? content.length() : 0;

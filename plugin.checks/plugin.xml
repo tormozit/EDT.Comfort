@@ -27,6 +27,7 @@
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslAstTruncationCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslPreprocessorStraddleCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslQueryResultFieldCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BslForEachCollectionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BrokenMdCompositionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.UnreachableMdObjectCheck"/>
   </extension>

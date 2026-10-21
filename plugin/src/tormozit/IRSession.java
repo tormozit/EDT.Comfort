@@ -615,30 +615,16 @@ public final class IRSession
 
         private static void replaceDocumentRange(IDocument doc, int offset, int length, String text)
         {
-            if (doc instanceof IXtextDocument xtextDoc)
+            // Обычная правка текста, как при наборе. Не через IXtextDocument.modify: это путь Handly
+            // «модель → текст», правка текста внутри него не согласуется — модель остаётся
+            // устаревшей, проверка модуля не запускается, маркеры ошибок залипают.
+            try
             {
-                xtextDoc.modify(resource -> {
-                    try
-                    {
-                        xtextDoc.replace(offset, length, text);
-                    }
-                    catch (BadLocationException e)
-                    {
-                        throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
-                    }
-                    return null;
-                });
+                doc.replace(offset, length, text);
             }
-            else
+            catch (BadLocationException e)
             {
-                try
-                {
-                    doc.replace(offset, length, text);
-                }
-                catch (BadLocationException e)
-                {
-                    throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
-                }
+                throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
             }
 
             IDocumentUndoManager undoManager = DocumentUndoManagerRegistry.getDocumentUndoManager(doc);

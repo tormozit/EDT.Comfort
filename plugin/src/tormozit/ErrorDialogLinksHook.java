@@ -51,6 +51,7 @@ public final class ErrorDialogLinksHook implements IStartup
     /** Сообщения платформы при обновлении базы, когда объект ссылается на отсутствующий объект метаданных. */
     private static final String[] BROKEN_LINKS_SNIPPETS = {
         "Неизвестный объект метаданных", //$NON-NLS-1$
+        "Неизвестное имя типа", //$NON-NLS-1$
         "Файл объекта не существует", //$NON-NLS-1$
     };
     private static final String DIALOG_TITLE = "Ошибка"; //$NON-NLS-1$

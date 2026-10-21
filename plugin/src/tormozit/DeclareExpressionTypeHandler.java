@@ -359,8 +359,8 @@ public final class DeclareExpressionTypeHandler
 
         /**
          * Только новый полный комментарий: типы сохраняем, описания из имён не переносим.
-         * Параметры без типа убираем (кроме {@code target} — ему команда сейчас объявит тип),
-         * опустевший раздел «Параметры:» — тоже.
+         * Для {@code target} оставляем только его (команда сейчас объявит ему тип), иначе — параметры
+         * с рассчитанным типом; опустевший раздел «Параметры:» убираем.
          */
         private static String emptyGeneratedDescriptions(String template, Method method, FormalParam target,
             String separator, String parameterIndent, boolean old, boolean russian)
@@ -380,8 +380,11 @@ public final class DeclareExpressionTypeHandler
             if (comment.getParametersSection() != null)
             {
                 var fields = comment.getParametersSection().getParameterDefinitions();
-                fields.removeIf(field -> (target == null || !field.getName().equalsIgnoreCase(target.getName()))
-                    && field.getTypeSections().stream().allMatch(section -> section.getTypeDefinitions().isEmpty()));
+                if (target != null)
+                    fields.removeIf(field -> !field.getName().equalsIgnoreCase(target.getName()));
+                else
+                    fields.removeIf(field -> field.getTypeSections().stream()
+                        .allMatch(section -> section.getTypeDefinitions().isEmpty()));
                 if (fields.isEmpty())
                     comment.setParametersSection(null);
             }
