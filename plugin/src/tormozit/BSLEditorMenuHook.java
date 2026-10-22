@@ -3,10 +3,25 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
 import org.eclipse.e4.ui.model.application.ui.menu.MHandledItem;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IMarker;
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.model.IBreakpoint;
+import org.eclipse.jface.action.ContributionItem;
+import org.eclipse.jface.action.IMenuListener;
+import org.eclipse.jface.action.IMenuManager;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.source.IAnnotationModel;
+import org.eclipse.jface.text.source.IVerticalRulerInfo;
+import org.eclipse.ui.texteditor.MarkerAnnotation;
 import org.eclipse.e4.ui.workbench.renderers.swt.HandledContributionItem;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
@@ -37,12 +52,14 @@ import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.menus.CommandContributionItem;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslBreakpointFactory;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
- * Добавляет пункт «Редактировать вложенный текст» в контекстное меню
- * BSL-редактора EDT.
+ * Доработки контекстных меню BSL-редактора EDT: команды работы с текстом
+ * и копирование/вставка настроек остановок в меню левой полосы.
  *
  * <p>Поддерживает оба варианта открытия BSL-редактора:
  * <ul>
@@ -283,6 +300,196 @@ public class BSLEditorMenuHook implements IStartup
         attachKeyDiagnostic(editor, textWidget);
         EmbeddedBslXtextContextHook.attach(editor, textWidget);
         TextEditorIdentifierSelectionHook.attachToTextEditor(editor, textWidget);
+        BreakpointRulerMenu.attach(editor, textWidget);
+    }
+
+    /** Меню левой полосы: снимок настроек общий для всех модулей до закрытия EDT. */
+    private static final class BreakpointRulerMenu
+    {
+        private static final String HOOKED = "tormozit.breakpointRulerMenu"; //$NON-NLS-1$
+        private static final String LOG_TOPIC = "bp-copy-paste"; //$NON-NLS-1$
+        // Только настройки: расположение, сигнатура метода, регистрация и текущий
+        // счётчик попаданий принадлежат целевой остановке и сюда не входят.
+        private static final String[] SETTINGS = {
+            IBreakpoint.ENABLED,
+            IBslLineBreakpoint.CONDITION,
+            IBslLineBreakpoint.HIT_COUNT,
+            IBslLineBreakpoint.HIT_CONDITION,
+            IBslLineBreakpoint.PARENT_METHOD_TO_BREAK_ON,
+            IBslLineBreakpoint.PUT_DESCRIPTION,
+            IBslLineBreakpoint.PUT_EXPRESSION_TO_EVALUATE,
+            IBslLineBreakpoint.PUT_STACK_TRACE,
+            IBslLineBreakpoint.PUT_HIT_COUNT,
+            IBslLineBreakpoint.CONTINUE_EXECUTION,
+            // Сохранённые значения и общий флажок из BreakpointPropertiesHook.
+            "tormozit.savedCondition", //$NON-NLS-1$
+            "tormozit.savedExpression", //$NON-NLS-1$
+            "tormozit.savedDescription", //$NON-NLS-1$
+            "tormozit.savedConsoleOutput", //$NON-NLS-1$
+            "tormozit.consoleOutput", //$NON-NLS-1$
+            "tormozit.consoleHiddenDescription" //$NON-NLS-1$
+        };
+        private static Map<String, Object> copiedSettings;
+
+        static void attach(BslXtextEditor editor, StyledText text)
+        {
+            if (Boolean.TRUE.equals(text.getData(HOOKED)))
+                return;
+            text.setData(HOOKED, Boolean.TRUE);
+            IMenuListener listener = menu -> populate(editor, menu);
+            editor.addRulerContextMenuListener(listener);
+            text.addDisposeListener(e -> editor.removeRulerContextMenuListener(listener));
+            Global.tempLog(LOG_TOPIC, "attach editor=" + editor.getEditorInput()); //$NON-NLS-1$
+        }
+
+        private static void populate(BslXtextEditor editor, IMenuManager menu)
+        {
+            ISourceViewer viewer = editor.getInternalSourceViewer();
+            IVerticalRulerInfo ruler = editor.getAdapter(IVerticalRulerInfo.class);
+            IFile file = editor.getEditorInput().getAdapter(IFile.class);
+            if (viewer == null || viewer.getDocument() == null || ruler == null || file == null
+                    || !"bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                return;
+            int line = ruler.getLineOfLastMouseButtonActivity();
+            if (line < 0 || line >= viewer.getDocument().getNumberOfLines())
+                return;
+            try
+            {
+                IBslLineBreakpoint breakpoint = findBreakpoint(viewer, line);
+                Global.tempLog(LOG_TOPIC, "menu file=" + file.getFullPath() + " line=" + (line + 1) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " breakpoint=" + (breakpoint != null) + " copied=" + (copiedSettings != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                addCommand(menu, "copy", "Скопировать точку остановка", //$NON-NLS-1$
+                    "Запомнить настройки остановки для вставки в другую строку модуля.",
+                    breakpoint != null, () -> copy(breakpoint));
+                addCommand(menu, "paste", "Вставить точку остановка", //$NON-NLS-1$
+                    "Создать остановку с запомненными настройками. Если остановка уже есть, заменить её настройки.",
+                    copiedSettings != null, () -> paste(file, line + 1, breakpoint));
+            }
+            catch (BadLocationException e)
+            {
+                reportFailure(e);
+            }
+        }
+
+        private static void addCommand(IMenuManager menu, String id, String label, String tooltip,
+                boolean enabled, Runnable command)
+        {
+            String itemId = "tormozit.breakpointRuler." + id; //$NON-NLS-1$
+            menu.remove(itemId);
+            ContributionItem contribution = new ContributionItem(itemId)
+            {
+                @Override
+                public void fill(Menu parent, int index)
+                {
+                    MenuItem item = index < 0 ? new MenuItem(parent, SWT.PUSH)
+                        : new MenuItem(parent, SWT.PUSH, index);
+                    item.setText(label);
+                    item.setEnabled(enabled);
+                    ComfortSubmenuHelper.setMenuItemTooltip(item, tooltip);
+                    item.addListener(SWT.Selection, event -> command.run());
+                }
+            };
+            if (menu.find("additions") != null) //$NON-NLS-1$
+                menu.appendToGroup("additions", contribution); //$NON-NLS-1$
+            else
+                menu.add(contribution);
+        }
+
+        /** Позиция аннотации учитывает несохранённые правки и свёртки выше строки. */
+        private static IBslLineBreakpoint findBreakpoint(ISourceViewer viewer, int line)
+                throws BadLocationException
+        {
+            IAnnotationModel model = viewer.getAnnotationModel();
+            if (model == null)
+                return null;
+            var annotations = model.getAnnotationIterator();
+            while (annotations.hasNext())
+            {
+                var annotation = annotations.next();
+                if (!(annotation instanceof MarkerAnnotation markerAnnotation))
+                    continue;
+                Position position = model.getPosition(annotation);
+                if (position == null || position.isDeleted()
+                        || viewer.getDocument().getLineOfOffset(position.getOffset()) != line)
+                    continue;
+                IBreakpoint breakpoint = DebugPlugin.getDefault().getBreakpointManager()
+                    .getBreakpoint(markerAnnotation.getMarker());
+                if (breakpoint instanceof IBslLineBreakpoint bslBreakpoint)
+                    return bslBreakpoint;
+            }
+            return null;
+        }
+
+        private static void copy(IBslLineBreakpoint breakpoint)
+        {
+            try
+            {
+                Map<String, Object> attributes = breakpoint.getMarker().getAttributes();
+                Map<String, Object> snapshot = new LinkedHashMap<>();
+                for (String key : SETTINGS)
+                    snapshot.put(key, attributes.get(key));
+                copiedSettings = Collections.unmodifiableMap(snapshot);
+                Global.tempLog(LOG_TOPIC, "copy marker=" + breakpoint.getMarker().getId()); //$NON-NLS-1$
+            }
+            catch (CoreException e)
+            {
+                reportFailure(e);
+            }
+        }
+
+        private static void paste(IFile file, int line, IBslLineBreakpoint existing)
+        {
+            Map<String, Object> snapshot = copiedSettings;
+            if (snapshot == null)
+                return;
+            IBslLineBreakpoint created = null;
+            try
+            {
+                IBslLineBreakpoint target = existing;
+                if (target == null)
+                {
+                    IBslBreakpointFactory factory = CreateDebuggerBreakpoints.resolveFactory();
+                    if (factory == null)
+                    {
+                        Global.tempLog(LOG_TOPIC, "paste: breakpoint factory unavailable"); //$NON-NLS-1$
+                        ToastNotification.show("Точки останова", "Не удалось получить службу создания остановок EDT.");
+                        return;
+                    }
+                    target = factory.createLineBreakpoint(file, line);
+                    created = target;
+                }
+                // null удаляет отсутствовавшие у источника настройки существующей точки.
+                // Все настройки меняются одним событием маркера, включая enabled.
+                IMarker marker = target.getMarker();
+                marker.setAttributes(SETTINGS, snapshot.values().toArray());
+                if (created != null)
+                    DebugPlugin.getDefault().getBreakpointManager().addBreakpoint(created);
+                Global.tempLog(LOG_TOPIC, "paste file=" + file.getFullPath() + " line=" + line //$NON-NLS-1$ //$NON-NLS-2$
+                    + " created=" + (created != null)); //$NON-NLS-1$
+            }
+            catch (CoreException e)
+            {
+                if (created != null)
+                {
+                    try
+                    {
+                        created.delete();
+                    }
+                    catch (CoreException cleanupError)
+                    {
+                        e.addSuppressed(cleanupError);
+                    }
+                }
+                reportFailure(e);
+            }
+        }
+
+        private static void reportFailure(Exception error)
+        {
+            Global.tempLog(LOG_TOPIC, "failure: " + error); //$NON-NLS-1$
+            ToastNotification.show("Точки останова", "Не удалось скопировать или вставить остановку: "
+                + error.getMessage());
+        }
     }
 
     private static void attachKeyDiagnostic(BslXtextEditor editor, StyledText textWidget)

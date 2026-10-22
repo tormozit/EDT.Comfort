@@ -34,6 +34,7 @@ final class ComfortSubmenuHelper
     static final String SUBMENU_MARKER = "tormozit.comfortSubmenu"; //$NON-NLS-1$
     static final String FIRST_ITEM_MARKER = "tormozit.comfortFirstItem"; //$NON-NLS-1$
     private static final String ROOT_COMMANDS_MARKER = "tormozit.comfortRootCommands"; //$NON-NLS-1$
+    private static final String TOOLTIP_POSITION_MARKER = "tormozit.menuTooltipPosition"; //$NON-NLS-1$
 
     /** Ключ данных подменю: выделение внешнего меню (см. {@link #fillExternalMenu}). */
     private static final String EXTERNAL_SELECTION_KEY = "tormozit.comfortSubmenu.selection"; //$NON-NLS-1$
@@ -536,6 +537,34 @@ final class ComfortSubmenuHelper
             return;
         String full = isInsideComfortSubmenu(item) ? text : text + Global.pluginSignForTooltip();
         item.setToolTipText(TooltipText.wrap(item.getDisplay(), null, full));
+        if ("win32".equals(SWT.getPlatform()) //$NON-NLS-1$
+                && !Boolean.TRUE.equals(item.getData(TOOLTIP_POSITION_MARKER)))
+        {
+            item.setData(TOOLTIP_POSITION_MARKER, Boolean.TRUE);
+            item.addListener(SWT.Arm, event -> updateTooltipPosition(item));
+        }
+    }
+
+    /**
+     * SWT Win32 3.124.200: Menu.wmTimer берёт прямоугольник по MenuItem.index,
+     * записанному конструктором. Вставки перед пунктом это поле не обновляют.
+     * SWT.Arm приходит до таймера подсказки, когда меню уже полностью заполнено.
+     * Подтверждено Menu/MenuItem/Control в .tmp/bundles/swt-src и swt-win32.
+     */
+    private static void updateTooltipPosition(MenuItem item)
+    {
+        int actualIndex = item.getParent().indexOf(item);
+        Object previousIndex = Global.getField(item, "index"); //$NON-NLS-1$
+        boolean updated = false;
+        if (actualIndex >= 0 && previousIndex instanceof Integer storedIndex)
+        {
+            if (storedIndex != actualIndex)
+                Global.setField(item, "index", actualIndex); //$NON-NLS-1$
+            updated = Integer.valueOf(actualIndex).equals(Global.getField(item, "index")); //$NON-NLS-1$
+        }
+        Global.tempLog("menu-tooltip-position", "arm text=" + item.getText() //$NON-NLS-1$ //$NON-NLS-2$
+            + " storedIndex=" + previousIndex + " actualIndex=" + actualIndex //$NON-NLS-1$ //$NON-NLS-2$
+            + " updated=" + updated); //$NON-NLS-1$
     }
 
     /** Лежит ли пункт (на любой глубине вложенности) в подменю «Комфорт». */

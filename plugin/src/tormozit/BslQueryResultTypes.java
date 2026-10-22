@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,6 +38,11 @@ import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.resource.IReferenceDescription;
+import org.eclipse.xtext.naming.QualifiedName;
+import org.eclipse.xtext.scoping.IScopeProvider;
+import org.eclipse.xtext.util.Triple;
+import org.eclipse.xtext.util.Tuples;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
@@ -64,6 +70,12 @@ import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.typesystem.IInvocationTypesComputerExtension;
+import com._1c.g5.v8.dt.bsl.typesystem.ValueTableDynamicContextDefProvider;
+import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
+import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.AbstractStringLiteralProposalProvider;
+import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.IStringLiteralProposalProvider.IBslStringLiteralProposalImageProvider;
+import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
@@ -337,6 +349,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         catch (RuntimeException | LinkageError failure)
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
+            Global.tempLog("query-value-table", "prepare failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             session.plans.remove(method);
         }
     }
@@ -656,6 +669,143 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         return lower(name) + "/" + localOffset; //$NON-NLS-1$
     }
 
+    /**
+     * Штатная точка расширения строковых подсказок. Состав колонок берётся из типа
+     * таблицы; место параметра определяется по штатной сигнатуре, без списка методов.
+     * Сортировать обслуживает собственный провайдер EDT с направлениями сортировки.
+     */
+    public static final class ColumnProposals extends AbstractStringLiteralProposalProvider
+    {
+        @Override
+        public boolean isAppropriate(Triple<EObject, List<Expression>, Integer> context)
+        {
+            return !columnTables(context).isEmpty();
+        }
+
+        @Override
+        public List<Triple<String, String, IBslStringLiteralProposalImageProvider>> computeProposals(
+            Triple<EObject, List<Expression>, Integer> context, String prefix,
+            IScopeProvider scope, IIndexSlicePredicateService slices, boolean russian)
+        {
+            var proposals = new ArrayList<Triple<String, String, IBslStringLiteralProposalImageProvider>>();
+            int tokenStart = prefix.lastIndexOf(',') + 1;
+            while (tokenStart < prefix.length() && Character.isWhitespace(prefix.charAt(tokenStart)))
+                tokenStart++;
+            String typed = lower(prefix.substring(tokenStart));
+            String before = "\"" + prefix.substring(0, tokenStart); //$NON-NLS-1$
+            Set<String> names = new java.util.LinkedHashSet<>();
+            for (Type table : columnTables(context))
+                for (TypeItem item : rowTypes(table))
+                    if (item instanceof Type row && row.getContextDef() != null)
+                        for (var property : row.getContextDef().allProperties())
+                        {
+                            if (property.isDependsOnMetadata())
+                                continue;
+                            String name = russian ? property.getNameRu() : property.getName();
+                            if (name == null || name.isBlank())
+                                name = property.getName();
+                            if (name != null && lower(name).startsWith(typed) && names.add(lower(name)))
+                                proposals.add(Tuples.create(before + name, name,
+                                    IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
+                        }
+            Global.tempLog("query-value-table", "columnProposals parameter=" + context.getThird() //$NON-NLS-1$ //$NON-NLS-2$
+                + " prefix=" + prefix + " names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
+            return proposals;
+        }
+
+        private static List<Type> columnTables(Triple<EObject, List<Expression>, Integer> context)
+        {
+            EObject target = context.getFirst();
+            int argument = context.getThird();
+            boolean filterKeys = target instanceof OperatorStyleCreator;
+            if (filterKeys)
+            {
+                OperatorStyleCreator creator = (OperatorStyleCreator) target;
+                // Только список ключей непосредственно переданной структуры отбора.
+                // Строковые значения (второй и следующие аргументы) сюда не попадают.
+                if (argument != 0 || !"Structure".equals(McoreUtil.getTypeName(creator.getType())) //$NON-NLS-1$
+                    || !(creator.eContainer() instanceof Invocation outer))
+                    return List.of();
+                argument = outer.getParams().indexOf(creator);
+                target = outer;
+            }
+            if (!(target instanceof Invocation invocation)
+                || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+                || access.getSource() == null || argument < 0
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(invocation))
+                return List.of();
+            String name = lower(access.getName());
+            if (name.equals("sort") || name.equals("сортировать")) //$NON-NLS-1$ //$NON-NLS-2$
+                return List.of();
+            var rsp = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(invocation.eResource().getURI());
+            Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
+            if (method == null)
+                return List.of();
+            int parameterIndex = argument;
+            List<Type> tables = new ArrayList<>();
+            for (TypeItem item : rsp.get(TypesComputer.class)
+                .computeTypes(access.getSource(), method.environments()))
+            {
+                EObject resolved = EcoreUtil.resolve(item, invocation);
+                if (!(resolved instanceof Type table) || table.eIsProxy()
+                    || !Set.of("ValueTable", "ValueTree", "ValueTreeRowCollection") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        .contains(McoreUtil.getTypeName(table))
+                    || table.getContextDef() == null || rowTypes(table).isEmpty())
+                    continue;
+                boolean columnParameter = table.getContextDef().allMethods().stream()
+                    .filter(candidate -> name.equals(lower(candidate.getName()))
+                        || name.equals(lower(candidate.getNameRu())))
+                    .flatMap(candidate -> candidate.getParamSet().stream())
+                    .filter(parameters -> parameterIndex < parameters.getParams().size())
+                    .map(parameters -> parameters.getParams().get(parameterIndex))
+                    .anyMatch(parameter -> filterKeys
+                        ? "FilterParameters".equalsIgnoreCase(parameter.getName()) //$NON-NLS-1$
+                        : "Columns".equalsIgnoreCase(parameter.getName()) //$NON-NLS-1$
+                            || "Column".equalsIgnoreCase(parameter.getName())); //$NON-NLS-1$
+                if (columnParameter)
+                    tables.add(table);
+            }
+            return tables;
+        }
+
+        private static List<TypeItem> rowTypes(Type table)
+        {
+            var rows = "ValueTree".equals(McoreUtil.getTypeName(table)) //$NON-NLS-1$
+                ? ValueTreeDynamicContextDefProvider.getValueTreeCollectionElementType(table)
+                : table.getCollectionElementTypes();
+            return rows == null ? List.of() : rows.allTypes();
+        }
+
+        @Override
+        public Collection<QualifiedName> getExportedName(
+            Triple<EObject, List<Expression>, Integer> context, IScopeProvider scope)
+        {
+            return List.of();
+        }
+
+        @Override
+        public List<IReferenceDescription> getReferenceDescriptions(
+            Triple<EObject, List<Expression>, Integer> context, IScopeProvider scope)
+        {
+            return List.of();
+        }
+
+        @Override
+        public boolean isCorrectValue(String value, Triple<EObject, List<Expression>, Integer> context,
+            IScopeProvider scope, IIndexSlicePredicateService slices)
+        {
+            // Это дополнение списка, а не проверка значения строкового параметра.
+            return true;
+        }
+
+        @Override
+        public boolean hasHyperlinks(Triple<EObject, List<Expression>, Integer> context)
+        {
+            return false;
+        }
+    }
+
     private static final class Session extends AdapterImpl
     {
         final Map<Method, Plan> plans = new java.util.concurrent.ConcurrentHashMap<>();
@@ -720,7 +870,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     || !RESULT_METHODS.contains(lower(access.getName())))
                     continue;
                 Shape shape = shape(invocation, Collections.newSetFromMap(new IdentityHashMap<>()));
-                if (shape == null)
+                // Строки выводит штатная система типов из общего типа таблицы.
+                if (shape == null || shape.kind.equals("ValueTableRow")) //$NON-NLS-1$
                     continue;
                 Type type = resultType(shape);
                 if (type != null)
@@ -1127,6 +1278,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
         private Type resultType(Shape shape)
         {
+            if (shape.kind.equals("ValueTable")) //$NON-NLS-1$
+                return valueTableType(shape.results.get(0));
             Type type = baseType(shape.kind);
             if (type == null)
                 return null;
@@ -1143,22 +1296,61 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 }
                 type.setCollectionElementTypes(elements);
             }
-            else if (shape.kind.equals("ValueTable")) //$NON-NLS-1$
-            {
-                Type row = baseType("ValueTableRow"); //$NON-NLS-1$
-                if (row == null)
-                    return null;
-                fillFields(row, shape.results.get(0));
-                TypeContainerRef elements = McoreFactory.eINSTANCE.createTypeContainerRef();
-                elements.getTypes().add(row);
-                type.setCollectionElementTypes(elements);
-            }
-            else if (shape.kind.equals("QueryResultSelection") || shape.kind.equals("ValueTableRow")) //$NON-NLS-1$ //$NON-NLS-2$
+            else if (shape.kind.equals("QueryResultSelection")) //$NON-NLS-1$
                 fillFields(type, shape.results.get(0));
             return type;
         }
 
+        /**
+         * Тот же тип таблицы, который EDT создаёт для «Новый ТаблицаЗначений»:
+         * общий тип строки для элементов коллекции и методов, собственный контекст колонок.
+         * Параметры и их описания остаются штатными; подсказка Сортировать читает
+         * свойства этого же типа строки через getCollectionElementTypes().
+         */
+        private Type valueTableType(Result result)
+        {
+            var rsp = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(method.eResource().getURI());
+            // Провайдер изменяет собственные методы и свойства. Ссылочный контекст
+            // copyWithRefContext здесь нельзя использовать: он ссылается на платформу.
+            Type table = rsp.get(ValueTableDynamicContextDefProvider.class)
+                .computeDerivedValueTableType(method,
+                    EcoreUtil2.cloneWithProxies(platformType("ValueTable"))); //$NON-NLS-1$
+            Type row = (Type) table.getCollectionElementTypes().allTypes().get(0);
+            fillFields(row, result);
+            // Как expandValueTableAndTreeType в EDT: те же имена доступны через Колонки,
+            // но тип значения там — колонка таблицы, а не значение ячейки.
+            Type columns = (Type) ValueTableDynamicContextDefProvider.getColumnCollectionType(table)
+                .allTypes().get(0);
+            Type columnType = platformType("ValueTableColumn"); //$NON-NLS-1$
+            for (var property : row.getContextDef().getProperties())
+                if (property instanceof DerivedProperty derived
+                    && derived.getSource() instanceof BslDerivedPropertySource)
+                {
+                    DerivedProperty column = EcoreUtil2.cloneWithProxies(derived);
+                    column.setWritable(false);
+                    TypeContainerRef types = McoreFactory.eINSTANCE.createTypeContainerRef();
+                    types.getTypes().add(columnType);
+                    column.setTypeContainer(types);
+                    columns.getContextDef().getProperties().add(column);
+                }
+            Global.tempLog("query-value-table", "method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " fields=" + result.fields.stream().map(Field::name).toList() //$NON-NLS-1$
+                + " rowMethods=" + table.getContextDef().allMethods().stream() //$NON-NLS-1$
+                    .filter(candidate -> candidate.getRetValType().contains(row))
+                    .map(com._1c.g5.v8.dt.mcore.Method::getName).toList()
+                + " tableMethods=" + table.getContextDef().allMethods().stream() //$NON-NLS-1$
+                    .filter(candidate -> candidate.getRetValType().contains(table))
+                    .map(com._1c.g5.v8.dt.mcore.Method::getName).toList());
+            return table;
+        }
+
         private Type baseType(String name)
+        {
+            return BslDocCommentTypeMerge.copyWithRefContext(platformType(name), method.environments(), false);
+        }
+
+        private Type platformType(String name)
         {
             var rsp = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
                 .getResourceServiceProvider(method.eResource().getURI());
@@ -1168,7 +1360,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             EObject resolved = EcoreUtil.resolve(provider.createProxy(name), method);
             if (!(resolved instanceof Type type) || type.eIsProxy())
                 throw new IllegalStateException("Platform type unavailable: " + name); //$NON-NLS-1$
-            return BslDocCommentTypeMerge.copyWithRefContext(type, method.environments(), false);
+            return type;
         }
 
         private void fillFields(Type type, Result result)
