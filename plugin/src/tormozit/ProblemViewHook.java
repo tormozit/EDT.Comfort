@@ -2976,7 +2976,7 @@ public final class ProblemViewHook implements IStartup
             if (shell == null || shell.isDisposed())
                 return;
             for (int type : new int[] { SWT.Show, SWT.Hide, SWT.Activate, SWT.Deactivate,
-                SWT.Move, SWT.Resize, SWT.Close, SWT.Dispose })
+                SWT.Close, SWT.Dispose })
             {
                 shell.addListener(type, event -> log("event=" + event.type, shell));
             }

@@ -656,11 +656,11 @@ public final class DebugAreasConfigureHook implements IStartup
         @Override
         public void configureDebugArea(DebugAreaInfo info) throws org.eclipse.debug.core.DebugException
         {
-            if (info == null)
-                return;
+            // null — пометка снята со всех отборов; как штатная EDT, сохраняем «отбор не выбран».
+            String name = info != null ? info.getName() : null;
             try
             {
-                Global.invokeVoid(helper, "saveCurrentDebugArea", project, info.getName()); //$NON-NLS-1$
+                Global.invokeVoid(helper, "saveCurrentDebugArea", project, name); //$NON-NLS-1$
             }
             catch (Exception e)
             {

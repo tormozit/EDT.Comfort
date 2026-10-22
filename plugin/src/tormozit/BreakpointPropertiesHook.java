@@ -1,7 +1,23 @@
 package tormozit;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
+import java.net.URI;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
@@ -10,7 +26,11 @@ import org.eclipse.core.runtime.CoreException;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.DocumentEvent;
+import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextSelection;
@@ -30,15 +50,26 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Layout;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.debug.ui.AbstractDebugView;
+import org.eclipse.debug.ui.IDebugUIConstants;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.IWindowListener;
+import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.IStartup;
@@ -48,7 +79,21 @@ import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.debug.core.IDebugConsoleWriter;
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeEventProcessor;
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
+import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetId;
+import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetTypeUtil;
+import org.eclipse.core.resources.IMarkerDelta;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.debug.core.DebugEvent;
+import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.IBreakpointListener;
+import org.eclipse.debug.core.ILaunch;
+import org.eclipse.debug.core.model.IBreakpoint;
+import org.eclipse.debug.core.model.IDebugElement;
 
 /**
  * Доработки диалога «Свойства для …» (точка останова):
@@ -77,6 +122,35 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String MARKER_SAVED_CONDITION = "tormozit.savedCondition"; //$NON-NLS-1$
     /** Текст выражения при снятом флажке «Значение выражения» — см. {@link #MARKER_SAVED_CONDITION}. */
     private static final String MARKER_SAVED_EXPRESSION = "tormozit.savedExpression"; //$NON-NLS-1$
+    /** Текст описания при снятом флажке «Описание точки останова» — см. {@link #MARKER_SAVED_CONDITION}. */
+    private static final String MARKER_SAVED_DESCRIPTION = "tormozit.savedDescription"; //$NON-NLS-1$
+    /**
+     * Пункты вывода в консоль, включённые до снятия общего флажка, — имена полей
+     * {@code BslBreakpointActionsEditor} через запятую. Включение флажка их возвращает.
+     */
+    private static final String MARKER_SAVED_CONSOLE_OUTPUT = "tormozit.savedConsoleOutput"; //$NON-NLS-1$
+    private static final String CONSOLE_MASTER_KEY = "tormozit.breakpointConsoleMaster"; //$NON-NLS-1$
+    private static final String BREAKPOINTS_VIEW_HOOKED_KEY = "tormozit.breakpointsViewConsoleMaster"; //$NON-NLS-1$
+    private static final String BSL_LINE_BREAKPOINT_DETAIL_PANE =
+            "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslLineBreakpointDetailPane"; //$NON-NLS-1$
+    private static final String CONSOLE_MASTER_FALLBACK_TEXT = "Вывести в консоль процесса отладки при попадании"; //$NON-NLS-1$
+    private static final String CONSOLE_MASTER_TOOLTIP =
+            "При попадании выводить строку «> время: модуль:строка, (предмет отладки: сеанс, сервер), метод: текст строки» и продолжать выполнение. Отмеченные ниже пункты выводятся после неё. Снятие выключает и запоминает пункты, включение возвращает."; //$NON-NLS-1$
+    /** Общий флажок вывода включён — флажок самостоятельный, пунктами вывода не определяется. */
+    private static final String MARKER_CONSOLE_OUTPUT = "tormozit.consoleOutput"; //$NON-NLS-1$
+    /**
+     * Описание точки останова подставлено плагином: без пунктов вывода сервер отладки сообщения
+     * не присылает и строке «Выполнено» не к чему привязаться ({@code BslLineBreakpointInformation.hasMessage}).
+     */
+    private static final String MARKER_CONSOLE_HIDDEN_DESCRIPTION = "tormozit.consoleHiddenDescription"; //$NON-NLS-1$
+    private static final String CONSOLE_HIDDEN_DESCRIPTION = "Выполнено"; //$NON-NLS-1$
+    private static final String CONTINUE_EXECUTION_FIELD = "continueExecutionButton"; //$NON-NLS-1$
+    private static final String[] CONSOLE_OUTPUT_FIELDS = {
+        "enablementDescriptionButton", //$NON-NLS-1$
+        "evaluateExpressionButton", //$NON-NLS-1$
+        "putStackButton", //$NON-NLS-1$
+        "putCurrentHitCountButton" //$NON-NLS-1$
+    };
     private static final String BP_FIELD_ROLE_KEY = "tormozit.bpFieldRole"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "tormozit.breakpointPropertiesDialog"; //$NON-NLS-1$
     private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
@@ -87,7 +161,7 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String DIALOG_TITLE_PREFIX = "Свойства для"; //$NON-NLS-1$
     private static final String BUTTON_TEXT = "Выводить ИР"; //$NON-NLS-1$
     private static final String BUTTON_TOOLTIP =
-            "Вставить вывод текущего времени, метода и значений выражений из выделенного фрагмента или текущей строки модуля."; //$NON-NLS-1$
+            "Вставить вывод значений выражений из выделенного фрагмента или текущей строки модуля."; //$NON-NLS-1$
     private static final String BSL_BREAKPOINT_PAGE =
             "com._1c.g5.v8.dt.internal.debug.ui.breakpoints.BslBreakpointPage"; //$NON-NLS-1$
     private static final String ACTIONS_EDITOR =
@@ -103,7 +177,107 @@ public final class BreakpointPropertiesHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() -> install(Display.getDefault()));
+        Display.getDefault().asyncExec(() ->
+        {
+            install(Display.getDefault());
+            installBreakpointsView();
+            ConsoleExecutedLine.installDoubleClick(Display.getDefault());
+        });
+        ConsoleExecutedLine.install();
+    }
+
+    /**
+     * Панель «Точки останова»: её панель деталей ({@code BslLineBreakpointDetailPane}) строит тот же
+     * редактор «Действия», что и диалог, — общий флажок вывода ставим и туда. Редактор один на
+     * панель, при выборе другой точки EDT зовёт его {@code setInput}, поэтому сверяемся после
+     * каждой смены выделения.
+     */
+    private static void installBreakpointsView()
+    {
+        IWorkbench workbench = PlatformUI.getWorkbench();
+        if (workbench == null)
+            return;
+        for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
+            hookBreakpointsViewWindow(window);
+        workbench.addWindowListener(new IWindowListener()
+        {
+            @Override
+            public void windowOpened(IWorkbenchWindow window)
+            {
+                hookBreakpointsViewWindow(window);
+            }
+
+            @Override
+            public void windowClosed(IWorkbenchWindow window) { }
+
+            @Override
+            public void windowActivated(IWorkbenchWindow window) { }
+
+            @Override
+            public void windowDeactivated(IWorkbenchWindow window) { }
+        });
+    }
+
+    private static void hookBreakpointsViewWindow(IWorkbenchWindow window)
+    {
+        if (window == null)
+            return;
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override
+            public void partOpened(IWorkbenchPartReference ref)
+            {
+                hookBreakpointsView(ref.getPart(false));
+            }
+
+            @Override
+            public void partVisible(IWorkbenchPartReference ref)
+            {
+                hookBreakpointsView(ref.getPart(false));
+            }
+        });
+        IWorkbenchPage page = window.getActivePage();
+        if (page == null)
+            return;
+        for (IViewReference ref : page.getViewReferences())
+        {
+            if (ref != null)
+                hookBreakpointsView(ref.getPart(false));
+        }
+    }
+
+    private static void hookBreakpointsView(IWorkbenchPart part)
+    {
+        if (!(part instanceof AbstractDebugView view) || view.getViewSite() == null
+                || !IDebugUIConstants.ID_BREAKPOINT_VIEW.equals(view.getViewSite().getId()))
+            return;
+        Viewer viewer = view.getViewer();
+        if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
+            return;
+        Control control = viewer.getControl();
+        if (!Boolean.TRUE.equals(control.getData(BREAKPOINTS_VIEW_HOOKED_KEY)))
+        {
+            control.setData(BREAKPOINTS_VIEW_HOOKED_KEY, Boolean.TRUE);
+            // Панель деталей обновляется слушателем выделения самой панели — сверяемся после него.
+            viewer.addSelectionChangedListener(e -> control.getDisplay().asyncExec(() ->
+            {
+                if (!control.isDisposed())
+                    patchBreakpointsViewDetailPane(view);
+            }));
+        }
+        patchBreakpointsViewDetailPane(view);
+    }
+
+    /** {@code VariablesView.fDetailPane} → {@code DetailPaneProxy.fCurrentPane} → редактор «Действия». */
+    private static void patchBreakpointsViewDetailPane(AbstractDebugView view)
+    {
+        Object proxy = Global.getField(view, "fDetailPane"); //$NON-NLS-1$
+        Object pane = proxy != null ? Global.getField(proxy, "fCurrentPane") : null; //$NON-NLS-1$
+        if (pane == null || !BSL_LINE_BREAKPOINT_DETAIL_PANE.equals(pane.getClass().getName()))
+            return;
+        Object actionsEditor = findSubEditor(Global.getField(pane, "breakpointEditor"), ACTIONS_EDITOR); //$NON-NLS-1$
+        if (actionsEditor != null)
+            installConsoleMasterCheckbox(actionsEditor, true);
     }
 
     static void install(Display display)
@@ -341,6 +515,7 @@ public final class BreakpointPropertiesHook implements IStartup
         {
             installEditorPanesVerticalStretch(shell, actionsEditor);
             installAlwaysEnabledPanes(shell, actionsEditor);
+            installConsoleMasterCheckbox(actionsEditor);
             installMouseWheelScroll(shell);
             installUncheckedTextPersistence(shell);
             shell.setData(PATCHED_KEY, Boolean.TRUE);
@@ -351,6 +526,7 @@ public final class BreakpointPropertiesHook implements IStartup
         // Только после installAlwaysEnabledPanes: там в поля подставляется текст,
         // запомненный при снятом флажке, и он тоже должен раскрыть свою группу.
         installAlwaysEnabledPanes(shell, actionsEditor);
+        installConsoleMasterCheckbox(actionsEditor);
         expandGroupsWithContent(shell, actionsEditor);
         installMouseWheelScroll(shell);
         installUncheckedTextPersistence(shell);
@@ -389,8 +565,10 @@ public final class BreakpointPropertiesHook implements IStartup
                 return;
             saveUncheckedFieldText(resolveBreakpointSubEditor(shell, CONDITION_EDITOR),
                 "conditionButton", "conditionPane", true); //$NON-NLS-1$ //$NON-NLS-2$
-            saveUncheckedFieldText(resolveActionsEditor(shell),
+            Object actionsEditor = resolveActionsEditor(shell);
+            saveUncheckedFieldText(actionsEditor,
                 "evaluateExpressionButton", "expressionPane", false); //$NON-NLS-1$ //$NON-NLS-2$
+            saveConsoleOutputState(actionsEditor);
         };
         display.addFilter(SWT.Selection, beforeOk);
         shell.addDisposeListener(e ->
@@ -500,13 +678,7 @@ public final class BreakpointPropertiesHook implements IStartup
      */
     private static void wireAutoContinueOnConsoleActions(Object actionsEditor)
     {
-        String[] fieldNames = {
-            "enablementDescriptionButton", //$NON-NLS-1$
-            "evaluateExpressionButton", //$NON-NLS-1$
-            "putStackButton", //$NON-NLS-1$
-            "putCurrentHitCountButton" //$NON-NLS-1$
-        };
-        for (String fieldName : fieldNames)
+        for (String fieldName : CONSOLE_OUTPUT_FIELDS)
         {
             Button button = (Button) Global.getField(actionsEditor, fieldName);
             if (button == null || button.isDisposed())
@@ -540,6 +712,12 @@ public final class BreakpointPropertiesHook implements IStartup
             return;
         if (continueButton.isEnabled() || !continueButton.getSelection())
             return;
+        // Общий флажок включён — «Продолжить выполнение» к нему привязано, сообщение подставит плагин.
+        if (isConsoleMasterOn(actionsEditor))
+        {
+            continueButton.setEnabled(true);
+            return;
+        }
 
         continueButton.setSelection(false);
         Event event = new Event();
@@ -552,6 +730,9 @@ public final class BreakpointPropertiesHook implements IStartup
     {
         if (actionsEditor == null)
             return;
+        // Сюда приходят все включения пунктов вывода, и автовключения «Значение выражения»
+        // без Selection тоже: включённый пункт означает «выводить» — общий флажок тоже.
+        setConsoleMasterState(actionsEditor, true);
         Button continueButton = (Button) Global.getField(actionsEditor, "continueExecutionButton"); //$NON-NLS-1$
         if (continueButton == null || continueButton.isDisposed())
             return;
@@ -564,6 +745,370 @@ public final class BreakpointPropertiesHook implements IStartup
         event.type = SWT.Selection;
         event.widget = continueButton;
         continueButton.notifyListeners(SWT.Selection, event);
+    }
+
+    /** Состояние общего флажка вывода для текущей точки останова редактора «Действия». */
+    private static final class ConsoleMasterState
+    {
+        /** Панель «Точки останова»: кнопки OK нет, запоминаем в маркер сразу. */
+        final boolean persistImmediately;
+        final List<String> remembered = new ArrayList<>();
+        Object breakpoint;
+        /** Общий флажок включён (атрибут {@link #MARKER_CONSOLE_OUTPUT}), независимо от пунктов. */
+        boolean on;
+
+        ConsoleMasterState(boolean persistImmediately)
+        {
+            this.persistImmediately = persistImmediately;
+        }
+    }
+
+    /**
+     * Общий флажок вывода в консоль — как «Выводить в окно служебных сообщений» конфигуратора.
+     * В EDT вместо него рамка с заголовком; заголовок рамки становится текстом флажка, а сам
+     * флажок встаёт первым в блоке «Действия».
+     * Флажок самостоятельный: включён один он — в консоль идёт строка «Выполнено: …»
+     * ({@link ConsoleExecutedLine}). Он привязан к «Продолжить выполнение» в обе стороны.
+     * Снятие запоминает включённые пункты и выключает их, включение возвращает запомненные.
+     * Включение любого пункта включает и флажок.
+     */
+    private static void installConsoleMasterCheckbox(Object actionsEditor)
+    {
+        installConsoleMasterCheckbox(actionsEditor, false);
+    }
+
+    private static void installConsoleMasterCheckbox(Object actionsEditor, boolean persistImmediately)
+    {
+        Button descriptionButton = (Button) Global.getField(actionsEditor, "enablementDescriptionButton"); //$NON-NLS-1$
+        if (descriptionButton == null || descriptionButton.isDisposed())
+            return;
+        Composite inner = descriptionButton.getParent();
+        if (inner == null || !(inner.getParent() instanceof Group group) || group.isDisposed())
+            return;
+        if (group.getData(CONSOLE_MASTER_KEY) != null)
+        {
+            refreshConsoleMaster(actionsEditor);
+            return;
+        }
+        Composite host = group.getParent();
+        if (host == null || !(host.getLayout() instanceof GridLayout))
+            return;
+
+        String title = group.getText() == null ? "" : group.getText().strip(); //$NON-NLS-1$
+        if (title.endsWith(":")) //$NON-NLS-1$
+            title = title.substring(0, title.length() - 1).strip();
+        if (title.isEmpty())
+            title = CONSOLE_MASTER_FALLBACK_TEXT;
+
+        Button master = new Button(host, SWT.CHECK);
+        master.setText(title);
+        master.setToolTipText(TooltipText.wrap(master, CONSOLE_MASTER_TOOLTIP + Global.pluginSignForTooltip()));
+        master.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        Button continueButton = (Button) Global.getField(actionsEditor, CONTINUE_EXECUTION_FIELD);
+        if (continueButton != null && !continueButton.isDisposed() && continueButton.getParent() == host)
+            master.moveAbove(continueButton);
+        else
+            master.moveAbove(group);
+        group.setText(""); //$NON-NLS-1$
+        group.setData(CONSOLE_MASTER_KEY, master);
+
+        ConsoleMasterState state = new ConsoleMasterState(persistImmediately);
+        master.setData(CONSOLE_MASTER_KEY, state);
+        refreshConsoleMaster(actionsEditor);
+
+        master.addListener(SWT.Selection, e ->
+        {
+            boolean on = master.getSelection();
+            state.on = on;
+            if (on)
+            {
+                restoreConsoleOutput(actionsEditor, state.remembered);
+            }
+            else
+            {
+                state.remembered.clear();
+                state.remembered.addAll(checkedConsoleOutput(actionsEditor));
+                for (String fieldName : CONSOLE_OUTPUT_FIELDS)
+                    setCheckedWithNotify((Button) Global.getField(actionsEditor, fieldName), false);
+            }
+            setContinueExecutionChecked(actionsEditor, on);
+            if (state.persistImmediately)
+                saveConsoleOutputState(actionsEditor);
+        });
+        Display display = master.getDisplay();
+        Runnable keepContinueEnabledLater = () -> display.asyncExec(() -> keepContinueEnabled(actionsEditor));
+        for (String fieldName : CONSOLE_OUTPUT_FIELDS)
+        {
+            Button button = (Button) Global.getField(actionsEditor, fieldName);
+            if (button != null && !button.isDisposed())
+                button.addListener(SWT.Selection, e ->
+                {
+                    keepContinueEnabledLater.run();
+                    if (state.persistImmediately)
+                        saveConsoleOutputState(actionsEditor);
+                });
+        }
+        // Штатный checkContinueExecutionAvailability гасит пометку и при правке описания/выражения.
+        Text descriptionText = (Text) Global.getField(actionsEditor, "descriptionText"); //$NON-NLS-1$
+        if (descriptionText != null && !descriptionText.isDisposed())
+            descriptionText.addListener(SWT.Modify, e -> keepContinueEnabledLater.run());
+        Object pane = Global.getField(actionsEditor, "expressionPane"); //$NON-NLS-1$
+        if (pane != null && Global.getField(pane, "document") instanceof IDocument document) //$NON-NLS-1$
+            document.addDocumentListener(new IDocumentListener()
+            {
+                @Override
+                public void documentAboutToBeChanged(DocumentEvent event)
+                {
+                }
+
+                @Override
+                public void documentChanged(DocumentEvent event)
+                {
+                    if (!master.isDisposed())
+                        keepContinueEnabledLater.run();
+                }
+            });
+        if (continueButton != null && !continueButton.isDisposed())
+            continueButton.addListener(SWT.Selection, e ->
+            {
+                if (state.on != continueButton.getSelection())
+                    setConsoleMasterState(actionsEditor, continueButton.getSelection());
+            });
+        host.layout(true, true);
+    }
+
+    /** Общий флажок включён: «Продолжить выполнение» доступно, даже когда EDT нечего выводить. */
+    private static void keepContinueEnabled(Object actionsEditor)
+    {
+        if (!isConsoleMasterOn(actionsEditor))
+            return;
+        Button continueButton = (Button) Global.getField(actionsEditor, CONTINUE_EXECUTION_FIELD);
+        if (continueButton != null && !continueButton.isDisposed() && !continueButton.isEnabled())
+            continueButton.setEnabled(true);
+    }
+
+    private static void setContinueExecutionChecked(Object actionsEditor, boolean checked)
+    {
+        Button continueButton = (Button) Global.getField(actionsEditor, CONTINUE_EXECUTION_FIELD);
+        if (continueButton == null || continueButton.isDisposed())
+            return;
+        if (checked && !continueButton.isEnabled())
+            continueButton.setEnabled(true);
+        setCheckedWithNotify(continueButton, checked);
+    }
+
+    private static ConsoleMasterState consoleMasterState(Object actionsEditor)
+    {
+        Button master = consoleMaster(actionsEditor);
+        return master != null && master.getData(CONSOLE_MASTER_KEY) instanceof ConsoleMasterState state
+                ? state
+                : null;
+    }
+
+    private static boolean isConsoleMasterOn(Object actionsEditor)
+    {
+        ConsoleMasterState state = consoleMasterState(actionsEditor);
+        return state != null && state.on;
+    }
+
+    private static void setConsoleMasterState(Object actionsEditor, boolean on)
+    {
+        Button master = consoleMaster(actionsEditor);
+        ConsoleMasterState state = consoleMasterState(actionsEditor);
+        if (master == null || state == null || state.on == on)
+            return;
+        state.on = on;
+        master.setSelection(on);
+        if (on)
+            keepContinueEnabled(actionsEditor);
+        if (state.persistImmediately)
+            saveConsoleOutputState(actionsEditor);
+    }
+
+    /**
+     * Сменилась точка останова редактора (панель «Точки останова» переиспользует его для
+     * каждой выбранной): запомненное — из её маркера, описание при снятом флажке — в поле.
+     * {@code setInput} ставит флажки без {@link SWT#Selection} — общий флажок сверяем здесь.
+     */
+    private static void refreshConsoleMaster(Object actionsEditor)
+    {
+        Button master = consoleMaster(actionsEditor);
+        if (master == null || !(master.getData(CONSOLE_MASTER_KEY) instanceof ConsoleMasterState state))
+            return;
+        Object breakpoint = Global.getField(actionsEditor, "breakpoint"); //$NON-NLS-1$
+        if (breakpoint == state.breakpoint)
+            return;
+        state.breakpoint = breakpoint;
+        state.remembered.clear();
+        hideConsoleExecutedDescription(actionsEditor);
+        restoreSavedDescription(actionsEditor);
+        state.on = Boolean.TRUE.equals(readMarkerAttribute(actionsEditor, MARKER_CONSOLE_OUTPUT));
+        if (!state.on)
+            state.remembered.addAll(readSavedConsoleOutput(actionsEditor));
+        master.setSelection(state.on);
+        keepContinueEnabled(actionsEditor);
+    }
+
+    /**
+     * Описание, подставленное плагином ради строки «Выполнено» ({@link ConsoleExecutedLine}), в поле
+     * не показываем: для пользователя описания нет. Подстановка — не правка, редактор не «грязный».
+     */
+    private static void hideConsoleExecutedDescription(Object actionsEditor)
+    {
+        if (!Boolean.TRUE.equals(readMarkerAttribute(actionsEditor, MARKER_CONSOLE_HIDDEN_DESCRIPTION)))
+            return;
+        Button descriptionButton = (Button) Global.getField(actionsEditor, "enablementDescriptionButton"); //$NON-NLS-1$
+        Text descriptionText = (Text) Global.getField(actionsEditor, "descriptionText"); //$NON-NLS-1$
+        if (descriptionButton == null || descriptionButton.isDisposed() || descriptionText == null
+                || descriptionText.isDisposed() || !CONSOLE_HIDDEN_DESCRIPTION.equals(descriptionText.getText().strip()))
+            return;
+        boolean wasDirty = Boolean.TRUE.equals(Global.invoke(actionsEditor, "isDirty")); //$NON-NLS-1$
+        descriptionButton.setSelection(false);
+        descriptionText.setText(""); //$NON-NLS-1$
+        descriptionText.setEnabled(false);
+        if (!wasDirty)
+            Global.invoke(actionsEditor, "setDirty", false); //$NON-NLS-1$
+    }
+
+    private static Button consoleMaster(Object actionsEditor)
+    {
+        Button descriptionButton = (Button) Global.getField(actionsEditor, "enablementDescriptionButton"); //$NON-NLS-1$
+        if (descriptionButton == null || descriptionButton.isDisposed())
+            return null;
+        Composite inner = descriptionButton.getParent();
+        if (inner == null || !(inner.getParent() instanceof Group group)
+                || !(group.getData(CONSOLE_MASTER_KEY) instanceof Button master) || master.isDisposed())
+            return null;
+        return master;
+    }
+
+    /** Имена полей включённых пунктов вывода; «Продолжить выполнение» — только вместе с ними. */
+    private static List<String> checkedConsoleOutput(Object actionsEditor)
+    {
+        List<String> result = new ArrayList<>();
+        for (String fieldName : CONSOLE_OUTPUT_FIELDS)
+        {
+            Button button = (Button) Global.getField(actionsEditor, fieldName);
+            if (button != null && !button.isDisposed() && button.getSelection())
+                result.add(fieldName);
+        }
+        Button continueButton = (Button) Global.getField(actionsEditor, CONTINUE_EXECUTION_FIELD);
+        if (!result.isEmpty() && continueButton != null && !continueButton.isDisposed()
+                && continueButton.getSelection())
+            result.add(CONTINUE_EXECUTION_FIELD);
+        return result;
+    }
+
+    /** Запомненные при снятии общего флажка пункты — обратно; без них ничего не включаем. */
+    private static void restoreConsoleOutput(Object actionsEditor, List<String> remembered)
+    {
+        for (String fieldName : remembered)
+        {
+            if (!CONTINUE_EXECUTION_FIELD.equals(fieldName))
+                setCheckedWithNotify((Button) Global.getField(actionsEditor, fieldName), true);
+        }
+    }
+
+    private static void setCheckedWithNotify(Button button, boolean checked)
+    {
+        if (button == null || button.isDisposed() || button.getSelection() == checked)
+            return;
+        button.setSelection(checked);
+        Event event = new Event();
+        event.type = SWT.Selection;
+        event.widget = button;
+        button.notifyListeners(SWT.Selection, event);
+    }
+
+    /**
+     * Запомненные пункты вывода — в атрибут маркера, пока общий флажок снят; при включённом
+     * атрибут убираем. Описание при снятом флажке — тоже: штатный {@code doSave} пишет пустую строку.
+     */
+    private static void saveConsoleOutputState(Object actionsEditor)
+    {
+        if (actionsEditor == null)
+            return;
+        Object bpObject = Global.getField(actionsEditor, "breakpoint"); //$NON-NLS-1$
+        if (!(bpObject instanceof IBslLineBreakpoint breakpoint))
+            return;
+        IMarker marker = breakpoint.getMarker();
+        if (marker == null || !marker.exists())
+            return;
+
+        String savedDescription = null;
+        Button descriptionButton = (Button) Global.getField(actionsEditor, "enablementDescriptionButton"); //$NON-NLS-1$
+        Text descriptionText = (Text) Global.getField(actionsEditor, "descriptionText"); //$NON-NLS-1$
+        if (descriptionButton != null && !descriptionButton.isDisposed() && !descriptionButton.getSelection()
+                && descriptionText != null && !descriptionText.isDisposed() && !descriptionText.getText().isBlank())
+            savedDescription = descriptionText.getText().strip();
+
+        String savedOutput = null;
+        ConsoleMasterState state = consoleMasterState(actionsEditor);
+        if (state != null && !state.on && !state.remembered.isEmpty())
+            savedOutput = String.join(",", state.remembered); //$NON-NLS-1$
+        try
+        {
+            marker.setAttribute(MARKER_SAVED_DESCRIPTION, savedDescription);
+            marker.setAttribute(MARKER_SAVED_CONSOLE_OUTPUT, savedOutput);
+            if (state != null)
+                marker.setAttribute(MARKER_CONSOLE_OUTPUT, state.on ? Boolean.TRUE : null);
+        }
+        catch (CoreException e)
+        {
+            BreakpointPropertiesDebug.problem("сохранение пунктов вывода в консоль: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private static List<String> readSavedConsoleOutput(Object actionsEditor)
+    {
+        List<String> result = new ArrayList<>();
+        Object value = readMarkerAttribute(actionsEditor, MARKER_SAVED_CONSOLE_OUTPUT);
+        if (!(value instanceof String s) || s.isBlank())
+            return result;
+        for (String name : s.split(",")) //$NON-NLS-1$
+        {
+            String fieldName = name.strip();
+            if (CONTINUE_EXECUTION_FIELD.equals(fieldName) || List.of(CONSOLE_OUTPUT_FIELDS).contains(fieldName))
+                result.add(fieldName);
+        }
+        return result;
+    }
+
+    /** Описание, запомненное при снятом флажке, — в поле (флажок остаётся снятым). */
+    private static void restoreSavedDescription(Object actionsEditor)
+    {
+        Button descriptionButton = (Button) Global.getField(actionsEditor, "enablementDescriptionButton"); //$NON-NLS-1$
+        Text descriptionText = (Text) Global.getField(actionsEditor, "descriptionText"); //$NON-NLS-1$
+        if (descriptionButton == null || descriptionButton.isDisposed() || descriptionButton.getSelection()
+                || descriptionText == null || descriptionText.isDisposed() || !descriptionText.getText().isEmpty())
+            return;
+        Object value = readMarkerAttribute(actionsEditor, MARKER_SAVED_DESCRIPTION);
+        if (!(value instanceof String s) || s.isBlank())
+            return;
+        // Штатный ModifyListener поля сочтёт подстановку правкой: в панели «Точки останова»
+        // это предложение сохранить при каждом выборе точки. Подстановка — не правка.
+        boolean wasDirty = Boolean.TRUE.equals(Global.invoke(actionsEditor, "isDirty")); //$NON-NLS-1$
+        descriptionText.setText(s);
+        if (!wasDirty)
+            Global.invoke(actionsEditor, "setDirty", false); //$NON-NLS-1$
+    }
+
+    private static Object readMarkerAttribute(Object actionsEditor, String attribute)
+    {
+        Object bpObject = Global.getField(actionsEditor, "breakpoint"); //$NON-NLS-1$
+        if (!(bpObject instanceof IBslLineBreakpoint breakpoint))
+            return null;
+        IMarker marker = breakpoint.getMarker();
+        if (marker == null || !marker.exists())
+            return null;
+        try
+        {
+            return marker.getAttribute(attribute);
+        }
+        catch (CoreException e)
+        {
+            return null;
+        }
     }
 
     private static void wireAlwaysEnabledPane(Button checkbox, Object pane, Object breakpointHolder,
@@ -1291,7 +1836,12 @@ public final class BreakpointPropertiesHook implements IStartup
         if (page == null || !BSL_BREAKPOINT_PAGE.equals(page.getClass().getName()))
             return null;
 
-        Object compositeEditor = Global.getField(page, "editor"); //$NON-NLS-1$
+        return findSubEditor(Global.getField(page, "editor"), editorClassName); //$NON-NLS-1$
+    }
+
+    /** Редактор класса {@code editorClassName} внутри {@code CompositeBreakpointEditor}. */
+    private static Object findSubEditor(Object compositeEditor, String editorClassName)
+    {
         if (compositeEditor == null)
             return null;
         Object editorsObj = Global.getField(compositeEditor, "editors"); //$NON-NLS-1$
@@ -1684,17 +2234,10 @@ public final class BreakpointPropertiesHook implements IStartup
             Object irCommon = session.getModule("ирОбщий"); //$NON-NLS-1$
             List<String> parts = new ArrayList<>();
 
-            if (oldExpressionText == null || oldExpressionText.isBlank())
-            {
-                Object method = ComBridge.getProperty(session.codeEditor, "мМетодМодуля"); //$NON-NLS-1$
-                String methodName = ComBridge.toString(ComBridge.getProperty(method, "Имя")); //$NON-NLS-1$
-                String truncatedMethod = truncate(irCommon, methodName, 50);
-                parts.add("ирОбщий.ТекущееВремяЛкс(1) + \" \" + \"" + truncatedMethod + ":\""); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            else
-            {
+            // Время и метод не вставляем: их выводит строка общего флажка вывода (ConsoleExecutedLine).
+            // Пустая первая часть — разделитель перед добавлением к уже набранному выражению.
+            if (oldExpressionText != null && !oldExpressionText.isBlank())
                 parts.add(""); //$NON-NLS-1$
-            }
 
             for (String expression : objectExpressions)
             {
@@ -1719,6 +2262,603 @@ public final class BreakpointPropertiesHook implements IStartup
             if (value == null)
                 value = ""; //$NON-NLS-1$
             return ComBridge.toString(ComBridge.invoke(irCommon, "ПредставлениеСОбрезкойДлиныЛкс", value, maxLen)); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Строка «Выполнено: …» в консоли отладки для точек с общим флажком вывода
+     * ({@link #MARKER_CONSOLE_OUTPUT}) — как «Сработала точка останова» конфигуратора.
+     * <p>
+     * EDT ({@code RuntimeDebugClientTarget.proceedStackEventDataAndSuspentionFlag}, debug.core
+     * 18.0.0.v202605050943) печатает через {@link IDebugConsoleWriter} заголовок «метод, строка»,
+     * затем сообщение сервера и два перевода строки — и только если сервер сообщение прислал, то
+     * есть у точки задан хоть один пункт вывода. Поэтому: без пунктов точке подставляется скрытое
+     * описание ({@link #enforce}); {@code consoleWriter} цели заменяется обёрткой, которая вместо
+     * заголовка и скрытого описания печатает свою строку. Поток (предмет отладки, сеанс) в
+     * {@code print} не передаётся — его даёт команда {@code handleCallStackFormed}, перехваченная
+     * в {@code RuntimeEventDispatchJob.eventProcessor} на том же потоке Java.
+     * Номера соединения в модели EDT нет ({@link DebugTargetId}) — в строке его нет.
+     */
+    private static final class ConsoleExecutedLine
+    {
+        private static final String CLIENT_TARGET_CLASS =
+                "com._1c.g5.v8.dt.internal.debug.core.model.RuntimeDebugClientTarget"; //$NON-NLS-1$
+        private static final String DISPATCH_JOB_CLASS =
+                "com._1c.g5.v8.dt.internal.debug.core.model.RuntimeEventDispatchJob"; //$NON-NLS-1$
+        private static final String MESSAGES_CLASS = "com._1c.g5.v8.dt.internal.debug.core.model.Messages"; //$NON-NLS-1$
+        private static final String HEADER_FIELD = "RuntimeDebugTargetThread_Breakpoint_data"; //$NON-NLS-1$
+        private static final String HEADER_FALLBACK = "Данные в точке останова: метод {0}, строка {1}"; //$NON-NLS-1$
+        private static final int LINE_CACHE_LIMIT = 16;
+        private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS"); //$NON-NLS-1$
+
+        /** Команда «стек сформирован», которую сейчас обрабатывает цель на этом потоке. */
+        private static final ThreadLocal<Object> CURRENT_COMMAND = new ThreadLocal<>();
+        private static final Map<String, IDocument> LINE_CACHE = new LinkedHashMap<>(16, 0.75f, true)
+        {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, IDocument> eldest)
+            {
+                return size() > LINE_CACHE_LIMIT;
+            }
+        };
+        private static volatile Pattern headerPattern;
+        private static volatile boolean installed;
+        private static final int PRINTED_LIMIT = 5000;
+        /** Напечатанная строка (без перевода строки) → место в модуле, породившее её. */
+        private static final Map<String, PrintedLocation> PRINTED = new LinkedHashMap<>(256, 0.75f, false)
+        {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, PrintedLocation> eldest)
+            {
+                return size() > PRINTED_LIMIT;
+            }
+        };
+
+        /** Место строки лога: ссылка на строку с позицией относительно метода ({@link #moduleLineRef}). */
+        private record PrintedLocation(IProject project, String ref)
+        {
+        }
+
+        private ConsoleExecutedLine() {}
+
+        static void install()
+        {
+            if (installed)
+                return;
+            DebugPlugin plugin = DebugPlugin.getDefault();
+            if (plugin == null)
+                return;
+            installed = true;
+            plugin.getBreakpointManager().addBreakpointListener(new IBreakpointListener()
+            {
+                @Override
+                public void breakpointAdded(IBreakpoint breakpoint)
+                {
+                    scheduleEnforce(breakpoint);
+                }
+
+                @Override
+                public void breakpointRemoved(IBreakpoint breakpoint, IMarkerDelta delta)
+                {
+                }
+
+                @Override
+                public void breakpointChanged(IBreakpoint breakpoint, IMarkerDelta delta)
+                {
+                    scheduleEnforce(breakpoint);
+                }
+            });
+            plugin.addDebugEventListener(events ->
+            {
+                for (DebugEvent event : events)
+                {
+                    if (event.getSource() instanceof IDebugElement element)
+                        hookTarget(element.getDebugTarget());
+                }
+            });
+        }
+
+        private static void rememberPrinted(String line, PrintedLocation location)
+        {
+            synchronized (PRINTED)
+            {
+                PRINTED.put(line.strip(), location);
+            }
+        }
+
+        /**
+         * Двойной клик по нашей строке в консоли отладки открывает модуль на строке, которая её
+         * породила. Строку узнаём по тексту — консоль EDT ({@code DebugMessageConsole}) хранит только текст.
+         */
+        static void installDoubleClick(Display display)
+        {
+            if (display == null || display.isDisposed())
+                return;
+            display.addFilter(SWT.MouseDoubleClick, event ->
+            {
+                if (!(event.widget instanceof StyledText text) || text.isDisposed() || event.button != 1)
+                    return;
+                PrintedLocation location;
+                String clicked;
+                try
+                {
+                    int lineIndex = text.getLineIndex(event.y);
+                    clicked = text.getLine(lineIndex).strip();
+                }
+                catch (IllegalArgumentException e)
+                {
+                    return;
+                }
+                synchronized (PRINTED)
+                {
+                    location = PRINTED.get(clicked);
+                }
+                if (location == null)
+                    return;
+                // После штатной обработки двойного клика (выделение слова) — иначе фокус вернётся в консоль.
+                display.asyncExec(() -> openModuleLine(location));
+            });
+        }
+
+        private static void openModuleLine(PrintedLocation location)
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window != null ? window.getActivePage() : null;
+            if (page == null)
+                return;
+            GoToDefinition.jump(location.ref(), window.getShell(), page, location.project(), false);
+        }
+
+        /** Слушатель точек останова идёт под блокировкой дерева ресурсов — маркер правим заданием. */
+        private static void scheduleEnforce(IBreakpoint breakpoint)
+        {
+            if (!(breakpoint instanceof IBslLineBreakpoint lineBreakpoint))
+                return;
+            Job job = Job.create("Комфорт: вывод точки останова", (IProgressMonitor monitor) -> //$NON-NLS-1$
+            {
+                enforce(lineBreakpoint);
+                return Status.OK_STATUS;
+            });
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        /**
+         * Общий флажок включён — продолжать выполнение и, если пунктов вывода нет, подставить скрытое
+         * описание (без сообщения сервер ничего не пришлёт). Выключен — скрытое описание убрать.
+         */
+        private static void enforce(IBslLineBreakpoint breakpoint)
+        {
+            IMarker marker = breakpoint.getMarker();
+            if (marker == null || !marker.exists())
+                return;
+            try
+            {
+                boolean on = Boolean.TRUE.equals(marker.getAttribute(MARKER_CONSOLE_OUTPUT));
+                boolean hidden = Boolean.TRUE.equals(marker.getAttribute(MARKER_CONSOLE_HIDDEN_DESCRIPTION));
+                String description = Objects.toString(breakpoint.getDescription(), ""); //$NON-NLS-1$
+                boolean hiddenDescription = hidden && CONSOLE_HIDDEN_DESCRIPTION.equals(description.strip());
+                boolean otherOutput = !Objects.toString(breakpoint.getExpressionForEvaluation(), "").isEmpty() //$NON-NLS-1$
+                        || breakpoint.isPutStackTrace() || breakpoint.isPutHitCount();
+                if (on)
+                {
+                    if (!breakpoint.getContinueExecution())
+                        breakpoint.setContinueExecution(true);
+                    if (description.isEmpty() && !otherOutput)
+                    {
+                        marker.setAttribute(MARKER_CONSOLE_HIDDEN_DESCRIPTION, Boolean.TRUE);
+                        breakpoint.setDescription(CONSOLE_HIDDEN_DESCRIPTION);
+                    }
+                    else if (hiddenDescription && otherOutput)
+                    {
+                        breakpoint.setDescription(""); //$NON-NLS-1$
+                        marker.setAttribute(MARKER_CONSOLE_HIDDEN_DESCRIPTION, null);
+                    }
+                    else if (hidden && !hiddenDescription)
+                    {
+                        marker.setAttribute(MARKER_CONSOLE_HIDDEN_DESCRIPTION, null);
+                    }
+                }
+                else if (hidden)
+                {
+                    if (hiddenDescription)
+                        breakpoint.setDescription(""); //$NON-NLS-1$
+                    marker.setAttribute(MARKER_CONSOLE_HIDDEN_DESCRIPTION, null);
+                }
+            }
+            catch (CoreException e)
+            {
+                BreakpointPropertiesDebug.problem("вывод в консоль, правка точки останова: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+
+        /** Обёртки на цель отладки EDT: запись в консоль и обработчик событий. Повторный вызов — no-op. */
+        private static void hookTarget(Object target)
+        {
+            // Реальный класс — наследник (в EDT с профилированием ProfilingRuntimeDebugClientTarget).
+            if (target == null || !isInstanceOf(target, CLIENT_TARGET_CLASS))
+                return;
+            synchronized (ConsoleExecutedLine.class)
+            {
+                Object writer = Global.getField(target, "consoleWriter"); //$NON-NLS-1$
+                if (writer instanceof IDebugConsoleWriter original && !(writer instanceof Writer))
+                    Global.setField(target, "consoleWriter", new Writer(target, original)); //$NON-NLS-1$
+                Object dispatcher = Global.getField(target, "eventDispatcher"); //$NON-NLS-1$
+                if (dispatcher == null || !isInstanceOf(dispatcher, DISPATCH_JOB_CLASS))
+                    return;
+                Object processor = Global.getField(dispatcher, "eventProcessor"); //$NON-NLS-1$
+                if (!(processor instanceof IRuntimeEventProcessor original) || isOurProcessor(processor))
+                    return;
+                InvocationHandler handler = new CommandCapture(original);
+                Object proxy = Proxy.newProxyInstance(IRuntimeEventProcessor.class.getClassLoader(),
+                        new Class<?>[] { IRuntimeEventProcessor.class }, handler);
+                Global.setField(dispatcher, "eventProcessor", proxy); //$NON-NLS-1$
+            }
+        }
+
+        private static boolean isInstanceOf(Object object, String className)
+        {
+            for (Class<?> type = object.getClass(); type != null; type = type.getSuperclass())
+            {
+                if (className.equals(type.getName()))
+                    return true;
+            }
+            return false;
+        }
+
+        private static boolean isOurProcessor(Object processor)
+        {
+            return Proxy.isProxyClass(processor.getClass())
+                    && Proxy.getInvocationHandler(processor) instanceof CommandCapture;
+        }
+
+        /** Запоминает команду {@code handleCallStackFormed} на время её обработки целью. */
+        private static final class CommandCapture implements InvocationHandler
+        {
+            private final IRuntimeEventProcessor delegate;
+
+            CommandCapture(IRuntimeEventProcessor delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable
+            {
+                boolean capture = "handleCallStackFormed".equals(method.getName()) && args != null && args.length == 1; //$NON-NLS-1$
+                Object previous = CURRENT_COMMAND.get();
+                if (capture)
+                    CURRENT_COMMAND.set(args[0]);
+                try
+                {
+                    return method.invoke(delegate, args);
+                }
+                catch (InvocationTargetException e)
+                {
+                    throw e.getCause() != null ? e.getCause() : e;
+                }
+                finally
+                {
+                    if (capture)
+                    {
+                        if (previous == null)
+                            CURRENT_COMMAND.remove();
+                        else
+                            CURRENT_COMMAND.set(previous);
+                    }
+                }
+            }
+        }
+
+        /** Ожидаемая после нашего заголовка часть вывода EDT: сообщение, затем два перевода строки. */
+        private static final class Pending
+        {
+            final IBslLineBreakpoint breakpoint;
+            final String methodSignature;
+            final Object command;
+            boolean messageDone;
+            int separators;
+
+            Pending(IBslLineBreakpoint breakpoint, String methodSignature, Object command)
+            {
+                this.breakpoint = breakpoint;
+                this.methodSignature = methodSignature;
+                this.command = command;
+            }
+        }
+
+        private static final class Writer implements IDebugConsoleWriter
+        {
+            private final Object target;
+            private final IDebugConsoleWriter delegate;
+            private final ThreadLocal<Pending> pending = new ThreadLocal<>();
+
+            Writer(Object target, IDebugConsoleWriter delegate)
+            {
+                this.target = target;
+                this.delegate = delegate;
+            }
+
+            @Override
+            public void print(ILaunch launch, String text)
+            {
+                try
+                {
+                    if (handle(launch, text))
+                        return;
+                }
+                catch (RuntimeException e)
+                {
+                    pending.remove();
+                    BreakpointPropertiesDebug.problem("вывод в консоль: " + e); //$NON-NLS-1$
+                }
+                delegate.print(launch, text);
+            }
+
+            /** {@code true} — текст обработан здесь, штатно печатать не нужно. */
+            private boolean handle(ILaunch launch, String text)
+            {
+                Pending current = pending.get();
+                if (current != null)
+                {
+                    if (!current.messageDone)
+                    {
+                        current.messageDone = true;
+                        delegate.print(launch, composeLine(current, text));
+                        return true;
+                    }
+                    if (text != null && text.isBlank() && current.separators < 2)
+                    {
+                        if (++current.separators >= 2)
+                            pending.remove();
+                        return true;
+                    }
+                    pending.remove();
+                }
+
+                Matcher matcher = headerPattern(target).matcher(text == null ? "" : text); //$NON-NLS-1$
+                if (!matcher.matches())
+                    return false;
+                String signature = matcher.group(1);
+                int lineNumber = parseLineNumber(matcher.group(2));
+                IBslLineBreakpoint breakpoint = findConsoleOutputBreakpoint(signature, lineNumber);
+                if (breakpoint == null)
+                    return false;
+                pending.set(new Pending(breakpoint, signature, CURRENT_COMMAND.get()));
+                return true;
+            }
+
+            /**
+             * {@code > <Время.мс>: <Модуль>:<Строка>, (<Предмет>: <Сеанс>, <Сервер>:<Порт>), <Метод>: <Текст строки>}
+             * и следом сообщение сервера без скрытого описания.
+             */
+            private String composeLine(Pending pending, String message)
+            {
+                IBslLineBreakpoint breakpoint = pending.breakpoint;
+                String rest = stripHiddenDescription(message);
+                StringBuilder line = new StringBuilder("> ").append(LocalTime.now().format(TIME_FORMAT)).append(": "); //$NON-NLS-1$ //$NON-NLS-2$
+                String moduleName = MarkersListViewsHook.ModuleField.moduleName(breakpoint.getMarker());
+                line.append(moduleName);
+                int lineNumber = 0;
+                try
+                {
+                    lineNumber = breakpoint.getLineNumber();
+                }
+                catch (CoreException ignored) {}
+                line.append(':').append(lineNumber).append(", (").append(targetPresentation(pending.command)) //$NON-NLS-1$
+                        .append(", ").append(serverAddress()).append("), ") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(methodName(pending.methodSignature))
+                        .append(": "); //$NON-NLS-1$
+                IDocument module = moduleDocument(breakpoint);
+                line.append(codeLine(module, lineNumber));
+                IMarker marker = breakpoint.getMarker();
+                if (marker != null && marker.getResource() instanceof IFile file)
+                    rememberPrinted(line.toString(), new PrintedLocation(file.getProject(),
+                            moduleLineRef(module, moduleName, lineNumber, methodName(pending.methodSignature))));
+                line.append(System.lineSeparator());
+                if (!rest.isEmpty())
+                    line.append(rest).append(System.lineSeparator());
+                return line.toString();
+            }
+
+            private String serverAddress()
+            {
+                Object url = Global.invoke(target, "getDebugServerUrl"); //$NON-NLS-1$
+                if (!(url instanceof String s) || s.isBlank())
+                    return ""; //$NON-NLS-1$
+                try
+                {
+                    URI uri = URI.create(s.strip());
+                    if (uri.getHost() != null)
+                        return uri.getPort() >= 0 ? uri.getHost() + ":" + uri.getPort() : uri.getHost(); //$NON-NLS-1$
+                }
+                catch (IllegalArgumentException ignored) {}
+                return s.strip();
+            }
+        }
+
+        /** {@code <Предмет отладки>: <Номер сеанса>} из {@link DebugTargetId} команды. */
+        private static String targetPresentation(Object command)
+        {
+            Object id = command != null ? Global.invoke(command, "getTargetID") : null; //$NON-NLS-1$
+            if (!(id instanceof DebugTargetId targetId))
+                return "?"; //$NON-NLS-1$
+            String type = targetId.getTargetType() != null
+                    ? DebugTargetTypeUtil.getPresentation(targetId.getTargetType())
+                    : ""; //$NON-NLS-1$
+            BigDecimal seance = targetId.getSeanceNo();
+            return type + ": " + (seance != null ? seance.toPlainString() : "?"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Скрытое описание — строкой целиком; остальное сообщение сервера как есть. */
+        private static String stripHiddenDescription(String message)
+        {
+            if (message == null)
+                return ""; //$NON-NLS-1$
+            List<String> kept = new ArrayList<>();
+            for (String line : message.split("\\R", -1)) //$NON-NLS-1$
+            {
+                if (!CONSOLE_HIDDEN_DESCRIPTION.equals(line.strip()))
+                    kept.add(line);
+            }
+            return String.join(System.lineSeparator(), kept).strip();
+        }
+
+        /** Имя метода из сигнатуры EDT: до скобки, последнее слово. */
+        private static String methodName(String signature)
+        {
+            if (signature == null)
+                return ""; //$NON-NLS-1$
+            String s = signature.strip();
+            int paren = s.indexOf('(');
+            if (paren >= 0)
+                s = s.substring(0, paren).strip();
+            int cut = Math.max(s.lastIndexOf(' '), s.lastIndexOf('.'));
+            return cut >= 0 ? s.substring(cut + 1) : s;
+        }
+
+        private static String codeLine(IDocument module, int lineNumber)
+        {
+            if (module == null || lineNumber <= 0 || lineNumber > module.getNumberOfLines())
+                return ""; //$NON-NLS-1$
+            try
+            {
+                IRegion region = module.getLineInformation(lineNumber - 1);
+                return module.get(region.getOffset(), region.getLength()).strip();
+            }
+            catch (BadLocationException e)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Ссылка на строку с позицией относительно метода — как «Копировать ссылку на строку»
+         * ({@link GetRef}): {@code {Модуль(строка,0:Метод,смещение)}}. Переход по ней
+         * ({@link GoToDefinition#jump}) ищет метод заново и переживает правки модуля.
+         */
+        private static String moduleLineRef(IDocument module, String moduleName, int lineNumber, String methodName)
+        {
+            int declaration0 = module != null && !methodName.isEmpty()
+                    ? GetRef.findMethodDeclarationLine(module, methodName)
+                    : -1;
+            if (declaration0 < 0)
+                return "{" + moduleName + "(" + lineNumber + ",0)}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            int offset = lineNumber - (declaration0 + 1);
+            return "{" + moduleName + "(" + lineNumber + ",0:" + methodName + "," + offset + ")}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        }
+
+        /** Текст модуля точки останова с диска (кэш по отметке изменения файла). */
+        private static IDocument moduleDocument(IBslLineBreakpoint breakpoint)
+        {
+            IMarker marker = breakpoint.getMarker();
+            if (marker == null || !(marker.getResource() instanceof IFile file) || !file.exists())
+                return null;
+            String key = file.getFullPath() + "#" + file.getModificationStamp(); //$NON-NLS-1$
+            IDocument cached;
+            synchronized (LINE_CACHE)
+            {
+                cached = LINE_CACHE.get(key);
+            }
+            if (cached != null)
+                return cached;
+            try (InputStream in = file.getContents(true))
+            {
+                Charset charset;
+                try
+                {
+                    charset = Charset.forName(file.getCharset());
+                }
+                catch (RuntimeException e)
+                {
+                    charset = StandardCharsets.UTF_8;
+                }
+                String content = new String(in.readAllBytes(), charset);
+                if (!content.isEmpty() && content.charAt(0) == '﻿')
+                    content = content.substring(1);
+                cached = new Document(content);
+            }
+            catch (CoreException | IOException e)
+            {
+                return null;
+            }
+            synchronized (LINE_CACHE)
+            {
+                LINE_CACHE.put(key, cached);
+            }
+            return cached;
+        }
+
+        /** Точка с общим флажком вывода по сигнатуре метода и строке из заголовка EDT. */
+        private static IBslLineBreakpoint findConsoleOutputBreakpoint(String signature, int lineNumber)
+        {
+            DebugPlugin plugin = DebugPlugin.getDefault();
+            if (plugin == null || lineNumber <= 0)
+                return null;
+            for (IBreakpoint breakpoint : plugin.getBreakpointManager().getBreakpoints())
+            {
+                if (!(breakpoint instanceof IBslLineBreakpoint line))
+                    continue;
+                try
+                {
+                    IMarker marker = line.getMarker();
+                    if (marker != null && marker.exists() && line.getLineNumber() == lineNumber
+                            && Objects.equals(line.getMethodSignature(), signature)
+                            && Boolean.TRUE.equals(marker.getAttribute(MARKER_CONSOLE_OUTPUT)))
+                        return line;
+                }
+                catch (CoreException ignored) {}
+            }
+            return null;
+        }
+
+        private static int parseLineNumber(String text)
+        {
+            String digits = text == null ? "" : text.replaceAll("\\D", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            try
+            {
+                return digits.isEmpty() ? 0 : Integer.parseInt(digits);
+            }
+            catch (NumberFormatException e)
+            {
+                return 0;
+            }
+        }
+
+        /** Шаблон заголовка «метод {0}, строка {1}» из {@code Messages} EDT (с учётом локализации). */
+        private static Pattern headerPattern(Object target)
+        {
+            Pattern pattern = headerPattern;
+            if (pattern != null)
+                return pattern;
+            String template = HEADER_FALLBACK;
+            try
+            {
+                Class<?> messages = target.getClass().getClassLoader().loadClass(MESSAGES_CLASS);
+                Object value = messages.getField(HEADER_FIELD).get(null);
+                if (value instanceof String s && s.contains("{0}") && s.contains("{1}")) //$NON-NLS-1$ //$NON-NLS-2$
+                    template = s;
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                BreakpointPropertiesDebug.problem("шаблон заголовка точки останова в консоли: " + e); //$NON-NLS-1$
+            }
+            int first = template.indexOf("{0}"); //$NON-NLS-1$
+            int second = template.indexOf("{1}"); //$NON-NLS-1$
+            String regex;
+            if (first >= 0 && second > first)
+                regex = Pattern.quote(template.substring(0, first)) + "(.*)" //$NON-NLS-1$
+                        + Pattern.quote(template.substring(first + 3, second)) + "([\\d\\s\\u00A0\\u202F]+?)" //$NON-NLS-1$
+                        + Pattern.quote(template.substring(second + 3)) + "\\s*"; //$NON-NLS-1$
+            else
+                regex = "(?!)"; //$NON-NLS-1$
+            pattern = Pattern.compile(regex, Pattern.DOTALL);
+            headerPattern = pattern;
+            return pattern;
         }
     }
 }

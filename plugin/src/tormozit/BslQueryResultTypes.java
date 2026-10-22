@@ -7,22 +7,45 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.common.notify.impl.AdapterImpl;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IWorkbenchPartReference;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
 
+import com._1c.g5.v8.bm.core.event.BmChangeEvent;
+import com._1c.g5.v8.bm.core.event.BmEvent;
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.event.BmEventFilter;
+import com._1c.g5.v8.bm.integration.event.IBmAsyncEventListener;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BslDerivedPropertySource;
@@ -41,6 +64,7 @@ import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.typesystem.IInvocationTypesComputerExtension;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.McorePackage;
@@ -50,17 +74,20 @@ import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.dcs.resource.IDependentQuerySchemaProvider;
+import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
+import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
 
 /**
  * Поля выборки и выгрузки запроса из отдельного литерала (issue 836).
@@ -171,6 +198,34 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         return names;
     }
 
+    private static final Set<String> SET_PARAMETER_METHODS = Set.of("setparameter", "установитьпараметр"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Имена параметров запроса для литерала — первого аргумента {@code Запрос.УстановитьПараметр("…")}:
+     * текст запроса той же переменной ({@link Plan#queryLiteral}), параметры — из его схемы.
+     * {@code null} — расширенный расчёт типов выключен; пусто — смысл литерала не определён.
+     * Вызывающий держит readOnly документа.
+     */
+    static List<String> queryParameterNamesAt(XtextResource resource, int offset)
+    {
+        if (resource.getContents().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            return null;
+        EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+        StringLiteral argument = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+        if (argument == null || !(argument.eContainer() instanceof Invocation invocation)
+            || invocation.getParams().indexOf(argument) != 0
+            || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+            || !SET_PARAMETER_METHODS.contains(lower(access.getName())))
+            return List.of();
+        Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
+        if (method == null)
+            return List.of();
+        Plan plan = new Plan(method, ""); //$NON-NLS-1$
+        StringLiteral query = plan.queryLiteral(access.getSource(), invocation);
+        return query == null ? List.of() : plan.parameters(query);
+    }
+
     /**
      * Общий результат для автопроверки отдельного бандла. Подготовка схемы выполняется
      * один раз для текущей версии метода; проверка не меняет состояния типов BSL.
@@ -197,7 +252,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     continue;
                 Plan plan = session.plans.get(method);
                 String text = node.getText();
-                if (plan == null || !text.equals(plan.text))
+                if (!current(plan, text))
                 {
                     session.plans.remove(method);
                     plan = new Plan(method, text);
@@ -223,6 +278,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     {
                         plan.cancellation = CancelIndicator.NullImpl;
                     }
+                    if (!plan.queries.isEmpty())
+                        session.hasQueries = true;
                     session.plans.put(method, plan);
                 }
                 problems.addAll(plan.unknownFields(cancellation));
@@ -247,16 +304,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
-        if (previous != null && previous.complete && text.equals(previous.text))
+        if (previous != null && previous.complete && current(previous, text))
         {
             return;
         }
         try
         {
-            Plan plan = previous != null && text.equals(previous.text) ? previous : new Plan(method, text);
+            Plan plan = current(previous, text) ? previous : new Plan(method, text);
             // Валидация могла уже подготовить план, не переустанавливая типы BSL.
             if (plan != previous)
                 plan.prepare();
+            if (!plan.queries.isEmpty())
+                session.hasQueries = true;
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
             // только он. Старые методы удаляем, чтобы ресурс редактора их не удерживал.
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
@@ -293,7 +352,284 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return null;
         Session session = new Session();
         resource.eAdapters().add(session);
+        if (!resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module module)
+            watchMetadata(module);
         return session;
+    }
+
+    /**
+     * Типы полей запроса зависят от представления данных (dbview), а не только от текста метода:
+     * смена типа реквизита/измерения обязана сбросить готовые планы, иначе в выборке остаётся старый тип.
+     */
+    private static final AtomicLong METADATA_GENERATION = new AtomicLong();
+    private static final Map<IBmModel, Boolean> WATCHED_MODELS =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    private static final IBmAsyncEventListener METADATA_LISTENER = BslQueryResultTypes::onBmEvent;
+
+    private static void watchMetadata(Module module)
+    {
+        IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+        IProject project = BslStructureInsertCommentTypes.projectOf(module);
+        IBmModel model = models != null && project != null ? models.getModel(project) : null;
+        boolean added = model != null && WATCHED_MODELS.putIfAbsent(model, Boolean.TRUE) == null;
+        if (added)
+            model.addAsyncEventListener(METADATA_LISTENER, BmEventFilter.changeFilter());
+    }
+
+    private static void onBmEvent(BmEvent event)
+    {
+        if (event.getChangeEvents() == null)
+            return;
+        // Поля запросов задаёт только представление данных (dbview): его строят таблицы,
+        // доступные в запросах; обработки, отчёты, команды его не меняют.
+        for (BmChangeEvent change : event.getChangeEvents().values())
+            if (change.getObject() != null
+                && change.getObject().eClass().getEPackage() == com._1c.g5.v8.dt.metadata.dbview.DbViewPackage.eINSTANCE)
+            {
+                METADATA_GENERATION.incrementAndGet();
+                scheduleRelink(RELINK_DELAY_MS);
+                return;
+            }
+    }
+
+    /**
+     * Привязки вызовов модуля после перестройки dbview ведут на удалённые объекты, и частичный
+     * пересчёт типов падает. Открытые модули с запросами перевязываем, как после правки текста.
+     */
+    private static final int RELINK_DELAY_MS = 500;
+    private static final int RELINK_ASSIST_RETRY_MS = 1000;
+    private static final AtomicBoolean RELINK_PENDING = new AtomicBoolean();
+
+    /**
+     * Включено скрытие проблем базовой версии, и в модуле нет отличий от неё. Сервис отвечает
+     * по строкам; у файла без отличий скрыта любая строка ({@code GitMarkerFilterManager.shouldSkipIssue}).
+     */
+    private static boolean unchangedFromBaseline(IXtextDocument document)
+    {
+        IGitMarkerFilterManager baseline = Global.getOsgiService(IGitMarkerFilterManager.class);
+        if (baseline == null || !baseline.isFilterApplied() || !(document instanceof XtextDocument xtext))
+            return false;
+        URI uri = xtext.getResourceURI();
+        if (uri == null)
+            return false;
+        // Строка Xtext начинается с единицы, как в BslNotifyingResourceValidator.
+        for (int line = 1; line <= document.getNumberOfLines(); line++)
+            if (!baseline.shouldSkipIssue(uri, line))
+                return false;
+        return true;
+    }
+
+    private static void scheduleRelink(int delayMs)
+    {
+        if (!PlatformUI.isWorkbenchRunning() || !RELINK_PENDING.compareAndSet(false, true))
+            return;
+        Display display = PlatformUI.getWorkbench().getDisplay();
+        if (display.isDisposed())
+        {
+            RELINK_PENDING.set(false);
+            return;
+        }
+        display.asyncExec(() -> display.timerExec(delayMs, BslQueryResultTypes::relinkOpenModules));
+    }
+
+    /**
+     * Структуру данных могут править каждые пару секунд: активный модуль перевязываем сразу,
+     * остальные открытые — через эту паузу после последнего изменения (или при их активации).
+     */
+    private static final int RELINK_INACTIVE_DELAY_MS = 5000;
+    /** Открытые неактивные модули, ждущие перевязки по таймеру. */
+    private static final Map<IXtextDocument, Boolean> INACTIVE_RELINK =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Runnable RELINK_INACTIVE = BslQueryResultTypes::relinkInactiveModules;
+
+    /** UI: активный модуль — сразу, прочие открытые — по таймеру; при открытом списке автодополнения — позже. */
+    private static void relinkOpenModules()
+    {
+        RELINK_PENDING.set(false);
+        BslXtextEditor active = activeModuleEditor();
+        if (assistOpen(active))
+        {
+            scheduleRelink(RELINK_ASSIST_RETRY_MS);
+            return;
+        }
+        IXtextDocument activeDocument = active == null ? null : active.getDocument();
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            for (IWorkbenchPage page : window.getPages())
+                for (IEditorReference reference : page.getEditorReferences())
+                {
+                    BslXtextEditor editor = GetRef.getActiveBslEditor(reference.getEditor(false));
+                    IXtextDocument document = editor == null ? null : editor.getDocument();
+                    if (document != null && document != activeDocument)
+                        INACTIVE_RELINK.put(document, Boolean.TRUE);
+                }
+        ensureActivationListener();
+        if (!INACTIVE_RELINK.isEmpty())
+        {
+            // Каждое новое изменение отодвигает перевязку неактивных модулей.
+            Display display = PlatformUI.getWorkbench().getDisplay();
+            display.timerExec(-1, RELINK_INACTIVE);
+            display.timerExec(RELINK_INACTIVE_DELAY_MS, RELINK_INACTIVE);
+        }
+        if (activeDocument != null)
+        {
+            INACTIVE_RELINK.remove(activeDocument);
+            scheduleRelinkJob(List.of(activeDocument), false);
+        }
+    }
+
+    /** UI: таймер неактивных модулей. */
+    private static void relinkInactiveModules()
+    {
+        BslXtextEditor active = activeModuleEditor();
+        List<IXtextDocument> documents;
+        synchronized (INACTIVE_RELINK)
+        {
+            documents = new ArrayList<>(INACTIVE_RELINK.keySet());
+        }
+        if (active != null && documents.contains(active.getDocument()) && assistOpen(active))
+        {
+            PlatformUI.getWorkbench().getDisplay().timerExec(RELINK_ASSIST_RETRY_MS, RELINK_INACTIVE);
+            return;
+        }
+        documents.forEach(INACTIVE_RELINK::remove);
+        scheduleRelinkJob(documents, false);
+    }
+
+    /** UI: модуль в активном редакторе активной страницы (фокус может быть в панели). */
+    private static BslXtextEditor activeModuleEditor()
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window == null ? null : window.getActivePage();
+        return page == null ? null : GetRef.getActiveBslEditor(page.getActiveEditor());
+    }
+
+    private static boolean assistOpen(BslXtextEditor editor)
+    {
+        boolean open = editor != null && editor.getInternalSourceViewer() instanceof SourceViewer viewer
+            && ContentAssistPopupSync.isPopupVisible(ContentAssistPatcher.getContentAssistant(viewer));
+        return open;
+    }
+
+    private static void scheduleRelinkJob(List<IXtextDocument> documents, boolean onActivation)
+    {
+        if (documents.isEmpty())
+            return;
+        Job job = new Job("Перевязка модулей после изменения структуры данных") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                for (IXtextDocument document : documents)
+                {
+                    if (monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    relink(document, onActivation);
+                }
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /** Модули без отличий от базовой версии: перевязка отложена до активации их редактора. */
+    private static final Map<IXtextDocument, Boolean> DEFERRED_RELINK =
+        Collections.synchronizedMap(new WeakHashMap<>());
+    private static final AtomicBoolean ACTIVATION_LISTENER_INSTALLED = new AtomicBoolean();
+
+    private static void deferUntilActivation(IXtextDocument document)
+    {
+        DEFERRED_RELINK.put(document, Boolean.TRUE);
+        ensureActivationListener();
+    }
+
+    private static void ensureActivationListener()
+    {
+        if (!ACTIVATION_LISTENER_INSTALLED.compareAndSet(false, true))
+            return;
+        Display display = PlatformUI.getWorkbench().getDisplay();
+        display.asyncExec(() ->
+        {
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                window.getPartService().addPartListener(ACTIVATION_LISTENER);
+            PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
+            {
+                @Override
+                public void windowOpened(IWorkbenchWindow window)
+                {
+                    window.getPartService().addPartListener(ACTIVATION_LISTENER);
+                }
+
+                @Override
+                public void windowActivated(IWorkbenchWindow window) {}
+
+                @Override
+                public void windowDeactivated(IWorkbenchWindow window) {}
+
+                @Override
+                public void windowClosed(IWorkbenchWindow window) {}
+            });
+        });
+    }
+
+    private static final IPartListener2 ACTIVATION_LISTENER = new IPartListener2()
+    {
+        @Override
+        public void partActivated(IWorkbenchPartReference reference)
+        {
+            BslXtextEditor editor = GetRef.getActiveBslEditor(reference.getPart(false));
+            IXtextDocument document = editor == null ? null : editor.getDocument();
+            if (document == null)
+                return;
+            // Не ждём таймера неактивных: модуль стал активным. Перевязан ли он уже для
+            // текущей версии структуры данных, relink проверит сам по сеансу ресурса.
+            DEFERRED_RELINK.remove(document);
+            INACTIVE_RELINK.remove(document);
+            scheduleRelinkJob(List.of(document), true);
+        }
+    };
+
+    private static void relink(IXtextDocument document, boolean onActivation)
+    {
+        if (!onActivation && unchangedFromBaseline(document))
+        {
+            deferUntilActivation(document);
+            return;
+        }
+        long generation = METADATA_GENERATION.get();
+        // Не modify: тот сериализует перевязанную модель в текст документа.
+        Boolean relinked = document.readOnly(resource ->
+        {
+            Session session = session(resource, false);
+            // В модуле без запросов перевязка не нужна.
+            if (session == null || !session.hasQueries || session.relinkedGeneration == generation)
+                return false;
+            session.relinkedGeneration = generation;
+            try
+            {
+                if (!BslStructureInsertCommentTypes.relinkModuleFully(resource))
+                    return false;
+                // Планы построены по прежним привязкам: следующий запрос пересчитает их.
+                session.plans.clear();
+                return true;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                return false;
+            }
+        });
+        // Перевязка не меняет текст, и проверку редактора никто не планирует: маркеры модуля
+        // и отметка на вкладке остались бы по прежней структуре данных. Вне readOnly.
+        if (Boolean.TRUE.equals(relinked) && document instanceof XtextDocument xtext)
+        {
+            xtext.checkAndUpdateAnnotations();
+        }
+    }
+
+    /** План построен по тому же тексту метода и тем же метаданным. */
+    private static boolean current(Plan plan, String text)
+    {
+        return plan != null && text.equals(plan.text) && plan.metadataGeneration == METADATA_GENERATION.get();
     }
 
     /** Общий адрес для команды определения, Ctrl+клика и ссылок в обеих подсказках. */
@@ -323,6 +659,27 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     private static final class Session extends AdapterImpl
     {
         final Map<Method, Plan> plans = new java.util.concurrent.ConcurrentHashMap<>();
+        /** В модуле разбирался текст запроса: его типы зависят от структуры данных. */
+        volatile boolean hasQueries;
+        /** Версия структуры данных, для которой модуль уже перевязан. */
+        volatile long relinkedGeneration;
+    }
+
+    /** Версия метаданных, на которой получена схема запроса литерала. */
+    private static final class SchemaGeneration extends AdapterImpl
+    {
+        final long generation;
+
+        SchemaGeneration(long generation)
+        {
+            this.generation = generation;
+        }
+
+        @Override
+        public boolean isAdapterForType(Object type)
+        {
+            return type == SchemaGeneration.class;
+        }
     }
 
     private record Field(String name, String nameRu, List<TypeItem> types,
@@ -334,6 +691,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     {
         final Method method;
         final String text;
+        final long metadataGeneration = METADATA_GENERATION.get();
         final Map<Invocation, List<TypeItem>> types = new IdentityHashMap<>();
         final Map<StringLiteral, List<Result>> queries = new IdentityHashMap<>();
         final Map<String, BslStructureInsertCommentTypes.PropertySourceTarget> sources = new java.util.HashMap<>();
@@ -601,7 +959,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return false;
         }
 
-        /** Передача запроса наружу/другой переменной допускает изменение его текста по другой ссылке. */
+        /**
+         * Присваивание запроса другой переменной допускает изменение его текста по другой ссылке.
+         * Передачу запроса или его текста в параметры вызовов не проверяем.
+         */
         private boolean escaped(Variable target, SimpleStatement creation, Invocation execute)
         {
             if (staticAccesses == null)
@@ -612,10 +973,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     continue;
                 SimpleStatement assignment = EcoreUtil2.getContainerOfType(access, SimpleStatement.class);
                 if (assignment != null && assignment.getRight() == access)
-                    return true;
-                Invocation invocation = EcoreUtil2.getContainerOfType(access, Invocation.class);
-                if (invocation != null && invocation.getParams().stream()
-                    .anyMatch(param -> param == access || EcoreUtil.isAncestor(param, access)))
                     return true;
             }
             return false;
@@ -651,6 +1008,21 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             QuerySchema schema = provider.getQuerySchema(literal,
                 com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
                 (object, feature) -> textProvider.getText(), cancellation);
+            // EDT держит схему на литерале, пока не изменится сам литерал: после правки
+            // метаданных её ссылки ведут на прежние поля, и тип поля остаётся старым.
+            long generation = METADATA_GENERATION.get();
+            SchemaGeneration stamp = schema == null ? null
+                : (SchemaGeneration)EcoreUtil.getExistingAdapter(schema, SchemaGeneration.class);
+            if (stamp != null && stamp.generation != generation)
+            {
+                provider.unload(schema);
+                schema = provider.getQuerySchema(literal,
+                    com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
+                    (object, feature) -> textProvider.getText(), cancellation);
+                stamp = null;
+            }
+            if (schema != null && stamp == null)
+                schema.eAdapters().add(new SchemaGeneration(generation));
             if (schema == null || schema.eResource() == null)
                 throw new IllegalStateException("Query schema unavailable"); //$NON-NLS-1$
             // DependentModelProvider.createDependentModel уже вызывает
@@ -701,6 +1073,30 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             cached = List.copyOf(results);
             queries.put(literal, cached);
             return cached;
+        }
+
+        /** Параметры схемы запроса в порядке первого упоминания, без повторов. */
+        private List<String> parameters(StringLiteral literal)
+        {
+            IDependentQuerySchemaProvider provider = Global.getOsgiService(IDependentQuerySchemaProvider.class);
+            if (provider == null)
+                return List.of();
+            DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
+            QuerySchema schema = provider.getQuerySchema(literal,
+                com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
+                (object, feature) -> textProvider.getText(), cancellation);
+            if (schema == null)
+                return List.of();
+            Map<String, String> names = new java.util.LinkedHashMap<>();
+            for (ParameterExpression parameter : EcoreUtil2.getAllContentsOfType(schema, ParameterExpression.class))
+            {
+                String name = parameter.getName();
+                if (name != null && name.startsWith("&")) //$NON-NLS-1$
+                    name = name.substring(1);
+                if (name != null && !name.isBlank())
+                    names.putIfAbsent(lower(name), name);
+            }
+            return List.copyOf(names.values());
         }
 
         /** Псевдоним SELECT; без псевдонима — имя поля, иначе само выражение (в том числе *). */

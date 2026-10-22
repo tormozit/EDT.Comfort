@@ -436,6 +436,39 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
+     * Перевязка модуля, как после правки текста, но всего модуля: частичный результат разбора
+     * на время перевязки не указывает метод. Вызывать под {@code readOnly} документа, не под
+     * {@code modify}: тот после работы сериализует изменённую модель в текст и падает на
+     * служебных свойствах модуля. Блокировка перевязки ресурса берётся здесь.
+     *
+     * @return {@code false}, если у ресурса нет блокировки
+     */
+    static boolean relinkModuleFully(org.eclipse.xtext.resource.XtextResource resource)
+    {
+        Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (lock == null)
+            return false;
+        return ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+        {
+            Module module = null;
+            if (!resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module root)
+                module = root;
+            Object partial = module == null ? null : ComfortTreeTypeSystem.partialParseResult(module);
+            Runnable restore = partial == null ? null : ComfortTreeTypeSystem.substituteReparseMethod(partial, null);
+            try
+            {
+                resource.relink();
+            }
+            finally
+            {
+                if (restore != null)
+                    restore.run();
+            }
+            return true;
+        });
+    }
+
+    /**
      * Перед автодополнением: если метод под кареткой ссылается «см.» на функцию, сменившую
      * версию после его последнего расчёта, — пересчитать только его (и его вызывающих) штатным
      * частичным расчётом; если расчёт модуля был отменён — модуль целиком. Вызывать в фоновом
@@ -2592,7 +2625,7 @@ public final class BslStructureInsertCommentTypes
         }
     }
 
-    private static IProject projectOf(Module module)
+    static IProject projectOf(Module module)
     {
         if (module == null)
             return null;

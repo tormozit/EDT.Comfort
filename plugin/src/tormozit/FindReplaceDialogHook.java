@@ -351,7 +351,7 @@ public final class FindReplaceDialogHook implements IStartup
          * Viewer, по которому ищет диалог: сначала {@code fTarget} → enclosing {@link ITextViewer}
          * ({@code TextViewer$FindReplaceTarget.this$0}); для сравнения текстов — сфокусированная
          * панель merge-вьюера ({@code fFocusPart} / {@code focusViewer}); иначе fallback через
-         * активный {@link ITextEditor}.
+         * активный {@link ITextEditor}. Обёртка {@code FindReplaceTarget} раскрывается до target просмотрщика.
          */
         private void resolveViewer()
         {
@@ -368,18 +368,30 @@ public final class FindReplaceDialogHook implements IStartup
                 ITextEditor textEditor = editorPart != null ? TextEditor.resolveTextEditor(editorPart) : null;
                 viewer = textEditor != null ? TextEditor.getSourceViewer(textEditor) : null;
             }
+            Global.tempLog("find-replace-count", "resolveViewer: target=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (target != null ? target.getClass().getName() : "null") //$NON-NLS-1$
+                + ", viewer=" + (viewer != null ? viewer.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             FindReplaceLiveCountDebug.log("resolveViewer: " //$NON-NLS-1$
                 + (viewer != null ? viewer.getClass().getSimpleName() : "null")); //$NON-NLS-1$
         }
 
         /**
-         * Обычный редактор: {@code this$0} сам {@link ITextViewer}. Сравнение текстов:
+         * Стандартный текстовый редактор (в том числе встроенный в текстовый макет) передаёт
+         * {@code org.eclipse.ui.texteditor.FindReplaceTarget}: его поле {@code fTarget} содержит
+         * {@code TextViewer.FindReplaceTarget} (проверено в бандле org.eclipse.ui.workbench.texteditor).
+         * У target просмотрщика {@code this$0} сам {@link ITextViewer}. Сравнение текстов:
          * {@code this$0} — {@code TextMergeViewer} ({@code fFocusPart}) или
          * {@code ThreeSideTextMergeViewer} ({@code focusViewer}), оба держат
          * {@code MergeSourceViewer} сфокусированной панели.
          */
         private static ITextViewer viewerFromFindTarget(Object target)
         {
+            if ("org.eclipse.ui.texteditor.FindReplaceTarget".equals(target.getClass().getName())) //$NON-NLS-1$
+            {
+                target = Global.getField(target, "fTarget"); //$NON-NLS-1$
+                if (target == null)
+                    return null;
+            }
             Object enclosing = Global.getField(target, "this$0"); //$NON-NLS-1$
             if (enclosing instanceof ITextViewer textViewer)
                 return textViewer;
@@ -419,6 +431,7 @@ public final class FindReplaceDialogHook implements IStartup
             }
             if (fullText == null)
             {
+                Global.tempLog("find-replace-count", "onModify: document unavailable"); //$NON-NLS-1$ //$NON-NLS-2$
                 statusLabel.setText(""); //$NON-NLS-1$
                 return;
             }
@@ -691,6 +704,7 @@ public final class FindReplaceDialogHook implements IStartup
             {
                 if (shell.isDisposed() || generation != myGeneration)
                     return;
+                Global.tempLog("find-replace-count", "result: count=" + count + ", current=" + current); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (current > 0)
                     statusLabel.setText("Вхождение " + current + " из " + count); //$NON-NLS-1$ //$NON-NLS-2$
                 else if (current == 0)

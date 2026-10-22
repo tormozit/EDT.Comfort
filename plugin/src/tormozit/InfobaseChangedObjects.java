@@ -27,6 +27,9 @@ import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationLis
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAssociationManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationContext;
 import com._1c.g5.v8.dt.platform.services.core.infobases.InfobaseAssociationSettings;
+import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationListener;
+import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager;
+import com._1c.g5.v8.dt.platform.services.core.infobases.sync.InfobaseEqualityState;
 import com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationStateManager;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 
@@ -121,6 +124,8 @@ public final class InfobaseChangedObjects
 
     private static IInfobaseAssociationListener associationListener;
 
+    private static IInfobaseSynchronizationListener synchronizationListener;
+
     private static boolean invalidatePending;
 
     private static boolean pendingRetryScheduled;
@@ -144,6 +149,55 @@ public final class InfobaseChangedObjects
         installResourceListener();
         // На earlyStartup сервис связей мог быть ещё не поднят — повторяем при открытии панели.
         installApplicationRemovalListener();
+        installSynchronizationListener();
+    }
+
+    /**
+     * Синхронизация с базой меняет только запомненное состояние синхронизации, ресурсы workspace
+     * она не трогает — слушатель ресурсов её не видит, и кэш отдавал состав, посчитанный до
+     * синхронизации. Поэтому кэш по базе сбрасывается и по событиям синхронизации EDT.
+     */
+    private static synchronized void installSynchronizationListener()
+    {
+        if (synchronizationListener != null)
+            return;
+        try
+        {
+            IInfobaseSynchronizationManager manager = Global.getOsgiService(IInfobaseSynchronizationManager.class);
+            if (manager == null)
+                return;
+            synchronizationListener = new IInfobaseSynchronizationListener()
+            {
+                @Override
+                public void synchronizationStateChanged(InfobaseReference infobase, boolean state)
+                {
+                    onSynchronizationEvent(infobase);
+                }
+
+                @Override
+                public void equalityStateChanged(InfobaseReference infobase, InfobaseEqualityState state)
+                {
+                    // После синхронизации EDT присылает только это событие (state=EQUAL).
+                    onSynchronizationEvent(infobase);
+                }
+            };
+            manager.addInfobaseSynchronizationListener(synchronizationListener);
+        }
+        catch (Throwable e)
+        {
+            synchronizationListener = null;
+            ObjectSetsDebug.problem("InfobaseChangedObjects.installSynchronizationListener: " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static void onSynchronizationEvent(InfobaseReference infobase)
+    {
+        if (infobase == null || infobase.getUuid() == null)
+            return;
+        String suffix = "\n" + infobase.getUuid(); //$NON-NLS-1$
+        CACHE.keySet().removeIf(key -> key.endsWith(suffix));
+        PENDING_ATTEMPTS.keySet().removeIf(key -> key.endsWith(suffix));
+        notifyMarkChangedListeners();
     }
 
     public static void removeChangeListener(Runnable listener)

@@ -35,7 +35,7 @@ import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 
-/** Меню метатипа в обеих подсказках; штатный клик по существующей ссылке сохраняется. */
+/** Меню метатипа в обеих подсказках; клик по ссылке — основной переход Ctrl-ссылки (редактор объекта). */
 final class MetadataTypeMenu
 {
     private static final String FUNCTION = "comfortMetadataTypeAction"; //$NON-NLS-1$
@@ -149,17 +149,8 @@ final class MetadataTypeMenu
                             return;
                         try
                         {
-                            if ("type".equals(action)) //$NON-NLS-1$
-                                openTypeDocumentation(request, browser);
-                            else if ("object".equals(action)) //$NON-NLS-1$
-                            {
-                                IHyperlink[] links = BslEditorHyperlinkHook.metadataObjectLinks(request.object, request.source);
-                                if (links.length > 0)
-                                {
-                                    browser.getShell().setVisible(false);
-                                    links[links.length - 1].open();
-                                }
-                            }
+                            if ("primary".equals(action)) //$NON-NLS-1$
+                                openPrimary(request, browser);
                             else if (action.startsWith("open:")) //$NON-NLS-1$
                             {
                                 int index = Integer.parseInt(action.substring(5));
@@ -332,16 +323,46 @@ final class MetadataTypeMenu
         return result.toString();
     }
 
-    /** Типы QL ещё не имеют ссылки: клик открывает штатное описание типа EDT. */
+    /** Типы QL ещё не имеют ссылки: клик — тот же основной переход, что у типов BSL. */
     static String link(TypeItem type, String label, BslXtextEditor source)
     {
         String text = HTMLPrinter.convertToHTMLContent(label);
         if (source == null)
             return text;
         String token = register(type, source);
-        String anchor = "<a href=\"#\" onclick=\"" + FUNCTION //$NON-NLS-1$
-            + "('" + token + "','type');return false;\">" + text + "</a>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        String anchor = "<a href=\"#\" " + primaryClick(token) + ">" + text + "</a>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return wrap(token, anchor);
+    }
+
+    private static String primaryClick(String token)
+    {
+        return "onclick=\"" + FUNCTION + "('" + token + "','primary');return false;\""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Клик по ссылке объекта метаданных — основной переход Ctrl-ссылки (редактор объекта).
+     * У типа без объекта-производителя (платформенный) — штатное описание типа.
+     */
+    private static void openPrimary(Request request, Browser browser)
+    {
+        for (IHyperlink link : links(request))
+        {
+            if (BslEditorHyperlinkHook.isPrimary(link))
+            {
+                browser.getShell().setVisible(false);
+                link.open();
+                return;
+            }
+        }
+        if (request.type != null)
+            openTypeDocumentation(request, browser);
+    }
+
+    private static IHyperlink[] links(Request request)
+    {
+        return request.type != null
+            ? BslEditorHyperlinkHook.metadataTypeLinks(request.type, request.source)
+            : BslEditorHyperlinkHook.metadataObjectLinks(request.object, request.source);
     }
 
     static String objectLink(MdObject object, String label, BslXtextEditor source)
@@ -350,13 +371,16 @@ final class MetadataTypeMenu
         if (object == null || source == null)
             return text;
         String token = register(null, object, source);
-        return wrap(token, "<span class=\"comfort-param-link\" onclick=\"" + FUNCTION //$NON-NLS-1$
-            + "('" + token + "','object');return false;\">" + text + "</span>"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return wrap(token, "<span class=\"comfort-param-link\" " + primaryClick(token) + ">" //$NON-NLS-1$ //$NON-NLS-2$
+            + text + "</span>"); //$NON-NLS-1$
     }
 
+    /** Штатная ссылка типа: клик вместо описания типа открывает редактор объекта-производителя. */
     private static String wrap(TypeItem type, BslXtextEditor source, String anchor)
     {
-        return wrap(register(type, source), anchor);
+        String token = register(type, source);
+        // Свой onclick — первым атрибутом: при повторе атрибута браузер берёт первый.
+        return wrap(token, "<a " + primaryClick(token) + anchor.substring(2)); //$NON-NLS-1$
     }
 
     private static String wrap(String token, String anchor)
@@ -406,12 +430,13 @@ final class MetadataTypeMenu
 
     private static String menuHtml(Request request, String token)
     {
-        request.links = request.type != null
-            ? BslEditorHyperlinkHook.metadataTypeLinks(request.type, request.source)
-            : BslEditorHyperlinkHook.metadataObjectLinks(request.object, request.source);
+        request.links = links(request);
         StringBuilder html = new StringBuilder();
         for (int index = 0; index < request.links.length; index++)
         {
+            // Основной переход — клик по самой ссылке.
+            if (BslEditorHyperlinkHook.isPrimary(request.links[index]))
+                continue;
             html.append("<span class=\"comfort-param-menu-item\" onclick=\"").append(FUNCTION) //$NON-NLS-1$
                 .append("('").append(token).append("','open:").append(index) //$NON-NLS-1$ //$NON-NLS-2$
                 .append("');event.stopPropagation();return false;\">") //$NON-NLS-1$

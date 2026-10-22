@@ -315,6 +315,9 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
      * сегмента, равного имени объекта. Спереди добавляется имя проекта ({@code editor}),
      * если его удалось определить. Уже отформатированный заголовок (без стрелки) не меняет.
      */
+    /** Заголовок штатной страницы макета EDT. */
+    private static final String TEMPLATE_PAGE_TITLE = "Макет"; //$NON-NLS-1$
+
     private static String formatPageTitle(String title, MdObject mdObject, IEditorPart editor)
     {
         if (title == null || title.isEmpty() || title.indexOf('→') < 0)
@@ -334,6 +337,12 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
             return title;
 
         String pageName = parts[lastNonEmpty].strip();
+        // Вкладка текстового макета с панелью формата подписана «Сырой текст» (TextTemplateFormatPagesHook, #868).
+        if (TextTemplateFormatPagesHook.isTextTemplate(mdObject) && TEMPLATE_PAGE_TITLE.equals(pageName))
+        {
+            pageName = TextTemplateFormatPagesHook.RAW_PAGE_TITLE;
+            parts[lastNonEmpty] = pageName;
+        }
         String projectPrefix = projectNamePrefix(editor);
 
         String configTitle = formatConfigurationPageTitle(parts, lastNonEmpty, mdObject);

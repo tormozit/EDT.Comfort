@@ -220,9 +220,7 @@
     <startup class="tormozit.LocalStringDialogHook"/>
     <startup class="tormozit.FormatStringDialogHook"/>
     <startup class="tormozit.FormattedTextEditorHook"/>
-    <!-- #868: отключено, пока в target platform нет Mylyn WikiText (исходник — TextTemplateFormatPagesHook.java.off)
     <startup class="tormozit.TextTemplateFormatPagesHook"/>
-    -->
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>
@@ -236,6 +234,11 @@
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
+    <!-- Вкладка «Сырой текст» текстового макета (TextTemplateFormatPagesHook, #868): быстрый поиск Ctrl+F3. -->
+    <context
+        id="tormozit.textTemplate.rawText.context"
+        name="Сырой текст макета"
+        parentId="org.eclipse.ui.textEditorScope"/>
     <context
         id="tormozit.compareConf.context"
         name="Редактор сравнения EDT"
@@ -400,6 +403,18 @@
     <key
         commandId="tormozit.TextEditorFastSearchBack"
         contextId="org.eclipse.xtext.ui.XtextEditorScope"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+M2+F3">
+    </key>
+    <key
+        commandId="tormozit.TextEditorFastSearchForward"
+        contextId="tormozit.textTemplate.rawText.context"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+F3">
+    </key>
+    <key
+        commandId="tormozit.TextEditorFastSearchBack"
+        contextId="tormozit.textTemplate.rawText.context"
         schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
         sequence="M1+M2+F3">
     </key>

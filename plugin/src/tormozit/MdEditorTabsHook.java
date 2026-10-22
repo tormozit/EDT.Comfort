@@ -1575,6 +1575,9 @@ public final class MdEditorTabsHook implements IStartup
                 || "editors.commontemplate.pages.htmldocument.text".equals(id) //$NON-NLS-1$
                 || "editors.commontemplate.pages.htmldocument.preview".equals(id)) //$NON-NLS-1$
                 return item.getText();
+            // Вкладка текстового макета с панелью формата (TextTemplateFormatPagesHook, #868).
+            if (TextTemplateFormatPagesHook.STOCK_PAGE_ID.equals(id))
+                return TextTemplateFormatPagesHook.RAW_PAGE_TITLE;
             String title = page.getTitle();
             if (title != null && !title.isBlank())
                 return displayBaseTitle(editor, page, stripCountSuffix(title));

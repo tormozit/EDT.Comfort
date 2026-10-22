@@ -50,6 +50,7 @@ import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonNavigator;
 
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
 
 /** Дополняет контекстное меню навигатора и упрощает единственную команду «Создать». */
@@ -129,6 +130,7 @@ public final class NavigatorMenuHook implements IStartup
             flattenSingleCreate(menu);
             fillShowInComparisons(menu, viewer.getStructuredSelection());
             OpenHandlerMenu.fill(menu, viewer.getStructuredSelection());
+            OpenTemplatePreviewMenu.fill(menu, viewer.getStructuredSelection());
         });
         menu.setData(HOOK_MARKER, Boolean.TRUE);
     }
@@ -177,6 +179,37 @@ public final class NavigatorMenuHook implements IStartup
                 }
             }
             return 0;
+        }
+    }
+
+    /** «Открыть готовый текст» у текстового макета (#868): редактор макета на вкладке «Готовый текст». */
+    private static final class OpenTemplatePreviewMenu
+    {
+        private static final String ITEM_KEY = "tormozit.textTemplatePreviewOpen"; //$NON-NLS-1$
+
+        static void fill(Menu menu, IStructuredSelection selection)
+        {
+            if (menu.getData(ITEM_KEY) instanceof MenuItem previous && !previous.isDisposed())
+                previous.dispose();
+            menu.setData(ITEM_KEY, null);
+            if (selection.size() != 1)
+                return;
+            EObject object = NavigatorElementModels.resolveEObject(selection.getFirstElement());
+            if (!TextTemplateFormatPagesHook.isTextTemplate(object))
+                return;
+            BasicTemplate template = (BasicTemplate)object;
+            TextTemplateFormatPagesHook.Format format = TextTemplateFormatPagesHook.formatOf(template);
+            // Формат не определён (файл не найден) — даём открыть: редактор сам скажет, есть ли готовый текст.
+            boolean available = format == null || format.hasPreview();
+            MenuItem item = new MenuItem(menu, SWT.PUSH, OpenHandlerMenu.insertIndex(menu));
+            item.setText(TextTemplateFormatPagesHook.OPEN_PREVIEW_TEXT);
+            ComfortSubmenuHelper.setMenuItemTooltip(item, available
+                ? "Открыть макет на вкладке «Готовый текст» — оформленный документ Markdown или HTML" //$NON-NLS-1$
+                : "Недоступно: у формата «" + format.title + "» нет готового текста. " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "Готовый текст есть у Markdown и HTML — формат выбирается на вкладке «Сырой текст»."); //$NON-NLS-1$
+            item.setEnabled(available);
+            item.addListener(SWT.Selection, event -> TextTemplateFormatPagesHook.openPreview(template));
+            menu.setData(ITEM_KEY, item);
         }
     }
 

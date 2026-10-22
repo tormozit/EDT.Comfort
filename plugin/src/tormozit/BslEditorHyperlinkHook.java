@@ -101,6 +101,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             Display display = Display.getDefault();
             display.addFilter(SWT.MouseMove, BslEditorHyperlinkHook::attach);
             display.addFilter(SWT.MouseDown, BslEditorHyperlinkHook::attach);
+            display.addFilter(SWT.Show, BslEditorHyperlinkHook::hidePrimaryLink);
             display.addFilter(SWT.Show, BslEditorHyperlinkHook::showVariableLinks);
             ICommandService commands = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commands != null)
@@ -681,45 +682,44 @@ public final class BslEditorHyperlinkHook implements IStartup
                     boolean typeTarget = target instanceof TypeItem;
                     if (target instanceof TypeItem type)
                         target = typeProducer(type);
-                    if (target instanceof BasicForm form)
+                    if (!(target instanceof MdObject object))
+                    {
+                        result.add(link);
+                        continue;
+                    }
+                    String title = object instanceof BasicForm ? "Форма" : "Объект";
+                    // Основной переход (Ctrl+клик, клик в подсказке) открывает редактор объекта;
+                    // в списке выбора его строки нет. У штатной ссылки сохраняем её обработчик.
+                    result.add(new PrimaryHyperlink(!typeTarget && link instanceof XtextHyperlink xtext
+                        ? new HistoryHyperlink(xtext, source, page, title)
+                        : new TypeHyperlink(link.getHyperlinkRegion(), title, object, source, page)));
+                    if (object instanceof BasicForm form)
                     {
                         // Страница «Данные» редактора формы — это страница владельца, её не предлагаем.
                         IFile module = formModuleFile(form);
                         if (module != null && fileHasContent(module))
                             result.add(new FileHyperlink(link.getHyperlinkRegion(), "Модуль формы", module,
                                 source, page));
-                        result.add(link instanceof XtextHyperlink xtext
-                            ? new HistoryHyperlink(xtext, source, page, "Форма")
-                            : new TypeHyperlink(link.getHyperlinkRegion(), "Форма", form, source, page));
-                        continue;
                     }
-                    boolean register = target instanceof BasicRegister;
-                    EStructuralFeature instanceModule = target instanceof MdObject
-                        ? target.eClass().getEStructuralFeature(register ? "recordSetModule" : "objectModule") : null; //$NON-NLS-1$ //$NON-NLS-2$
-                    EStructuralFeature managerModule = target instanceof MdObject
-                        ? target.eClass().getEStructuralFeature("managerModule") : null; //$NON-NLS-1$
-                    String dataPage = target instanceof MdObject ? dataPageId(target, page) : null;
-                    // Имена и типы свойств подтверждены в .tmp/bundles/mdclass/model/MdClass.xcore.
-                    if (instanceModule == null && managerModule == null && dataPage == null)
+                    else
                     {
-                        result.add(link);
-                        continue;
+                        boolean register = object instanceof BasicRegister;
+                        // Имена и типы свойств подтверждены в .tmp/bundles/mdclass/model/MdClass.xcore.
+                        EStructuralFeature instanceModule =
+                            object.eClass().getEStructuralFeature(register ? "recordSetModule" : "objectModule"); //$NON-NLS-1$ //$NON-NLS-2$
+                        EStructuralFeature managerModule = object.eClass().getEStructuralFeature("managerModule"); //$NON-NLS-1$
+                        String dataPage = dataPageId(object, page);
+                        if (instanceModule != null && moduleHasContent(object, instanceModule))
+                            result.add(new TypeHyperlink(link.getHyperlinkRegion(),
+                                register ? "Модуль набора записей" : "Модуль объекта",
+                                object, instanceModule, source, page));
+                        if (managerModule != null && moduleHasContent(object, managerModule))
+                            result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль менеджера",
+                                object, managerModule, source, page));
+                        if (dataPage != null)
+                            result.add(new DataHyperlink(link.getHyperlinkRegion(), object, dataPage, source, page));
                     }
-                    if (instanceModule != null && moduleHasContent(target, instanceModule))
-                        result.add(new TypeHyperlink(link.getHyperlinkRegion(),
-                            register ? "Модуль набора записей" : "Модуль объекта",
-                            (MdObject) target, instanceModule, source, page));
-                    if (managerModule != null && moduleHasContent(target, managerModule))
-                        result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Модуль менеджера",
-                            (MdObject) target, managerModule, source, page));
-                    if (dataPage != null)
-                        result.add(new DataHyperlink(link.getHyperlinkRegion(), (MdObject) target,
-                            dataPage, source, page));
-                    // У штатной ссылки сохраняем обработчик открытия объекта.
-                    result.add(!typeTarget && link instanceof XtextHyperlink xtext
-                        ? new HistoryHyperlink(xtext, source, page, "Объект")
-                        : new TypeHyperlink(link.getHyperlinkRegion(), "Объект", (MdObject) target,
-                            source, page));
+                    result.add(new NavigatorHyperlink(link.getHyperlinkRegion(), object));
                 }
                 return result.toArray(IHyperlink[]::new);
             });
@@ -844,6 +844,44 @@ public final class BslEditorHyperlinkHook implements IStartup
                     retryActivatePage(editor, pageId, attempt + 1);
             });
         }
+    }
+
+    /** Переход по клику на саму ссылку; в списке выбора ссылок не показывается. */
+    static boolean isPrimary(IHyperlink link)
+    {
+        return link instanceof PrimaryHyperlink;
+    }
+
+    private static final class PrimaryHyperlink implements IHyperlink
+    {
+        private final IHyperlink delegate;
+
+        PrimaryHyperlink(IHyperlink delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return delegate.getHyperlinkRegion(); }
+        @Override public String getTypeLabel() { return delegate.getTypeLabel(); }
+        @Override public String getHyperlinkText() { return delegate.getHyperlinkText(); }
+        @Override public void open() { delegate.open(); }
+    }
+
+    private static final class NavigatorHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final MdObject target;
+
+        NavigatorHyperlink(IRegion region, MdObject target)
+        {
+            this.region = region;
+            this.target = target;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "В навигаторе"; }
+        @Override public void open() { NavigatorReveal.revealAndActivateIfHidden(target); }
     }
 
     private static final class FileHyperlink implements IHyperlink
@@ -1162,6 +1200,50 @@ public final class BslEditorHyperlinkHook implements IStartup
             shell.setBounds(x, y, width, height);
             shell.layout(true, true);
         }
+    }
+
+    /**
+     * Ctrl+клик открывает первую ссылку (HyperlinkManager), а список показывает все
+     * (MultipleHyperlinkPresenter, .tmp/bundles/jface-text/). Строку основного перехода
+     * убираем из уже заполненной таблицы до показа и укорачиваем окно на эту строку.
+     */
+    private static void hidePrimaryLink(Event event)
+    {
+        if (!(event.widget instanceof Shell shell) || shell.isDisposed() || (shell.getStyle() & SWT.TOOL) == 0)
+            return;
+        Table table = primaryLinksTable(shell);
+        if (table == null)
+            return;
+        int itemHeight = table.getItemHeight();
+        // Без прокрутки все строки видны — окно короче на одну строку; с прокруткой высота прежняя.
+        boolean fits = table.getItemCount() * itemHeight <= table.getClientArea().height;
+        table.getItem(0).dispose();
+        table.setSelection(0);
+        if (fits)
+        {
+            Rectangle bounds = shell.getBounds();
+            shell.setSize(bounds.width, bounds.height - itemHeight);
+            shell.layout(true, true);
+        }
+    }
+
+    private static Table primaryLinksTable(Composite parent)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Table table)
+            {
+                if (table.getItemCount() > 1 && table.getItem(0).getData() instanceof PrimaryHyperlink)
+                    return table;
+            }
+            else if (child instanceof Composite composite)
+            {
+                Table found = primaryLinksTable(composite);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
     }
 
     private static Table variableLinksTable(Composite parent)
