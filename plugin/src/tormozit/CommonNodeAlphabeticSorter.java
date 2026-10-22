@@ -1,9 +1,12 @@
 package tormozit;
 
+import java.lang.reflect.Field;
 import java.text.Collator;
 import java.util.Locale;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.BiFunction;
@@ -16,6 +19,7 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.ui.model.IWorkbenchAdapter;
+import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
@@ -87,6 +91,77 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
                 }
                 return sorted;
             });
+    }
+
+    /**
+     * Папки «Общие модули», «Общие реквизиты» и т.п. при алфавитном порядке называются без слова
+     * «Общие» — внутри узла «Общие» оно лишнее. Подписи папок навигатора — NLS-поля
+     * {@code Messages.Common*NavigatorAdapter_Folder} бандла md.ui (передаются в конструкторы
+     * {@code Common*NavigatorAdapter$Folder}); папки создаются заново при каждом {@code getChildren}
+     * узла «Общие», поэтому после обновления дерева действуют новые значения.
+     */
+    static void installCommonFolderLabels()
+    {
+        applyCommonFolderLabels();
+        ComfortSettings.getInstance().getPreferenceStore().addPropertyChangeListener(event -> {
+            if (ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED.equals(event.getProperty())
+                    || ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(event.getProperty()))
+                applyCommonFolderLabels();
+        });
+    }
+
+    private static final String[] COMMON_FOLDER_LABEL_FIELDS = {
+        "CommonAttributeNavigatorAdapter_Folder", //$NON-NLS-1$
+        "CommonCommandNavigatorAdapter_Folder", //$NON-NLS-1$
+        "CommonFormNavigatorAdapter_Folder", //$NON-NLS-1$
+        "CommonModuleNavigatorAdapter_Folder", //$NON-NLS-1$
+        "CommonPictureNavigatorAdapter_Folder", //$NON-NLS-1$
+        "CommonTemplateNavigatorAdapter_Folder", //$NON-NLS-1$
+    };
+    /** Поле → штатная подпись, прочитанная до первой подмены. */
+    private static final Map<Field, String> STOCK_COMMON_FOLDER_LABELS = new LinkedHashMap<>();
+
+    private static synchronized void applyCommonFolderLabels()
+    {
+        try
+        {
+            if (STOCK_COMMON_FOLDER_LABELS.isEmpty())
+            {
+                Bundle bundle = Platform.getBundle("com._1c.g5.v8.dt.md.ui"); //$NON-NLS-1$
+                if (bundle == null)
+                    return;
+                Class<?> messages = bundle.loadClass("com._1c.g5.v8.dt.md.ui.navigator.adapters.Messages"); //$NON-NLS-1$
+                for (String name : COMMON_FOLDER_LABEL_FIELDS)
+                {
+                    Field field = messages.getField(name);
+                    STOCK_COMMON_FOLDER_LABELS.put(field, (String) field.get(null));
+                }
+            }
+            boolean replace = isEnabled() && ComfortSettings.isReplaceListFiltersEnabled();
+            for (Map.Entry<Field, String> entry : STOCK_COMMON_FOLDER_LABELS.entrySet())
+            {
+                String stock = entry.getValue();
+                entry.getKey().set(null, replace ? withoutCommonPrefix(stock) : stock);
+            }
+        }
+        catch (ReflectiveOperationException | RuntimeException e)
+        {
+            Global.log("CommonNodeAlphabeticSorter: подписи папок «Общие …» не заменены: " + e); //$NON-NLS-1$
+        }
+    }
+
+    /** «Общие модули» → «Модули», «Common modules» → «Modules»; иначе без изменений. */
+    private static String withoutCommonPrefix(String label)
+    {
+        if (label == null)
+            return null;
+        for (String prefix : new String[] { "Общие ", "Common " }) //$NON-NLS-1$ //$NON-NLS-2$
+            if (label.length() > prefix.length() && label.regionMatches(true, 0, prefix, 0, prefix.length()))
+            {
+                String rest = label.substring(prefix.length());
+                return Character.toUpperCase(rest.charAt(0)) + rest.substring(1);
+            }
+        return label;
     }
 
     private final ViewerComparator delegate;

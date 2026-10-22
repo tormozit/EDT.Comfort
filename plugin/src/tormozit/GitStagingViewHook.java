@@ -1102,6 +1102,9 @@ public final class GitStagingViewHook implements IStartup
 
             void begin() throws Exception
             {
+                // Источник панели живёт столько же, сколько панель: проекты прошлой проверки не относятся к этой.
+                if (source instanceof StagingSource staging)
+                    staging.workingModelProjects.clear();
                 Repository selected = source.repository();
                 Global.tempLog(LOG, "begin source=" + source.getClass().getSimpleName() + " repository=" + selected);
                 CommitButtonsDebug.step("begin", "source=" + source.getClass().getSimpleName()

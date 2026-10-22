@@ -197,6 +197,7 @@ public class Activator extends AbstractUIPlugin
         ComfortSettings.getInstance().getPreferenceStore().setDefault(
             ComfortSettings.PREF_PROBLEM_VIEW_UPDATE_GATE,
             ComfortSettings.DEFAULT_PROBLEM_VIEW_UPDATE_GATE);
+        CommonNodeAlphabeticSorter.installCommonFolderLabels();
         settings.getPreferenceStore().addPropertyChangeListener(event -> {
             if (ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(event.getProperty()))
                 SmartMatchHighlight.clearColorCache();
