@@ -220,6 +220,9 @@
     <startup class="tormozit.LocalStringDialogHook"/>
     <startup class="tormozit.FormatStringDialogHook"/>
     <startup class="tormozit.FormattedTextEditorHook"/>
+    <!-- #868: отключено, пока в target platform нет Mylyn WikiText (исходник — TextTemplateFormatPagesHook.java.off)
+    <startup class="tormozit.TextTemplateFormatPagesHook"/>
+    -->
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>

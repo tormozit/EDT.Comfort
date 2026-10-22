@@ -1567,6 +1567,14 @@ public final class MdEditorTabsHook implements IStartup
     {
         if (page != null)
         {
+            // TemplateEditor задаёт этим вкладкам «Редактирование», «Текст», «Просмотр»
+            // через setPageText: getTitle() каждой страницы возвращает общее «Макет».
+            // Сохраняем подпись EDT, а не заменяем её заголовком страницы.
+            String id = page.getId();
+            if ("editors.commontemplate.pages.htmldocument.wysiwyg".equals(id) //$NON-NLS-1$
+                || "editors.commontemplate.pages.htmldocument.text".equals(id) //$NON-NLS-1$
+                || "editors.commontemplate.pages.htmldocument.preview".equals(id)) //$NON-NLS-1$
+                return item.getText();
             String title = page.getTitle();
             if (title != null && !title.isBlank())
                 return displayBaseTitle(editor, page, stripCountSuffix(title));

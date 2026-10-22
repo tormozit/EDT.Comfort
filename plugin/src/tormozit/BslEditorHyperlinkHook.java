@@ -6,8 +6,11 @@ import java.util.List;
 
 import org.eclipse.core.filebuffers.FileBuffers;
 import org.eclipse.core.filebuffers.LocationKind;
+import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.runtime.Path;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -74,6 +77,7 @@ import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
 import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
@@ -379,9 +383,9 @@ public final class BslEditorHyperlinkHook implements IStartup
     {
         IHyperlink link = typeLink(editor, page, viewer, offset);
         if (link == null)
-            link = fullNameLink(editor, page, viewer, offset, false);
+            link = fullNameLink(editor, page, viewer, offset, false, false);
         if (link == null)
-            link = fullNameLink(editor, page, viewer, offset, true);
+            link = fullNameLink(editor, page, viewer, offset, true, false);
         if (link == null)
         {
             // Поля, псевдонимы, виртуальные таблицы в литерале-запросе — как в «Редакторе запроса».
@@ -391,21 +395,32 @@ public final class BslEditorHyperlinkHook implements IStartup
         return link;
     }
 
+    /** Полное имя объекта метаданных в литерале или комментарии — ссылка на фрагмент под указателем. */
+    private static IHyperlink segmentLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
+    {
+        IHyperlink link = fullNameLink(editor, page, viewer, offset, false, true);
+        return link != null ? link : fullNameLink(editor, page, viewer, offset, true, true);
+    }
+
     /**
      * Ссылка на объект метаданных по полному имени «Тип.Имя» под {@code offset} в строковом
      * литерале (текст запроса, аргумент НайтиПоПолномуИмени и т.п.). Дальние сегменты
      * («…КурсыВалют.СрезПоследних») не мешают — ссылка ведёт на объект верхнего уровня.
      * Первый сегмент может быть и во множественном числе («Справочники.Имя.Метод»).
      * {@code inComment} — то же для комментария {@code //}.
+     * Ссылка ведёт на объект того фрагмента, что под указателем: на «Обработка1» в
+     * «Обработка.Обработка1.Форма.Форма1» — на обработку, на «Форма1» — на форму.
+     * {@code segmentOnly} — только когда фрагмент под указателем найден в конфигурации
+     * (без хвоста), и без ожидания блокировки документа: вызов идёт до штатного детектора.
      */
     private static IHyperlink fullNameLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer,
-        int offset, boolean inComment)
+        int offset, boolean inComment, boolean segmentOnly)
     {
         if (!(viewer.getDocument() instanceof IXtextDocument document) || document.getResourceURI() == null)
             return null;
         try
         {
-            Object[] found = document.readOnly(resource ->
+            IUnitOfWork<Object[], XtextResource> work = resource ->
             {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
@@ -440,9 +455,14 @@ public final class BslEditorHyperlinkHook implements IStartup
                 // Под указателем — само имя, а не пробел или знак после него.
                 if (end <= typeEnd + 1 || position > end)
                     return null;
+                int hovered = 0;
+                for (int i = start + skip; i < position; i++)
+                    if (text.charAt(i) == '.')
+                        hovered++;
                 return new Object[] { text.substring(start + skip, end), Integer.valueOf(leaf.getOffset() + start),
-                    Integer.valueOf(skip) };
-            });
+                    Integer.valueOf(skip), Integer.valueOf(hovered) };
+            };
+            Object[] found = segmentOnly ? document.tryReadOnly(work) : document.readOnly(work);
             if (found == null)
                 return null;
             IV8ProjectManager manager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
@@ -455,7 +475,11 @@ public final class BslEditorHyperlinkHook implements IStartup
             int regionStart = (Integer) found[1];
             int skip = (Integer) found[2];
             int fullLength = skip + ((String) found[0]).length();
-            for (int count = segments.length; count >= 2; count--)
+            // Дочерние объекты правее фрагмента под указателем не рассматриваем:
+            // «Тип.Имя» — сегменты 0–1, далее пары «Вид.Имя».
+            int hovered = (Integer) found[3];
+            int limit = hovered < 2 ? 2 : hovered + 2 - hovered % 2;
+            for (int count = Math.min(segments.length, limit); count >= 2; count--)
             {
                 if (count > 2 && count % 2 != 0)
                     continue; // после «Тип.Имя» идут пары «Вид.Имя»
@@ -464,6 +488,8 @@ public final class BslEditorHyperlinkHook implements IStartup
                     instanceof MdObject target)
                 {
                     boolean onTail = offset - regionStart > skip + raw.length();
+                    if (segmentOnly && onTail)
+                        return null;
                     // «Справочники.Имя.Метод» с указателем на методе — в метод модуля менеджера,
                     // а не в меню объекта.
                     if (onTail && count == 2 && segments.length == 3 && MdTypeMapping.ruPluralToRu(segments[0]) != null)
@@ -655,6 +681,18 @@ public final class BslEditorHyperlinkHook implements IStartup
                     boolean typeTarget = target instanceof TypeItem;
                     if (target instanceof TypeItem type)
                         target = typeProducer(type);
+                    if (target instanceof BasicForm form)
+                    {
+                        // Страница «Данные» редактора формы — это страница владельца, её не предлагаем.
+                        IFile module = formModuleFile(form);
+                        if (module != null && fileHasContent(module))
+                            result.add(new FileHyperlink(link.getHyperlinkRegion(), "Модуль формы", module,
+                                source, page));
+                        result.add(link instanceof XtextHyperlink xtext
+                            ? new HistoryHyperlink(xtext, source, page, "Форма")
+                            : new TypeHyperlink(link.getHyperlinkRegion(), "Форма", form, source, page));
+                        continue;
+                    }
                     boolean register = target instanceof BasicRegister;
                     EStructuralFeature instanceModule = target instanceof MdObject
                         ? target.eClass().getEStructuralFeature(register ? "recordSetModule" : "objectModule") : null; //$NON-NLS-1$ //$NON-NLS-2$
@@ -703,8 +741,11 @@ public final class BslEditorHyperlinkHook implements IStartup
         if (lookup == null)
             return true;
         IFile file = lookup.getPlatformResource(module);
-        if (file == null)
-            return true;
+        return file == null || fileHasContent(file);
+    }
+
+    private static boolean fileHasContent(IFile file)
+    {
         var buffer = FileBuffers.getTextFileBufferManager().getTextFileBuffer(file.getFullPath(), LocationKind.IFILE);
         if (buffer != null && buffer.getDocument() != null)
             return !buffer.getDocument().get().isBlank();
@@ -713,6 +754,13 @@ public final class BslEditorHyperlinkHook implements IStartup
         String text = BslModuleMethodResolver.moduleText(file);
         // При ошибке чтения не считаем модуль пустым.
         return text == null || !text.isBlank();
+    }
+
+    /** Модуль формы лежит в папке формы (у общей формы — в папке объекта). */
+    private static IFile formModuleFile(BasicForm form)
+    {
+        IResource folder = NavigatorResourceResolver.resolve(form);
+        return folder instanceof IContainer container ? container.getFile(new Path("Module.bsl")) : null; //$NON-NLS-1$
     }
 
     private static String dataPageId(EObject target, IWorkbenchPage page)
@@ -795,6 +843,37 @@ public final class BslEditorHyperlinkHook implements IStartup
                 if (editor.setActivePage(pageId) == null)
                     retryActivatePage(editor, pageId, attempt + 1);
             });
+        }
+    }
+
+    private static final class FileHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final String name;
+        private final IFile file;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        FileHyperlink(IRegion region, String name, IFile file, BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.name = name;
+            this.file = file;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return name; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                scope.opened = GoToDefinition.openBslModuleGranularEditor(file) != null;
+            }
         }
     }
 
@@ -932,7 +1011,11 @@ public final class BslEditorHyperlinkHook implements IStartup
             IHyperlink property = region == null ? null : propertyLink(source, page, viewer, region.getOffset());
             if (property != null)
                 return new IHyperlink[] { property };
-            IHyperlink[] links = delegate.detectHyperlinks(viewer, region, multiple);
+            // Штатные ссылки литерала («ПолучитьФорму») ведут на имя целиком: на «Обработка1»
+            // в имени формы предложили бы форму.
+            IHyperlink segment = region == null ? null : segmentLink(source, page, viewer, region.getOffset());
+            IHyperlink[] links = segment != null ? new IHyperlink[] { segment }
+                : delegate.detectHyperlinks(viewer, region, multiple);
             if (links == null || links.length == 0)
             {
                 IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());

@@ -1,0 +1,345 @@
+package tormozit;
+
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.regex.Pattern;
+
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.mylyn.internal.wikitext.ui.editor.MarkupEditor;
+import org.eclipse.mylyn.wikitext.markdown.MarkdownLanguage;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorInput;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IEditorSite;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWindowListener;
+import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.editors.text.TextEditor;
+import org.eclipse.ui.forms.editor.FormEditor;
+import org.osgi.framework.Bundle;
+
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
+import com._1c.g5.v8.dt.ui.editor.IDtGranularEditorEmbeddedEditorPage;
+
+/**
+ * Дорабатывает редактор макета типа «Текстовый документ» (issue #868): если текст макета похож
+ * на Markdown, рядом со штатной вкладкой «Макет» добавляется вкладка «Markdown» — тот же файл в
+ * редакторе Mylyn WikiText с подсветкой разметки, свёрткой по заголовкам, схемой документа и
+ * вкладкой готового текста (предпросмотра).
+ *
+ * <p>Редактор WikiText ставится отдельно и не входит в EDT: без его бандлов хук ничего не делает
+ * (зависимости объявлены {@code resolution:=optional}). Оба редактора работают с одним буфером
+ * файла, поэтому правки видны в обоих и сохраняются вместе.
+ *
+ * <p>Формат определяется один раз при открытии редактора по содержимому ({@link #looksLikeMarkdown}).
+ */
+public final class TextTemplateFormatPagesHook implements IStartup
+{
+    static final String PAGE_ID = "tormozit.textTemplate.markdown"; //$NON-NLS-1$
+
+    private static final String PAGE_TITLE = "Markdown"; //$NON-NLS-1$
+
+    /** Штатная вкладка текстового макета (TemplateEditor). */
+    private static final String STOCK_PAGE_ID = "editors.commontemplate.pages.text.document"; //$NON-NLS-1$
+
+    private static final String WIKITEXT_UI_BUNDLE = "org.eclipse.mylyn.wikitext.ui"; //$NON-NLS-1$
+
+    private static final String WIKITEXT_MARKDOWN_BUNDLE = "org.eclipse.mylyn.wikitext.markdown"; //$NON-NLS-1$
+
+    private static final int HOOK_RETRY_DELAY_MS = 200;
+
+    private static final int HOOK_MAX_ATTEMPTS = 150;
+
+    /** Сколько первых строк текста смотрим при определении формата. */
+    private static final int DETECT_MAX_LINES = 400;
+
+    private static final Pattern HEADING = Pattern.compile("^ {0,3}#{1,6}\\s+\\S"); //$NON-NLS-1$
+
+    private static final Pattern FENCE = Pattern.compile("^\\s*(```|~~~)"); //$NON-NLS-1$
+
+    private static final Pattern LINK = Pattern.compile("\\[[^\\]\\n]+\\]\\([^)\\n]+\\)"); //$NON-NLS-1$
+
+    private static final Pattern LIST_ITEM = Pattern.compile("^\\s*([-*+]|\\d+\\.)\\s+\\S"); //$NON-NLS-1$
+
+    private static final Pattern BOLD = Pattern.compile("\\*\\*[^*\\n]+\\*\\*"); //$NON-NLS-1$
+
+    private final Set<DtGranularEditor<?>> hookedEditors =
+        Collections.newSetFromMap(new WeakHashMap<>());
+
+    private final Set<DtGranularEditor<?>> pendingRetryEditors =
+        Collections.newSetFromMap(new WeakHashMap<>());
+
+    @Override
+    public void earlyStartup()
+    {
+        if (!isWikiTextAvailable())
+            return;
+        Display.getDefault().asyncExec(() ->
+        {
+            IWorkbench workbench = PlatformUI.getWorkbench();
+            workbench.addWindowListener(new IWindowListener()
+            {
+                @Override public void windowOpened(IWorkbenchWindow w)      { hookWindow(w); }
+                @Override public void windowActivated(IWorkbenchWindow w)   {}
+                @Override public void windowDeactivated(IWorkbenchWindow w) {}
+                @Override public void windowClosed(IWorkbenchWindow w)      {}
+            });
+            for (IWorkbenchWindow w : workbench.getWorkbenchWindows())
+                hookWindow(w);
+        });
+    }
+
+    /** Бандлы WikiText есть в установке (классы из них трогаем только после этой проверки). */
+    private static boolean isWikiTextAvailable()
+    {
+        return isResolved(Platform.getBundle(WIKITEXT_UI_BUNDLE))
+            && isResolved(Platform.getBundle(WIKITEXT_MARKDOWN_BUNDLE));
+    }
+
+    private static boolean isResolved(Bundle bundle)
+    {
+        return bundle != null && (bundle.getState() & (Bundle.RESOLVED | Bundle.STARTING | Bundle.ACTIVE)) != 0;
+    }
+
+    private void hookWindow(IWorkbenchWindow window)
+    {
+        IWorkbenchPage page = window.getActivePage();
+        if (page != null)
+        {
+            for (IEditorReference ref : page.getEditorReferences())
+            {
+                IEditorPart editor = ref.getEditor(false);
+                if (editor instanceof DtGranularEditor<?> granular)
+                    hookEditor(granular, 0);
+            }
+        }
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override public void partOpened(IWorkbenchPartReference ref)      { hookFromRef(ref); }
+            @Override public void partActivated(IWorkbenchPartReference ref)   { hookFromRef(ref); }
+            @Override public void partBroughtToTop(IWorkbenchPartReference r)  {}
+            @Override public void partClosed(IWorkbenchPartReference r)        {}
+            @Override public void partDeactivated(IWorkbenchPartReference r)   {}
+            @Override public void partHidden(IWorkbenchPartReference r)        {}
+            @Override public void partVisible(IWorkbenchPartReference r)       {}
+            @Override public void partInputChanged(IWorkbenchPartReference r)  {}
+
+            private void hookFromRef(IWorkbenchPartReference ref)
+            {
+                if (!(ref instanceof IEditorReference editorRef))
+                    return;
+                IWorkbenchPart part = editorRef.getPart(false);
+                if (part instanceof DtGranularEditor<?> granular)
+                    hookEditor(granular, 0);
+            }
+        });
+    }
+
+    private void hookEditor(DtGranularEditor<?> editor, int attempt)
+    {
+        if (hookedEditors.contains(editor))
+            return;
+        try
+        {
+            // Пока редактор не инициализирован, вкладки основных страниц не созданы —
+            // повторяем по таймеру (в т.ч. для редакторов, восстановленных при старте).
+            if (editor.getModel() == null || !Boolean.TRUE.equals(Global.getField(editor, "initialized"))) //$NON-NLS-1$
+            {
+                scheduleRetry(editor, attempt);
+                return;
+            }
+            if (!(editor.getModel() instanceof BasicTemplate template)
+                || template.getTemplateType() != TemplateType.TEXT_DOCUMENT)
+            {
+                hookedEditors.add(editor);
+                return;
+            }
+            int stockIndex = MdEventHandlersPageHook.indexOfPageId(editor, STOCK_PAGE_ID);
+            if (stockIndex < 0)
+            {
+                hookedEditors.add(editor);
+                return;
+            }
+            Object stockPage = ((FormEditor)editor).findPage(STOCK_PAGE_ID);
+            if (!(stockPage instanceof IDtGranularEditorEmbeddedEditorPage<?> stock)
+                || !(stock.getEmbeddedEditor() instanceof TextEditor stockEditor)
+                || stockEditor.getEditorInput() == null)
+            {
+                // Штатный редактор вкладки ещё не создан.
+                scheduleRetry(editor, attempt);
+                return;
+            }
+            if (!hookedEditors.add(editor))
+                return;
+            IDocument document = stockEditor.getDocumentProvider().getDocument(stockEditor.getEditorInput());
+            if (document != null && looksLikeMarkdown(document.get()))
+                addPage(editor, stockEditor, stockIndex + 1);
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+        }
+    }
+
+    private void scheduleRetry(DtGranularEditor<?> editor, int attempt)
+    {
+        if (attempt >= HOOK_MAX_ATTEMPTS || editor.getSite() == null)
+            return;
+        Composite container = (Composite)Global.invoke(editor, "getContainer"); //$NON-NLS-1$
+        if (container != null && container.isDisposed())
+            return;
+        if (!pendingRetryEditors.add(editor))
+            return;
+        Display.getDefault().timerExec(HOOK_RETRY_DELAY_MS, () ->
+        {
+            pendingRetryEditors.remove(editor);
+            hookEditor(editor, attempt + 1);
+        });
+    }
+
+    private static void addPage(DtGranularEditor<?> editor, TextEditor stockEditor, int index)
+    {
+        try
+        {
+            @SuppressWarnings("unchecked")
+            IDtGranularEditorEmbeddedEditorPage<BasicTemplate> stockPage =
+                (IDtGranularEditorEmbeddedEditorPage<BasicTemplate>)((FormEditor)editor).findPage(STOCK_PAGE_ID);
+            MarkdownPage page = new MarkdownPage(stockPage, stockEditor);
+            page.initialize(editor);
+            Composite container = (Composite)Global.invoke(editor, "getContainer"); //$NON-NLS-1$
+            if (container == null || container.isDisposed())
+                return;
+            page.createPartControl(container);
+            editor.addPage(index, page);
+        }
+        catch (PartInitException | RuntimeException e)
+        {
+        }
+    }
+
+    // =========================================================================
+    // Определение формата
+    // =========================================================================
+
+    /**
+     * Похож ли текст на Markdown: заголовки {@code #}, блоки кода, ссылки {@code [текст](адрес)},
+     * списки, выделение {@code **}. XML, HTML и JSON отсекаются по первому символу.
+     */
+    static boolean looksLikeMarkdown(String text)
+    {
+        if (text == null)
+            return false;
+        String trimmed = text.stripLeading();
+        if (trimmed.isEmpty())
+            return false;
+        char first = trimmed.charAt(0);
+        if (first == '<' || first == '{' || first == '[')
+            return false;
+        int headings = 0;
+        int fences = 0;
+        int links = 0;
+        int lists = 0;
+        int bold = 0;
+        String[] lines = trimmed.split("\\R", DETECT_MAX_LINES + 1); //$NON-NLS-1$
+        for (int i = 0; i < lines.length && i < DETECT_MAX_LINES; i++)
+        {
+            String line = lines[i];
+            if (HEADING.matcher(line).find())
+                headings++;
+            if (FENCE.matcher(line).find())
+                fences++;
+            if (LINK.matcher(line).find())
+                links++;
+            if (LIST_ITEM.matcher(line).find())
+                lists++;
+            if (BOLD.matcher(line).find())
+                bold++;
+        }
+        int strong = headings + fences + links;
+        if (strong == 0)
+            return false;
+        int score = headings * 3 + fences * 3 + links * 2 + bold + (lists >= 2 ? 1 : 0);
+        return score >= 3;
+    }
+
+    // =========================================================================
+    // Страница и редактор (классы WikiText — только внутри этих типов)
+    // =========================================================================
+
+    /** Вкладка «Markdown»: редактор WikiText над тем же файлом, что и штатная вкладка. */
+    static final class MarkdownPage extends DtGranularEditorEmbeddedEditorPage<BasicTemplate>
+    {
+        private final IDtGranularEditorEmbeddedEditorPage<BasicTemplate> stockPage;
+
+        private final TextEditor stockEditor;
+
+        MarkdownPage(IDtGranularEditorEmbeddedEditorPage<BasicTemplate> stockPage, TextEditor stockEditor)
+        {
+            super(PAGE_ID, PAGE_TITLE);
+            this.stockPage = stockPage;
+            this.stockEditor = stockEditor;
+        }
+
+        @Override
+        public IEditorInput createEmbeddedEditorInput()
+        {
+            return stockPage.createEmbeddedEditorInput();
+        }
+
+        @Override
+        public IEditorPart createEmbeddedEditor()
+        {
+            return new MarkdownEditor(stockEditor);
+        }
+    }
+
+    /** Редактор WikiText с языком Markdown и правами на правку, как у штатного редактора вкладки. */
+    private static final class MarkdownEditor extends MarkupEditor
+    {
+        private final TextEditor stock;
+
+        MarkdownEditor(TextEditor stock)
+        {
+            this.stock = stock;
+        }
+
+        @Override
+        public boolean isEditable()
+        {
+            return (stock == null || stock.isEditable()) && super.isEditable();
+        }
+
+        @Override
+        public boolean isEditorInputModifiable()
+        {
+            return (stock == null || stock.isEditorInputModifiable()) && super.isEditorInputModifiable();
+        }
+
+        @Override
+        public boolean isEditorInputReadOnly()
+        {
+            return (stock != null && stock.isEditorInputReadOnly()) || super.isEditorInputReadOnly();
+        }
+
+        @Override
+        public void init(IEditorSite site, IEditorInput input) throws PartInitException
+        {
+            super.init(site, input);
+            // По имени файла макета язык не определить — задаём явно и не запоминаем в свойствах файла.
+            setMarkupLanguage(new MarkdownLanguage(), false);
+        }
+    }
+}

@@ -31,6 +31,7 @@ import org.eclipse.swt.dnd.TransferData;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
@@ -441,6 +442,7 @@ public final class NavigatorDropSearchHook implements IStartup
         }
 
         private static final String KEY = "tormozit.navigatorDropContentPage"; //$NON-NLS-1$
+        private static final String COMFORT_SUBMENU_KEY = "tormozit.navigatorDropContentPage.comfortSubmenu"; //$NON-NLS-1$
         private static final String SUBSYSTEM_MODEL_CLASS =
             "com._1c.g5.v8.dt.internal.md.ui.editors.subsystem.SubsystemEditorContentPageModel"; //$NON-NLS-1$
         private static final String DIALOG_MODEL_FACTORY_CLASS =
@@ -492,7 +494,30 @@ public final class NavigatorDropSearchHook implements IStartup
             target.addDropListener(new ContentPageDrop(editor, page, kind, tree, allowed, project));
             tree.setData(KEY, Boolean.TRUE);
             tree.setData(INSTALLED_KEY, Boolean.TRUE);
+            installComfortSubmenu(tree);
             return true;
+        }
+
+        /**
+         * Подменю «Комфорт» в меню дерева: его наполняют общие пункты списков («Вывести список»,
+         * «Свернуть все другие»). Штатный {@code MenuManager} пересобирает меню в своём
+         * {@code SWT.Show} и стирает чужие пункты, поэтому подменю ставится заново в собственном
+         * {@code SWT.Show}, добавленном позже штатного.
+         */
+        private static void installComfortSubmenu(Tree tree)
+        {
+            tree.addListener(SWT.MenuDetect, e ->
+            {
+                Menu menu = tree.isDisposed() ? null : tree.getMenu();
+                if (menu == null || menu.isDisposed() || Boolean.TRUE.equals(menu.getData(COMFORT_SUBMENU_KEY)))
+                    return;
+                menu.setData(COMFORT_SUBMENU_KEY, Boolean.TRUE);
+                menu.addListener(SWT.Show, ev ->
+                {
+                    if (!tree.isDisposed() && !menu.isDisposed())
+                        ComfortSubmenuHelper.findOrCreateComfortSubmenu(menu, tree.getShell());
+                });
+            });
         }
 
         @Override

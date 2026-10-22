@@ -20,11 +20,14 @@ import org.eclipse.jface.window.DefaultToolTip;
 import org.eclipse.jface.window.ToolTip;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.dnd.DND;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
@@ -52,7 +55,10 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 
-/** Заголовки вкладок (728), подсказки списка (729), постоянная кнопка списка (730) и сопоставление восстановленных редакторов (726). */
+/**
+ * Заголовки вкладок (728), подсказки списка (729), постоянная кнопка списка (730), сопоставление
+ * восстановленных редакторов (726) и активация вкладки удержанием перетаскивания (858).
+ */
 public final class WorkbenchTabsHook implements IStartup
 {
     private static final String TOPIC = "workbench-tabs"; //$NON-NLS-1$
@@ -76,6 +82,7 @@ public final class WorkbenchTabsHook implements IStartup
                 @Override public void windowDeactivated(IWorkbenchWindow window) {}
                 @Override public void windowClosed(IWorkbenchWindow window) {}
             });
+            DragHoverActivation.install(display);
             display.addFilter(SWT.Paint, event -> {
                 if (event.widget instanceof CTabFolder folder)
                     PartListButton.syncMark(folder);
@@ -564,6 +571,101 @@ public final class WorkbenchTabsHook implements IStartup
                 Global.invoke(folder, "updateItems"); //$NON-NLS-1$
                 folder.redraw();
             });
+        }
+    }
+
+    /**
+     * Удержание перетаскивания над вкладкой {@link CTabFolder} {@link #HOLD_MS} мс активирует её (858).
+     * Перетаскивание из SWT отслеживается по {@code DND.DragStart}/{@code DND.DragEnd}, внешнее —
+     * по событиям цели сброса, пока они идут. Вкладка под курсором проверяется таймером: при
+     * перетаскивании обычные события мыши не приходят.
+     */
+    private static final class DragHoverActivation
+    {
+        private static final int HOLD_MS = 1000;
+        private static final int POLL_MS = 100;
+        /** Внешнее перетаскивание считается законченным, если события цели сброса не шли столько мс. */
+        private static final int TARGET_IDLE_MS = 500;
+
+        private static boolean sourceDrag;
+        private static long lastTargetEvent;
+        private static boolean polling;
+        private static CTabItem hoverItem;
+        private static long hoverSince;
+
+        static void install(Display display)
+        {
+            display.addFilter(DND.DragStart, event -> {
+                sourceDrag = true;
+                start(display);
+            });
+            display.addFilter(DND.DragEnd, event -> sourceDrag = false);
+            Listener targetListener = event -> {
+                lastTargetEvent = System.currentTimeMillis();
+                start(display);
+            };
+            display.addFilter(DND.DragEnter, targetListener);
+            display.addFilter(DND.DragOver, targetListener);
+            display.addFilter(DND.DragLeave, event -> lastTargetEvent = 0);
+            display.addFilter(DND.Drop, event -> lastTargetEvent = 0);
+        }
+
+        private static void start(Display display)
+        {
+            if (polling)
+                return;
+            polling = true;
+            hoverItem = null;
+            display.timerExec(POLL_MS, () -> poll(display));
+        }
+
+        private static void poll(Display display)
+        {
+            if (display.isDisposed())
+                return;
+            if (!sourceDrag && System.currentTimeMillis() - lastTargetEvent > TARGET_IDLE_MS)
+            {
+                polling = false;
+                hoverItem = null;
+                return;
+            }
+            try
+            {
+                checkHover(display);
+            }
+            catch (RuntimeException ex)
+            {
+                Global.tempLogException(TOPIC, "drag hover", ex); //$NON-NLS-1$
+            }
+            display.timerExec(POLL_MS, () -> poll(display));
+        }
+
+        private static void checkHover(Display display)
+        {
+            CTabItem item = null;
+            if (display.getCursorControl() instanceof CTabFolder folder)
+                item = folder.getItem(folder.toControl(display.getCursorLocation()));
+            if (item == null || item.isDisposed() || item.getParent().getSelection() == item)
+            {
+                hoverItem = null;
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (item != hoverItem)
+            {
+                hoverItem = item;
+                hoverSince = now;
+                return;
+            }
+            if (now - hoverSince < HOLD_MS)
+                return;
+            hoverItem = null;
+            CTabFolder folder = item.getParent();
+            folder.setSelection(item);
+            // setSelection не рассылает SWT.Selection — сообщаем, как при клике по вкладке.
+            Event event = new Event();
+            event.item = item;
+            folder.notifyListeners(SWT.Selection, event);
         }
     }
 

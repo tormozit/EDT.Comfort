@@ -4315,8 +4315,9 @@ return EMPTY;
                             if (isCommonModuleTypeName(type.getName()))
                                 continue;
                             // Шаблонные типы платформы («СправочникОбъектИмяСправочника») — не имена.
+                            // Полное имя вводится посекционно: в корне — только первый сегмент.
                             if (name != null && !name.isBlank() && !isTemplateTypeName(name))
-                                names.put(name, "Тип"); //$NON-NLS-1$
+                                names.put(MdTypeMapping.firstSegment(name), "Тип"); //$NON-NLS-1$
                         }
                     }
                     if (receiver == null)
@@ -4325,6 +4326,10 @@ return EMPTY;
                         for (String manager : MdTypeMapping.managerPluralNames())
                             names.put(english ? MdTypeMapping.anyToFolder(MdTypeMapping.ruPluralToRu(manager))
                                 : manager, "Менеджер"); //$NON-NLS-1$
+                        // Виды метаданных: «Справочник», «Документ», … — первый сегмент «Справочник.Имя».
+                        for (String kind : (english ? MdTypeMapping.EN_SING_TO_FOLDER : MdTypeMapping.RU_TO_FOLDER)
+                            .keySet())
+                            names.putIfAbsent(kind, "Вид метаданных"); //$NON-NLS-1$
                     }
                     else if (project instanceof IConfigurationAware aware && aware.getConfiguration() != null)
                         addManagerObjectNames(names, aware.getConfiguration(), receiver, resource);
@@ -4352,6 +4357,12 @@ return EMPTY;
                             String name = filterMatchName(proposal);
                             if (isCommonModuleTypeName(name))
                             {
+                                continue;
+                            }
+                            // Полное имя штатного списка — тоже посекционно (первый сегмент уже в names).
+                            if (name != null && name.indexOf('.') > 0)
+                            {
+                                names.putIfAbsent(MdTypeMapping.firstSegment(name), "Тип"); //$NON-NLS-1$
                                 continue;
                             }
                             result.add(proposal);
@@ -4391,7 +4402,10 @@ return EMPTY;
             String singular = MdTypeMapping.ruPluralToRu(parts[0]);
             String folder = singular != null ? MdTypeMapping.anyToFolder(singular)
                 : MdTypeMapping.anyToFolder(parts[0]);
-            if (folder == null || !(singular != null || folder.equalsIgnoreCase(parts[0])))
+            // «Справочник.» (ед. ч.) — только имена объектов: дальше идут не методы менеджера.
+            boolean kind = singular == null && MdTypeMapping.isKnownMdRootType(parts[0]);
+            if (folder == null || !(singular != null || kind || folder.equalsIgnoreCase(parts[0]))
+                || (kind && parts.length > 1))
                 return;
             var feature = configuration.eClass()
                 .getEStructuralFeature(Character.toLowerCase(folder.charAt(0)) + folder.substring(1));

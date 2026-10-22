@@ -417,6 +417,7 @@ final class ComfortSubmenuHelper
                 item.dispose();
             }
         TreeCollapseOthers.ensureComfortMenuItem(menu);
+        OutputListCommand.ensureComfortMenuItem(menu);
     }
 
     /**
@@ -465,6 +466,7 @@ final class ComfortSubmenuHelper
         if (existing != null)
         {
             TreeCollapseOthers.ensureComfortMenuItem(existing);
+            OutputListCommand.ensureComfortMenuItem(existing);
             return existing;
         }
 
@@ -482,6 +484,7 @@ final class ComfortSubmenuHelper
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);
         comfortRoot.setMenu(comfortSub);
         TreeCollapseOthers.ensureComfortMenuItem(comfortSub);
+        OutputListCommand.ensureComfortMenuItem(comfortSub);
         // «Вывести список» мог лечь в корень, пока подменю ещё не было.
         OutputListCommand.moveRootItemToComfortSubmenu(parentMenu, comfortSub);
         return comfortSub;

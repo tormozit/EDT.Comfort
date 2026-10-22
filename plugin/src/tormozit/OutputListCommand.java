@@ -9,6 +9,7 @@ import java.text.ParsePosition;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,6 +24,8 @@ import org.eclipse.nebula.widgets.grid.Grid;
 import org.eclipse.nebula.widgets.grid.GridColumn;
 import org.eclipse.nebula.widgets.grid.GridItem;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.program.Program;
 import org.eclipse.swt.widgets.Composite;
@@ -51,13 +54,14 @@ import org.osgi.framework.Bundle;
  * вызывается {@link #attach(Control)}), либо подключается напрямую — {@link #attach(Control)} /
  * {@link #attachDescendants(Composite)}. В контекстном меню <b>штатного</b> списка EDT пункт идёт в подменю
  * «Комфорт», если оно там есть (ради одного этого пункта подменю не создаётся — тогда в корень),
- * в меню <b>собственного окна плагина</b> — в корень (см. {@link #attach(Control)}).
+ * в меню <b>собственного окна плагина</b> — в корень (см. {@link #attach(Control)}). Кроме того,
+ * пункт сам появляется в подменю «Комфорт» любого списка ({@link #ensureComfortMenuItem(Menu)}).
  * Окна, которые сами пересобирают меню при каждом показе ({@code FormTableInteraction} внешнего
  * режима, {@code DebugCollectionWindow}), зовут {@link #appendMenuItem(Menu, Control)}.
  *
  * <p>Дерево выводится в том виде, в каком оно на экране: только развёрнутые узлы, вложенность
- * показана ведущими пробелами в первой колонке. Ячейки, целиком разбирающиеся как число,
- * пишутся числовым типом.
+ * показана ведущими пробелами в первой колонке и группами строк документа (issue #851).
+ * Ячейки, целиком разбирающиеся как число, пишутся числовым типом.
  */
 public final class OutputListCommand
 {
@@ -73,6 +77,8 @@ public final class OutputListCommand
     private static final String INDENT = "    "; //$NON-NLS-1$
 
     private static final String SHOW_HOOK_KEY = "tormozit.outputListShowHook"; //$NON-NLS-1$
+
+    private static final String COMFORT_HOOK_KEY = "tormozit.outputListComfortHook"; //$NON-NLS-1$
 
     private static final String ICON_PATH = "icons/etool16/output_list.png"; //$NON-NLS-1$
 
@@ -199,7 +205,82 @@ public final class OutputListCommand
         }
     }
 
-    private static void createItem(Menu rootMenu, Menu comfortSub, Control control, boolean nativeList)
+    /**
+     * Один раз вешает на подменю «Комфорт» показ пункта «Вывести список», если владелец
+     * контекстного меню — список ({@code Table}/{@code Tree}/{@code List}/{@code Grid}), не
+     * подключённый через {@link #attach(Control)}. Так пункт есть в любом списке, где есть
+     * подменю «Комфорт», без отдельного подключения. Владелец — контрол с фокусом, как в
+     * {@link TreeCollapseOthers#resolveOwnerTree(Menu)}.
+     */
+    static void ensureComfortMenuItem(Menu comfortSub)
+    {
+        if (comfortSub == null || comfortSub.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(comfortSub.getData(COMFORT_HOOK_KEY)))
+            return;
+        comfortSub.setData(COMFORT_HOOK_KEY, Boolean.TRUE);
+
+        MenuAdapter listener = new MenuAdapter()
+        {
+            private final ArrayList<MenuItem> added = new ArrayList<>(1);
+
+            @Override
+            public void menuShown(MenuEvent e)
+            {
+                Control owner = resolveOwnerList(comfortSub);
+                if (owner == null || Boolean.TRUE.equals(owner.getData(ATTACHED_KEY)) || hasItem(comfortSub))
+                    return;
+                added.add(createItem(comfortSub, comfortSub, owner, false));
+            }
+
+            @Override
+            public void menuHidden(MenuEvent e)
+            {
+                ArrayList<MenuItem> snapshot = new ArrayList<>(added);
+                added.clear();
+                comfortSub.getDisplay().asyncExec(() ->
+                {
+                    for (MenuItem mi : snapshot)
+                    {
+                        if (!mi.isDisposed())
+                            mi.dispose();
+                    }
+                });
+            }
+        };
+        comfortSub.addMenuListener(listener);
+        comfortSub.addDisposeListener(ev ->
+        {
+            if (!comfortSub.isDisposed())
+                comfortSub.removeMenuListener(listener);
+        });
+    }
+
+    private static Control resolveOwnerList(Menu menu)
+    {
+        Display display = menu.getDisplay();
+        if (display == null || display.isDisposed())
+            return null;
+        Control focused = display.getFocusControl();
+        if (focused == null || focused.isDisposed())
+            return null;
+        if (focused instanceof Table || focused instanceof Tree
+            || focused instanceof org.eclipse.swt.widgets.List || focused instanceof Grid)
+            return focused;
+        return null;
+    }
+
+    private static boolean hasItem(Menu menu)
+    {
+        for (MenuItem mi : menu.getItems())
+        {
+            if (!mi.isDisposed() && Boolean.TRUE.equals(mi.getData(ITEM_KEY)))
+                return true;
+        }
+        return false;
+    }
+
+    private static MenuItem createItem(Menu rootMenu, Menu comfortSub, Control control, boolean nativeList)
     {
         MenuItem item;
         if (comfortSub != null)
@@ -224,6 +305,7 @@ public final class OutputListCommand
         if (image != null)
             item.setImage(image);
         item.addListener(SWT.Selection, e -> run(control));
+        return item;
     }
 
     private static void disposeExistingItem(Menu menu)
@@ -388,7 +470,10 @@ public final class OutputListCommand
         if (selection.length > 1)
         {
             for (TreeItem item : selection)
-                model.rows.add(treeRow(item, cols, depthOf(item)));
+            {
+                int depth = depthOf(item);
+                model.addTreeRow(treeRow(item, cols, depth), depth);
+            }
         }
         else
         {
@@ -402,7 +487,7 @@ public final class OutputListCommand
     {
         if (item.isDisposed())
             return;
-        model.rows.add(treeRow(item, cols, depth));
+        model.addTreeRow(treeRow(item, cols, depth), depth);
         if (item.getExpanded())
         {
             for (TreeItem child : item.getItems())
@@ -470,7 +555,7 @@ public final class OutputListCommand
         if (selection.length > 1)
         {
             for (GridItem item : selection)
-                model.rows.add(gridRow(item, cols, item.getLevel()));
+                model.addTreeRow(gridRow(item, cols, item.getLevel()), item.getLevel());
         }
         else
         {
@@ -484,7 +569,7 @@ public final class OutputListCommand
     {
         if (item.isDisposed())
             return;
-        model.rows.add(gridRow(item, cols, item.getLevel()));
+        model.addTreeRow(gridRow(item, cols, item.getLevel()), item.getLevel());
         if (item.isExpanded())
         {
             for (GridItem child : item.getItems())
@@ -755,13 +840,25 @@ public final class OutputListCommand
                 b.append(headerCell(c < model.headers.size() ? model.headers.get(c) : "")); //$NON-NLS-1$
             b.append("</table:table-row>\n"); //$NON-NLS-1$
         }
-        for (String[] row : model.rows)
+        // Иерархия дерева — вложенными группами строк: в табличном документе узлы
+        // сворачиваются так же, как на экране. Строка-родитель стоит над группой своих детей.
+        int baseLevel = model.levels.isEmpty() ? 0 : Collections.min(model.levels);
+        int openGroups = 0;
+        for (int r = 0; r < model.rows.size(); r++)
         {
+            int level = model.level(r) - baseLevel;
+            for (; openGroups > level; openGroups--)
+                b.append("</table:table-row-group>\n"); //$NON-NLS-1$
+            for (; openGroups < level; openGroups++)
+                b.append("<table:table-row-group>\n"); //$NON-NLS-1$
+            String[] row = model.rows.get(r);
             b.append("<table:table-row>"); //$NON-NLS-1$
             for (int c = 0; c < columns; c++)
                 b.append(dataCell(c < row.length ? row[c] : "")); //$NON-NLS-1$
             b.append("</table:table-row>\n"); //$NON-NLS-1$
         }
+        for (; openGroups > 0; openGroups--)
+            b.append("</table:table-row-group>\n"); //$NON-NLS-1$
         b.append("</table:table>\n"); //$NON-NLS-1$
         b.append("</office:spreadsheet></office:body>\n"); //$NON-NLS-1$
         b.append("</office:document-content>\n"); //$NON-NLS-1$
@@ -843,12 +940,35 @@ public final class OutputListCommand
         return java.math.BigDecimal.valueOf(value).toPlainString();
     }
 
+    /**
+     * Текст ячейки для {@code <text:p>}. Пробелы в начале абзаца и повторные пробелы ODF
+     * схлопывает, поэтому они пишутся через {@code <text:s text:c="n"/>} — иначе пропадает
+     * отступ вложенности в первой колонке дерева.
+     */
     private static String escape(String value)
     {
         StringBuilder b = new StringBuilder(value.length() + 16);
         for (int i = 0; i < value.length(); i++)
         {
             char ch = value.charAt(i);
+            if (ch == ' ')
+            {
+                int end = i;
+                while (end < value.length() && value.charAt(end) == ' ')
+                    end++;
+                int run = end - i;
+                if (i > 0)
+                {
+                    b.append(' ');
+                    run--;
+                }
+                if (run == 1)
+                    b.append("<text:s/>"); //$NON-NLS-1$
+                else if (run > 1)
+                    b.append("<text:s text:c=\"").append(run).append("\"/>"); //$NON-NLS-1$ //$NON-NLS-2$
+                i = end - 1;
+                continue;
+            }
             switch (ch)
             {
                 case '&' -> b.append("&amp;"); //$NON-NLS-1$
@@ -872,5 +992,19 @@ public final class OutputListCommand
         final ArrayList<String> headers = new ArrayList<>();
 
         final ArrayList<String[]> rows = new ArrayList<>();
+
+        /** Уровень вложенности строки дерева (параллельно {@link #rows}); пусто — плоский список. */
+        final ArrayList<Integer> levels = new ArrayList<>();
+
+        void addTreeRow(String[] row, int level)
+        {
+            rows.add(row);
+            levels.add(level);
+        }
+
+        int level(int index)
+        {
+            return index < levels.size() ? levels.get(index) : 0;
+        }
     }
 }
