@@ -813,6 +813,14 @@ public final class BslEditorHoverHook implements IStartup
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
         private volatile BslQueryLiteralSupport.QueryHover lastQueryHover;
+        /** Функция конфигурации под указателем — её тип в заголовке ({@link FunctionReturnTypes}). */
+        private volatile FunctionReturnTypes.Target lastFunctionTarget;
+        /** Штатная подсказка последнего наведения — основа перерисовки после расчёта типа функции. */
+        private volatile Object lastHoverBaseInput;
+        private volatile int lastHoverOffset = -1;
+        /** Последний применённый заголовок с типом функции и его основа. UI-поток. */
+        private Object lastFunctionTypeBase;
+        private String lastFunctionTypeHtml;
 
         IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor, boolean suppressPointerHover)
         {
@@ -824,6 +832,16 @@ public final class BslEditorHoverHook implements IStartup
             // Обёртка создаётся при подключении редактора в UI-потоке,
             // но EDT вызывает getHoverInfo2 из фонового TextViewerHoverManager.
             this.platformAvailabilityColor = PlatformWordAvailability.recentColor();
+            // Слабая ссылка: слушатель не держит обёртку закрытого редактора.
+            java.lang.ref.WeakReference<IrBslTextHoverWrapper> self = new java.lang.ref.WeakReference<>(this);
+            FunctionReturnTypes.addListener(() ->
+            {
+                IrBslTextHoverWrapper wrapper = self.get();
+                if (wrapper == null)
+                    return false;
+                wrapper.refreshFunctionType();
+                return true;
+            });
         }
 
         @Override
@@ -886,6 +904,9 @@ public final class BslEditorHoverHook implements IStartup
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
             lastQueryHover = null;
+            lastFunctionTarget = null;
+            lastHoverBaseInput = null;
+            lastHoverOffset = -1;
             if (hoverRegion != null && annotationTextAt(textViewer, hoverRegion) == null)
             {
                 BslQueryLiteralSupport.QueryHover queryHover =
@@ -910,18 +931,35 @@ public final class BslEditorHoverHook implements IStartup
             else
             {
             }
+            // #region temp timing #877: долгое первое открытие подсказки
+            long t0 = System.nanoTime();
             refreshStaleTypesBeforeHover(textViewer, hoverRegion);
+            long t1 = System.nanoTime();
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
+            long t2 = System.nanoTime();
             if (info == null || hoverRegion == null || editor == null)
+            {
+                functionTypeLog("timing noInfo staleMs=" + (t1 - t0) / 1_000_000L //$NON-NLS-1$
+                    + " edtMs=" + (t2 - t1) / 1_000_000L); //$NON-NLS-1$
                 return info;
+            }
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
             final int offset = hoverRegion.getOffset();
             info = recoverMemberDocumentation(textViewer, offset, info);
+            long t3 = System.nanoTime();
             BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
+            long t4 = System.nanoTime();
             prepareHoverDecorations(textViewer, hoverRegion, info);
+            long t5 = System.nanoTime();
+            functionTypeLog("timing offset=" + offset + " staleMs=" + (t1 - t0) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
+                + " edtMs=" + (t2 - t1) / 1_000_000L + " recoverMs=" + (t3 - t2) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
+                + " propertyMs=" + (t4 - t3) / 1_000_000L + " decorationsMs=" + (t5 - t4) / 1_000_000L); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            functionTypeLog("hover offset=" + offset + " target=" + lastFunctionTarget); //$NON-NLS-1$ //$NON-NLS-2$
+            scheduleFunctionTypeSync(info, offset);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
@@ -1107,6 +1145,160 @@ public final class BslEditorHoverHook implements IStartup
             return null;
         }
 
+        /**
+         * Функция конфигурации под указателем: в UI-потоке её тип становится первым в расчёте
+         * ({@link FunctionReturnTypes#activate}) и подставляется в заголовок открытой подсказки;
+         * после расчёта заголовок обновляет {@link #refreshFunctionType}.
+         */
+        private void scheduleFunctionTypeSync(Object baseInput, int offset)
+        {
+            if (lastFunctionTarget == null)
+                return;
+            lastHoverBaseInput = baseInput;
+            lastHoverOffset = offset;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                if (offset != lastHoverOffset)
+                {
+                    functionTypeLog("sync skip offset=" + offset + " now=" + lastHoverOffset); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                FunctionReturnTypes.activate(lastFunctionTarget);
+                refreshFunctionType();
+            });
+        }
+
+        /** Заголовок открытой подсказки — с текущим типом функции (вместе с дополнением ИР). UI-поток. */
+        private void refreshFunctionType()
+        {
+            Object base = lastHoverBaseInput;
+            if (lastFunctionTarget == null || base == null)
+            {
+                functionTypeLog("refresh skip target=" + lastFunctionTarget + " base=" + (base != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String baseHtml = lastBaseHtml;
+            String irHtml = lastIrHtml;
+            String html = baseHtml != null && irHtml != null
+                ? IrBslHoverHtml.mergeHtml(baseHtml, irHtml) : IrBslHoverHtml.readHtml(base);
+            if (html == null)
+            {
+                functionTypeLog("refresh skip noHtml"); //$NON-NLS-1$
+                return;
+            }
+            String decorated = applyHoverDecorations(html);
+            // Публикации идут по всем модулям; перерисовка без изменений сбивала бы прокрутку.
+            if (base == lastFunctionTypeBase && decorated.equals(lastFunctionTypeHtml))
+            {
+                functionTypeLog("refresh skip unchanged"); //$NON-NLS-1$
+                return;
+            }
+            boolean applied = tryApplyToCurrentControl(decorated);
+            functionTypeLog("refresh applied=" + applied + " ir=" + (irHtml != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " heading=" + headingSnippet(decorated)); //$NON-NLS-1$
+            if (applied)
+            {
+                lastFunctionTypeBase = base;
+                lastFunctionTypeHtml = decorated;
+            }
+        }
+
+        /** Временный лог типа функции в подсказке (#877; снять после подтверждения). */
+        private static void functionTypeLog(String text)
+        {
+            Global.tempLog("hover-function-type", text); //$NON-NLS-1$
+        }
+
+        private static String headingSnippet(String html)
+        {
+            if (html == null)
+                return null;
+            int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
+            if (heading < 0)
+                return "noHeading len=" + html.length() //$NON-NLS-1$
+                    + " start=" + html.substring(0, Math.min(400, html.length())); //$NON-NLS-1$
+            int end = html.indexOf("</div>", heading); //$NON-NLS-1$
+            return html.substring(heading, end > heading ? Math.min(end + 6, heading + 1200)
+                : Math.min(html.length(), heading + 600));
+        }
+
+        /**
+         * Тип в заголовке функции ({@code Функция <Тип> Имя()}) — как в строке списка
+         * автодополнения: итоговый рассчитанный, иначе предварительный с {@code ?} первым
+         * элементом. И в фоновом потоке подсказки: тогда тип есть уже в HTML, который получает
+         * EDT, и её повторные выставления исходного HTML не возвращают штатный тип (лог 09:23).
+         */
+        private String injectFunctionType(String html)
+        {
+            FunctionReturnTypes.Target target = lastFunctionTarget;
+            if (target == null || html == null)
+                return html;
+            return injectFunctionTypeHeading(html, FunctionReturnTypes.state(target));
+        }
+
+        private static String injectFunctionTypeHeading(String html, FunctionReturnTypes.State state)
+        {
+            int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
+            int contentStart = heading >= 0 ? html.indexOf('>', heading) + 1 : 0;
+            int headingEnd = contentStart > 0 ? html.indexOf("</div>", contentStart) : -1; //$NON-NLS-1$
+            int title = contentStart > 0 ? html.indexOf("<span class=\"title\">", contentStart) : -1; //$NON-NLS-1$
+            if (headingEnd < 0 || title < 0 || title > headingEnd)
+            {
+                functionTypeLog("inject skip heading=" + heading + " headingEnd=" + headingEnd //$NON-NLS-1$ //$NON-NLS-2$
+                    + " title=" + title + " snippet=" + headingSnippet(html)); //$NON-NLS-1$ //$NON-NLS-2$
+                return html;
+            }
+            String segment = html.substring(contentStart, title);
+            String keyword = "Функция "; //$NON-NLS-1$
+            int keywordAt = segment.indexOf(keyword);
+            if (keywordAt < 0)
+            {
+                keyword = "Function "; //$NON-NLS-1$
+                keywordAt = segment.indexOf(keyword);
+            }
+            if (keywordAt < 0)
+            {
+                functionTypeLog("inject skip noKeyword segment=" + segment); //$NON-NLS-1$
+                return html;
+            }
+            int typeStart = contentStart + keywordAt + keyword.length();
+            functionTypeLog("inject state=" + state + " edt=" + html.substring(typeStart, title)); //$NON-NLS-1$ //$NON-NLS-2$
+            String type;
+            if (state != null && state.fresh())
+            {
+                if (state.type().isEmpty())
+                    return html;
+                type = escapeHtml(state.type());
+            }
+            else
+            {
+                String inner;
+                if (state != null && !state.type().isEmpty())
+                    inner = escapeHtml(unwrapAngles(state.type()));
+                else
+                {
+                    // Штатное «&lt;<a …>Строка</a>&gt;*»: внутренность с её ссылками, без скобок.
+                    String edtType = html.substring(typeStart, title).trim();
+                    int close = edtType.lastIndexOf("&gt;"); //$NON-NLS-1$
+                    inner = edtType.startsWith("&lt;") && close > 4 //$NON-NLS-1$
+                        ? edtType.substring(4, close).trim() : edtType;
+                }
+                type = inner.isEmpty()
+                    ? "&lt;" + FunctionReturnTypes.UNKNOWN + "&gt;" //$NON-NLS-1$ //$NON-NLS-2$
+                    : "&lt;" + FunctionReturnTypes.UNKNOWN + ", " + inner + "&gt;"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            return html.substring(0, typeStart) + type + " " + html.substring(title); //$NON-NLS-1$
+        }
+
+        private static String unwrapAngles(String type)
+        {
+            return type.length() >= 2 && type.charAt(0) == '<' && type.charAt(type.length() - 1) == '>'
+                ? type.substring(1, type.length() - 1).trim() : type;
+        }
+
         private Object maybeDecorateHoverInfo(Object info)
         {
             String html = IrBslHoverHtml.readHtml(info);
@@ -1118,7 +1310,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             if (html == null)
                 return html;
-            String result = injectDefinedTypeLinks(html);
+            String result = injectDefinedTypeLinks(injectFunctionType(html));
             if (lastDirective != null && !lastDirective.isBlank())
                 result = IrBslHoverHtml.injectDirectiveIntoHtml(result, lastDirective);
             if (lastCreationSite)
@@ -1204,6 +1396,7 @@ public final class BslEditorHoverHook implements IStartup
         private String resolveMethodLink(IRegion region)
         {
             lastMethodName = null;
+            lastFunctionTarget = null;
             if (!(editor.getDocument() instanceof IXtextDocument document))
                 return null;
             return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
@@ -1238,6 +1431,8 @@ public final class BslEditorHoverHook implements IStartup
                 for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : entries)
                 {
                     EObject feature = entry.getFeature();
+                    if (lastFunctionTarget == null)
+                        lastFunctionTarget = FunctionReturnTypes.targetOf(feature, 0);
                     org.eclipse.emf.common.util.URI sourceUri =
                         feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod contextMethod
                             ? contextMethod.getSourceUri()

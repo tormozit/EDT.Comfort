@@ -165,6 +165,12 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
             ComfortSettings.DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS,
+            ComfortSettings.DEFAULT_COLLAPSE_ASSIST_PARAMS);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_ASSIST_SIDE_HINT_DELAY,
+            ComfortSettings.DEFAULT_ASSIST_SIDE_HINT_DELAY);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_COMPILE_CONTEXT_STATUS_WIDTH,
             ComfortSettings.DEFAULT_COMPILE_CONTEXT_STATUS_WIDTH);
         settings.getPreferenceStore().setDefault(

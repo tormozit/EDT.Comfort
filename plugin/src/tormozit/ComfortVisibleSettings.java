@@ -63,6 +63,10 @@ final class ComfortVisibleSettings
             "Автооткрытие: Задержка (мс)", Kind.TEXT), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED, //$NON-NLS-1$
             "Предложение Напарника наверху списка автодополнения", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Редактор кода", ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS, //$NON-NLS-1$
+            "Сворачивать параметры в списке автодополнения", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Редактор кода", ComfortSettings.PREF_ASSIST_SIDE_HINT_DELAY, //$NON-NLS-1$
+            "Задержка боковой подсказки списка (мс)", Kind.TEXT), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED, //$NON-NLS-1$
             "Подсвечивать серверные вызовы", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR, //$NON-NLS-1$

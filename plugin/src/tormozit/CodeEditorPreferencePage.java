@@ -57,6 +57,35 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
             + "Нужны флажок «Улучшать списки» и включённое завершение кода в «Параметры → 1С:Напарник».", //$NON-NLS-1$
             parent);
 
+        BooleanFieldEditor collapseParamsField = new BooleanFieldEditor(
+            ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS),
+            parent);
+        addField(collapseParamsField);
+        setFieldTooltip(collapseParamsField,
+            "В подписи метода в списке автодополнения показывать вместо имён параметров их число: "
+            + "«Метод(3)» вместо «Метод(Параметр1, Параметр2, Параметр3)».", //$NON-NLS-1$
+            parent);
+
+        IntegerFieldEditor sideHintDelayField = new IntegerFieldEditor(
+            ComfortSettings.PREF_ASSIST_SIDE_HINT_DELAY,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_ASSIST_SIDE_HINT_DELAY),
+            parent,
+            5);
+        sideHintDelayField.setValidRange(0, ComfortSettings.MAX_ASSIST_SIDE_HINT_DELAY);
+        addField(sideHintDelayField);
+        String sideHintDelayTooltip =
+            "Пауза после смены строки списка автодополнения, после которой обновляется его боковая "
+            + "подсказка. Штатно в EDT — 500 мс."; //$NON-NLS-1$
+        setFieldTooltip(sideHintDelayField, sideHintDelayTooltip, parent);
+        Text sideHintDelayText = sideHintDelayField.getTextControl(parent);
+        sideHintDelayText.setToolTipText(TooltipText.wrap(sideHintDelayText, sideHintDelayTooltip));
+        GridData sideHintDelayTextData = new GridData();
+        sideHintDelayTextData.widthHint = 40;
+        sideHintDelayTextData.grabExcessHorizontalSpace = false;
+        sideHintDelayTextData.horizontalAlignment = SWT.LEFT;
+        sideHintDelayText.setLayoutData(sideHintDelayTextData);
+
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
             ComfortVisibleSettings.label(ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED),

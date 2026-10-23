@@ -305,6 +305,20 @@ public final class ComfortSettings
     /** По умолчанию выключено: каждое открытие списка — запрос к серверу Напарника. */
     public static final boolean DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED = false;
 
+    /** Ключ: в подписи метода в списке автодополнения вместо имён параметров — их число (issue #877). */
+    public static final String PREF_COLLAPSE_ASSIST_PARAMS = "comfort.assist.collapseParams"; //$NON-NLS-1$
+
+    public static final boolean DEFAULT_COLLAPSE_ASSIST_PARAMS = true;
+
+    /** Ключ: пауза перед обновлением боковой подсказки списка автодополнения при смене строки, мс. */
+    public static final String PREF_ASSIST_SIDE_HINT_DELAY = "comfort.assist.sideHintDelay"; //$NON-NLS-1$
+
+    /** Пауза боковой подсказки по умолчанию — 300 мс (штатно в EDT 500 мс). */
+    public static final int DEFAULT_ASSIST_SIDE_HINT_DELAY = 300;
+
+    /** Наибольшая допустимая пауза боковой подсказки, мс. */
+    public static final int MAX_ASSIST_SIDE_HINT_DELAY = 1000;
+
     // ---- Compile context status field ----
 
     /** Ключ: ширина индикатора условий компиляции в строке состояния, в символах; 0 — не показывать. */
@@ -1299,6 +1313,14 @@ public final class ComfortSettings
         return settings.preferenceStore.getBoolean(PREF_NAPARNIK_ASSIST_ROW_ENABLED);
     }
 
+    public static boolean isCollapseAssistParamsEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_COLLAPSE_ASSIST_PARAMS;
+        return settings.preferenceStore.getBoolean(PREF_COLLAPSE_ASSIST_PARAMS);
+    }
+
     // ---- Auto-collapsed regions accessors ----
 
     /** Имена областей для автосворачивания (в нижнем регистре, без пустых). */
@@ -1584,6 +1606,16 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES;
         return settings.preferenceStore.getInt(PREF_BRACKET_CONTENT_HINT_MIN_LINES);
+    }
+
+    /** Пауза перед обновлением боковой подсказки списка автодополнения при смене строки, мс. */
+    public static int getAssistSideHintDelay()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_ASSIST_SIDE_HINT_DELAY;
+        return Math.min(MAX_ASSIST_SIDE_HINT_DELAY,
+            Math.max(0, settings.preferenceStore.getInt(PREF_ASSIST_SIDE_HINT_DELAY)));
     }
 
     /** Ширина индикатора условий компиляции в строке состояния, в символах; 0 — индикатор выключен. */

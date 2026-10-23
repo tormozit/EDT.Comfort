@@ -379,6 +379,7 @@ this.completionListener = new CompletionListenerAdapter() {
             {
                 ContentAssistDebug.resetValidateStats();
                 SmartAssistFilterState.reset();
+                ContentAssistPopupSync.applySideHintDelay(assistant);
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
                 IDocument startDoc = viewer != null ? viewer.getDocument() : null;
                 ContentAssistPopupSync.syncEqualsSpacePad(assistant, startDoc, caret);

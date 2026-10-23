@@ -69,6 +69,12 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
             ComfortSettings.DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED);
+        store.setDefault(
+            ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS,
+            ComfortSettings.DEFAULT_COLLAPSE_ASSIST_PARAMS);
+        store.setDefault(
+            ComfortSettings.PREF_ASSIST_SIDE_HINT_DELAY,
+            ComfortSettings.DEFAULT_ASSIST_SIDE_HINT_DELAY);
         ComfortSettings.applyIndentGuideDefaults(store);
         store.setDefault(
             ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,

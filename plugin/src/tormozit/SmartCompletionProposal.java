@@ -93,6 +93,13 @@ public class SmartCompletionProposal implements
     /** Каретка внутри встроенного шаблона вставки. */
     private Point templateSelection;
 
+    /** Функция конфигурации строки ({@link FunctionReturnTypes}); {@code null} — не функция. */
+    private FunctionReturnTypes.Target functionTarget;
+    private boolean functionTargetResolved;
+    /** Переменная строки ({@link FunctionReturnTypes#variableTargetOf}); {@code null} — не переменная. */
+    private FunctionReturnTypes.VariableTarget variableTarget;
+    private boolean variableTargetResolved;
+
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this(delegate, -1);
@@ -142,8 +149,19 @@ public class SmartCompletionProposal implements
             ? overlapDisplay
             : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
         String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
+        // Подпись совпадения с ИР несёт тип ИР — его досчитывает активация ИР.
+        if (overlapDisplay == null)
+            FunctionReturnTypes.prefetchEditorModule(functionTarget());
+        String collapsed = collapseParams(overlapDisplay != null
+            ? localized : decorateVariableType(decorateFunctionType(localized, functionTarget()),
+                variableTarget()));
         StyledString result;
-        if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
+        if (collapsed != localized)
+        {
+            localized = collapsed;
+            result = buildIrStyledDisplayString(collapsed);
+        }
+        else if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
             result = buildIrStyledDisplayString(localized);
         else if (localized != null && localized.equals(sourceDisplay)
             && !(delegate instanceof SmartCompletionProposal)
@@ -162,6 +180,170 @@ public class SmartCompletionProposal implements
         return result;
 
 
+    }
+
+    /**
+     * {@code Имя(А, Б, В) : <Тип> ~ Родитель} → {@code Имя(3) : <Тип> ~ Родитель} при флажке
+     * «Сворачивать параметры в списке автодополнения» (issue #877). Только для показа: разбор
+     * сигнатуры идёт по исходной подписи delegate. Без изменений — тот же экземпляр строки.
+     */
+    static String collapseParams(String display)
+    {
+        if (display == null || !ComfortSettings.isCollapseAssistParamsEnabled())
+            return display;
+        int open = signatureOpen(display);
+        int close = signatureClose(display, open);
+        if (close < 0)
+            return display;
+        String inside = display.substring(open + 1, close).trim();
+        if (inside.isEmpty() || inside.chars().allMatch(Character::isDigit))
+            return display;
+        int depth = 0;
+        int count = 1;
+        for (int i = open + 1; i < close; i++)
+        {
+            char c = display.charAt(i);
+            if (c == '(' || c == '<' || c == '[')
+                depth++;
+            else if (c == ')' || c == '>' || c == ']')
+                depth--;
+            else if (c == ',' && depth == 0)
+                count++;
+        }
+        return display.substring(0, open + 1) + count + display.substring(close);
+    }
+
+    /** {@code (} списка параметров в подписи {@code Имя(…) : <Тип> ~ Родитель}; {@code -1} — нет. */
+    private static int signatureOpen(String display)
+    {
+        if (display == null)
+            return -1;
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        int headEnd = sep >= 0 ? sep : display.length();
+        int open = display.indexOf('(');
+        if (open <= 0 || open >= headEnd)
+            return -1;
+        // «Имя : <Строка(10)>» — скобка в типе свойства, а не параметры.
+        int colon = display.indexOf(':');
+        if (colon >= 0 && colon < open)
+            return -1;
+        // «Имя - описание (…)» — скобка в пояснении шаблона.
+        int dash = display.indexOf(" - "); //$NON-NLS-1$
+        if (dash >= 0 && dash < open)
+            return -1;
+        return open;
+    }
+
+    /** Парная {@code )} к {@link #signatureOpen}; {@code -1} — нет. */
+    private static int signatureClose(String display, int open)
+    {
+        if (open < 0)
+            return -1;
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        int headEnd = sep >= 0 ? sep : display.length();
+        int depth = 0;
+        for (int i = open + 1; i < headEnd; i++)
+        {
+            char c = display.charAt(i);
+            if (c == '(' || c == '<' || c == '[')
+                depth++;
+            else if (c == ')' && depth == 0)
+                return i;
+            else if (c == ')' || c == '>' || c == ']')
+                depth--;
+        }
+        return -1;
+    }
+
+    private FunctionReturnTypes.Target functionTarget()
+    {
+        if (!functionTargetResolved)
+        {
+            functionTargetResolved = true;
+            functionTarget = delegate instanceof ConfigurableCompletionProposal configurable
+                ? FunctionReturnTypes.targetOf(Global.getField(configurable, "additionalProposalInfo"), 0) //$NON-NLS-1$
+                : null;
+        }
+        return functionTarget;
+    }
+
+    private FunctionReturnTypes.VariableTarget variableTarget()
+    {
+        if (!variableTargetResolved)
+        {
+            variableTargetResolved = true;
+            variableTarget = delegate instanceof ConfigurableCompletionProposal configurable
+                ? FunctionReturnTypes.variableTargetOf(Global.getField(configurable, "additionalProposalInfo")) //$NON-NLS-1$
+                : null;
+        }
+        return variableTarget;
+    }
+
+    /**
+     * Подпись строки переменной с её типом в точке, где открыт список: {@code имя : <Тип>};
+     * до расчёта — {@code : <?>}, по прежнему состоянию модуля — {@code : <?, Тип>}. Тип, который
+     * не удалось определить, не пишется.
+     */
+    private static String decorateVariableType(String display, FunctionReturnTypes.VariableTarget target)
+    {
+        if (target == null || display == null || display.isEmpty())
+            return display;
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        int nameEnd = sep >= 0 ? sep : display.length();
+        if (display.substring(0, nameEnd).contains(" : ")) //$NON-NLS-1$
+            return display;
+        FunctionReturnTypes.State state = FunctionReturnTypes.variableState(target);
+        String type;
+        if (state != null && state.fresh())
+        {
+            if (state.type().isEmpty())
+                return display;
+            type = state.type();
+        }
+        else
+        {
+            String preliminary = state != null ? state.type() : ""; //$NON-NLS-1$
+            if (preliminary.length() >= 2 && preliminary.charAt(0) == '<'
+                && preliminary.charAt(preliminary.length() - 1) == '>')
+                preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
+            type = preliminary.isEmpty()
+                ? "<" + FunctionReturnTypes.UNKNOWN + ">" //$NON-NLS-1$ //$NON-NLS-2$
+                : "<" + FunctionReturnTypes.UNKNOWN + ", " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        return display.substring(0, nameEnd) + " : " + type + display.substring(nameEnd); //$NON-NLS-1$
+    }
+
+    /**
+     * Подпись строки с типом функции ({@link FunctionReturnTypes}). Итоговый — только тип,
+     * рассчитанный по текущему состоянию модуля; если рассчитать не удалось, остаётся тип EDT без
+     * {@code ?}. Иначе тип предварительный, с {@code ?} первым элементом: рассчитанный по прежнему
+     * состоянию модуля, а без него — тип EDT из «Возвращаемое значение» ({@code : <?, Строка>});
+     * нет ни того, ни другого — {@code : <?>}.
+     */
+    private static String decorateFunctionType(String display, FunctionReturnTypes.Target target)
+    {
+        if (target == null || display == null)
+            return display;
+        int close = signatureClose(display, signatureOpen(display));
+        if (close < 0)
+            return display;
+        int sep = display.indexOf(" ~ ", close); //$NON-NLS-1$
+        int typeEnd = sep >= 0 ? sep : display.length();
+        String rest = display.substring(close + 1, typeEnd).trim();
+        String edtType = rest.startsWith(":") ? rest.substring(1).trim() : ""; //$NON-NLS-1$ //$NON-NLS-2$
+        String head = display.substring(0, close + 1);
+        String tail = display.substring(typeEnd);
+        FunctionReturnTypes.State state = FunctionReturnTypes.state(target);
+        if (state != null && state.fresh())
+            return state.type().isEmpty() ? display : head + " : " + state.type() + tail; //$NON-NLS-1$
+        String preliminary = state != null && !state.type().isEmpty() ? state.type() : edtType;
+        if (preliminary.length() >= 2 && preliminary.charAt(0) == '<'
+            && preliminary.charAt(preliminary.length() - 1) == '>')
+            preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
+        String type = preliminary.isEmpty()
+            ? "<" + FunctionReturnTypes.UNKNOWN + ">" //$NON-NLS-1$ //$NON-NLS-2$
+            : "<" + FunctionReturnTypes.UNKNOWN + ", " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return head + " : " + type + tail; //$NON-NLS-1$
     }
 
     /** Владелец после {@code ~} — как у штатного assist EDT ({@link StyledString#QUALIFIER_STYLER}). */
@@ -448,6 +630,7 @@ public class SmartCompletionProposal implements
         {
             ensureLiteralOverlapBrowserIfNeeded(viewer);
             scheduleEdtRowActivation(null);
+            FunctionReturnTypes.activate(functionTarget());
         }
         if (!(delegate instanceof SmartCompletionProposal)
             && delegate instanceof ICompletionProposalExtension2 ext2)

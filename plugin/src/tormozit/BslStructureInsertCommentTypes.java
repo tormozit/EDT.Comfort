@@ -527,8 +527,16 @@ public final class BslStructureInsertCommentTypes
                 }
                 whole = false;
             }
+            // #region agent log second-pass
+            long diagStart = System.currentTimeMillis();
+            String diagModule = BslDocCommentComputedTypes.diagModuleName(module);
+            // #endregion
             if (whole)
             {
+                // #region agent log second-pass
+                Global.tempLog("see-second-pass", "assist.whole.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                    + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                // #endregion
                 onRecompute.accept("Пересчёт типов модуля…"); //$NON-NLS-1$
                 ComfortTreeTypeSystem.SecondPassProgress progress = new ComfortTreeTypeSystem.SecondPassProgress(module, 0);
                 try
@@ -544,6 +552,10 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
+                    // #region agent log second-pass
+                    Global.tempLog("see-second-pass", "assist.whole.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
+                    // #endregion
                 }
                 ComfortTreeTypeSystem.StaleTypes.clear(resource);
                 BslDocCommentComputedTypes.bumpTypesGeneration();
@@ -567,6 +579,12 @@ public final class BslStructureInsertCommentTypes
             List<Method> dependencies = new ArrayList<>();
             collectStaleDependencies(module, method, names,
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), dependencies);
+            // #region agent log second-pass
+            Global.tempLog("see-second-pass", "assist.method module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + method.getName() + " staleNames=" + names.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " version=" + version + " dependencies=" + dependencies.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
             if (!dependencies.isEmpty())
             {
                 onRecompute.accept("Пересчёт типов: " + method.getName() + "…"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -593,6 +611,11 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
+                    // #region agent log second-pass
+                    Global.tempLog("see-second-pass", "assist.method.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                        + " method=" + method.getName() //$NON-NLS-1$
+                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
+                    // #endregion
                 }
                 if (!done)
                     // Подставить метод не удалось — пометку не снимаем.
@@ -1302,7 +1325,7 @@ public final class BslStructureInsertCommentTypes
         return result;
     }
 
-    private static BslDocumentationComment parseMethodComment(Method method, Module module)
+    static BslDocumentationComment parseMethodComment(Method method, Module module)
     {
         Resource resource = module.eResource();
         IResourceServiceProvider rsp = resource == null || resource.getURI() == null ? null
@@ -2933,6 +2956,23 @@ public final class BslStructureInsertCommentTypes
             }
         }
 
+        /** Первые имена набора — без простыни на сотни функций. */
+        private static String diagNames(java.util.Set<String> names)
+        {
+            StringBuilder text = new StringBuilder();
+            int shown = 0;
+            for (String name : names)
+            {
+                if (shown++ == 15)
+                {
+                    text.append(" …+").append(names.size() - 15); //$NON-NLS-1$
+                    break;
+                }
+                text.append(shown == 1 ? "" : ",").append(name); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return text.toString();
+        }
+
         private static String diagReparseMethodName(Module module)
         {
             try
@@ -3027,11 +3067,20 @@ public final class BslStructureInsertCommentTypes
             }
             if (changed.isEmpty())
                 return;
+            // #region agent log second-pass
+            long diagStart = System.currentTimeMillis();
+            String diagModule = BslDocCommentComputedTypes.diagModuleName(module);
+            // #endregion
             if (partial == null)
             {
                 // Полный переразбор: повторный штатный расчёт всего модуля. Готовые состояния тела
                 // он не пересоздаёт (параметр в теле оставался без слияния, лог 18.10: «Структура.»
                 // — 0 членов), поэтому NORMAL сначала сбрасывается.
+                // #region agent log second-pass
+                Global.tempLog("see-second-pass", "build.full.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                    + " changed=" + changed.size() + " names=" + diagNames(changed) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                // #endregion
                 SecondPassProgress progress = new SecondPassProgress(module, 0);
                 try
                 {
@@ -3049,6 +3098,11 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
+                    // #region agent log second-pass
+                    Global.tempLog("see-second-pass", "build.full.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                        + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$
+                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
+                    // #endregion
                 }
                 return;
             }
@@ -3059,16 +3113,36 @@ public final class BslStructureInsertCommentTypes
             // прохода подставляется ссылающийся. Полный расчёт модуля здесь не годится — на модуле
             // БСП это ~20 с на правку.
             List<Method> dependents = BslDocCommentComputedTypes.methodsReferencing(module, changed);
+            // #region agent log second-pass
+            Global.tempLog("see-second-pass", "build.partial.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                + " reparse=" + diagReparseMethodName(module) //$NON-NLS-1$
+                + " changed=" + changed.size() + " dependents=" + dependents.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " referencesMs=" + (System.currentTimeMillis() - diagStart) //$NON-NLS-1$
+                + " names=" + diagNames(changed) //$NON-NLS-1$
+                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            int diagDone = 0;
+            String diagStop = "end"; //$NON-NLS-1$
+            // #endregion
             SecondPassProgress progress = new SecondPassProgress(module, dependents.size());
             try
             {
                 for (Method dependent : dependents)
                 {
                     if (stopSecondPass(cancelIndicator))
+                    {
+                        // #region agent log second-pass
+                        diagStop = "canceled"; //$NON-NLS-1$
+                        // #endregion
                         return;
+                    }
                     // Отмена в «Ходе выполнения»: оставшиеся методы сохраняют прежний слитый тип.
                     if (progress.cancelRequestedByUser())
+                    {
+                        // #region agent log second-pass
+                        diagStop = "userCancel"; //$NON-NLS-1$
+                        // #endregion
                         break;
+                    }
                     progress.step(dependent.getName());
                     Runnable restore;
                     try
@@ -3078,6 +3152,9 @@ public final class BslStructureInsertCommentTypes
                     catch (IllegalStateException ignored)
                     {
                         // Поле разбора недоступно — ссылающиеся методы останутся с прежним типом.
+                        // #region agent log second-pass
+                        diagStop = "noSubstitute"; //$NON-NLS-1$
+                        // #endregion
                         return;
                     }
                     try
@@ -3095,11 +3172,19 @@ public final class BslStructureInsertCommentTypes
                         restore.run();
                     }
                     progress.stepDone();
+                    // #region agent log second-pass
+                    diagDone++;
+                    // #endregion
                 }
             }
             finally
             {
                 progress.finish();
+                // #region agent log second-pass
+                Global.tempLog("see-second-pass", "build.partial.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                    + " done=" + diagDone + "/" + dependents.size() + " stop=" + diagStop //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
+                // #endregion
             }
             ModuleVariableStates.fix(module);
             if (!isCanceled(cancelIndicator))

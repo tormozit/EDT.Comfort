@@ -23,6 +23,8 @@ public final class IrBslHoverHtml
         "com._1c.g5.v8.dt.internal.bsl.ui.browserscommon.BslBrowserInformationControlInput"; //$NON-NLS-1$
     private static final String BSL_ASSIST_BROWSER_INPUT_CLASS =
         "com._1c.g5.v8.dt.bsl.ui.contentassist.BslContentAssistBrowserInput"; //$NON-NLS-1$
+    private static final String BSL_HOVER_CONTROL_CREATOR_CLASS =
+        "com._1c.g5.v8.dt.bsl.ui.hover.BslEObjectHoverProvider$BslHoverControlCreator"; //$NON-NLS-1$
     private static final String BSL_DOC_UTIL_CLASS =
         "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationUtil"; //$NON-NLS-1$
 
@@ -73,8 +75,69 @@ public final class IrBslHoverHtml
         {
             browser.setData(DECORATION_LISTENER_MARK, Boolean.TRUE);
             information.addInputChangeListener(input -> applyHtmlDecoration(information, browser, input));
+            if (hasBslHeightFitListener(browser))
+                information.addInputChangeListener(input -> keepVisibleHeightUntilLoaded(information, browser));
             applyHtmlDecoration(information, browser, information.getInput());
         }
+    }
+
+    /**
+     * Смена строки списка при видимой подсказке: jface после {@code setInput} растягивает окно —
+     * боковая подсказка автодополнения не меньше списка ({@code CompletionProposalPopup}:
+     * {@code setSizeConstraints(50, 10, true, …)}), да и {@code computeSizeHint} для HTML EDT
+     * упирается в максимум. До подгонки по высоте страницы (обработчик EDT на загрузку) видна
+     * неперерисованная чёрная область (#878). Ограничения jface ставит до {@code setInput},
+     * а размер считает после — здесь, между ними, держим текущую высоту на один показ.
+     * Нужную высоту выставит EDT.
+     */
+    private static void keepVisibleHeightUntilLoaded(BrowserInformationControl control, Browser browser)
+    {
+        if (browser.isDisposed())
+            return;
+        org.eclipse.swt.widgets.Shell shell = browser.getShell();
+        if (shell == null || shell.isDisposed() || !shell.isVisible())
+            return;
+        Object constraints = Global.getField(control, "fSizeConstraints"); //$NON-NLS-1$
+        int width = constraints instanceof org.eclipse.swt.graphics.Point point
+            ? point.x : org.eclipse.swt.SWT.DEFAULT;
+        control.setSizeConstraints(width, shell.getSize().y);
+        liftAssistMinimalSizeOnce(control, shell.getDisplay());
+    }
+
+    /**
+     * Снять «не меньше списка» у {@code AdditionalInfoController} на текущий показ, если control —
+     * его боковая подсказка. Флаг возвращается сразу после показа: штатный jface читает его
+     * синхронно в том же {@code internalShowInformationControl}, что вызвал {@code setInput}.
+     */
+    private static boolean liftAssistMinimalSizeOnce(BrowserInformationControl control,
+        org.eclipse.swt.widgets.Display display)
+    {
+        Object controller = ContentAssistPopupSync.resolveAdditionalInfoController(
+            ContentAssistSessionReloader.getActiveAssistant());
+        if (controller == null
+            || Global.invoke(controller, "getCurrentInformationControl2") != control //$NON-NLS-1$
+            || !Boolean.TRUE.equals(Global.getField(controller, "fEnforceAsMinimalSize"))) //$NON-NLS-1$
+            return false;
+        if (!Global.setFieldForce(controller, "fEnforceAsMinimalSize", Boolean.FALSE)) //$NON-NLS-1$
+            return false;
+        display.asyncExec(() -> {
+            if (Boolean.FALSE.equals(Global.getField(controller, "fEnforceAsMinimalSize"))) //$NON-NLS-1$
+                Global.setFieldForce(controller, "fEnforceAsMinimalSize", Boolean.TRUE); //$NON-NLS-1$
+        });
+        return true;
+    }
+
+    /** Обработчик EDT, подгоняющий высоту окна под страницу после загрузки. */
+    private static boolean hasBslHeightFitListener(Browser browser)
+    {
+        Object webBrowser = Global.getField(browser, "webBrowser"); //$NON-NLS-1$
+        Object listeners = Global.getField(webBrowser, "progressListeners"); //$NON-NLS-1$
+        if (listeners instanceof org.eclipse.swt.browser.ProgressListener[] array)
+            for (org.eclipse.swt.browser.ProgressListener listener : array)
+                if (listener != null
+                    && listener.getClass().getName().startsWith(BSL_HOVER_CONTROL_CREATOR_CLASS))
+                    return true;
+        return false;
     }
 
     private static void applyHtmlDecoration(BrowserInformationControl control, Browser browser, Object input)

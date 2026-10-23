@@ -3887,6 +3887,29 @@ ensureFilterPending(popup);
         }
     }
 
+    /**
+     * Пауза боковой подсказки — из {@link ComfortSettings#getAssistSideHintDelay()}. JFace задаёт её
+     * один раз ({@code AdditionalInfoController.fDelay} = {@code OpenStrategy.getPostSelectionDelay()},
+     * 500 мс) и копирует в таймер, который пересоздаётся при каждом открытии списка.
+     */
+    public static void applySideHintDelay(ContentAssistant assistant)
+    {
+        Object controller = resolveAdditionalInfoController(assistant);
+        if (controller == null)
+            return;
+        int delay = ComfortSettings.getAssistSideHintDelay();
+        applyDelayField(controller, delay);
+        Object timer = Global.getField(controller, "fTimer"); //$NON-NLS-1$
+        if (timer != null)
+            applyDelayField(timer, delay);
+    }
+
+    private static void applyDelayField(Object owner, int delay)
+    {
+        if (Global.getField(owner, "fDelay") instanceof Integer current && current != delay) //$NON-NLS-1$
+            Global.setFieldForce(owner, "fDelay", delay); //$NON-NLS-1$
+    }
+
     public static Object resolveAdditionalInfoController(ContentAssistant assistant)
     {
         if (assistant == null)

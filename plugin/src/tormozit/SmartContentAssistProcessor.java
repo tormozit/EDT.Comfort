@@ -2242,14 +2242,14 @@ return result;
 
     /**
      * In-place фильтр уже показанного списка (member-access без stock recompute).
-     * Не трогает кэш; пустой {@code filter} — исходный массив.
+     * Не трогает кэш; пустой {@code filter} сохраняет порядок и оборачивает подписи для показа.
      */
     ICompletionProposal[] filterProposalsInPlace(ICompletionProposal[] raw, String filter)
     {
         if (raw == null || raw.length == 0)
             return EMPTY;
         if (filter == null || filter.isEmpty() || !SmartAssistFilterState.isSmartFilterEnabled())
-            return dropTypedIdentifierGhost(raw);
+            return buildDelegateOrderedList(dropTypedIdentifierGhost(raw));
         return filterAndSort(raw, filter);
     }
 
@@ -2616,6 +2616,19 @@ return;
 
         result = queryParametersOnly(viewer, offset, result);
 
+        // После схлопывания перегрузок и штатного расчёта могут остаться исходные EDT proposal.
+        // Перевод типов в подписи нужен при любом режиме фильтра и порядка ИР.
+        if (ComfortSettings.isReplaceListFiltersEnabled() && result != null)
+        {
+            result = result.clone();
+            for (int i = 0; i < result.length; i++)
+            {
+                if (result[i] != null && !(result[i] instanceof SmartCompletionProposal))
+                {
+                    result[i] = wrapProposal(result[i]);
+                }
+            }
+        }
         result = NaparnikAssistRow.withRow(dropTemplateTypes(result));
         return result;
         }

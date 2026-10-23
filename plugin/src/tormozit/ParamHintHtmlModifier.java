@@ -15,13 +15,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.resources.IFile;
-import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
-import org.eclipse.core.runtime.jobs.ISchedulingRule;
 import org.eclipse.core.runtime.jobs.Job;
-import org.eclipse.emf.ecore.resource.ResourceSet;
-import org.eclipse.ui.IEditorReference;
 import com._1c.g5.v8.dt.bsl.resource.BslResource;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
@@ -41,7 +37,6 @@ import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
-import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.TextUtilities;
@@ -3617,6 +3612,10 @@ public final class ParamHintHtmlModifier
             boolean headingDone = isHeadingAlreadyRewritten(html);
             if (hasMeta || headingDone)
             {
+                DefaultValueDebug.log("browser skip alreadyModified", null, null, //$NON-NLS-1$
+                    "browser=" + DefaultValueDebug.identity(browser) + " hasMeta=" + hasMeta //$NON-NLS-1$ //$NON-NLS-2$
+                        + " headingDone=" + headingDone //$NON-NLS-1$
+                        + " exactIndex=" + browser.getData(CURRENT_PARAM_INDEX_MARK)); //$NON-NLS-1$
                 // showPage уже поставил новый точный индекс, но Browser может ещё
                 // показывать предыдущее размеченное HTML. Его нельзя просто пропустить:
                 // обновляем выбранный параметр непосредственно в этом документе.
@@ -5474,6 +5473,7 @@ public final class ParamHintHtmlModifier
 
     static String modifyContentHtml(String html, HoverContext ctx)
     {
+        DefaultValueDebug.log("content enter", ctx, null, "html=" + html); //$NON-NLS-1$ //$NON-NLS-2$
         if (html == null || html.isEmpty())
             return null;
 
@@ -5517,12 +5517,17 @@ public final class ParamHintHtmlModifier
             {
                 paramName = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
                 Object sourceParameter = ParameterSeeLinks.parameter(ctx, paramName);
+                DefaultValueDebug.log("parameter", ctx, paramName, //$NON-NLS-1$
+                    "pageParameter=" + DefaultValueDebug.identity(paramContent) //$NON-NLS-1$
+                        + " sourceParameter=" + DefaultValueDebug.identity(sourceParameter) //$NON-NLS-1$
+                        + " highlight=" + highlight); //$NON-NLS-1$
                 if (sourceParameter != null)
                 {
                     paramContent = sourceParameter;
                     typeBase = formatParamContentTypesHtml(sourceParameter);
                 }
                 defaultDescription = asString(Global.invoke(paramContent, "getDefaultDescription")); //$NON-NLS-1$
+                DefaultValueDebug.log("edt default", ctx, paramName, "value=" + defaultDescription); //$NON-NLS-1$ //$NON-NLS-2$
                 if (defaultDescription == null || defaultDescription.isBlank())
                     defaultDescription = keptDefaultValueText(ctx, paramName);
                 Object value = Global.invoke(paramContent, "getValue"); //$NON-NLS-1$
@@ -5544,6 +5549,8 @@ public final class ParamHintHtmlModifier
                 if (!virtualParam && stripHtml(typeBase).isEmpty())
                 {
                     ForeignParamTypes.ParamInfo foreign = ForeignParamTypes.info(ctx, paramName);
+                    DefaultValueDebug.log("foreign result", ctx, paramName, //$NON-NLS-1$
+                        "previousDefault=" + defaultDescription + " info=" + foreign); //$NON-NLS-1$ //$NON-NLS-2$
                     if (foreign != null)
                     {
                         // Обе части — из одной модели цели: копия у вызывающего редактора
@@ -5587,6 +5594,9 @@ public final class ParamHintHtmlModifier
                 + (copy ? ", копия" : "") + ") - "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         String suffix = buildMetaSuffix(defaultDescription, description);
+        DefaultValueDebug.log("content resolved", ctx, paramName, //$NON-NLS-1$
+            "current=" + currentParam + " virtual=" + virtualParam //$NON-NLS-1$ //$NON-NLS-2$
+                + " value=" + defaultDescription + " suffix=" + suffix + " types=" + typeBase); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String seeLinks = !virtualParam && paramName != null
             ? ParameterSeeLinks.html(ctx, paramName) : ""; //$NON-NLS-1$
         // Единый вид с подсказкой члена: «<Типы : Конструктор()>».
@@ -5891,7 +5901,12 @@ public final class ParamHintHtmlModifier
          */
         static String defaultValueText(EObject method, String paramName)
         {
+            DefaultValueDebug.log("declaration enter", null, paramName, //$NON-NLS-1$
+                "method=" + DefaultValueDebug.identity(method)); //$NON-NLS-1$
             com._1c.g5.v8.dt.bsl.model.Method source = sourceMethod(method);
+            DefaultValueDebug.log("declaration source", null, paramName, //$NON-NLS-1$
+                "source=" + DefaultValueDebug.identity(source) //$NON-NLS-1$
+                    + " name=" + (source != null ? source.getName() : null)); //$NON-NLS-1$
             if (source == null || paramName == null)
                 return null;
             for (FormalParam param : source.getFormalParams())
@@ -5899,10 +5914,15 @@ public final class ParamHintHtmlModifier
                 if (param == null || !paramName.equalsIgnoreCase(param.getName()))
                     continue;
                 Expression value = param.getDefaultValue();
+                DefaultValueDebug.log("declaration parameter", null, paramName, //$NON-NLS-1$
+                    "parameter=" + DefaultValueDebug.identity(param) //$NON-NLS-1$
+                        + " expression=" + DefaultValueDebug.identity(value)); //$NON-NLS-1$
                 if (value == null)
                     return null;
                 ICompositeNode node = NodeModelUtils.findActualNodeFor(value);
                 String text = node != null ? NodeModelUtils.getTokenText(node) : null;
+                DefaultValueDebug.log("declaration tokens", null, paramName, //$NON-NLS-1$
+                    "node=" + DefaultValueDebug.identity(node) + " text=" + text); //$NON-NLS-1$ //$NON-NLS-2$
                 if (text != null && !text.isBlank())
                     return text.trim();
                 if (value instanceof BooleanLiteral bool)
@@ -5911,8 +5931,12 @@ public final class ParamHintHtmlModifier
                     return "Неопределено"; //$NON-NLS-1$
                 if (value instanceof NullLiteral)
                     return "Null"; //$NON-NLS-1$
+                DefaultValueDebug.log("declaration unsupported expression", null, paramName, //$NON-NLS-1$
+                    "expression=" + DefaultValueDebug.identity(value)); //$NON-NLS-1$
                 return null;
             }
+            DefaultValueDebug.log("declaration parameter missing", null, paramName, //$NON-NLS-1$
+                "source=" + DefaultValueDebug.identity(source)); //$NON-NLS-1$
             return null;
         }
 
@@ -6267,6 +6291,34 @@ public final class ParamHintHtmlModifier
 
     private static final String KEPT_DEFAULTS_MARK = "tormozit.paramHintDefaultValues"; //$NON-NLS-1$
 
+    /** Безусловная временная диагностика потери значения по умолчанию в подсказках. */
+    private static final class DefaultValueDebug
+    {
+        static String identity(Object value)
+        {
+            if (value == null)
+                return "null"; //$NON-NLS-1$
+            String id = value.getClass().getName() + "@" //$NON-NLS-1$
+                + Integer.toHexString(System.identityHashCode(value));
+            if (value instanceof EObject object)
+                id += " proxy=" + object.eIsProxy() + " resource=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (object.eResource() != null ? object.eResource().getURI() : null);
+            return id;
+        }
+
+        static void log(String stage, HoverContext ctx, String paramName, String detail)
+        {
+            String context = ctx == null ? " context=null" //$NON-NLS-1$
+                : " browser=" + identity(ctx.browser) + " pages=" + identity(ctx.pages) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " page=" + ctx.pageIndex + " paramIndex=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$
+                    + " currentArg=" + ctx.currentArgIndex + " invocationFound=" + ctx.invocationFound //$NON-NLS-1$ //$NON-NLS-2$
+                    + " method=" + identity(ctx.method) + " documentationMethod=" + identity(ctx.documentationMethod); //$NON-NLS-1$ //$NON-NLS-2$
+            String line = stage + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + context + " parameter=" + paramName + " " + detail; //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("param-hint-default-values", line.replace("\r", "\\r").replace("\n", "\\n")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        }
+    }
+
     /**
      * Значение по умолчанию из объявления. Сразу после правки модель вызова отстаёт и метод
      * под кареткой не найден — тогда берём значение, запомненное на окне подсказки для этого же
@@ -6281,9 +6333,15 @@ public final class ParamHintHtmlModifier
         KeptDefaults kept = browser != null && browser.getData(KEPT_DEFAULTS_MARK) instanceof KeptDefaults data
             && data.pages() == ctx.pages ? data : null;
         EObject method = ctx.documentationMethod != null ? ctx.documentationMethod : ctx.method;
+        DefaultValueDebug.log("cache lookup", ctx, paramName, //$NON-NLS-1$
+            "samePages=" + (kept != null) + " contains=" + (kept != null && kept.values().containsKey(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                + " cached=" + (kept != null ? kept.values().get(name) : null)); //$NON-NLS-1$
         if (method == null)
             return kept != null ? kept.values().get(name) : null;
         String text = ParameterSeeLinks.defaultValueText(method, paramName);
+        DefaultValueDebug.log("cache store", ctx, paramName, //$NON-NLS-1$
+            "previous=" + (kept != null ? kept.values().get(name) : null) + " value=" + text //$NON-NLS-1$ //$NON-NLS-2$
+                + " canStore=" + (browser != null && ctx.pages != null)); //$NON-NLS-1$
         if (browser != null && ctx.pages != null)
         {
             if (kept == null)
@@ -6341,6 +6399,9 @@ public final class ParamHintHtmlModifier
         }
         if (def == null || def.isBlank())
             def = ParameterSeeLinks.defaultValueText(method, paramName);
+        DefaultValueDebug.log("plain parameter", null, paramName, //$NON-NLS-1$
+            "method=" + DefaultValueDebug.identity(method) + " index=" + paramIndex //$NON-NLS-1$ //$NON-NLS-2$
+                + " value=" + def); //$NON-NLS-1$
         if (desc == null)
             desc = normalizeDescription(
                 BslDocCommentDescriptionFix.recoverParamDescription(method, paramName));
@@ -8188,21 +8249,6 @@ public final class ParamHintHtmlModifier
          */
         private static final Map<String, Map<String, ParamInfo>> RESULTS = new ConcurrentHashMap<>();
         private static final Set<String> PENDING = ConcurrentHashMap.newKeySet();
-        /** Расчёты по одному: модель BSL на общих ресурсах не потокобезопасна. */
-        private static final ISchedulingRule SERIAL = new ISchedulingRule()
-        {
-            @Override
-            public boolean contains(ISchedulingRule rule)
-            {
-                return rule == this;
-            }
-
-            @Override
-            public boolean isConflicting(ISchedulingRule rule)
-            {
-                return rule == this;
-            }
-        };
 
         private ForeignParamTypes()
         {
@@ -8235,17 +8281,15 @@ public final class ParamHintHtmlModifier
                 log("skip linkedBatch uri=" + uri + " method=" + source.getName() + " param=" + paramName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
             }
-            IFile file = fileOf(uri);
+            IFile file = ForeignModuleModel.fileOf(uri);
             if (file == null)
             {
                 log("skip noFile uri=" + uri); //$NON-NLS-1$
                 return null;
             }
             String methodName = source.getName();
-            IXtextDocument document = openDocument(file);
-            String stamp = document instanceof IDocumentExtension4 extension
-                ? "d" + extension.getModificationStamp() //$NON-NLS-1$
-                : "f" + file.getModificationStamp(); //$NON-NLS-1$
+            IXtextDocument document = ForeignModuleModel.openDocument(file);
+            String stamp = ForeignModuleModel.stamp(file, document);
             String key = uri + "#" + stamp + "#" + methodName.toLowerCase(Locale.ROOT); //$NON-NLS-1$ //$NON-NLS-2$
             keepKey(ctx, key);
             Map<String, ParamInfo> ready = RESULTS.get(key);
@@ -8259,7 +8303,8 @@ public final class ParamHintHtmlModifier
             {
                 log("schedule key=" + key + " param=" + paramName //$NON-NLS-1$ //$NON-NLS-2$
                     + " openEditor=" + (document != null)); //$NON-NLS-1$
-                schedule(key, uri, file, methodName, document, ctx.browser, ctx.pages);
+                schedule(key, uri, file, methodName, ForeignModuleModel.snapshot(document), ctx.browser,
+                    ctx.pages);
             }
             else
                 log("pending key=" + key + " param=" + paramName); //$NON-NLS-1$ //$NON-NLS-2$
@@ -8287,38 +8332,8 @@ public final class ParamHintHtmlModifier
                 ? kept.key() : null;
         }
 
-        private static IFile fileOf(URI uri)
-        {
-            if (!uri.isPlatformResource())
-                return null;
-            IFile file = ResourcesPlugin.getWorkspace().getRoot()
-                .getFile(new Path(uri.toPlatformString(true)));
-            return file.exists() ? file : null;
-        }
-
-        /** Документ уже открытого редактора модуля или {@code null}. */
-        private static IXtextDocument openDocument(IFile file)
-        {
-            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
-            {
-                for (IWorkbenchPage page : window.getPages())
-                {
-                    for (IEditorReference reference : page.getEditorReferences())
-                    {
-                        IEditorPart part = reference.getEditor(false);
-                        BslXtextEditor editor = part != null ? GetRef.getActiveBslEditor(part) : null;
-                        if (editor == null || editor.getEditorInput() == null)
-                            continue;
-                        if (file.equals(editor.getEditorInput().getAdapter(IFile.class)))
-                            return editor.getDocument();
-                    }
-                }
-            }
-            return null;
-        }
-
         private static void schedule(String key, URI uri, IFile file, String methodName,
-            IXtextDocument document, Browser browser, List<Object> pages)
+            String text, Browser browser, List<Object> pages)
         {
             Job job = new Job("Комфорт: типы параметров " + methodName) //$NON-NLS-1$
             {
@@ -8326,17 +8341,14 @@ public final class ParamHintHtmlModifier
                 protected IStatus run(IProgressMonitor monitor)
                 {
                     long start = System.nanoTime();
-                    String source = "editor"; //$NON-NLS-1$
+                    String source = null;
                     Map<String, ParamInfo> types = null;
                     try
                     {
-                        if (document != null)
-                            types = document.readOnly(resource -> typesOf(resource, methodName));
-                        if (types == null)
-                        {
-                            source = "full"; //$NON-NLS-1$
-                            types = fromFullComputation(uri, file, methodName);
-                        }
+                        ForeignModuleModel.Read<Map<String, ParamInfo>> read = ForeignModuleModel.read(
+                            uri, file, text, resource -> typesOf(resource, methodName));
+                        types = read.value();
+                        source = read.source();
                     }
                     catch (Throwable error)
                     {
@@ -8356,32 +8368,8 @@ public final class ParamHintHtmlModifier
                 }
             };
             job.setSystem(true);
-            job.setRule(SERIAL);
+            job.setRule(ForeignModuleModel.SERIAL);
             job.schedule();
-        }
-
-        /** Полный расчёт модуля, как у редактора, в новом наборе ресурсов (с диска). */
-        private static Map<String, ParamInfo> fromFullComputation(URI uri, IFile file, String methodName)
-        {
-            IResourceServiceProvider rsp =
-                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
-            if (rsp == null)
-                return null;
-            ResourceSet set = BslOccurrenceContextResolver.newLiveResourceSet(rsp, file.getProject());
-            if (set == null)
-                return null;
-            try
-            {
-                long start = System.nanoTime();
-                XtextResource resource = BslOccurrenceContextResolver.loadLinkedResource(uri, set);
-                log("linked uri=" + uri + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
-                return typesOf(resource, methodName);
-            }
-            finally
-            {
-                set.getResources().clear();
-            }
         }
 
         private static Map<String, ParamInfo> typesOf(Resource resource, String methodName)
