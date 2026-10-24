@@ -28,7 +28,6 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.ProposalElement;
-import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.ParamSet;
@@ -41,18 +40,12 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
  * предварительный, показывается с {@code ?} первым элементом ({@code <?, Строка>}), без него —
  * {@code <?>}.
  *
- * <p>При выборе строки или наведении в фоне строится модель модуля функции
- * ({@link ForeignModuleModel}) — одна на модуль: по ней считаются типы всех его функций, первой —
- * выбранной; рассчитанный тип заменяет предварительный, и показ перерисовывается
- * ({@link #addListener}). Модуль редактора, в котором открыт список, считается сразу при показе
- * списка ({@link #prefetchEditorModule}). Тип итоговый, только пока модуль в том состоянии, по
- * которому он посчитан ({@link #state}). Модуль, открытый в редакторе (в т.ч. активном —
- * согласовано с автором), даёт из родной модели только готовые типы — то же, что читает боковая
- * подсказка EDT, без досчёта ({@link #readyFromNative}); чего готового нет — отдельной моделью из
- * снимка текста (её расчёт ввод не блокирует).
- *
- * <p>Тот же расчёт модуля даёт и типы переменных строк списка — в точке, где открыт список
- * ({@link #variableState}): EDT в строке переменной тип не пишет.
+ * <p>Текущая строка запрашивает свой тип сразу; остальные видимые строки — после двух секунд
+ * бездействия пользователя. Запрос читает тип одного элемента из индекса или готовых состояний
+ * родной модели открытого редактора. Последовательные запросы модуля используют тот же документ
+ * и его модель; новая модель не создаётся, накопленные состояния не сбрасываются.
+ * Результаты сохраняются для состояния текста ({@link #state}) и точки списка
+ * ({@link #variableState}), после получения обновляется показ ({@link #addListener}).
  */
 final class FunctionReturnTypes
 {
@@ -79,22 +72,64 @@ final class FunctionReturnTypes
     {
     }
 
-    /** Тип ({@code <А, Б>}, пустой — не определён) и штамп модуля, по которому посчитан. */
-    private record Computed(String stamp, String type)
+    /**
+     * Тип ({@code <А, Б>}, пустой — не определён) и штамп модуля, по которому получен. Тип из
+     * индекса, прочитанный, пока идёт сборка (она обновит индекс), записывается со штампом
+     * {@link #UNRELIABLE}: с текущим он не совпадает, и до перечитывания после сборки тип
+     * показывается с {@code ?}.
+     *
+     * <p>Общее правило показа расчётных типов (#877): {@code ?} значит «последний известный тип,
+     * сейчас идёт пересчёт, через секунды может смениться» — только пока пересчёт действительно
+     * ждёт или идёт ({@link #state}); закончился — тип итоговый, без {@code ?}.
+     */
+    private record Computed(String stamp, String type, boolean linePreserved)
     {
+        Computed(String stamp, String type)
+        {
+            this(stamp, type, false);
+        }
+    }
+
+    /** Окончание штампа типа из индекса, прочитанного во время сборки (см. {@link Computed}). */
+    private static final String UNRELIABLE = "~"; //$NON-NLS-1$
+
+    private static String stampOf(String stamp, boolean reliable)
+    {
+        return reliable ? stamp : stamp + UNRELIABLE;
+    }
+
+    /** Сборка ждёт или идёт: индекс сборки может быть старым. */
+    private static boolean buildPending()
+    {
+        var jobs = Job.getJobManager();
+        return jobs.find(org.eclipse.core.resources.ResourcesPlugin.FAMILY_AUTO_BUILD).length > 0
+            || jobs.find(org.eclipse.core.resources.ResourcesPlugin.FAMILY_MANUAL_BUILD).length > 0;
     }
 
     /**
-     * Запрос расчёта всех функций модуля в состоянии на момент запроса (снимок текста и штамп).
-     * {@code nativeDocument} — модуль открыт в редакторе: готовые типы берутся из его родной
-     * модели ({@link #readyFromNative}), остальные — отдельной моделью.
+     * Запрос чтения готовых типов модуля, открытого в редакторе {@code nativeDocument}
+     * ({@link #readyFromNative}), в состоянии {@code stamp} на момент запроса.
      */
-    private record Request(URI module, IFile file, String text, String stamp, IXtextDocument nativeDocument)
+    private record Request(URI module, IFile file, String stamp, IXtextDocument nativeDocument,
+        String method, VariableTarget variable, long queuedAt, long contextRevision)
     {
-    }
+        Request(URI module, IFile file, String stamp, IXtextDocument nativeDocument,
+            String method, VariableTarget variable)
+        {
+            this(module, file, stamp, nativeDocument, method, variable, System.nanoTime(),
+                FunctionReturnTypes.contextRevision(module));
+        }
 
-    /** Перерисовка показа по ходу расчёта модуля — не чаще. */
-    private static final long REFRESH_INTERVAL_NS = 300_000_000L;
+        String key()
+        {
+            return variable != null ? variable.key() : module + "#" + method.toLowerCase(Locale.ROOT); //$NON-NLS-1$
+        }
+
+        String state()
+        {
+            return stamp + "@" + (variable != null ? variable.offset() : -1) + "#" + contextRevision; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
 
     private static final Map<String, Computed> RESULTS = new ConcurrentHashMap<>();
 
@@ -103,7 +138,7 @@ final class FunctionReturnTypes
      * модуля {@code module}, строка которой показана для точки {@code offset} (модельное смещение
      * точки, в которой открыт список).
      */
-    record VariableTarget(URI module, String method, String name, int offset)
+    record VariableTarget(URI module, String method, String name, int offset, String fragment)
     {
         String key()
         {
@@ -112,32 +147,50 @@ final class FunctionReturnTypes
     }
 
     /** Тип переменной в точке {@code offset} по состоянию модуля {@code stamp}. */
-    private record VariableComputed(String stamp, int offset, String type)
+    private record VariableComputed(String stamp, int offset, String type, int lineStart, int lineEnd)
     {
+        VariableComputed(String stamp, int offset, String type)
+        {
+            this(stamp, offset, type, -1, -1);
+        }
+
+        boolean matches(String currentStamp, int point)
+        {
+            return stamp.equals(currentStamp)
+                && (lineStart >= 0 ? point >= lineStart && point <= lineEnd : offset == point);
+        }
     }
 
     private static final Map<String, VariableComputed> VARIABLE_RESULTS = new ConcurrentHashMap<>();
     /**
-     * Модуль → точка ({@code метод:смещение}) последней показанной строки переменной: её
-     * переменные считаются в расчёте модуля первыми. Точка входит в состояние модуля
-     * ({@link #stateOf}): другая точка того же текста — новый расчёт.
-     */
-    private static final Map<URI, String> POINTS = new ConcurrentHashMap<>();
-    /**
-     * Предварительные типы — из «Возвращаемое значение» комментария, по разбору модуля без
-     * связывания ({@link #computeComments}): EDT в строке тип часто не пишет вовсе.
+     * Предварительные типы — из «Возвращаемое значение» комментария функций без готового типа,
+     * разбором комментария в родной модели редактора ({@link #readyFromNative}): EDT в строке тип
+     * часто не пишет вовсе.
      */
     private static final Map<String, Computed> COMMENT_TYPES = new ConcurrentHashMap<>();
-    /** Модуль → штамп, для которого его расчёт ждёт в очереди, идёт или уже сделан. */
-    private static final Map<URI, String> MODULE_STAMPS = new ConcurrentHashMap<>();
-    /** То же для разбора комментариев модуля. */
-    private static final Map<URI, String> COMMENT_STAMPS = new ConcurrentHashMap<>();
-    /** Модули, ожидающие разбора комментариев; разбор быстрый и идёт раньше полных расчётов. */
-    private static final java.util.Deque<Request> COMMENT_QUEUE = new java.util.ArrayDeque<>();
+    /** Элемент → состояние, для которого его готовый тип уже запрошен. */
+    private static final Map<String, String> REQUEST_STAMPS = new ConcurrentHashMap<>();
+
+    /**
+     * Готовый тип функции или переменной ({@code offset >= 0}), прочитанный под блокировкой документа
+     * редактора, в котором есть ещё не загруженные ссылки на типы ({@link URI} среди {@code parts},
+     * остальное — имена). Ссылки загружаются после снятия блокировки в своём наборе ресурсов
+     * ({@link #resolvePending}): модель редактора не меняется, ввод не ждёт.
+     */
+    private record Pending(String key, List<Object> parts, String stamp, int offset)
+    {
+    }
+
+    /** Имя типа по адресу ссылки на него (пустое — не загрузилась); адреса платформенных типов неизменны. */
+    private static final Map<URI, String> PROXY_NAMES = new ConcurrentHashMap<>();
 
     /** Запрос типа экспортной функции из индекса сборки для состояния модуля {@code stamp}. */
-    private record IndexRequest(Target target, IFile file, String stamp)
+    private record IndexRequest(Target target, IFile file, String stamp, boolean reliable, long queuedAt)
     {
+        IndexRequest(Target target, IFile file, String stamp, boolean reliable)
+        {
+            this(target, file, stamp, reliable, System.nanoTime());
+        }
     }
 
     /** Экспортные функции, ожидающие чтения индекса; самая быстрая очередь, текущая — в голове. */
@@ -145,47 +198,64 @@ final class FunctionReturnTypes
     /** Функция → штамп модуля, для которого индекс уже запрошен. */
     private static final Map<String, String> INDEX_STAMPS = new ConcurrentHashMap<>();
     /**
-     * Модуль → имя выбранной функции (нижний регистр): в расчёте модуля она считается первой,
-     * в том числе если её выбрали, пока модуль уже считается.
-     */
-    private static final Map<URI, String> PRIORITY = new ConcurrentHashMap<>();
-    /**
-     * Модули, ожидающие расчёта; голова — модуль функции, выбранной последней: он считается
-     * следующим, вне очереди. Под монитором самой очереди.
+     * Элементы, ожидающие чтения готового типа из модели редактора. Текущий элемент —
+     * в голове очереди. Под монитором самой очереди.
      */
     private static final java.util.Deque<Request> QUEUE = new java.util.ArrayDeque<>();
+    /** Текущий элемент имеет приоритет перед обеими очередями фонового чтения. */
+    private static volatile String priorityKey;
     /** Перерисовка показов после новых типов; {@code false} — слушатель больше не нужен. UI-поток. */
     private static final List<BooleanSupplier> LISTENERS = new CopyOnWriteArrayList<>();
 
     /**
-     * Один модуль за запуск: правило {@link ForeignModuleModel#SERIAL} отпускается между
-     * расчётами, и следующим берётся модуль выбранной функции.
+     * Один элемент за запуск. Правило {@link ForeignModuleModel#SERIAL} сохраняет
+     * последовательность чтения общей модели, не удерживая очередь между элементами.
      */
     private static final Job WORKER = new Job("Комфорт: тип функции") //$NON-NLS-1$
     {
         @Override
         protected IStatus run(IProgressMonitor monitor)
         {
-            IndexRequest index;
+            IndexRequest index = null;
             Request request = null;
-            boolean comments = false;
             synchronized (QUEUE)
             {
-                index = INDEX_QUEUE.pollFirst();
-                if (index == null)
+                for (IndexRequest candidate : INDEX_QUEUE)
+                    if (candidate.target().key().equals(priorityKey))
+                    {
+                        index = candidate;
+                        break;
+                    }
+                if (index != null)
+                    INDEX_QUEUE.remove(index);
+                else
                 {
-                    request = COMMENT_QUEUE.pollFirst();
-                    comments = request != null;
-                    if (request == null)
+                    for (Request candidate : QUEUE)
+                        if (candidate.key().equals(priorityKey))
+                        {
+                            request = candidate;
+                            break;
+                        }
+                    if (request != null)
+                        QUEUE.remove(request);
+                }
+                if (index == null && request == null)
+                {
+                    index = INDEX_QUEUE.pollFirst();
+                    if (index == null)
                         request = QUEUE.pollFirst();
                 }
             }
-            try
+            String phase = index != null ? "worker.index" : request != null ? "worker.native" : "worker.empty"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            String key = index != null ? index.target().key() : request != null ? request.key() : ""; //$NON-NLS-1$
+            long queuedAt = index != null ? index.queuedAt() : request != null ? request.queuedAt() : 0;
+            try (TypeLoadTrace.Span trace = TypeLoadTrace.start(phase, key))
             {
+                trace.detail = "queueUs=" + (queuedAt != 0 ? (System.nanoTime() - queuedAt) / 1000L : -1L) //$NON-NLS-1$
+                    + " priority=" + key.equals(priorityKey); //$NON-NLS-1$
+                TypeLoadTrace.begin(trace);
                 if (index != null)
                     computeIndex(index);
-                else if (comments)
-                    computeComments(request);
                 else if (request != null)
                     compute(request);
             }
@@ -194,7 +264,7 @@ final class FunctionReturnTypes
                 boolean more;
                 synchronized (QUEUE)
                 {
-                    more = !QUEUE.isEmpty() || !COMMENT_QUEUE.isEmpty() || !INDEX_QUEUE.isEmpty();
+                    more = !QUEUE.isEmpty() || !INDEX_QUEUE.isEmpty();
                 }
                 if (more)
                     schedule();
@@ -214,12 +284,345 @@ final class FunctionReturnTypes
     {
     }
 
+    /** Временные безусловные замеры. Суммы разных этапов могут пересекаться: этапы вложены. */
+    private static final class TypeLoadTrace
+    {
+        private static final String TOPIC = "assist-type-load"; //$NON-NLS-1$
+        private static final long STARTED = System.nanoTime();
+        private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
+        private static final Map<String, Totals> TOTALS = new ConcurrentHashMap<>();
+        private static final java.lang.management.ThreadMXBean CPU = cpuBean();
+        private static final ThreadLocal<LoggingCost> LOG_COST = ThreadLocal.withInitial(LoggingCost::new);
+
+        private static final class LoggingCost
+        {
+            long wall;
+            long cpu;
+        }
+
+        private static void write(String text)
+        {
+            long wall = System.nanoTime();
+            long cpu = cpuNow();
+            try
+            {
+                Global.tempLog(TOPIC, text);
+            }
+            finally
+            {
+                long endCpu = cpuNow();
+                LoggingCost cost = LOG_COST.get();
+                cost.wall += System.nanoTime() - wall;
+                if (cpu >= 0 && endCpu >= cpu)
+                    cost.cpu += endCpu - cpu;
+            }
+        }
+
+        private static java.lang.management.ThreadMXBean cpuBean()
+        {
+            try
+            {
+                var bean = java.lang.management.ManagementFactory.getThreadMXBean();
+                if (!bean.isCurrentThreadCpuTimeSupported())
+                    return null;
+                if (!bean.isThreadCpuTimeEnabled())
+                    bean.setThreadCpuTimeEnabled(true);
+                return bean;
+            }
+            catch (UnsupportedOperationException | SecurityException error)
+            {
+                return null;
+            }
+        }
+
+        private static long cpuNow()
+        {
+            try
+            {
+                return CPU != null && CPU.isThreadCpuTimeEnabled() ? CPU.getCurrentThreadCpuTime() : -1L;
+            }
+            catch (UnsupportedOperationException | SecurityException error)
+            {
+                return -1L;
+            }
+        }
+
+        static Span start(String phase, String key)
+        {
+            return new Span(phase, key);
+        }
+
+        static void begin(Span span)
+        {
+            write("begin id=" + span.id + " phase=" + span.phase + " key=" + span.key //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " " + span.detail + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+            // Запись начала задания не включается в его время выполнения.
+            span.wall = System.nanoTime();
+            span.cpu = cpuNow();
+            span.loggingWall = LOG_COST.get().wall;
+            span.loggingCpu = LOG_COST.get().cpu;
+        }
+
+        private static final class Totals
+        {
+            final java.util.concurrent.atomic.AtomicLong count = new java.util.concurrent.atomic.AtomicLong();
+            final java.util.concurrent.atomic.AtomicLong wallUs = new java.util.concurrent.atomic.AtomicLong();
+            final java.util.concurrent.atomic.AtomicLong cpuUs = new java.util.concurrent.atomic.AtomicLong();
+            final java.util.concurrent.atomic.AtomicLong cpuSamples = new java.util.concurrent.atomic.AtomicLong();
+            final java.util.concurrent.atomic.AtomicLong maxUs = new java.util.concurrent.atomic.AtomicLong();
+            final java.util.concurrent.atomic.AtomicLong cacheHits = new java.util.concurrent.atomic.AtomicLong();
+        }
+
+        static final class Span implements AutoCloseable
+        {
+            final long id = IDS.incrementAndGet();
+            final String phase;
+            final String key;
+            long wall = System.nanoTime();
+            long cpu = cpuNow();
+            long loggingWall = LOG_COST.get().wall;
+            long loggingCpu = LOG_COST.get().cpu;
+            String detail = ""; //$NON-NLS-1$
+            boolean cacheHit;
+
+            Span(String phase, String key)
+            {
+                this.phase = phase;
+                this.key = key;
+            }
+
+            @Override
+            public void close()
+            {
+                long endWall = System.nanoTime();
+                long endCpu = cpuNow();
+                long logWall = LOG_COST.get().wall - loggingWall;
+                long logCpu = LOG_COST.get().cpu - loggingCpu;
+                long elapsedUs = Math.max(0L, endWall - wall - logWall) / 1000L;
+                long elapsedCpuUs = cpu >= 0 && endCpu >= cpu
+                    ? Math.max(0L, endCpu - cpu - logCpu) / 1000L : -1L;
+                Totals totals = TOTALS.computeIfAbsent(phase, ignored -> new Totals());
+                long count = totals.count.incrementAndGet();
+                long sumWall = totals.wallUs.addAndGet(elapsedUs);
+                if (elapsedCpuUs >= 0)
+                {
+                    totals.cpuUs.addAndGet(elapsedCpuUs);
+                    totals.cpuSamples.incrementAndGet();
+                }
+                long max = totals.maxUs.accumulateAndGet(elapsedUs, Math::max);
+                if (cacheHit)
+                    totals.cacheHits.incrementAndGet();
+                write("end id=" + id + " phase=" + phase + " key=" + key //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " wallUs=" + elapsedUs + " cpuUs=" + elapsedCpuUs + " cacheHit=" + cacheHit //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " traceLogUs=" + logWall / 1000L //$NON-NLS-1$
+                    + " phaseCount=" + count + " phaseWallUs=" + sumWall + " phaseCpuUs=" + totals.cpuUs.get() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " phaseCpuSamples=" + totals.cpuSamples.get() + " phaseMaxUs=" + max //$NON-NLS-1$ //$NON-NLS-2$
+                    + " phaseCacheHits=" + totals.cacheHits.get() + " windowMs=" + (endWall - STARTED) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
+                    + " " + detail + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /** Перерисовка строки не запускает чтение типов: запросами управляет активный список. */
+    static void rowShown(SmartCompletionProposal proposal)
+    {
+        if (Display.getCurrent() == null)
+            return;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        Object popup = assistant != null ? ContentAssistPopupSync.getPopupObject(assistant) : null;
+        org.eclipse.swt.widgets.Table table = ContentAssistPopupSync.getProposalTable(popup);
+        if (table == null || table.isDisposed())
+            return;
+        if (table.getData(TypeDemandSession.KEY) == null)
+            new TypeDemandSession(assistant, table);
+        List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+            ContentAssistPopupSync.visibleProposals(assistant);
+        int selected = table.getSelectionIndex();
+        if (rows != null && selected >= 0 && selected < rows.size() && rows.get(selected) == proposal)
+            proposal.requestRowTypes(true);
+        else if (table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
+            session.ensureTimer();
+    }
+
+    /** Текущая строка — сразу; остальные фактически видимые строки — через 2 с без ввода. */
+    private static final class TypeDemandSession
+    {
+        static final String KEY = "comfort.typeDemand"; //$NON-NLS-1$
+        private static final int IDLE_MS = 2000;
+        private static final int[] INPUT_EVENTS = {
+            org.eclipse.swt.SWT.KeyDown, org.eclipse.swt.SWT.MouseDown, org.eclipse.swt.SWT.MouseMove,
+            org.eclipse.swt.SWT.MouseWheel, org.eclipse.swt.SWT.Selection, org.eclipse.swt.SWT.Modify };
+
+        private final ContentAssistant assistant;
+        private final org.eclipse.swt.widgets.Table table;
+        private final Display display;
+        private final Runnable timer = this::requestVisible;
+        private final org.eclipse.swt.widgets.Listener input = event -> postpone();
+        private final org.eclipse.swt.widgets.Listener closing = event -> close();
+        private boolean closed;
+        private boolean timerScheduled;
+        private long idleAt;
+
+        TypeDemandSession(ContentAssistant assistant, org.eclipse.swt.widgets.Table table)
+        {
+            this.assistant = assistant;
+            this.table = table;
+            display = table.getDisplay();
+            table.setData(KEY, this);
+            for (int event : INPUT_EVENTS)
+                display.addFilter(event, input);
+            table.addListener(org.eclipse.swt.SWT.Dispose, closing);
+            table.getShell().addListener(org.eclipse.swt.SWT.Hide, closing);
+            postpone();
+        }
+
+        private void postpone()
+        {
+            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.defer", "popup@" + System.identityHashCode(assistant)))
+            {
+                if (closed)
+                    return;
+                discardBackgroundRequests();
+                display.timerExec(-1, timer);
+                timerScheduled = false;
+                idleAt = System.nanoTime() + IDLE_MS * 1_000_000L;
+                ensureTimer();
+            }
+        }
+
+        /** Новый ввод отменяет ещё не начатые запросы остальных строк, сохраняя их готовый кэш. */
+        private static void discardBackgroundRequests()
+        {
+            synchronized (QUEUE)
+            {
+                var requests = QUEUE.iterator();
+                while (requests.hasNext())
+                {
+                    Request request = requests.next();
+                    if (!request.key().equals(priorityKey))
+                    {
+                        requests.remove();
+                        REQUEST_STAMPS.remove(request.key(), request.state());
+                    }
+                }
+                var indexes = INDEX_QUEUE.iterator();
+                while (indexes.hasNext())
+                {
+                    IndexRequest request = indexes.next();
+                    if (!request.target().key().equals(priorityKey))
+                    {
+                        indexes.remove();
+                        INDEX_STAMPS.remove(request.target().key(), stampOf(request.stamp(), request.reliable()));
+                    }
+                }
+            }
+        }
+
+        private void ensureTimer()
+        {
+            if (closed || timerScheduled)
+                return;
+            long remaining = idleAt - System.nanoTime();
+            timerScheduled = true;
+            display.timerExec((int)Math.max(1L, (remaining + 999_999L) / 1_000_000L), timer);
+        }
+
+        private void requestVisible()
+        {
+            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.visible", "popup@" + System.identityHashCode(assistant)))
+            {
+                timerScheduled = false;
+                if (closed || table.isDisposed() || !ContentAssistPopupSync.isPopupVisible(assistant))
+                {
+                    close();
+                    return;
+                }
+                List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+                    ContentAssistPopupSync.visibleProposals(assistant);
+                if (rows == null)
+                    return;
+                var area = table.getClientArea();
+                int requested = 0;
+                for (int i = table.getTopIndex(); i < table.getItemCount() && i < rows.size(); i++)
+                {
+                    var bounds = table.getItem(i).getBounds();
+                    if (bounds.y >= area.y + area.height)
+                        break;
+                    if (bounds.y + bounds.height <= area.y || i == table.getSelectionIndex())
+                        continue;
+                    if (rows.get(i) instanceof SmartCompletionProposal proposal)
+                    {
+                        proposal.requestRowTypes(false);
+                        requested++;
+                    }
+                }
+                trace.detail = "rows=" + requested + " idleMs=" + IDLE_MS; //$NON-NLS-1$ //$NON-NLS-2$
+                log("visible.requests rows=" + requested + " idleMs=" + IDLE_MS); //$NON-NLS-1$ //$NON-NLS-2$
+                traceVisibleRows("idle"); //$NON-NLS-1$
+            }
+        }
+
+        private void traceVisibleRows(String phase)
+        {
+            if (table.isDisposed())
+                return;
+            List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+                ContentAssistPopupSync.visibleProposals(assistant);
+            var area = table.getClientArea();
+            for (int i = table.getTopIndex(); i < table.getItemCount(); i++)
+            {
+                var item = table.getItem(i);
+                var bounds = item.getBounds();
+                if (bounds.y >= area.y + area.height)
+                    break;
+                Object proposal = rows != null && i < rows.size() ? rows.get(i) : null;
+                Global.tempLog("assist-type-display", "table phase=" + phase + " index=" + i //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " proposal=" + System.identityHashCode(proposal) + " text=" + item.getText()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private void close()
+        {
+            if (closed)
+                return;
+            closed = true;
+            discardBackgroundRequests();
+            display.timerExec(-1, timer);
+            for (int event : INPUT_EVENTS)
+                display.removeFilter(event, input);
+            if (!table.isDisposed())
+            {
+                table.setData(KEY, null);
+                table.removeListener(org.eclipse.swt.SWT.Dispose, closing);
+                if (!table.getShell().isDisposed())
+                    table.getShell().removeListener(org.eclipse.swt.SWT.Hide, closing);
+            }
+        }
+    }
+
     /**
      * Функция конфигурации объекта строки EDT или элемента под указателем: метод модуля, его
      * экспортный образ, {@code ProposalElement} или {@code ParamSet} с ними; иначе {@code null}.
      * Прокси не разрешаются (как {@code edtDocumentationObjectProblem}).
      */
     static Target targetOf(Object info, int depth)
+    {
+        try
+        {
+            return availableTargetOf(info, depth);
+        }
+        catch (IllegalStateException error)
+        {
+            // BM-объект предложения мог быть удалён после получения списка.
+            if (!"Object is removed".equals(error.getMessage())) //$NON-NLS-1$
+                throw error;
+            Global.tempLogException("assist-removed-object", "functionTarget infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (info == null ? null : info.getClass().getName()) + " depth=" + depth, error); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static Target availableTargetOf(Object info, int depth)
     {
         if (depth > 3)
             return null;
@@ -252,33 +655,162 @@ final class FunctionReturnTypes
         }
         if (info instanceof BslContextDefMethod exported && !exported.eIsProxy()
             && exported.isRetVal() && exported.getSourceUri() != null && exported.getName() != null)
-            return new Target(exported.getSourceUri().trimFragment(), exported.getName(), exported);
+            return new Target(exported.getSourceUri().trimFragment(), exported.getName(),
+                exportedLookup(exported.getName(), exported.getSourceUri(), exported.environments()));
         return null;
     }
 
-    /**
-     * Запрос к индексу сборки для экспортной функции своего модуля: строка EDT несёт метод модуля,
-     * а {@code ExportMethodTypeProvider.getMethodType} принимает экспортный образ. Ключ индекса
-     * (по байткоду bsl 28.0.1) — FQN модуля из {@code getSourceUri}, имя метода и
-     * {@code environments().toString()}; без записи возвращается собственный (пустой)
-     * {@code getRetValType} — тогда расчёт модели. Согласовано с автором (#877, вариант А).
-     */
     private static com._1c.g5.v8.dt.mcore.Method exportedLookup(com._1c.g5.v8.dt.bsl.model.Method method)
+    {
+        return exportedLookup(method.getName(), EcoreUtil.getURI(method), method.environments());
+    }
+
+    /**
+     * Запрос к индексу сборки ({@code ExportMethodTypeProvider.getMethodType}) — всегда отдельный
+     * экспортный образ, не связанный ни с одной моделью: {@code getMethodType} меняет переданный
+     * метод ({@code setRetVal}), а у {@code BslContextDefMockMethod} разрешает типы через его
+     * контекст — узел модели редактора. Вызов над объектом модели редактора из фона, без
+     * блокировки его документа, портил эту модель: в ней переставали разрешаться обращения через
+     * точку и пустела подсказка при наведении (#877, 23.10.2026). Ключ индекса (по байткоду bsl
+     * 28.0.1) — FQN модуля из {@code getSourceUri}, имя и {@code environments().toString()}; без
+     * записи возвращается собственный (пустой) {@code getRetValType}.
+     */
+    private static com._1c.g5.v8.dt.mcore.Method exportedLookup(String name, URI sourceUri,
+        com._1c.g5.v8.dt.mcore.util.Environments environments)
     {
         try
         {
             com._1c.g5.v8.dt.bsl.model.BslContextDefMethod lookup =
                 com._1c.g5.v8.dt.bsl.model.BslContextDefFactory.eINSTANCE.createBslContextDefMethod();
-            lookup.setName(method.getName());
-            lookup.setSourceUri(EcoreUtil.getURI(method));
-            lookup.setEnvironments(method.environments());
+            lookup.setName(name);
+            lookup.setSourceUri(sourceUri);
+            lookup.setEnvironments(environments);
             lookup.setRetVal(true);
             return lookup;
         }
         catch (RuntimeException error)
         {
-            log("error lookup method=" + method.getName() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+            log("error lookup method=" + name + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
+        }
+    }
+
+    /** Адреса ссылок на типы свойств, загрузка которых поставлена ({@link #propertyState}). */
+    private static final Set<URI> PROPERTY_LOADS = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Тип свойства строки EDT ({@code mcore.Property}: свойства глобального контекста — общие
+     * модули и т.п., свойства через точку) — его готовые типы ({@code Property.getTypes}, их же
+     * показывает подсказка EDT), без досчёта; {@code null} — не свойство или показывать нечего.
+     * Ссылки на типы, ещё не загруженные, загружаются в фоне ({@link #loadProxyNames}); до того —
+     * {@code ?}. UI-поток.
+     */
+    static State propertyState(Object info)
+    {
+        return propertyState(info, false);
+    }
+
+    static void requestProperty(Object info)
+    {
+        propertyState(info, true);
+    }
+
+    private static State propertyState(Object info, boolean request)
+    {
+        if (!(info instanceof com._1c.g5.v8.dt.mcore.Property property))
+            return null;
+        List<Object> parts = new java.util.ArrayList<>();
+        Set<URI> unloaded = new LinkedHashSet<>();
+        for (TypeItem item : property.getTypes())
+        {
+            Object part = partOf(item);
+            // Ссылка, которая не загрузилась, — пустое имя: типа нет.
+            if (part == null || "".equals(part)) //$NON-NLS-1$
+                return null;
+            if (part instanceof URI uri)
+                unloaded.add(uri);
+            parts.add(part);
+        }
+        if (parts.isEmpty())
+            return null;
+        if (unloaded.isEmpty())
+        {
+            // «ОбщийМодуль.Мурзик» у свойства «Мурзик» — хвост повторяет имя строки; как подсказка
+            // EDT, показываем «ОбщийМодуль».
+            Set<String> names = new LinkedHashSet<>();
+            for (Object part : parts)
+                names.add(withoutOwnName((String)part, property));
+            return new State(formatTypeNames(names), true);
+        }
+        if (request)
+            loadPropertyTypes(unloaded);
+        return new State("", false); //$NON-NLS-1$
+    }
+
+    private static String withoutOwnName(String type, com._1c.g5.v8.dt.mcore.Property property)
+    {
+        for (String own : new String[] { property.getNameRu(), property.getName() })
+        {
+            if (own != null && !own.isEmpty() && type.length() > own.length() + 1
+                && type.regionMatches(true, type.length() - own.length(), own, 0, own.length())
+                && type.charAt(type.length() - own.length() - 1) == '.')
+                return type.substring(0, type.length() - own.length() - 1);
+        }
+        return type;
+    }
+
+    /** Фоновая загрузка ссылок на типы свойств — в наборе ресурсов проекта редактора списка. */
+    private static void loadPropertyTypes(Set<URI> unloaded)
+    {
+        unloaded.removeIf(uri -> !PROPERTY_LOADS.add(uri));
+        if (unloaded.isEmpty())
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
+        IFile file = editor != null && editor.getEditorInput() != null
+            ? editor.getEditorInput().getAdapter(IFile.class) : null;
+        if (file == null)
+        {
+            PROPERTY_LOADS.removeAll(unloaded);
+            return;
+        }
+        URI module = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+        Job job = new Job("Комфорт: типы свойств") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                long start = System.nanoTime();
+                int count = unloaded.size();
+                loadProxyNames(unloaded, module, file.getProject());
+                log("property proxies loaded=" + count //$NON-NLS-1$
+                    + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
+                publish();
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setRule(ForeignModuleModel.SERIAL);
+        job.schedule();
+    }
+
+    /** Адрес строки переживает отсоединение её AST при переразборе; сам AST здесь не удерживается. */
+    private static final Map<ProposalElement, VariableTarget> VARIABLE_TARGETS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Снять только адреса переменных сразу после штатного compute, до сохранения списка
+     * и следующего переразбора. Типы здесь не читаются и фоновые запросы не создаются.
+     */
+    static void rememberVariableTargets(org.eclipse.jface.text.contentassist.ICompletionProposal[] proposals)
+    {
+        if (proposals == null)
+            return;
+        for (var proposal : proposals)
+        {
+            if (proposal instanceof org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal configurable
+                && Global.getField(configurable, "additionalProposalInfo") instanceof ProposalElement info) //$NON-NLS-1$
+                variableTargetOf(info);
         }
     }
 
@@ -292,155 +824,135 @@ final class FunctionReturnTypes
     {
         if (!(info instanceof ProposalElement && info instanceof InternalEObject element))
             return null;
+        VariableTarget remembered = VARIABLE_TARGETS.get((ProposalElement)info);
+        if (remembered != null)
+            return remembered;
         Object value = element.eGet(BslPackage.PROPOSAL_ELEMENT__LIST, false, false);
         if (!(value instanceof InternalEList<?> list))
+        {
+            Global.tempLog("assist-variable-target", "reject list info=" + System.identityHashCode(info)
+                + " valueClass=" + (value == null ? null : value.getClass().getName()));
             return null;
+        }
+        StringBuilder entriesTrace = new StringBuilder();
         var entries = list.basicIterator();
         while (entries.hasNext())
         {
-            if (!(entries.next() instanceof com._1c.g5.v8.dt.bsl.model.FantomVariableOccurrence occurrence))
+            Object entry = entries.next();
+            entriesTrace.append(entry == null ? null : entry.getClass().getName()).append(';');
+            if (!(entry instanceof com._1c.g5.v8.dt.bsl.model.FantomVariableOccurrence occurrence))
                 continue;
             com._1c.g5.v8.dt.bsl.model.Variable variable = occurrence.getVariable();
             if (variable == null || variable.eIsProxy() || variable.getName() == null)
+            {
+                Global.tempLog("assist-variable-target", "reject variable info=" + System.identityHashCode(info)
+                    + " offset=" + occurrence.getOffset() + " variableClass="
+                    + (variable == null ? null : variable.getClass().getName())
+                    + " proxy=" + (variable != null && variable.eIsProxy()) + " proxyUri="
+                    + (variable instanceof InternalEObject internal ? internal.eProxyURI() : null));
                 return null;
+            }
             Resource resource = variable.eResource();
             if (resource == null || resource.getURI() == null)
+            {
+                Global.tempLog("assist-variable-target", "reject resource info=" + System.identityHashCode(info)
+                    + " name=" + variable.getName() + " offset=" + occurrence.getOffset()
+                    + " variable=" + System.identityHashCode(variable) + " resource=" + resource);
                 return null;
+            }
             com._1c.g5.v8.dt.bsl.model.Method method =
                 org.eclipse.xtext.EcoreUtil2.getContainerOfType(variable, com._1c.g5.v8.dt.bsl.model.Method.class);
             String methodName = method != null && method.getName() != null
                 ? method.getName().toLowerCase(Locale.ROOT) : ""; //$NON-NLS-1$
-            return new VariableTarget(resource.getURI().trimFragment(), methodName, variable.getName(),
-                occurrence.getOffset());
+            VariableTarget target = new VariableTarget(resource.getURI().trimFragment(), methodName, variable.getName(),
+                occurrence.getOffset(), resource.getURIFragment(variable));
+            VARIABLE_TARGETS.put((ProposalElement)info, target);
+            Global.tempLog("assist-variable-target", "resolved info=" + System.identityHashCode(info)
+                + " variable=" + System.identityHashCode(variable) + " target=" + target);
+            return target;
         }
+        Global.tempLog("assist-variable-target", "reject entries info=" + System.identityHashCode(info)
+            + " size=" + list.size() + " classes=" + entriesTrace);
         return null;
     }
 
     /**
-     * Тип переменной для показа или {@code null} — неизвестен. Итоговый — рассчитанный по
-     * текущему состоянию модуля в той же точке; иначе — прежний рассчитанный как
-     * предварительный, а расчёт модуля для этой точки ставится в голову очереди. UI-поток.
+     * Конечный результат для текущего текста и точки показывается без {@code ?}, в том числе
+     * во время паузы. Если такого результата ещё нет, тип ожидает чтения: {@code ?} показывается
+     * и до постановки запроса в очередь, вместе с прежним типом, если он известен.
+     * Вне UI — только чтение, без запросов.
      */
     static State variableState(VariableTarget target)
     {
         if (target == null)
             return null;
         String stamp = currentStamp(target.module());
+        rememberLineContextKey(target.module(), target.key());
         VariableComputed computed = VARIABLE_RESULTS.get(target.key());
-        if (computed != null && computed.stamp().equals(stamp) && computed.offset() == target.offset())
+        // #region temp #877 — что получает строка переменной
+        log("  show key=" + target.key() + " offset=" + target.offset() + " stamp=" + stamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " computed=" + computed); //$NON-NLS-1$
+        // #endregion
+        if (computed != null && computed.matches(stamp, target.offset()))
             return new State(computed.type(), true);
-        requestPoint(target, stamp);
-        return computed != null ? new State(computed.type(), false) : null;
+        if (stamp.isEmpty())
+            return new State("", true); //$NON-NLS-1$
+        return new State(computed != null ? computed.type() : "", false); //$NON-NLS-1$
     }
 
-    private static void requestPoint(VariableTarget target, String stamp)
+    static void requestVariable(VariableTarget target, boolean first)
     {
-        IFile file = ForeignModuleModel.fileOf(target.module());
-        if (file == null || stamp == null || stamp.isEmpty())
+        if (target == null)
             return;
-        String point = target.method() + ":" + target.offset(); //$NON-NLS-1$
-        String previous = POINTS.put(target.module(), point);
-        if (point.equals(previous) && stateOf(target.module(), stamp).equals(MODULE_STAMPS.get(target.module())))
-            return;
-        enqueue(target.module(), file, ForeignModuleModel.openDocument(file), stamp, true);
-    }
-
-    /** Состояние модуля для очереди: штамп текста и точка переменных. */
-    private static String stateOf(URI module, String stamp)
-    {
-        return stamp + "@" + POINTS.getOrDefault(module, ""); //$NON-NLS-1$ //$NON-NLS-2$
+        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("request.variable", target.key()))
+        {
+            IFile file = ForeignModuleModel.fileOf(target.module());
+            String stamp = currentStamp(target.module());
+            if (file == null || stamp == null || stamp.isEmpty())
+                return;
+            if (first)
+                priorityKey = target.key();
+            VariableComputed computed = VARIABLE_RESULTS.get(target.key());
+            trace.detail = "current=" + first; //$NON-NLS-1$
+            if (computed != null && computed.matches(stamp, target.offset()))
+            {
+                trace.cacheHit = true;
+                return;
+            }
+            Request request = new Request(target.module(), file, stamp, ForeignModuleModel.openDocument(file),
+                target.method(), target);
+            if (request.nativeDocument() == null)
+                finishUnknown(request);
+            else
+                enqueue(request, first);
+        }
     }
 
     /**
-     * Тип функции для показа или {@code null} — неизвестен. Итоговый ({@code fresh}) — рассчитанный
-     * по текущему состоянию модуля. Иначе предварительный: из «Возвращаемое значение» комментария,
-     * а без него — рассчитанный по прежнему состоянию; комментарии модуля для текущего состояния
-     * при этом разбираются в фоне ({@link #requestComments}). Показ строки, подсказки; вне UI —
-     * только чтение готового, без запросов расчёта.
+     * Тип функции для показа или {@code null} — показывать нечего: ничего не пересчитывается и
+     * итогового нет, строка и подсказка остаются штатными. Итоговый ({@code fresh}) — полученный
+     * для текущего состояния модуля (индекс сборки или готовые типы модели редактора). Пока
+     * пересчёт ждёт или идёт — предварительный, с {@code ?}: последний известный, иначе из
+     * «Возвращаемое значение» комментария. Показ строки, подсказки; вне UI — только чтение, без
+     * запросов.
      */
     static State state(Target target)
     {
         if (target == null)
             return null;
         String stamp = currentStamp(target.module());
+        if (target.exported() == null)
+            rememberLineContextKey(target.module(), target.key());
         Computed computed = RESULTS.get(target.key());
         if (computed != null && computed.stamp().equals(stamp))
             return new State(computed.type(), true);
-        // Вне UI (фоновый поток подсказки) — только чтение готового: запросы ставит UI-проход.
-        boolean ui = Display.getCurrent() != null;
-        if (ui && requestIndex(target, stamp, false))
-            return computed != null ? new State(computed.type(), false) : null;
-        if (ui)
-            requestComments(target.module(), stamp);
+        // Конечный результат уже проверен выше. Только при его отсутствии пауза — ожидание с «?».
+        if (stamp.isEmpty())
+            return new State("", true); //$NON-NLS-1$
+        if (computed != null && !computed.type().isEmpty())
+            return new State(computed.type(), false);
         Computed comment = COMMENT_TYPES.get(target.key());
-        if (comment != null && !comment.type().isEmpty())
-            return new State(comment.type(), false);
-        return computed != null ? new State(computed.type(), false) : null;
-    }
-
-    /** Разбор комментариев модуля для этого состояния, если его ещё не было. UI-поток. */
-    private static void requestComments(URI module, String stamp)
-    {
-        if (stamp == null || stamp.isEmpty() || stamp.equals(COMMENT_STAMPS.get(module)))
-            return;
-        IFile file = ForeignModuleModel.fileOf(module);
-        if (file == null)
-            return;
-        COMMENT_STAMPS.put(module, stamp);
-        IXtextDocument document = ForeignModuleModel.openDocument(file);
-        Request request = new Request(module, file, ForeignModuleModel.snapshot(document), stamp, null);
-        synchronized (QUEUE)
-        {
-            COMMENT_QUEUE.removeIf(pending -> pending.module().equals(module));
-            COMMENT_QUEUE.addLast(request);
-        }
-        log("comments module=" + module + " stamp=" + stamp); //$NON-NLS-1$ //$NON-NLS-2$
-        WORKER.schedule();
-    }
-
-    /** Типы «Возвращаемое значение» всех функций модуля — по разбору без связывания (быстро). */
-    private static void computeComments(Request request)
-    {
-        long start = System.nanoTime();
-        Integer count = null;
-        try
-        {
-            count = ForeignModuleModel.parse(request.module(), request.file(), request.text(),
-                resource -> commentTypes(resource, request));
-        }
-        catch (Throwable error)
-        {
-            log("error comments module=" + request.module() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        log("done comments module=" + request.module() + " functions=" + count //$NON-NLS-1$ //$NON-NLS-2$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
-        publish();
-    }
-
-    private static Integer commentTypes(Resource resource, Request request)
-    {
-        com._1c.g5.v8.dt.bsl.model.Module module = moduleOf(resource);
-        if (module == null)
-            return null;
-        int count = 0;
-        for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
-        {
-            if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function) || method.getName() == null)
-                continue;
-            String type;
-            try
-            {
-                type = commentType(BslStructureInsertCommentTypes.parseMethodComment(method, module));
-            }
-            catch (RuntimeException error)
-            {
-                type = ""; //$NON-NLS-1$
-            }
-            COMMENT_TYPES.put(request.module() + "#" + method.getName().toLowerCase(Locale.ROOT), //$NON-NLS-1$
-                new Computed(request.stamp(), type));
-            count++;
-        }
-        return Integer.valueOf(count);
+        return new State(comment != null ? comment.type() : "", false); //$NON-NLS-1$
     }
 
     /** Имена типов раздела «Возвращаемое значение» как в тексте комментария: {@code <А, Б>}. */
@@ -461,7 +973,7 @@ final class FunctionReturnTypes
                     names.add(SmartContentAssistProcessor.localizeAssistTypeSegment(name.trim()));
             }
         }
-        return names.isEmpty() ? "" : "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        return formatTypeNames(names);
     }
 
     /**
@@ -479,8 +991,7 @@ final class FunctionReturnTypes
     }
 
     private static final long STAMP_CHECK_TTL_NS = 200_000_000L;
-    /** Только UI-поток. */
-    private static final Map<URI, StampCheck> STAMP_CHECKS = new java.util.HashMap<>();
+    private static final Map<URI, StampCheck> STAMP_CHECKS = new ConcurrentHashMap<>();
 
     /**
      * Модуль → документ его открытого редактора, найденный UI-потоком ({@code null} внутри ссылки —
@@ -489,6 +1000,332 @@ final class FunctionReturnTypes
      */
     private static final Map<URI, java.lang.ref.WeakReference<IXtextDocument>> KNOWN_DOCUMENTS =
         new ConcurrentHashMap<>();
+
+    /** Один слушатель на документ; значение не удерживает сам документ после закрытия редактора. */
+    private static final Map<IXtextDocument, LocalContextLineCache> LOCAL_CONTEXT_LINES =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static final Map<URI, Long> CONTEXT_REVISIONS = new ConcurrentHashMap<>();
+    private static final Map<URI, Set<String>> LINE_CONTEXT_KEYS = new ConcurrentHashMap<>();
+
+    /** С первой отрисовки, ещё до первой правки строки: её готовые типы уже могут устареть. */
+    private static void rememberLineContextKey(URI module, String key)
+    {
+        if (Display.getCurrent() == null)
+            return;
+        var known = KNOWN_DOCUMENTS.get(module);
+        var viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (known != null && known.get() != null && viewer != null && viewer.getDocument() == known.get())
+            LINE_CONTEXT_KEYS.computeIfAbsent(module, unused -> ConcurrentHashMap.newKeySet()).add(key);
+    }
+
+    private static long contextRevision(URI module)
+    {
+        return CONTEXT_REVISIONS.computeIfAbsent(module, key -> 0L);
+    }
+
+    /** Правки других модулей обесценивают также тип получателя и запас его членов. */
+    static long localContextRevision(org.eclipse.jface.text.IDocument document)
+    {
+        synchronized (LocalContextInvalidation.documents)
+        {
+            URI module = LocalContextInvalidation.modules.get(document);
+            return module != null ? contextRevision(module) : 0L;
+        }
+    }
+
+    static void installLocalContextInvalidation()
+    {
+        LocalContextInvalidation.install();
+    }
+
+    static void stopLocalContextInvalidation()
+    {
+        LocalContextInvalidation.stop();
+    }
+
+    /** EDT использует и документы, не зарегистрированные в FileBuffers. */
+    static void observeLocalContextEditor(BslXtextEditor editor)
+    {
+        var input = editor.getEditorInput();
+        IFile file = input != null ? input.getAdapter(IFile.class) : null;
+        var document = editor.getDocument();
+        Global.tempLog("assist-local-context-invalidation", "editor title=" + editor.getTitle() //$NON-NLS-1$ //$NON-NLS-2$
+            + " input=" + (input == null ? null : input.getClass().getName()) + " file=" + file //$NON-NLS-1$ //$NON-NLS-2$
+            + " document=" + (document == null ? null : document.getClass().getName())); //$NON-NLS-1$
+        if (file != null && document != null)
+            LocalContextInvalidation.observe(URI.createPlatformResourceURI(file.getFullPath().toString(), true), document);
+    }
+
+    /** Только результаты, перенесённые через правку той же строки, теряют актуальность. */
+    private static void otherModuleChanged(URI changedModule)
+    {
+        int[] invalidated = { 0 };
+        for (URI module : CONTEXT_REVISIONS.keySet())
+        {
+            if (module.equals(changedModule))
+                continue;
+            long revision = CONTEXT_REVISIONS.merge(module, 1L, Long::sum);
+            String prefix = module + "#"; //$NON-NLS-1$
+            String suffix = "!dependency-" + revision; //$NON-NLS-1$
+            Set<String> lineKeys = LINE_CONTEXT_KEYS.getOrDefault(module, java.util.Collections.emptySet());
+            VARIABLE_RESULTS.replaceAll((key, value) ->
+            {
+                if (!key.startsWith(prefix) || value.lineStart() < 0 && !lineKeys.contains(key))
+                    return value;
+                invalidated[0]++;
+                REQUEST_STAMPS.remove(key);
+                Global.tempLog("assist-local-context-invalidation", "variable key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                    + " oldStamp=" + value.stamp() + " shown=" + lineKeys.contains(key) + " changed=" + changedModule); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return new VariableComputed(suffix, value.offset(), value.type());
+            });
+            RESULTS.replaceAll((key, value) ->
+            {
+                if (!key.startsWith(prefix) || !value.linePreserved() && !lineKeys.contains(key))
+                    return value;
+                invalidated[0]++;
+                REQUEST_STAMPS.remove(key);
+                INDEX_STAMPS.remove(key);
+                Global.tempLog("assist-local-context-invalidation", "function key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                    + " oldStamp=" + value.stamp() + " shown=" + lineKeys.contains(key) + " changed=" + changedModule); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return new Computed(suffix, value.type());
+            });
+        }
+        Global.tempLog("assist-local-context-invalidation", "changed=" + changedModule + " invalidated=" + invalidated[0]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (invalidated[0] > 0)
+            publish();
+    }
+
+    /** Правки открытых буферов, в том числе без автодополнения, и изменения файлов вне редактора. */
+    private static final class LocalContextInvalidation implements org.eclipse.core.filebuffers.IFileBufferListener,
+        org.eclipse.core.resources.IResourceChangeListener
+    {
+        private static final LocalContextInvalidation INSTANCE = new LocalContextInvalidation();
+        private static final Map<org.eclipse.jface.text.IDocument, org.eclipse.jface.text.IDocumentListener> documents =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        private static final Map<org.eclipse.jface.text.IDocument, URI> modules = new java.util.WeakHashMap<>();
+
+        static void install()
+        {
+            var manager = org.eclipse.core.filebuffers.FileBuffers.getTextFileBufferManager();
+            manager.addFileBufferListener(INSTANCE);
+            for (var buffer : manager.getFileBuffers())
+                INSTANCE.bufferCreated(buffer);
+            org.eclipse.core.resources.ResourcesPlugin.getWorkspace().addResourceChangeListener(INSTANCE,
+                org.eclipse.core.resources.IResourceChangeEvent.POST_CHANGE);
+            Global.tempLog("assist-local-context-invalidation", "installed"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static void stop()
+        {
+            org.eclipse.core.filebuffers.FileBuffers.getTextFileBufferManager().removeFileBufferListener(INSTANCE);
+            org.eclipse.core.resources.ResourcesPlugin.getWorkspace().removeResourceChangeListener(INSTANCE);
+            synchronized (documents)
+            {
+                documents.forEach((document, listener) -> document.removeDocumentListener(listener));
+                documents.clear();
+                modules.clear();
+            }
+        }
+
+        @Override
+        public void bufferCreated(org.eclipse.core.filebuffers.IFileBuffer buffer)
+        {
+            if (!(buffer instanceof org.eclipse.core.filebuffers.ITextFileBuffer text) || buffer.getLocation() == null
+                || !"bsl".equalsIgnoreCase(buffer.getLocation().getFileExtension())) //$NON-NLS-1$
+                return;
+            var file = org.eclipse.core.filebuffers.FileBuffers.getWorkspaceFileAtLocation(buffer.getLocation());
+            if (file == null)
+                return;
+            URI module = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+            observe(module, text.getDocument());
+        }
+
+        static void observe(URI module, org.eclipse.jface.text.IDocument document)
+        {
+            synchronized (documents)
+            {
+                if (document == null || documents.containsKey(document))
+                    return;
+                org.eclipse.jface.text.IDocumentListener listener = new org.eclipse.jface.text.IDocumentListener()
+                {
+                    @Override
+                    public void documentAboutToBeChanged(org.eclipse.jface.text.DocumentEvent event) {}
+
+                    @Override
+                    public void documentChanged(org.eclipse.jface.text.DocumentEvent event)
+                    {
+                        otherModuleChanged(module);
+                    }
+                };
+                documents.put(document, listener);
+                modules.put(document, module);
+                contextRevision(module);
+                document.addDocumentListener(listener);
+                Global.tempLog("assist-local-context-invalidation", "observe module=" + module //$NON-NLS-1$ //$NON-NLS-2$
+                    + " document=" + document.getClass().getName() + "@" + System.identityHashCode(document)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public void bufferDisposed(org.eclipse.core.filebuffers.IFileBuffer buffer)
+        {
+            if (buffer instanceof org.eclipse.core.filebuffers.ITextFileBuffer text)
+            {
+                synchronized (documents)
+                {
+                    var listener = documents.remove(text.getDocument());
+                    modules.remove(text.getDocument());
+                    if (listener != null)
+                        text.getDocument().removeDocumentListener(listener);
+                }
+            }
+        }
+
+        @Override
+        public void resourceChanged(org.eclipse.core.resources.IResourceChangeEvent event)
+        {
+            if (event.getDelta() == null)
+                return;
+            try
+            {
+                event.getDelta().accept(delta ->
+                {
+                    if (!(delta.getResource() instanceof IFile file))
+                        return true;
+                    if ("bsl".equalsIgnoreCase(file.getFileExtension()) //$NON-NLS-1$
+                        && (delta.getKind() != org.eclipse.core.resources.IResourceDelta.CHANGED
+                            || (delta.getFlags() & org.eclipse.core.resources.IResourceDelta.CONTENT) != 0))
+                        otherModuleChanged(URI.createPlatformResourceURI(file.getFullPath().toString(), true));
+                    return false;
+                });
+            }
+            catch (org.eclipse.core.runtime.CoreException error)
+            {
+                Global.tempLogException("assist-local-context-invalidation", "resource.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override public void bufferContentAboutToBeReplaced(org.eclipse.core.filebuffers.IFileBuffer buffer) {}
+        @Override public void bufferContentReplaced(org.eclipse.core.filebuffers.IFileBuffer buffer)
+        {
+            bufferDisposed(buffer);
+            bufferCreated(buffer);
+        }
+        @Override public void stateChanging(org.eclipse.core.filebuffers.IFileBuffer buffer) {}
+        @Override public void dirtyStateChanged(org.eclipse.core.filebuffers.IFileBuffer buffer, boolean dirty) {}
+        @Override public void stateValidationChanged(org.eclipse.core.filebuffers.IFileBuffer buffer, boolean validated) {}
+        @Override public void underlyingFileMoved(org.eclipse.core.filebuffers.IFileBuffer buffer, org.eclipse.core.runtime.IPath path)
+        {
+            bufferDisposed(buffer);
+            bufferCreated(buffer);
+        }
+        @Override public void underlyingFileDeleted(org.eclipse.core.filebuffers.IFileBuffer buffer) {}
+        @Override public void stateChangeFailed(org.eclipse.core.filebuffers.IFileBuffer buffer) {}
+    }
+
+    /** Конечные типы локального контекста сохраняются на время редактирования одной строки. */
+    private static final class LocalContextLineCache implements org.eclipse.jface.text.IDocumentListener
+    {
+        private final URI module;
+        private final IFile file;
+        private int editingLine = -1;
+        private int lineStart;
+        private int lineEnd;
+        private String beforeStamp;
+        private boolean preserve;
+
+        LocalContextLineCache(URI module, IFile file, IXtextDocument document)
+        {
+            this.module = module;
+            this.file = file;
+            contextRevision(module);
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            var viewer = reloader != null ? reloader.getViewer() : null;
+            if (viewer != null && viewer.getDocument() == document)
+            {
+                try
+                {
+                    editingLine = document.getLineInformationOfOffset(viewer.getSelectedRange().x).getOffset();
+                }
+                catch (org.eclipse.jface.text.BadLocationException error)
+                {
+                    Global.tempLog("assist-local-context", "initial point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            document.addDocumentListener(this);
+        }
+
+        @Override
+        public void documentAboutToBeChanged(org.eclipse.jface.text.DocumentEvent event)
+        {
+            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("context.before-edit", module.toString()))
+            {
+                preserve = false;
+                beforeStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
+                try
+                {
+                    var line = event.getDocument().getLineInformationOfOffset(event.getOffset());
+                    lineStart = line.getOffset();
+                    lineEnd = lineStart + line.getLength();
+                    String inserted = event.getText();
+                    boolean singleLine = event.getOffset() + event.getLength() <= lineEnd
+                        && (inserted == null || inserted.indexOf('\n') < 0 && inserted.indexOf('\r') < 0);
+                    preserve = singleLine && lineStart == editingLine;
+                    editingLine = singleLine ? lineStart : -1;
+                }
+                catch (org.eclipse.jface.text.BadLocationException error)
+                {
+                    editingLine = -1;
+                    Global.tempLog("assist-local-context", "edit point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                Global.tempLog("assist-local-context", "before module=" + module + " stamp=" + beforeStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " line=" + lineStart + " preserve=" + preserve); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public void documentChanged(org.eclipse.jface.text.DocumentEvent event)
+        {
+            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("context.after-edit", module.toString()))
+            {
+                String afterStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
+                if (!LocalContextInvalidation.documents.containsKey(event.getDocument()))
+                    otherModuleChanged(module);
+                STAMP_CHECKS.put(module, new StampCheck(afterStamp, System.nanoTime()));
+                int[] retained = { 0 };
+                if (!preserve)
+                    LINE_CONTEXT_KEYS.remove(module);
+                if (preserve)
+                {
+                    int newEnd = lineEnd - event.getLength() + (event.getText() != null ? event.getText().length() : 0);
+                    String prefix = module + "#"; //$NON-NLS-1$
+                    VARIABLE_RESULTS.replaceAll((key, value) ->
+                    {
+                        boolean sameLine = value.lineStart() >= 0 ? value.lineStart() == lineStart
+                            : value.offset() >= lineStart && value.offset() <= lineEnd;
+                        if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp) || !sameLine)
+                            return value;
+                        retained[0]++;
+                        return new VariableComputed(afterStamp, value.offset(), value.type(), lineStart, newEnd);
+                    });
+                    RESULTS.replaceAll((key, value) ->
+                    {
+                        if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp))
+                            return value;
+                        retained[0]++;
+                        return new Computed(afterStamp, value.type(), true);
+                    });
+                }
+                Global.tempLog("assist-local-context", "after module=" + module + " stamp=" + afterStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " preserve=" + preserve + " retained=" + retained[0]); //$NON-NLS-1$ //$NON-NLS-2$
+                trace.detail = "preserve=" + preserve + " retained=" + retained[0] //$NON-NLS-1$ //$NON-NLS-2$
+                    + " variableEntries=" + VARIABLE_RESULTS.size() + " functionEntries=" + RESULTS.size(); //$NON-NLS-1$ //$NON-NLS-2$
+                if (retained[0] > 0)
+                    publish();
+            }
+        }
+    }
 
     /**
      * Текущее состояние модуля: документа открытого редактора или файла ({@link ForeignModuleModel#stamp});
@@ -512,49 +1349,69 @@ final class FunctionReturnTypes
             return check.stamp();
         IXtextDocument document = ForeignModuleModel.openDocument(file);
         KNOWN_DOCUMENTS.put(module, new java.lang.ref.WeakReference<>(document));
+        if (document != null)
+            LOCAL_CONTEXT_LINES.computeIfAbsent(document, key -> new LocalContextLineCache(module, file, key));
         String stamp = ForeignModuleModel.stamp(file, document);
         STAMP_CHECKS.put(module, new StampCheck(stamp, now));
         return stamp;
     }
 
     /**
-     * Выбор функции (строка списка, наведение): она в расчёте модуля — первая; модуль, ещё не
-     * посчитанный для текущего состояния, встаёт в голову очереди. UI-поток.
+     * Выбор функции (текущая строка списка, наведение): чтение только её готового типа
+     * встаёт в голову очереди. UI-поток.
      */
     static void activate(Target target)
     {
-        if (target == null)
-            return;
-        String key = target.key();
-        IFile file = ForeignModuleModel.fileOf(target.module());
-        if (file == null)
-        {
-            log("skip noFile key=" + key); //$NON-NLS-1$
-            RESULTS.putIfAbsent(key, new Computed("", "")); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        IXtextDocument document = ForeignModuleModel.openDocument(file);
-        String stamp = ForeignModuleModel.stamp(file, document);
-        Computed ready = RESULTS.get(key);
-        if (ready != null && ready.stamp().equals(stamp))
-            return;
-        if (requestIndex(target, stamp, true))
-            return;
-        activateModel(target, file, document, stamp);
+        requestFunction(target, true);
     }
 
-    /** Тип по модели модуля: выбранная функция первой, модуль — в голову очереди. UI-поток. */
-    private static void activateModel(Target target, IFile file, IXtextDocument document, String stamp)
+    static void requestFunction(Target target, boolean first)
     {
-        String key = target.key();
-        PRIORITY.put(target.module(), target.name().toLowerCase(Locale.ROOT));
-        // Быстрый разбор комментариев — в очередь раньше полного расчёта: иначе запущенный
-        // полный расчёт задерживает и предварительный тип (лог 08:40:53–08:41:03).
-        requestComments(target.module(), stamp);
-        Computed ready = RESULTS.get(key);
-        if (ready != null && ready.stamp().equals(stamp))
+        if (target == null)
             return;
-        enqueue(target.module(), file, document, stamp, true);
+        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("request.function", target.key()))
+        {
+            String key = target.key();
+            if (first)
+                priorityKey = key;
+            IFile file = ForeignModuleModel.fileOf(target.module());
+            if (file == null)
+            {
+                log("skip noFile key=" + key); //$NON-NLS-1$
+                RESULTS.putIfAbsent(key, new Computed("", "")); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String stamp = currentStamp(target.module());
+            Computed ready = RESULTS.get(key);
+            trace.detail = "current=" + first; //$NON-NLS-1$
+            if (ready != null && ready.stamp().equals(stamp))
+            {
+                trace.cacheHit = true;
+                return;
+            }
+            if (requestIndex(target, stamp, first))
+                return;
+            IXtextDocument document = ForeignModuleModel.openDocument(file);
+            if (document == null)
+            {
+                finishUnknown(new Request(target.module(), file, stamp, null, target.name(), null));
+                return;
+            }
+            activateModel(target, file, document, stamp, first);
+        }
+    }
+
+    /**
+     * Готовые типы по родной модели модуля, если он открыт в редакторе, — в голову очереди.
+     * Неоткрытый модуль не загружается (своя модель задевала общий объект модуля). UI-поток.
+     */
+    private static void activateModel(Target target, IFile file, IXtextDocument document, String stamp,
+        boolean first)
+    {
+        Computed ready = RESULTS.get(target.key());
+        if (document == null || ready != null && ready.stamp().equals(stamp))
+            return;
+        enqueue(new Request(target.module(), file, stamp, document, target.name(), null), first);
     }
 
     /**
@@ -570,7 +1427,10 @@ final class FunctionReturnTypes
         if (target.exported() == null || stamp == null || stamp.isEmpty())
             return false;
         String key = target.key();
-        if (stamp.equals(INDEX_STAMPS.get(key)))
+        // Пока сборка не закончилась, индекс может быть старым: тип с «?», после сборки — перечитать.
+        boolean reliable = !buildPending();
+        String requestStamp = stampOf(stamp, reliable);
+        if (requestStamp.equals(INDEX_STAMPS.get(key)))
         {
             if (first)
             {
@@ -594,13 +1454,13 @@ final class FunctionReturnTypes
         IFile file = ForeignModuleModel.fileOf(target.module());
         if (file == null || ForeignModuleModel.isDirty(file))
             return false;
-        INDEX_STAMPS.put(key, stamp);
+        INDEX_STAMPS.put(key, requestStamp);
         synchronized (QUEUE)
         {
             if (first)
-                INDEX_QUEUE.addFirst(new IndexRequest(target, file, stamp));
+                INDEX_QUEUE.addFirst(new IndexRequest(target, file, stamp, reliable));
             else
-                INDEX_QUEUE.addLast(new IndexRequest(target, file, stamp));
+                INDEX_QUEUE.addLast(new IndexRequest(target, file, stamp, reliable));
         }
         WORKER.schedule();
         return true;
@@ -658,7 +1518,7 @@ final class FunctionReturnTypes
                         set.getResources().clear();
                 }
                 if (!names.isEmpty())
-                    type = "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    type = formatTypeNames(names);
             }
         }
         catch (Throwable error)
@@ -669,108 +1529,129 @@ final class FunctionReturnTypes
             + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
         if (type != null)
         {
-            Computed old = RESULTS.put(target.key(), new Computed(request.stamp(), type));
-            if (old == null || !old.type().equals(type))
+            Computed result = new Computed(stampOf(request.stamp(), request.reliable()), type);
+            Computed old = RESULTS.put(target.key(), result);
+            if (!result.equals(old))
                 publish();
+            if (!request.reliable())
+                rereadAfterBuild(target);
             return;
         }
-        // Индекс пуст — тип по модели модуля (как без индекса).
+        // Индекс пуст — тип по модели модуля, если он открыт; иначе пересчёта не будет: итог
+        // «без типа», без «?».
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
             display.asyncExec(() ->
             {
                 IXtextDocument document = ForeignModuleModel.openDocument(request.file());
                 String stamp = ForeignModuleModel.stamp(request.file(), document);
-                if (stamp.equals(request.stamp()))
-                    activateModel(target, request.file(), document, stamp);
+                if (!stamp.equals(request.stamp()))
+                    return;
+                if (document != null)
+                    activateModel(target, request.file(), document, stamp, target.key().equals(priorityKey));
+                else
+                {
+                    RESULTS.put(target.key(), new Computed(stamp, "")); //$NON-NLS-1$
+                    publish();
+                }
             });
     }
 
     /**
-     * Строка функции модуля редактора, в котором открыт список, показана, а модуль для текущего
-     * состояния документа ещё не считался (в т.ч. после правок) — модуль в конец очереди
-     * (модули выбранных функций — впереди). UI-поток (показ строки списка).
+     * Тип из индекса прочитан во время сборки и показан с «?» — после сборки перечитать его без
+     * нового показа строки: снять отметку запроса и перерисовать, перерисовка запросит заново.
      */
-    static void prefetchEditorModule(Target target)
+    private static void rereadAfterBuild(Target target)
     {
-        if (target == null)
-            return;
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
-        IFile file = editor != null && editor.getEditorInput() != null
-            ? editor.getEditorInput().getAdapter(IFile.class) : null;
-        IXtextDocument document = editor != null ? editor.getDocument() : null;
-        if (file == null || document == null)
-            return;
-        String stamp = ForeignModuleModel.stamp(file, document);
-        if (stateOf(target.module(), stamp).equals(MODULE_STAMPS.get(target.module()))
-            || !file.equals(ForeignModuleModel.fileOf(target.module())))
-            return;
-        enqueue(target.module(), file, document, stamp, false);
+        Job waiter = new Job("Комфорт: тип функции после сборки") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                try
+                {
+                    Job.getJobManager().join(org.eclipse.core.resources.ResourcesPlugin.FAMILY_AUTO_BUILD, monitor);
+                    Job.getJobManager().join(org.eclipse.core.resources.ResourcesPlugin.FAMILY_MANUAL_BUILD, monitor);
+                }
+                catch (InterruptedException | org.eclipse.core.runtime.OperationCanceledException e)
+                {
+                    return Status.CANCEL_STATUS;
+                }
+                INDEX_STAMPS.remove(target.key());
+                log("reread after build key=" + target.key()); //$NON-NLS-1$
+                publish();
+                return Status.OK_STATUS;
+            }
+        };
+        waiter.setSystem(true);
+        waiter.schedule();
     }
 
-    /**
-     * Модуль в очередь, если для этого состояния его расчёт не ждёт, не идёт и не сделан.
-     * {@code first} — в голову очереди (модуль выбранной функции). UI-поток.
-     */
-    private static void enqueue(URI module, IFile file, IXtextDocument document, String stamp,
-        boolean first)
+    /** Один запрошенный элемент, без чтения типов остальных функций и переменных модуля. */
+    private static void enqueue(Request request, boolean first)
     {
+        if (request.nativeDocument() == null)
+            return;
         int queued;
         synchronized (QUEUE)
         {
             Request pending = null;
-            for (Request request : QUEUE)
-            {
-                if (request.module().equals(module))
-                    pending = request;
-            }
-            String state = stateOf(module, stamp);
-            boolean sameState = state.equals(MODULE_STAMPS.get(module));
+            for (Request candidate : QUEUE)
+                if (candidate.key().equals(request.key()))
+                    pending = candidate;
+            boolean sameState = request.state().equals(REQUEST_STAMPS.get(request.key()));
             if (sameState && pending == null)
-                return; // считается сейчас или уже посчитан
+                return;
             if (pending != null && sameState && (!first || QUEUE.peekFirst() == pending))
                 return;
-            // Родная модель открытого редактора, в т.ч. активного (согласовано с автором, #877):
-            // только чтение готовых состояний, как боковая подсказка EDT.
-            IXtextDocument nativeDocument = document;
-            Request request = pending != null && sameState ? pending
-                : new Request(module, file, ForeignModuleModel.snapshot(document), stamp, nativeDocument);
             if (pending != null)
                 QUEUE.remove(pending);
             if (first)
                 QUEUE.addFirst(request);
             else
                 QUEUE.addLast(request);
-            MODULE_STAMPS.put(module, state);
+            REQUEST_STAMPS.put(request.key(), request.state());
             queued = QUEUE.size();
         }
-        log("schedule module=" + module + " stamp=" + stamp + " openEditor=" + (document != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        log("schedule key=" + request.key() + " state=" + request.state() //$NON-NLS-1$ //$NON-NLS-2$
             + " first=" + first + " queued=" + queued); //$NON-NLS-1$ //$NON-NLS-2$
         WORKER.schedule();
     }
 
     /**
-     * Модуль, открытый в соседнем редакторе: сначала готовые типы его родной модели. Если готовы
-     * все — отдельная модель не строится. Иначе — одна отдельная модель модуля (из снимка текста,
-     * ввод не блокируется) на все его функции.
+     * Модуль, открытый в редакторе: готовые типы его родной модели — только чтение. Отдельная
+     * модель модуля не строится: её связывание и производное состояние задевали общий объект
+     * модуля, и в других редакторах переставали разрешаться обращения через точку (#877, 23.10).
+     * Чего готового нет — остаётся предварительным.
      */
     private static void compute(Request request)
     {
+        if (!requestStillCurrent(request) || hasCompletedResult(request))
+        {
+            log("native.skip key=" + request.key() + " state=" + request.state()); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         long start = System.nanoTime();
-        // Записанные из родной модели — запасной расчёт их не перезаписывает прежним состоянием.
         Set<String> nativeDone = ConcurrentHashMap.newKeySet();
         if (request.nativeDocument() != null)
         {
             Integer missing = null;
+            List<Pending> pending = new java.util.ArrayList<>();
             // #region temp timing #877: ожидание блокировки документа против работы под ней
             long[] entered = new long[1];
+            TypeLoadTrace.Span readTrace = TypeLoadTrace.start("native.read", request.key()); //$NON-NLS-1$
             try
             {
                 missing = request.nativeDocument().readOnly(resource ->
                 {
                     entered[0] = System.nanoTime();
-                    return readyFromNative(resource, request, nativeDone);
+                    String actualStamp = ForeignModuleModel.stamp(request.file(), request.nativeDocument());
+                    log("native.request key=" + request.key() + " stamp=" + actualStamp //$NON-NLS-1$ //$NON-NLS-2$
+                        + " document=" + System.identityHashCode(request.nativeDocument()) //$NON-NLS-1$
+                        + " model=" + System.identityHashCode(resource)); //$NON-NLS-1$
+                    if (!request.stamp().equals(actualStamp))
+                        return null;
+                    return readyFromNative(resource, request, nativeDone, pending);
                 });
             }
             catch (Throwable error)
@@ -778,105 +1659,213 @@ final class FunctionReturnTypes
                 log("error native module=" + request.module() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
             }
             long end = System.nanoTime();
+            readTrace.detail = "lockWaitUs=" + (entered[0] > 0 ? (entered[0] - readTrace.wall) / 1000L : -1L) //$NON-NLS-1$
+                + " lockedUs=" + (entered[0] > 0 ? (end - entered[0]) / 1000L : -1L) + " missing=" + missing; //$NON-NLS-1$ //$NON-NLS-2$
+            readTrace.close();
             log("native module=" + request.module() + " missing=" + missing //$NON-NLS-1$ //$NON-NLS-2$
                 + " ms=" + (end - start) / 1_000_000L //$NON-NLS-1$
                 + " waitMs=" + (entered[0] > 0 ? (entered[0] - start) / 1_000_000L : -1) //$NON-NLS-1$
                 + " underLockMs=" + (entered[0] > 0 ? (end - entered[0]) / 1_000_000L : -1)); //$NON-NLS-1$
             // #endregion
-            if (missing != null && missing.intValue() == 0)
+            if (!requestStillCurrent(request))
                 return;
+            resolvePending(request, pending);
+            if (!requestStillCurrent(request))
+                return;
+            // Не найден элемент, модель недоступна или чтение завершилось ошибкой: запрос
+            // окончен. Не оставлять бесконечное ожидание и не выдавать старый тип за итоговый.
+            if (!hasCompletedResult(request))
+                finishUnknown(request);
         }
-        String source = null;
-        try
+    }
+
+    private static void finishUnknown(Request request)
+    {
+        if (!requestStillCurrent(request))
+            return;
+        if (request.variable() != null)
+            storeNative(request, new VariableComputed(request.stamp(), request.variable().offset(), "")); //$NON-NLS-1$
+        else
+            storeNative(request, new Computed(request.stamp(), "")); //$NON-NLS-1$
+        log("finished unknown key=" + request.key() + " state=" + request.state()); //$NON-NLS-1$ //$NON-NLS-2$
+        publish();
+    }
+
+    private static boolean requestStillCurrent(Request request)
+    {
+        return request.contextRevision() == contextRevision(request.module())
+            && request.stamp().equals(ForeignModuleModel.stamp(request.file(), request.nativeDocument()));
+    }
+
+    private static boolean hasCompletedResult(Request request)
+    {
+        if (request.variable() != null)
         {
-            source = ForeignModuleModel.read(request.module(), request.file(), request.text(),
-                resource -> computeModule(resource, request, start, nativeDone)).source();
+            VariableComputed computed = VARIABLE_RESULTS.get(request.key());
+            return computed != null && computed.matches(request.stamp(), request.variable().offset());
         }
-        catch (Throwable error)
+        Computed computed = RESULTS.get(request.key());
+        return computed != null && computed.stamp().equals(request.stamp());
+    }
+
+    /** Старый фоновый запрос не перезаписывает результат, сохранённый правкой текущей строки. */
+    private static boolean storeNative(Request request, Computed result)
+    {
+        boolean[] changed = { false };
+        RESULTS.compute(request.key(), (key, old) ->
         {
-            log("error module=" + request.module() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        log("done module=" + request.module() + " source=" + source //$NON-NLS-1$ //$NON-NLS-2$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
+            if (!requestStillCurrent(request))
+                return old;
+            changed[0] = !result.equals(old);
+            return result;
+        });
+        return changed[0];
+    }
+
+    private static boolean storeNative(Request request, VariableComputed result)
+    {
+        boolean[] changed = { false };
+        VARIABLE_RESULTS.compute(request.key(), (key, old) ->
+        {
+            if (!requestStillCurrent(request))
+                return old;
+            changed[0] = !result.equals(old);
+            return result;
+        });
+        return changed[0];
     }
 
     /**
-     * Типы всех функций модуля по одной модели. Очередная — выбранная функция, если она ещё не
-     * посчитана (выбор во время расчёта учитывается сразу); её тип публикуется немедленно,
-     * остальные — перерисовкой не чаще {@link #REFRESH_INTERVAL_NS}.
+     * Готовая часть типа: имя, адрес ещё не загруженной ссылки ({@link URI}; уже известное имя —
+     * из {@link #PROXY_NAMES}) или {@code null} — не тип. Только чтение.
      */
-    private static Boolean computeModule(Resource resource, Request request, long start,
-        Set<String> skipKeys)
+    private static Object partOf(Object item)
     {
-        com._1c.g5.v8.dt.bsl.model.Module module = moduleOf(resource);
-        TypesComputer computer = module != null ? typesComputer(resource) : null;
-        if (computer == null)
+        if (!(item instanceof TypeItem type))
             return null;
-        long modelMs = (System.nanoTime() - start) / 1_000_000L;
-        computeVariables(module, request, request.stamp(), false, skipKeys);
-        Map<String, com._1c.g5.v8.dt.bsl.model.Method> pending = new java.util.LinkedHashMap<>();
-        for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+        if (type.eIsProxy())
         {
-            if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function) || method.getName() == null)
-                continue;
-            String name = method.getName().toLowerCase(Locale.ROOT);
-            if (!skipKeys.contains(request.module() + "#" + name)) //$NON-NLS-1$
-                pending.putIfAbsent(name, method);
+            URI uri = ((InternalEObject)type).eProxyURI();
+            if (uri == null)
+                return null;
+            String known = PROXY_NAMES.get(uri);
+            return known != null ? known : uri;
         }
-        int functions = pending.size();
-        boolean dirty = false;
-        long lastRefresh = System.nanoTime();
-        while (!pending.isEmpty())
+        String name = typeName(type);
+        return name != null && !name.isEmpty() ? name : null;
+    }
+
+    /**
+     * Загрузка ссылок на типы готовых типов, прочитанных под блокировкой ({@link Pending}), — вне
+     * блокировки документа, в своём наборе ресурсов проекта (как у индекса, {@link #computeIndex}):
+     * модель редактора не меняется. Итоги пишутся по штампу прочитанного состояния.
+     */
+    /**
+     * Имена типов по адресам ссылок — в {@link #PROXY_NAMES}; загрузка в своём наборе ресурсов
+     * проекта (модель редактора не меняется). Не UI-поток, вне блокировок документов.
+     */
+    private static void loadProxyNames(Set<URI> uris, URI module,
+        org.eclipse.core.resources.IProject project)
+    {
+        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("proxy.load", module.toString()))
         {
-            String priority = PRIORITY.get(request.module());
-            boolean selected = priority != null && pending.containsKey(priority);
-            String name = selected ? priority : pending.keySet().iterator().next();
-            String type;
+            trace.detail = "requestedUris=" + uris.size(); //$NON-NLS-1$
+            uris.removeIf(PROXY_NAMES::containsKey);
+            trace.detail += " loadUris=" + uris.size(); //$NON-NLS-1$
+            if (uris.isEmpty())
+                return;
+            org.eclipse.emf.ecore.resource.ResourceSet set = null;
             try
             {
-                type = typeOf(computer, pending.remove(name), resource);
+                IResourceServiceProvider rsp =
+                    IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(module);
+                set = rsp != null ? BslOccurrenceContextResolver.newLiveResourceSet(rsp, project) : null;
+                for (URI uri : uris)
+                {
+                    String name = null;
+                    try
+                    {
+                        org.eclipse.emf.ecore.EObject object = set != null ? set.getEObject(uri, true) : null;
+                        name = object instanceof TypeItem type ? typeName(type) : null;
+                    }
+                    catch (RuntimeException error)
+                    {
+                        log("error proxy uri=" + uri + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    if (name == null || name.isEmpty())
+                        log("proxy unresolved uri=" + uri); //$NON-NLS-1$
+                    PROXY_NAMES.put(uri, name != null ? name : ""); //$NON-NLS-1$
+                }
             }
-            catch (RuntimeException error)
+            finally
             {
-                log("error module=" + request.module() + " name=" + name + " " + error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                type = ""; //$NON-NLS-1$
-            }
-            Computed old = RESULTS.put(request.module() + "#" + name, new Computed(request.stamp(), type)); //$NON-NLS-1$
-            dirty |= old == null || !old.type().equals(type);
-            if (selected)
-                log("selected module=" + request.module() + " name=" + name + " type=" + type //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
-            if (dirty && (selected || System.nanoTime() - lastRefresh > REFRESH_INTERVAL_NS))
-            {
-                publish();
-                dirty = false;
-                lastRefresh = System.nanoTime();
+                if (set != null)
+                    set.getResources().clear();
             }
         }
-        if (dirty)
-            publish();
-        log("module=" + request.module() + " functions=" + functions + " modelMs=" + modelMs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " typesMs=" + ((System.nanoTime() - start) / 1_000_000L - modelMs)); //$NON-NLS-1$
-        return Boolean.TRUE;
+    }
+
+    private static void resolvePending(Request request, List<Pending> pending)
+    {
+        if (pending.isEmpty())
+            return;
+        long start = System.nanoTime();
+        Set<URI> uris = new LinkedHashSet<>();
+        for (Pending item : pending)
+        {
+            for (Object part : item.parts())
+            {
+                if (part instanceof URI uri && !PROXY_NAMES.containsKey(uri))
+                    uris.add(uri);
+            }
+        }
+        loadProxyNames(uris, request.module(), request.file().getProject());
+        for (Pending item : pending)
+        {
+            Set<String> names = new LinkedHashSet<>();
+            for (Object part : item.parts())
+            {
+                String name = part instanceof URI uri ? PROXY_NAMES.get(uri) : (String)part;
+                if (name == null || name.isEmpty())
+                {
+                    names.clear();
+                    break;
+                }
+                names.add(name);
+            }
+            // Не загрузилась — пересчёта больше не будет: итог «без типа», без «?».
+            String type = formatTypeNames(names);
+            if (item.offset() >= 0)
+                storeNative(request, new VariableComputed(item.stamp(), item.offset(), type));
+            else
+                storeNative(request, new Computed(item.stamp(), type));
+            log("  resolved key=" + item.key() + " stamp=" + item.stamp() + " type=" + type); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        log("proxies module=" + request.module() + " items=" + pending.size() + " loaded=" + uris.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
+        publish();
     }
 
     /**
-     * Готовые типы всех функций родной модели соседнего редактора — только чтение рассчитанных
+     * Готовый тип одной запрошенной функции родной модели редактора — только чтение рассчитанных
      * EDT состояний ({@link BslDocCommentComputedTypes#readyNormalReturnTypes}): ни
      * {@code TypesComputer}, ни разрешения прокси под блокировкой его документа. Функция без
-     * готового состояния или с типом-прокси не записывается.
+     * готового состояния получает пустой итог (показ штатный); ссылки на типы загружаются после
+     * блокировки ({@link #resolvePending}).
      *
      * @return число функций без готового типа; {@code null} — модели нет
      */
-    private static Integer readyFromNative(Resource resource, Request request, Set<String> done)
+    private static Integer readyFromNative(Resource resource, Request request, Set<String> done,
+        List<Pending> pending)
     {
         com._1c.g5.v8.dt.bsl.model.Module module = moduleOf(resource);
         if (module == null)
             return null;
         // Штамп — того состояния, которое читается сейчас, под блокировкой.
         String stamp = ForeignModuleModel.stamp(request.file(), request.nativeDocument());
-        // Переменные — первыми: их строки видны первыми.
-        int missing = computeVariables(module, request, stamp, true, done);
+        if (request.variable() != null)
+            return computeVariable(module, request, stamp, done, pending);
+        int missing = 0;
         boolean dirty = false;
         int noState = 0;
         int emptyState = 0;
@@ -885,10 +1874,12 @@ final class FunctionReturnTypes
         List<String> missingExamples = new java.util.ArrayList<>();
         for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
         {
-            if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function) || method.getName() == null)
+            if (method.getName() == null || !method.getName().equalsIgnoreCase(request.method())
+                || !(method instanceof com._1c.g5.v8.dt.bsl.model.Function))
                 continue;
             List<?> ready = BslDocCommentComputedTypes.readyNormalReturnTypes(method);
-            Set<String> names = new LinkedHashSet<>();
+            List<Object> parts = new java.util.ArrayList<>();
+            boolean unloaded = false;
             boolean complete = ready != null && !ready.isEmpty();
             // #region temp #877: почему у функции нет готового типа
             if (ready == null)
@@ -900,30 +1891,55 @@ final class FunctionReturnTypes
             {
                 for (Object item : ready)
                 {
-                    String name = item instanceof TypeItem type && !type.eIsProxy() ? typeName(type) : null;
-                    if (name == null || name.isEmpty())
+                    Object part = partOf(item);
+                    if (part == null)
                     {
                         complete = false;
-                        proxyType++;
-                        if (proxyExample == null)
-                            proxyExample = method.getName() + ":" + item; //$NON-NLS-1$
                         break;
                     }
-                    names.add(name);
+                    unloaded |= part instanceof URI;
+                    parts.add(part);
                 }
+            }
+            String key = request.module() + "#" + method.getName().toLowerCase(Locale.ROOT); //$NON-NLS-1$
+            if (complete && unloaded)
+            {
+                // Ссылки на типы загружаются после блокировки (resolvePending); до того — «?».
+                proxyType++;
+                if (proxyExample == null)
+                    proxyExample = method.getName() + ":" + parts; //$NON-NLS-1$
+                pending.add(new Pending(key, parts, stamp, -1));
+                done.add(key);
+                continue;
             }
             if (!complete)
             {
                 missing++;
                 if (missingExamples.size() < 5)
                     missingExamples.add(method.getName());
+                // Готового типа нет, и пересчёта не будет: итог пустой — показ штатный, без «?».
+                // Тип из «Возвращаемое значение» (чтение комментария) — только предварительный
+                // при следующем пересчёте.
+                String comment;
+                try
+                {
+                    comment = commentType(BslStructureInsertCommentTypes.parseMethodComment(method, module));
+                }
+                catch (RuntimeException error)
+                {
+                    comment = ""; //$NON-NLS-1$
+                }
+                COMMENT_TYPES.put(key, new Computed(stamp, comment));
+                dirty |= storeNative(request, new Computed(stamp, "")); //$NON-NLS-1$
                 continue;
             }
-            String type = "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            String key = request.module() + "#" + method.getName().toLowerCase(Locale.ROOT); //$NON-NLS-1$
-            Computed old = RESULTS.put(key, new Computed(stamp, type));
+            List<String> names = new java.util.ArrayList<>();
+            for (Object part : parts)
+                names.add((String)part);
+            String type = formatTypeNames(names);
+            Computed result = new Computed(stamp, type);
             done.add(key);
-            dirty |= old == null || !old.type().equals(type);
+            dirty |= storeNative(request, result);
         }
         log("native reasons module=" + request.module() + " noState=" + noState + " emptyState=" + emptyState //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " proxyType=" + proxyType + " proxyExample=" + proxyExample + " examples=" + missingExamples); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -933,159 +1949,99 @@ final class FunctionReturnTypes
     }
 
     /**
-     * Типы переменных метода точки ({@link #POINTS}) и переменных модуля в этой точке.
-     * Публикуются сразу: строки переменных видны первыми.
+     * Тип одной запрошенной переменной в точке списка по родной
+     * модели редактора — только готовое состояние NORMAL в точке
+     * ({@code getTypeStateProvider().get(NORMAL).getNearestByOffset} — так строку переменной строит
+     * сама EDT), без досчёта и разрешения прокси. Публикуются сразу.
      *
-     * @param readyOnly родная модель редактора: только готовое состояние NORMAL в точке
-     *            ({@code getTypeStateProvider().get(NORMAL).getNearestByOffset} — так строку
-     *            переменной строит сама EDT), без досчёта и разрешения прокси; иначе отдельная
-     *            модель — штатный {@code TypeSystemUtil.getVariableTypesAtOffset}
-     * @param done переменные, записанные из родной модели: в отдельной модели пропускаются,
-     *            в родной — пополняются
-     * @return число переменных без готового типа (в режиме {@code readyOnly})
+     * @return число переменных без готового типа
      */
-    private static int computeVariables(com._1c.g5.v8.dt.bsl.model.Module module, Request request,
-        String stamp, boolean readyOnly, Set<String> done)
+    private static int computeVariable(com._1c.g5.v8.dt.bsl.model.Module module, Request request,
+        String stamp, Set<String> done, List<Pending> pending)
     {
-        String point = POINTS.get(request.module());
-        int colon = point != null ? point.lastIndexOf(':') : -1;
-        if (colon < 0)
+        VariableTarget target = request.variable();
+        if (target == null)
             return 0;
-        String methodName = point.substring(0, colon);
-        int offset;
-        try
-        {
-            offset = Integer.parseInt(point.substring(colon + 1));
-        }
-        catch (NumberFormatException e)
-        {
-            return 0;
-        }
+        int offset = target.offset();
         long start = System.nanoTime();
-        com._1c.g5.v8.dt.bsl.model.Method method = null;
-        for (com._1c.g5.v8.dt.bsl.model.Method candidate : module.allMethods())
+        org.eclipse.emf.ecore.EObject object = module.eResource().getEObject(target.fragment());
+        if (!(object instanceof com._1c.g5.v8.dt.bsl.model.Variable variable)
+            || variable.getName() == null || !variable.getName().equalsIgnoreCase(target.name()))
         {
-            if (candidate.getName() != null && candidate.getName().equalsIgnoreCase(methodName))
-            {
-                method = candidate;
-                break;
-            }
-        }
-        com._1c.g5.v8.dt.mcore.util.Environments environments =
-            method != null ? method.environments() : module.environments();
-        int count = 0;
-        int missing = 0;
-        boolean dirty = false;
-        // Переменные модуля — без переменных методов; переменные метода — все его.
-        List<com._1c.g5.v8.dt.bsl.model.Variable> variables = new java.util.ArrayList<>();
-        for (org.eclipse.emf.ecore.EObject child : module.eContents())
-        {
-            if (!(child instanceof com._1c.g5.v8.dt.bsl.model.Method))
-                variables.addAll(org.eclipse.xtext.EcoreUtil2.getAllContentsOfType(child,
-                    com._1c.g5.v8.dt.bsl.model.Variable.class));
-            if (child instanceof com._1c.g5.v8.dt.bsl.model.Variable variable)
-                variables.add(variable);
-        }
-        int moduleVariables = variables.size();
-        if (method != null)
-            variables.addAll(org.eclipse.xtext.EcoreUtil2.getAllContentsOfType(method,
-                com._1c.g5.v8.dt.bsl.model.Variable.class));
-        for (int i = 0; i < variables.size(); i++)
-        {
-            com._1c.g5.v8.dt.bsl.model.Variable variable = variables.get(i);
-            if (variable.getName() == null)
-                continue;
-            String owner = i < moduleVariables ? "" : methodName; //$NON-NLS-1$
-            String key = new VariableTarget(request.module(), owner, variable.getName(), offset).key();
-            if (!readyOnly && done.contains(key))
-                continue;
-            String type;
-            if (readyOnly)
-            {
-                type = readyVariableType(variable, offset);
-                if (type == null)
-                {
-                    missing++;
-                    continue;
-                }
-                done.add(key);
-            }
-            else
-                type = computedVariableType(variable, offset, environments, module);
-            VariableComputed old = VARIABLE_RESULTS.put(key, new VariableComputed(stamp, offset, type));
-            dirty |= old == null || !old.type().equals(type) || old.offset() != offset;
-            count++;
-        }
-        log("variables module=" + request.module() + " method=" + methodName + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " ready=" + readyOnly + " count=" + count + " missing=" + missing //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
-        if (dirty)
+            storeNative(request, new VariableComputed(stamp, offset, "")); //$NON-NLS-1$
+            log("variable unavailable key=" + target.key() + " fragment=" + target.fragment()); //$NON-NLS-1$ //$NON-NLS-2$
             publish();
-        return missing;
+            return 1;
+        }
+        com._1c.g5.v8.dt.bsl.model.Method method = org.eclipse.xtext.EcoreUtil2.getContainerOfType(
+            variable, com._1c.g5.v8.dt.bsl.model.Method.class);
+        com._1c.g5.v8.dt.mcore.util.Environments environments = method != null ? method.environments()
+            : module.environments();
+        String key = target.key();
+        List<Object> parts = environments != null ? readyVariableType(variable, offset, environments) : null;
+        if (parts != null && parts.stream().anyMatch(URI.class::isInstance))
+        {
+            pending.add(new Pending(key, parts, stamp, offset));
+            done.add(key);
+            log("  var key=" + key + " stamp=" + stamp + " pending=" + parts); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return 0;
+        }
+        List<String> names = new java.util.ArrayList<>();
+        if (parts != null)
+            for (Object part : parts)
+                names.add((String)part);
+        String type = formatTypeNames(names);
+        done.add(key);
+        VariableComputed result = new VariableComputed(stamp, offset, type);
+        boolean changed = storeNative(request, result);
+        log("variable key=" + key + " offset=" + offset + " stamp=" + stamp + " type=" + type //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
+        // Даже при том же типе новый штамп завершает ожидание: строка должна снять «?».
+        if (changed)
+            publish();
+        return parts == null ? 1 : 0;
     }
 
     /**
-     * Готовый тип переменной в точке — только чтение сохранённых EDT состояний, как в
-     * {@code BslProposalProvider.createProposalsByDeclarementVariables}; {@code null} — готового
-     * нет (состояний нет, типов нет или есть тип-прокси).
+     * Готовый тип переменной в точке — тот же вызов, что у боковой подсказки EDT
+     * ({@code BslDocumentationProvider.getDocByNotFormalParamVariable}):
+     * {@code TypeSystemUtil.getVariableTypesAtOffset} — ближайшее состояние для сред метода и его
+     * подсостояния этих сред, только чтение. Части типа — {@link #partOf} (имена и адреса не
+     * загруженных ссылок); {@code null} — готового нет.
      */
-    private static String readyVariableType(com._1c.g5.v8.dt.bsl.model.Variable variable, int offset)
+    private static List<Object> readyVariableType(com._1c.g5.v8.dt.bsl.model.Variable variable, int offset,
+        com._1c.g5.v8.dt.mcore.util.Environments environments)
     {
         try
         {
-            com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector collector =
-                variable.getTypeStateProvider();
-            com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProvider provider = collector != null
-                ? collector.get(com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode.NORMAL) : null;
-            List<com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState> states =
-                provider != null ? provider.getNearestByOffset(offset) : null;
-            if (states == null || states.isEmpty())
+            List<TypeItem> types = com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil.getVariableTypesAtOffset(
+                variable, offset, environments);
+            if (types == null || types.isEmpty())
+            {
+                // #region agent log — причина пустого типа переменной (временно)
+                log("variable miss name=" + variable.getName() + " class=" + variable.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " offset=" + offset + " env=" + environments); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 return null;
-            Set<String> names = new LinkedHashSet<>();
-            for (com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState state : states)
-            {
-                for (TypeItem item : state.getTypes())
-                {
-                    String name = item != null && !item.eIsProxy() ? typeName(item) : null;
-                    if (name == null || name.isEmpty())
-                        return null;
-                    names.add(name);
-                }
             }
-            return names.isEmpty() ? null : "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            List<Object> parts = new java.util.ArrayList<>();
+            for (TypeItem item : types)
+            {
+                Object part = partOf(item);
+                if (part == null)
+                {
+                    log("variable miss name=" + variable.getName() + " reason=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (item == null ? "nullItem" : "noName " + item.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                parts.add(part);
+            }
+            return parts;
         }
         catch (RuntimeException error)
         {
+            log("variable miss name=" + variable.getName() + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
-    }
-
-    /** Тип переменной в точке по рассчитанной отдельной модели (штатный расчёт EDT). */
-    private static String computedVariableType(com._1c.g5.v8.dt.bsl.model.Variable variable, int offset,
-        com._1c.g5.v8.dt.mcore.util.Environments environments, com._1c.g5.v8.dt.bsl.model.Module module)
-    {
-        try
-        {
-            List<TypeItem> types = com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil
-                .getVariableTypesAtOffset(variable, offset, environments);
-            Set<String> names = new LinkedHashSet<>();
-            if (types != null)
-            {
-                for (TypeItem item : types)
-                {
-                    TypeItem resolved = item != null && item.eIsProxy()
-                        ? (TypeItem)EcoreUtil.resolve(item, module) : item;
-                    String name = typeName(resolved);
-                    if (name != null && !name.isEmpty())
-                        names.add(name);
-                }
-            }
-            return names.isEmpty() ? "" : "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        }
-        catch (RuntimeException error)
-        {
-            log("error variable=" + variable.getName() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
-            return ""; //$NON-NLS-1$
         }
     }
 
@@ -1098,12 +2054,22 @@ final class FunctionReturnTypes
 
     private static void refresh()
     {
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
-        log("refresh list=" + visible + " listeners=" + LISTENERS.size()); //$NON-NLS-1$ //$NON-NLS-2$
-        if (visible)
-            ContentAssistPopupSync.refreshProposalTable(assistant);
-        LISTENERS.removeIf(listener -> !listener.getAsBoolean());
+        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.refresh", ""))
+        {
+            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+            boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
+            trace.detail = "visible=" + visible + " listeners=" + LISTENERS.size(); //$NON-NLS-1$ //$NON-NLS-2$
+            log("refresh list=" + visible + " listeners=" + LISTENERS.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (visible)
+            {
+                ContentAssistPopupSync.refreshProposalTable(assistant);
+                var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
+                if (table != null && !table.isDisposed()
+                    && table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
+                    session.traceVisibleRows("refresh"); //$NON-NLS-1$
+            }
+            LISTENERS.removeIf(listener -> !listener.getAsBoolean());
+        }
     }
 
     private static com._1c.g5.v8.dt.bsl.model.Module moduleOf(Resource resource)
@@ -1113,38 +2079,43 @@ final class FunctionReturnTypes
             ? module : null;
     }
 
-    private static TypesComputer typesComputer(Resource resource)
-    {
-        IResourceServiceProvider rsp = ((XtextResource)resource).getResourceServiceProvider();
-        return rsp != null ? rsp.get(TypesComputer.class) : null;
-    }
+    /** Только ключи сортировки и имена: объекты модели редактора здесь не удерживаются. */
+    private static final Map<String, TypeDescriptionPresentationHook.TypeOrder> TYPE_ORDERS =
+        new ConcurrentHashMap<>();
 
-    private static String typeOf(TypesComputer computer, com._1c.g5.v8.dt.bsl.model.Method method,
-        Resource resource)
+    /** Тот же порядок, что в подсказках; при неизвестном ключе сохраняется исходный порядок. */
+    private static String formatTypeNames(java.util.Collection<String> names)
     {
-        // Как EDT для методов модуля в BslProposalProvider.createProposalsByDeclarementMethods.
-        List<TypeItem> types = computer.computeTypes(method, method.environments());
-        Set<String> names = new LinkedHashSet<>();
-        for (TypeItem item : types)
+        List<String> sorted = new java.util.ArrayList<>(new LinkedHashSet<>(names));
+        Map<String, TypeDescriptionPresentationHook.TypeOrder> orders = new java.util.HashMap<>();
+        for (String name : sorted)
         {
-            TypeItem resolved = item != null && item.eIsProxy()
-                ? (TypeItem)EcoreUtil.resolve(item, resource) : item;
-            String typeName = typeName(resolved);
-            if (typeName != null && !typeName.isEmpty())
-                names.add(typeName);
+            var order = TYPE_ORDERS.get(name);
+            if (order == null)
+                break;
+            orders.put(name, order);
         }
-        return names.isEmpty() ? "" : "<" + String.join(", ", names) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        if (orders.size() == sorted.size())
+            sorted.sort((left, right) -> orders.get(left).compareTo(orders.get(right)));
+        return sorted.isEmpty() ? "" : "<" + String.join(", ", sorted) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     private static String typeName(TypeItem type)
     {
         if (type == null || type.eIsProxy())
             return null;
-        if (type instanceof DuallyNamedElement dually && dually.getNameRu() != null
-            && !dually.getNameRu().isEmpty())
-            return SmartContentAssistProcessor.localizeAssistTypeSegment(dually.getNameRu());
-        return type.getName() != null
+        String name = type instanceof DuallyNamedElement dually && dually.getNameRu() != null
+            && !dually.getNameRu().isEmpty()
+            ? SmartContentAssistProcessor.localizeAssistTypeSegment(dually.getNameRu())
+            : type.getName() != null
             ? SmartContentAssistProcessor.localizeAssistTypeSegment(type.getName()) : null;
+        if (name != null && !name.isEmpty())
+        {
+            var order = TypeDescriptionPresentationHook.assistOrder(type);
+            if (order != null)
+                TYPE_ORDERS.put(name, order);
+        }
+        return name;
     }
 
     /** Временный лог (снять после подтверждения). */

@@ -46,7 +46,6 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
     /** Команды ИР с привязками в {@code plugin.xml}. */
     private static final String[] IR_COMMAND_IDS = {
         IrMethodConstructorHandler.COMMAND_ID,
-        EditEmbeddedTextCommandHandler.COMMAND_ID,
         IrFormatTextCommandHandler.COMMAND_ID,
         IrModuleCheckHandler.COMMAND_ID
     };

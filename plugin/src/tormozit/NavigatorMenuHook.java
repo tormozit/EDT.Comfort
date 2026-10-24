@@ -198,7 +198,7 @@ public final class NavigatorMenuHook implements IStartup
             if (!TextTemplateFormatPagesHook.isTextTemplate(object))
                 return;
             BasicTemplate template = (BasicTemplate)object;
-            TextTemplateFormatPagesHook.Format format = TextTemplateFormatPagesHook.formatOf(template);
+            FormattedTextEditor.Format format =TextTemplateFormatPagesHook.formatOf(template);
             // Формат не определён (файл не найден) — даём открыть: редактор сам скажет, есть ли готовый текст.
             boolean available = format == null || format.hasPreview();
             MenuItem item = new MenuItem(menu, SWT.PUSH, OpenHandlerMenu.insertIndex(menu));

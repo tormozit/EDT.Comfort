@@ -152,6 +152,8 @@ public final class ContentAssistPopupUi
             shown = truncateToPopupWidth(contextLabel, bar, text);
 
         contextLabel.setText(shown);
+        Global.tempLog("assist-parent-type", "apply text=" + text + " shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " bounds=" + contextLabel.getBounds() + " status=" + status); //$NON-NLS-1$ //$NON-NLS-2$
         if (shown.equals(text))
             contextLabel.setToolTipText(null);
         else
@@ -251,7 +253,10 @@ public final class ContentAssistPopupUi
             if (contextLabel != null && !contextLabel.isDisposed())
                 applyContextTypeLabel(contextLabel, viewer);
         }
-        catch (Exception ignored) {}
+        catch (Exception error)
+        {
+            Global.tempLogException("assist-parent-type", "update.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     public static boolean isFilterBarCreated(ContentAssistant assistant)
@@ -344,7 +349,13 @@ public final class ContentAssistPopupUi
         int invOff = assistant != null ? ContentAssistPopupSync.getInvocationOffset(assistant) : -1;
         int lastOff = assistant != null ? ContentAssistPopupSync.getLastCompletionOffset(assistant) : -1;
         int caret;
-        if (filterOff >= 0)
+        // Позиции popup могли остаться от списка слов до ввода точки. Контекст подписи
+        // определяется по текущей каретке редактора; поля popup — только запасной источник.
+        if (modelCaret >= 0)
+        {
+            caret = modelCaret;
+        }
+        else if (filterOff >= 0)
         {
             caret = filterOff;
         }
@@ -360,6 +371,8 @@ public final class ContentAssistPopupUi
         {
             caret = modelCaret;
         }
+        Global.tempLog("assist-parent-type", "resolve caret=" + caret + " live=" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " filter=" + filterOff + " invocation=" + invOff + " last=" + lastOff); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         if (inLiteral)
         {

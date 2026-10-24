@@ -3090,12 +3090,20 @@ finishSyncCycleLight(popup);
             List<ICompletionProposal> current =
                 (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
             int currentN = current != null ? current.size() : 0;
-            if (!base.isEmpty() && base.size() > currentN)
+            // Сужен ли список фильтром — сравниваем со схлопнутой базой: несхлопнутая база
+            // всегда длиннее показанного списка, и окно получало бы её строки.
+            List<ICompletionProposal> collapsed = base.isEmpty() ? base
+                : SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(
+                    new ArrayList<>(base));
+            if (collapsed.size() > currentN)
             {
                 SavedSelection saved = saveSelection(popup);
-                List<ICompletionProposal> collapsed =
-                    SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(
-                        new ArrayList<>(base));
+                // База — исходные строки EDT; без обёртки нет типов и свёртки параметров.
+                SmartContentAssistProcessor processor =
+                    ContentAssistSessionReloader.getActiveProcessor();
+                if (processor != null)
+                    collapsed = new ArrayList<>(Arrays.asList(processor.filterProposalsInPlace(
+                        collapsed.toArray(new ICompletionProposal[0]), ""))); //$NON-NLS-1$
                 setProposalsAndRestoreSelection(popup, collapsed, false, saved, false, false);
                 List<ICompletionProposal> applied =
                     (List<ICompletionProposal>) fFilteredProposalsField.get(popup);

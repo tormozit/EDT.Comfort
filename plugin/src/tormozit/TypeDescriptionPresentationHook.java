@@ -306,6 +306,19 @@ final class TypeDescriptionPresentationHook
         }
     }
 
+    /** Ключ порядка для русских названий типов в списке автодополнения, без удержания модели. */
+    static TypeOrder assistOrder(TypeItem item)
+    {
+        try
+        {
+            return typeOrder(item, false, SelectedClassifiers.get(), true);
+        }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+        {
+            return null;
+        }
+    }
+
     /**
      * Ключ TypeInfoSorter EDT для типа; {@code null}, если у типа нет имени.
      *
@@ -412,7 +425,7 @@ final class TypeDescriptionPresentationHook
     private static record CachedText(String source, boolean english, String result) {}
 
     /** Сравнение TypeInfoSorter EDT: приоритет, затем код на языке конфигурации. */
-    private static record TypeOrder(int priority, QualifiedName name) implements Comparable<TypeOrder>
+    static record TypeOrder(int priority, QualifiedName name) implements Comparable<TypeOrder>
     {
         @Override
         public int compareTo(TypeOrder other)

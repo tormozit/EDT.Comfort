@@ -1,6 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?eclipse version="3.4"?>
 <plugin>
+  <extension point="org.eclipse.debug.ui.launchConfigurationTabs">
+    <tab id="tormozit.comfort.debug.ras.remote"
+        group="com._1c.g5.v8.dt.debug.ui.launchConfigurationTabGroup.remote"
+        name="RAS" class="tormozit.DebugSessionRasTab">
+      <placement after="org.eclipse.debug.ui.commonTab"/>
+    </tab>
+    <tab id="tormozit.comfort.debug.ras.local"
+        group="com._1c.g5.v8.dt.debug.ui.launchConfigurationTabGroup.local"
+        name="RAS" class="tormozit.DebugSessionRasTab">
+      <placement after="org.eclipse.debug.ui.commonTab"/>
+    </tab>
+  </extension>
+  <extension point="org.eclipse.core.runtime.adapters">
+    <factory
+        adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.RuntimeSessionThreadGroup"
+        class="tormozit.DebugViewHook">
+      <adapter type="org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider"/>
+    </factory>
+    <factory
+        adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.RuntimeDebugTargetThread"
+        class="tormozit.DebugTargetTerminateAdapterFactory">
+      <adapter type="org.eclipse.debug.core.commands.ITerminateHandler"/>
+    </factory>
+  </extension>
   <extension point="com._1c.g5.v8.dt.bsl.stringLiteralProposals">
     <stringLiteralProposals class="tormozit.BslQueryResultTypes$ColumnProposals"/>
   </extension>
@@ -18,6 +42,7 @@
     <startup class="tormozit.ComfortStartup"/>
   </extension>
   <extension point="tormozit.comfort.startup">
+    <startup class="tormozit.DebugViewHook"/>
     <startup class="tormozit.WorkbenchTabsHook"/>
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ExternalOpenRequestHook"/>
@@ -155,6 +180,7 @@
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
     <startup class="tormozit.DebugErrorSuffixHook"/>
     <startup class="tormozit.DebugAreasConfigureHook"/>
+    <startup class="tormozit.DebugServerConnectionHook"/>
     <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.BreakpointListHook"/>
     <startup class="tormozit.MarkersListViewsHook"/>
@@ -234,6 +260,17 @@
     <startup class="tormozit.SchemaPropertiesTabSyncHook"/>
     <startup class="tormozit.GcPressureToastHook"/>
     <startup class="tormozit.UiStallSampler"/>
+  </extension>
+
+  <!-- Тип содержимого JSON (в платформе EDT его нет): формат JSON окна «Вложенный текст» и вкладки
+       «Сырой текст» макета — для настроек по типу, например направляющих отступов (FormattedTextEditor, #885). -->
+  <extension point="org.eclipse.core.contenttype.contentTypes">
+    <content-type
+        id="tormozit.comfort.json"
+        name="JSON"
+        base-type="org.eclipse.core.runtime.text"
+        file-extensions="json"
+        priority="low"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -580,9 +617,9 @@
         description="Открыть конструктор метода приложения ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.IrEmbeddedText"
-        name="Вложенный текст ИР"
+        name="Вложенный текст"
         categoryId="tormozit.commands.global"
-        description="Открыть строковый литерал BSL в редакторе текста ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+        description="Редактировать строковый литерал BSL в отдельном окне; при подключённом ИР — в редакторе текста ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.IrQueryConstructor"
         name="Конструктор запроса ИР"

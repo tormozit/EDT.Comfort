@@ -95,8 +95,25 @@ public final class PasteWithCompareActions
      */
     public static boolean runWithNewText(Shell shell, TextEditor.Context ctx, String newText)
     {
+        return compareAndInsert(ctx, newText) != null;
+    }
+
+    /**
+     * Как {@link #runWithNewText}, но сообщает, одобрена ли вставка (окно «Вложенный текст»
+     * закрывается только после неё).
+     *
+     * @return {@code true} — вставка выполнена; {@code false} — отмена или сравнение не открылось
+     */
+    public static boolean runWithNewTextInserted(Shell shell, TextEditor.Context ctx, String newText)
+    {
+        return Boolean.TRUE.equals(compareAndInsert(ctx, newText));
+    }
+
+    /** @return вставка выполнена / отменена; {@code null} — контекст непригоден или диалог не открылся */
+    private static Boolean compareAndInsert(TextEditor.Context ctx, String newText)
+    {
         if (ctx == null || !ctx.editable)
-            return false;
+            return null;
 
         try
         {
@@ -108,17 +125,17 @@ public final class PasteWithCompareActions
 
             String result = input.openDialog();
             if (result == null)
-                return true;
+                return Boolean.FALSE;
 
             TextEditor.replaceSelectionAndSelect(ctx, result);
-            return true;
+            return Boolean.TRUE;
         }
         catch (Exception e)
         {
             Global.log("PasteWithCompareActions.runWithNewText: " + e); //$NON-NLS-1$
             ToastNotification.show(MENU_LABEL,
                 "Не удалось открыть сравнение: " + e.getMessage(), 5000);
-            return false;
+            return null;
         }
     }
 

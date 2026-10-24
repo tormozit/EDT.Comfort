@@ -554,7 +554,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     /** Результат фонового расчёта вместе с контекстом, для которого он посчитан. */
     private record BackgroundStock(int dot, int gen, String receiver, ICompletionProposal[] list,
-        java.util.Map<Object, Object> dataEvents)
+        java.util.Map<Object, Object> dataEvents, long dependencyRevision)
     {}
 
     private Job memberStockBackgroundJob;
@@ -813,8 +813,33 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
+     * Длинная строка — та же сигнатура, что короткая, только с необязательными параметрами.
+     * Платформенный метод EDT строит обе строки из одного {@code ParamSet}
+     * ({@code createProposalForOneMcoreMethod} получает {@code List.of(paramSet)}): одинаковый
+     * {@code ParamSet} — одна сигнатура (в т.ч. {@code Метод()} + {@code Метод(А)}), разные —
+     * разные сигнатуры, даже если имена параметров одной — начало другой. Без {@code ParamSet}
+     * (методы модулей, ИР) — по именам параметров.
+     */
+    private static boolean isSameSignatureExtension(ICompletionProposal shorter,
+        List<String> shorterParams, ICompletionProposal longer, List<String> longerParams)
+    {
+        ParamSet a = paramSetSignatureOf(shorter);
+        ParamSet b = paramSetSignatureOf(longer);
+        if (a != null && b != null)
+            return a == b && shorterParams.size() < longerParams.size();
+        return isOptionalParamExtension(shorterParams, longerParams);
+    }
+
+    /** {@code ParamSet} строки списка; {@code null} — не известен. */
+    static ParamSet paramSetSignatureOf(ICompletionProposal proposal)
+    {
+        return unwrapProposal(proposal) instanceof ConfigurableCompletionProposal cp
+            && CtorMinParamsInsert.readSignatureObject(cp) instanceof ParamSet set ? set : null;
+    }
+
+    /**
      * Схлопывает min/max перегрузки с необязательными параметрами; разные сигнатуры
-     * (другие имена/типы параметров) остаются.
+     * (другие {@code ParamSet}, другие имена/типы параметров) остаются.
      */
     static List<ICompletionProposal> collapseOptionalParamOverlaps(
         List<ICompletionProposal> batch)
@@ -843,9 +868,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             List<String> params = parseProposalParamNames(
                 displayString(unwrapProposal(proposal)));
             boolean extension = false;
-            for (List<String> existing : keptParams)
+            for (int k = 0; k < kept.size(); k++)
             {
-                if (isOptionalParamExtension(existing, params))
+                if (isSameSignatureExtension(kept.get(k), keptParams.get(k), proposal, params))
                 {
                     extension = true;
                     break;
@@ -1035,6 +1060,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         if (emptyForm == null || paramForm == null)
             return null;
+        // Голое слово (тип «Строка») — не перегрузка метода «Строка(…)».
+        if (parseProposalSignature(displayString(unwrapProposal(emptyForm))).indexOf('(') < 0)
+            return null;
+        ParamSet emptySet = paramSetSignatureOf(emptyForm);
+        ParamSet paramSet = paramSetSignatureOf(paramForm);
+        if (emptySet != null && paramSet != null && emptySet != paramSet)
+            return null;
         return java.util.Collections.singletonList(emptyForm);
     }
 
@@ -1060,10 +1092,24 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 && "NoLinkModelCompletionProposal".equals(raw.getClass().getSimpleName())) //$NON-NLS-1$
                 typeN++;
         }
-        if (typeN > 0)
-            return merged;
-        for (ICompletionProposal p : merged)
-            CtorMinParamsInsert.trimIfNeeded(unwrapProposal(p));
+        // NoLinkModel — не только типы после «Новый», но и строка метода без параметров
+        // («Метод()»), поэтому без неё пропускается только подрезка вставки (ждёт замок
+        // документа), а схлопывание перегрузок нужно всегда.
+        if (typeN == 0)
+        {
+            for (ICompletionProposal p : merged)
+                CtorMinParamsInsert.trimIfNeeded(unwrapProposal(p));
+        }
+        return collapseSameNameOverlaps(merged);
+    }
+
+    /**
+     * Схлопывание перегрузок одного имени без подрезки вставки; слова ИР не трогает.
+     * Те же объекты proposal (identity).
+     */
+    private static List<ICompletionProposal> collapseSameNameOverlaps(
+        List<ICompletionProposal> merged)
+    {
         if (merged.size() <= 1)
             return merged;
         Map<String, List<ICompletionProposal>> byKey = new LinkedHashMap<>();
@@ -1094,8 +1140,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         List<ICompletionProposal> result = new ArrayList<>(merged.size());
         for (ICompletionProposal p : merged)
         {
-            ICompletionProposal raw = unwrapProposal(p);
-            if (raw instanceof IrCompletionProposal)
+            if (unwrapProposal(p) instanceof IrCompletionProposal)
             {
                 result.add(p);
                 continue;
@@ -1119,9 +1164,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return merged != null ? merged : EMPTY;
         // Типы после «Новый»: trimAll на 300 пунктах ждёт замок документа
         // (лог 10:30:41 fetch 539 мс → filterAndSort через 1147 мс, показ 2 с).
-        if (countNoLinkModelProposals(merged) > 0)
-            return merged;
-        CtorMinParamsInsert.trimAll(merged);
+        int typeN = countNoLinkModelProposals(merged);
+        // Только подрезка; схлопывание — всегда (см. collapseOptionalEdtOverlapsInMergedList).
+        if (typeN == 0)
+            CtorMinParamsInsert.trimAll(merged);
         if (merged.length <= 1)
             return merged;
         List<ICompletionProposal> collapsed =
@@ -2597,6 +2643,7 @@ return;
         ICompletionProposal[] result = EMPTY;
         try
         {
+        dropMemberCachesOnOtherModuleChange(viewer != null ? viewer.getDocument() : null);
         dropListCachesOnTypesChange();
 
         result = computeCompletionProposalsImpl(viewer, offset);
@@ -3712,6 +3759,8 @@ return;
         if (stock == null || stock.dot() != dot)
             return hasMemberStock(dot);
         backgroundStock = null;
+        if (stock.dependencyRevision() != FunctionReturnTypes.localContextRevision(viewer.getDocument()))
+            return false;
         publishMemberStock(viewer, stock.dot(), stock.gen(), stock.receiver(), stock.list(),
             stock.dataEvents());
         return hasMemberStock(dot);
@@ -6494,6 +6543,71 @@ return stripEmptyPlaceholderProposals(result);
         return hasZeroMinParamsConstructor(CtorMinParamsInsert.resolveType(typeName));
     }
 
+    /** Конструктор типа: имена параметров (рус., англ.) и {@code getMinParams()}. */
+    private record CtorSignature(List<String> namesRu, List<String> names, int minParams)
+    {}
+
+    /** Конструкторы по имени типа на сеанс EDT; заполняет {@link BareConstructorWarmup}. */
+    private static final Map<String, List<CtorSignature>> CTOR_SIGNATURE_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Номер последнего обязательного параметра конструктора с такими именами параметров
+     * ({@code FakeCtor} их обязательность не несёт); {@code -1} — ещё не известен: модель на UI
+     * не читаем, запрос уходит в фон, по готовности окно пересчитывается.
+     */
+    static int ctorLastRequiredParam(String typeName, List<String> paramNames)
+    {
+        if (typeName == null || typeName.isEmpty() || paramNames == null)
+            return -1;
+        List<CtorSignature> ctors = CTOR_SIGNATURE_CACHE.get(typeName.toLowerCase(java.util.Locale.ROOT));
+        if (ctors == null)
+        {
+            if (org.eclipse.swt.widgets.Display.getCurrent() != null)
+                BareConstructorWarmup.request(typeName);
+            return -1;
+        }
+        for (CtorSignature ctor : ctors)
+        {
+            if (sameNamesIgnoreCase(ctor.namesRu(), paramNames) || sameNamesIgnoreCase(ctor.names(), paramNames))
+                return Math.min(ctor.minParams(), paramNames.size());
+        }
+        return -1;
+    }
+
+    private static boolean sameNamesIgnoreCase(List<String> a, List<String> b)
+    {
+        if (a.size() != b.size())
+            return false;
+        for (int i = 0; i < a.size(); i++)
+        {
+            if (!a.get(i).equalsIgnoreCase(b.get(i)))
+                return false;
+        }
+        return true;
+    }
+
+    private static List<CtorSignature> ctorSignatures(Type type)
+    {
+        List<CtorSignature> result = new ArrayList<>();
+        if (type == null || type.getCtors() == null)
+            return result;
+        for (Ctor ctor : type.getCtors())
+        {
+            if (ctor == null || ctor.getParams() == null)
+                continue;
+            List<String> namesRu = new ArrayList<>();
+            List<String> names = new ArrayList<>();
+            for (com._1c.g5.v8.dt.mcore.Parameter param : ctor.getParams())
+            {
+                namesRu.add(param.getNameRu() != null ? param.getNameRu() : ""); //$NON-NLS-1$
+                names.add(param.getName() != null ? param.getName() : ""); //$NON-NLS-1$
+            }
+            result.add(new CtorSignature(namesRu, names, Math.max(0, ctor.getMinParams())));
+        }
+        return result;
+    }
+
     private static boolean hasZeroMinParamsConstructor(Type type)
     {
         if (type == null)
@@ -6585,6 +6699,7 @@ return stripEmptyPlaceholderProposals(result);
                                 break;
                             Type type = CtorMinParamsInsert.resolveTypeInResource(resource, entry.getValue());
                             values.put(entry.getKey(), Boolean.valueOf(hasZeroMinParamsConstructor(type)));
+                            CTOR_SIGNATURE_CACHE.put(entry.getKey(), ctorSignatures(type));
                         }
                         return values;
                     });
@@ -8513,6 +8628,7 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
     private void ensureFullListForContext(ITextViewer viewer, IDocument doc, int caret,
                                           boolean allowSyncMemberCapture)
     {
+        dropMemberCachesOnOtherModuleChange(doc);
         ensureFullListForContextImpl(viewer, doc, caret, allowSyncMemberCapture);
 
     }
@@ -8971,36 +9087,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (!onUi)
             resetDelegateAssistMode();
         KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
-        // Метод под кареткой, ссылающийся «см.» на функцию, тело которой правили после его
-        // расчёта, пересчитывается здесь — только он и только когда в нём нужен список.
-        // В UI-потоке — нет: там readOnly ждал бы задания разрешения ссылок.
-        if (!onUi && viewer != null && viewer.getDocument() instanceof IXtextDocument refreshDoc)
-        {
-            final int refreshOffset = off;
-            boolean[] shown = { false };
-            try
-            {
-                refreshDoc.readOnly(resource ->
-                {
-                    BslStructureInsertCommentTypes.refreshTypesForAssist(resource, refreshOffset, status ->
-                    {
-                        // Состояние — в нижней панели открытого списка вместо «Родитель: …».
-                        shown[0] = true;
-                        ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
-                    });
-                    return null;
-                });
-            }
-            finally
-            {
-                if (shown[0])
-                    ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
-            }
-        }
+        // Типы строк запрашиваются отдельно: текущая сразу, остальные видимые после паузы.
         boolean delegateCompleted = false;
         try
         {
             raw = dropTemplateTypes(delegate.computeCompletionProposals(viewer, off));
+            FunctionReturnTypes.rememberVariableTargets(raw);
             BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
             delegateCompleted = true;
         }
@@ -9208,6 +9300,56 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         memberStockFullListComplete = false;
     }
 
+    private IDocument memberDependencyDocument;
+    private long memberDependencyRevision;
+
+    /** Точка осталась на месте, но код другого модуля мог изменить тип выражения слева от неё. */
+    private void dropMemberCachesOnOtherModuleChange(IDocument document)
+    {
+        if (document == null)
+            return;
+        long revision = FunctionReturnTypes.localContextRevision(document);
+        if (memberDependencyDocument != document)
+        {
+            memberDependencyDocument = document;
+            memberDependencyRevision = revision;
+            return;
+        }
+        if (memberDependencyRevision == revision)
+            return;
+        Global.tempLog(RECEIVER_TYPE_LOG, "dependency.changed old=" + memberDependencyRevision //$NON-NLS-1$
+            + " new=" + revision + " stock=" + memberStockFullList.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " parents=" + collectParentTypesFromProposals(memberStockFullList)); //$NON-NLS-1$
+        memberDependencyRevision = revision;
+        memberStockContextGen++;
+        memberStockCaptureGen++;
+        if (memberStockBackgroundJob != null)
+            memberStockBackgroundJob.cancel();
+        memberStockBackgroundDot = -1;
+        memberStockBackgroundGen = -1;
+        backgroundStock = null;
+        resetMemberStockFullList();
+        if (fullListContextKey >= 0 || activeMemberAccessDot >= 0)
+        {
+            assignFullListCache(EMPTY);
+            fullListReady = false;
+            fullListComplete = false;
+            delegateListCache = EMPTY;
+            lastStableDelegateList = EMPTY;
+            lastStableEmptyList = EMPTY;
+            fullListContextKey = Integer.MIN_VALUE;
+            fullListContextReceiver = ""; //$NON-NLS-1$
+        }
+        terminalEmptyMemberAccess = false;
+        cachedNonObjectDot = -1;
+        nonObjectCheckedDot = -1;
+        lastNonObjectResult = false;
+        memberStockWaitFailedDot = -1;
+        memberAccessReloadSeq++;
+        memberAccessReloadScheduledSeq = -1;
+        clearDelegateSyncProbe();
+    }
+
     private void captureMemberStockFullList(ICompletionProposal[] raw, int dot)
     {
         if (dot < 0 || raw == null || raw.length == 0)
@@ -9375,6 +9517,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Исходный запас членов, до фильтрации и схлопывания отображаемого списка. Без чтения модели. */
     ICompletionProposal[] memberAccessBaseForPopup(IDocument doc, int caret)
     {
+        dropMemberCachesOnOtherModuleChange(doc);
         int dot = doc != null ? ReceiverTypeLabel.findMemberAccessDot(doc, caret) : -1;
         ICompletionProposal[] base = hasMemberListForDot(dot) ? memberStockFullList : EMPTY;
         return base;
@@ -9450,6 +9593,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (viewer == null || dotContextKey < 0)
             return;
+        dropMemberCachesOnOtherModuleChange(viewer.getDocument());
         // «.» в строковом литерале — не member-access; readOnly здесь держит UI ~2 с.
         int caretProbe = resolveWidgetCaret(viewer);
         if (caretProbe >= 0 && isStringLiteralAssistContext(viewer, caretProbe))
@@ -9526,6 +9670,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         String contextReceiver)
     {
         IDocument doc = viewer.getDocument();
+        final long dependencyRevision = FunctionReturnTypes.localContextRevision(doc);
         if (doc == null || !(doc instanceof IXtextDocument))
             return memberStockSkip("noXtextDoc"); //$NON-NLS-1$
         // Изоляция ставится в finally расчёта, то есть впервые — только после того, как
@@ -9693,10 +9838,18 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     // подсветкой, asyncExec стоит секундами (лог 11.09.2026: probe n=5 в 00:19:00,
                     // show в 00:19:10). Показ — тот же Paint+timerExec(0), что у списка слов.
                     backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
-                        result, events);
+                        result, events, dependencyRevision);
+                    Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.result dot=" + dotContextKey //$NON-NLS-1$
+                        + " revision=" + dependencyRevision + " current=" + FunctionReturnTypes.localContextRevision(doc) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " parents=" + collectParentTypesFromProposals(result)); //$NON-NLS-1$
+                    Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.receiver dot=" + dotContextKey //$NON-NLS-1$
+                        + " " + ReceiverTypeLabel.describeReceiverBeforeDot(doc, dotContextKey, probeOffset)); //$NON-NLS-1$
                     runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
-                        () -> publishMemberStock(viewer, dotContextKey, contextGen,
-                        contextReceiver, result, events));
+                        () ->
+                        {
+                            if (dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
+                                publishMemberStock(viewer, dotContextKey, contextGen, contextReceiver, result, events);
+                        });
                     return Status.OK_STATUS;
                 }
                 finally
@@ -11020,6 +11173,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ghostMs = (System.nanoTime() - tGhost) / 1_000_000L;
         if (filtered.isEmpty())
             return EMPTY;
+        // Сюда список приходит мимо collapseOptionalEdtOverlapsArray (кэш полного списка):
+        // перегрузки одной сигнатуры схлопываем на отфильтрованном срезе.
+        List<ICompletionProposal> collapsed = collapseSameNameOverlaps(filtered);
+        if (collapsed != filtered)
+        {
+            filtered.clear();
+            filtered.addAll(collapsed);
+        }
 
         Integer[] idx = new Integer[filtered.size()];
         for (int i = 0; i < idx.length; i++)

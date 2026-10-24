@@ -7,13 +7,16 @@
  *****************************************************************************/
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.StringTokenizer;
+import java.util.function.Supplier;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -67,9 +70,82 @@ public final class IndentGuideHook implements IStartup
     private final PartWatcher partWatcher = new PartWatcher();
     private final PropWatcher propWatcher = new PropWatcher();
 
+    /** Экземпляр хука после старта — для просмотрщиков вне редакторов ({@link #attachViewer}). */
+    private static volatile IndentGuideHook instance;
+
+    /**
+     * Просмотрщики вне редакторов EDT (поле «Сырой текст» макета, окно «Вложенный текст»):
+     * их не находит обход редакторов, тип содержимого задаёт владелец ({@link FormattedTextEditor}).
+     */
+    private final Map<ISourceViewer, Standalone> standalone = new LinkedHashMap<>();
+
+    /**
+     * Направляющие на просмотрщике вне редактора — по флажку «Включить» и списку типов на странице
+     * «Направляющие отступов». Повторный вызов (смена формата → другой тип) пересчитывает: тип
+     * исключён — направляющие снимаются, разрешён — ставятся. Снимаются и при закрытии поля.
+     *
+     * @param contentTypeId текущий тип содержимого поля; {@code null} — как «Текст»
+     */
+    static void attachViewer(ISourceViewer viewer, Supplier<String> contentTypeId)
+    {
+        IndentGuideHook hook = instance;
+        if (hook == null || viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+            return;
+        Standalone record = hook.standalone.get(viewer);
+        if (record == null)
+        {
+            record = new Standalone(viewer, contentTypeId);
+            hook.standalone.put(viewer, record);
+            Standalone created = record;
+            viewer.getTextWidget().addDisposeListener(e ->
+            {
+                hook.standalone.remove(viewer);
+                if (created.painter != null)
+                    created.painter.dispose();
+                created.painter = null;
+            });
+        }
+        hook.applyStandalone(record);
+    }
+
+    private void applyStandalone(Standalone record)
+    {
+        if (!(record.viewer instanceof ITextViewerExtension2 ext) || record.viewer.getTextWidget() == null
+            || record.viewer.getTextWidget().isDisposed())
+            return;
+        String typeId = record.contentTypeId.get();
+        boolean wanted = store != null && store.getBoolean(ComfortSettings.PREF_INDENT_GUIDE_ENABLED)
+            && (typeId == null || !excludedTypeIds.contains(typeId));
+        try
+        {
+            if (wanted && record.painter == null)
+            {
+                record.painter = new IndentGuidePainter(record.viewer);
+                ext.addPainter(record.painter);
+            }
+            else if (!wanted && record.painter != null)
+            {
+                ext.removePainter(record.painter);
+                record.painter.dispose();
+                record.painter = null;
+            }
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.log(TAG, "standalone install failed: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private void applyAllStandalone()
+    {
+        for (Standalone record : new ArrayList<>(standalone.values()))
+            applyStandalone(record);
+    }
+
     @Override
     public void earlyStartup()
     {
+        instance = this;
         UIJob job = new UIJob("Indent Guide Startup") //$NON-NLS-1$
         {
             @Override
@@ -335,6 +411,14 @@ public final class IndentGuideHook implements IStartup
                 d.painter.redrawAll();
             }
         }
+        for (Standalone record : standalone.values())
+        {
+            if (record.painter != null)
+            {
+                record.painter.loadPrefs();
+                record.painter.redrawAll();
+            }
+        }
     }
 
     private void deactivate(IWorkbenchPart part)
@@ -437,7 +521,23 @@ public final class IndentGuideHook implements IStartup
                     initWorkbenchWindows();
             }
 
+            // Флажок «Включить» и список типов — и для полей вне редакторов.
+            applyAllStandalone();
             refreshAll();
+        }
+    }
+
+    /** Просмотрщик вне редактора: тип содержимого спрашиваем у владельца при каждом пересчёте. */
+    private static final class Standalone
+    {
+        final ISourceViewer viewer;
+        final Supplier<String> contentTypeId;
+        IndentGuidePainter painter;
+
+        Standalone(ISourceViewer viewer, Supplier<String> contentTypeId)
+        {
+            this.viewer = viewer;
+            this.contentTypeId = contentTypeId;
         }
     }
 

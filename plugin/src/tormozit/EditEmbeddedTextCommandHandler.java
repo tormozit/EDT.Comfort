@@ -12,7 +12,7 @@ import org.eclipse.ui.handlers.HandlerUtil;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Команда «Вложенный текст ИР»: открыть строковый литерал BSL в редакторе текста ИР.
+ * Команда «Вложенный текст»: редактировать строковый литерал BSL ({@link EditEmbeddedTextHandler}).
  */
 public final class EditEmbeddedTextCommandHandler extends AbstractHandler
 {
@@ -20,7 +20,7 @@ public final class EditEmbeddedTextCommandHandler extends AbstractHandler
 
     public static final String BINDING_CONTEXT_ID = "org.eclipse.xtext.ui.XtextEditorScope"; //$NON-NLS-1$
 
-    public static final String MENU_LABEL = "Вложенный текст ИР"; //$NON-NLS-1$
+    public static final String MENU_LABEL = "Вложенный текст"; //$NON-NLS-1$
 
     @Override
     public void setEnabled(Object evaluationContext)

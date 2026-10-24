@@ -13,7 +13,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
  * Команда «Конструктор запроса ИР»: открыть конструктор запроса приложения ИР
- * для текста запроса под кареткой. Доступность — как у команды «Вложенный текст ИР».
+ * для текста запроса под кареткой. Доступность — как у команды «Вложенный текст».
  */
 public final class IrQueryConstructorCommandHandler extends AbstractHandler
 {

@@ -882,7 +882,8 @@ public class BSLEditorMenuHook implements IStartup
                         EditEmbeddedTextCommandHandler.COMMAND_ID,
                         EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
                     ComfortSubmenuHelper.setMenuItemTooltip(item,
-                        "Открыть вложенный текст в редакторе текста приложения ИР");
+                        "Редактировать строковый литерал в отдельном окне: подсветка Markdown/JSON/XML/HTML и готовый текст. "
+                            + "При подключённом приложении ИР — в редакторе текста ИР");
                     item.addSelectionListener(new SelectionAdapter()
                     {
                         @Override

@@ -35,7 +35,7 @@
          version="0.0.0"
          unpack="false"/>
 
-   <!-- Mylyn WikiText и jsoup: редактор Markdown текстового макета, в EDT не входят -->
+   <!-- WikiText и jsoup поставляются для Markdown; диапазоны версий в p2.inf допускают библиотеки Workmate. -->
    <plugin
          id="org.eclipse.mylyn.wikitext"
          version="0.0.0"

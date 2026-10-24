@@ -73,6 +73,8 @@ public class Activator extends AbstractUIPlugin
         super.start(context);
         instance = this;
         CheckRecomputeNotifications.install();
+        BuildTriggerDiagnostics.install();
+        FunctionReturnTypes.installLocalContextInvalidation();
         TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
         FormEditorHook.installPreviewCallbacks();
@@ -231,6 +233,8 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        BuildTriggerDiagnostics.uninstall();
+        FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
         IRApplication.disconnectAll();
@@ -243,6 +247,109 @@ public class Activator extends AbstractUIPlugin
 
         instance = null;
         super.stop(context);
+    }
+
+    /** Временная безусловная диагностика: инициатор изменения ресурсов и постановки сборки. */
+    private static final class BuildTriggerDiagnostics extends org.eclipse.core.runtime.jobs.JobChangeAdapter
+        implements IResourceChangeListener
+    {
+        private static final String TOPIC = "build-trigger"; //$NON-NLS-1$
+        private static final BuildTriggerDiagnostics INSTANCE = new BuildTriggerDiagnostics();
+        private static final java.util.concurrent.atomic.AtomicLong sequence =
+            new java.util.concurrent.atomic.AtomicLong();
+
+        static void install()
+        {
+            ResourcesPlugin.getWorkspace().addResourceChangeListener(INSTANCE,
+                IResourceChangeEvent.POST_CHANGE | IResourceChangeEvent.PRE_BUILD | IResourceChangeEvent.POST_BUILD);
+            Job.getJobManager().addJobChangeListener(INSTANCE);
+            Global.tempLog(TOPIC, "installed autoBuilding=" //$NON-NLS-1$
+                + ResourcesPlugin.getWorkspace().getDescription().isAutoBuilding());
+        }
+
+        static void uninstall()
+        {
+            Job.getJobManager().removeJobChangeListener(INSTANCE);
+            ResourcesPlugin.getWorkspace().removeResourceChangeListener(INSTANCE);
+            Global.tempLog(TOPIC, "uninstalled"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void resourceChanged(IResourceChangeEvent event)
+        {
+            long id = sequence.incrementAndGet();
+            String phase = switch (event.getType())
+            {
+                case IResourceChangeEvent.POST_CHANGE -> "resource.changed"; //$NON-NLS-1$
+                case IResourceChangeEvent.PRE_BUILD -> "build.before"; //$NON-NLS-1$
+                case IResourceChangeEvent.POST_BUILD -> "build.after"; //$NON-NLS-1$
+                default -> "resource.event"; //$NON-NLS-1$
+            };
+            record(phase, "event=" + id + " buildKind=" + event.getBuildKind() //$NON-NLS-1$ //$NON-NLS-2$
+                + " resource=" + event.getResource()); //$NON-NLS-1$
+            IResourceDelta root = event.getDelta();
+            if (root == null)
+                return;
+            try
+            {
+                root.accept(delta ->
+                {
+                    Global.tempLog(TOPIC, "delta event=" + id + " path=" + delta.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " kind=" + delta.getKind() + " flags=" + delta.getFlags() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " content=" + ((delta.getFlags() & IResourceDelta.CONTENT) != 0) //$NON-NLS-1$
+                        + " movedFrom=" + delta.getMovedFromPath() + " movedTo=" + delta.getMovedToPath()); //$NON-NLS-1$ //$NON-NLS-2$
+                    return true;
+                });
+            }
+            catch (org.eclipse.core.runtime.CoreException error)
+            {
+                Global.tempLogException(TOPIC, "delta.failed event=" + id, error); //$NON-NLS-1$
+            }
+        }
+
+        @Override
+        public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            recordJob("job.scheduled", event); //$NON-NLS-1$
+        }
+
+        @Override
+        public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            recordJob("job.start", event); //$NON-NLS-1$
+        }
+
+        @Override
+        public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            recordJob("job.done", event); //$NON-NLS-1$
+        }
+
+        @Override
+        public void awake(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            recordJob("job.awake", event); //$NON-NLS-1$
+        }
+
+        private static void recordJob(String phase, org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            Job job = event.getJob();
+            boolean auto = job.belongsTo(ResourcesPlugin.FAMILY_AUTO_BUILD);
+            boolean manual = job.belongsTo(ResourcesPlugin.FAMILY_MANUAL_BUILD);
+            if (!auto && !manual)
+                return;
+            record(phase, "job=" + System.identityHashCode(job) + " class=" + job.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " name=" + job.getName() + " auto=" + auto + " manual=" + manual //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " delay=" + event.getDelay() + " result=" + event.getResult()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void record(String phase, String detail)
+        {
+            Global.tempLogException(TOPIC, phase + " " + detail //$NON-NLS-1$
+                + " autoBuilding=" + ResourcesPlugin.getWorkspace().getDescription().isAutoBuilding() //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName(), //$NON-NLS-1$
+                new Exception("Diagnostic call stack (not an error)")); //$NON-NLS-1$
+        }
     }
 
     /** Уведомления о полном пересчёте; ранний бандл не зависит от Workbench. */

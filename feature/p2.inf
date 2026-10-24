@@ -1,9 +1,29 @@
-# Update descriptor for feature.group IU.
-# Tells p2 that this version replaces any previous version of the same feature,
-# so "Install New Software" correctly updates instead of installing alongside.
-units.0.id=tormozit.comfort.feature.feature.group
-units.0.version=$version$
-units.0.update.id=tormozit.comfort.feature.feature.group
-units.0.update.range=[0.0.0,$version$)
-units.0.update.severity=0
-units.0.update.description=EDT Comfort update
+# Feature group update and dependency advice (Equinox p2 publisher).
+# Root advice modifies the generated group; units.N would create another IU.
+update.id=tormozit.comfort.feature.feature.group
+update.range=[0.0.0,$version$)
+update.severity=0
+update.description=EDT Comfort update
+
+# Keep bundled libraries in feature.xml for PDE export and offline installation.
+# Override exact generated requirements by name/namespace (AbstractPublisherAction).
+# Workmate 1.0.8 pins WikiText UI 3.0.42; both 3.0.42 and 3.0.48 expose our API.
+requires.0.namespace=org.eclipse.equinox.p2.iu
+requires.0.name=org.eclipse.mylyn.wikitext
+requires.0.range=[3.0.42,4.0.0)
+requires.1.namespace=org.eclipse.equinox.p2.iu
+requires.1.name=org.eclipse.mylyn.wikitext.osgi
+requires.1.range=[3.0.42,4.0.0)
+requires.2.namespace=org.eclipse.equinox.p2.iu
+requires.2.name=org.eclipse.mylyn.wikitext.ui
+requires.2.range=[3.0.42,4.0.0)
+requires.3.namespace=org.eclipse.equinox.p2.iu
+requires.3.name=org.eclipse.mylyn.wikitext.markdown
+requires.3.range=[3.0.42,4.0.0)
+requires.4.namespace=org.eclipse.equinox.p2.iu
+requires.4.name=org.eclipse.mylyn.wikitext.markdown.ui
+requires.4.range=[3.0.42,4.0.0)
+# WikiText's own package requirements select a compatible jsoup version.
+requires.5.namespace=org.eclipse.equinox.p2.iu
+requires.5.name=org.jsoup
+requires.5.range=[1.14.0,2.0.0)

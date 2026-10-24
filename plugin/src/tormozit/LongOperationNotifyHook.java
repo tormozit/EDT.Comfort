@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.function.Consumer;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -49,7 +50,7 @@ import com.sun.jna.platform.win32.WinDef.HWND;
  * или нет событий мыши/клавиатуры ≥ 30 с. Белый список: загрузка конфигурации,
  * сравнение конфигураций, объединение конфигураций, выгрузка конфигурации
  * в файлы XML, активация проектного контекста, переключение на ветку Git,
- * отправка на сервер Git.
+ * отправка на сервер Git, обновление базы.
  * <p>Отдельный триггер — ошибки: если сама операция записала в журнал ошибок платформы
  * хотя бы одну запись уровня ERROR, тост показывается всегда (независимо
  * от фокуса, активности пользователя, длительности и статуса Job), содержит число
@@ -83,6 +84,7 @@ public final class LongOperationNotifyHook implements IStartup
     /** Штатный Error Log (бандл {@code org.eclipse.ui.views.log}). */
     private static final String ERROR_LOG_VIEW_ID = "org.eclipse.pde.runtime.LogView"; //$NON-NLS-1$
     private static final String TITLE_LOAD = "Загрузка конфигурации"; //$NON-NLS-1$
+    private static final String TITLE_UPDATE = "Обновление базы"; //$NON-NLS-1$
     private static final String TITLE_COMPARE = "Сравнение конфигураций"; //$NON-NLS-1$
     private static final String TITLE_MERGE = "Объединение конфигураций"; //$NON-NLS-1$
     private static final String TITLE_CHECKOUT = "Переключение на ветку"; //$NON-NLS-1$
@@ -118,8 +120,8 @@ public final class LongOperationNotifyHook implements IStartup
         new OpMatcher(TITLE_LOAD, name -> name.contains("Загрузка конфигурации") //$NON-NLS-1$
             // DeployConfigurationJob: «Загружается конфигурация <проект>».
             || name.contains("Загружается конфигурация") //$NON-NLS-1$
-            || name.contains("Загрузка и обновление конфигураций") //$NON-NLS-1$
-            || name.contains("Обновление конфигурации") //$NON-NLS-1$
+            || name.contains("Загрузка и обновление конфигураций")), //$NON-NLS-1$
+        new OpMatcher(TITLE_UPDATE, name -> name.contains("Обновление конфигурации") //$NON-NLS-1$
             || name.contains("Обновление приложений")), //$NON-NLS-1$
         new OpMatcher(TITLE_COMPARE, name -> name.contains("Сравнение проектов") //$NON-NLS-1$
             || name.contains("Сравнение проекта") //$NON-NLS-1$
@@ -150,6 +152,7 @@ public final class LongOperationNotifyHook implements IStartup
      * В map только текущие Job; remove в done.
      */
     private static final ConcurrentHashMap<Job, JobTrack> jobTracks = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Job, InfobaseUpdate> infobaseUpdates = new ConcurrentHashMap<>();
 
     private static final AtomicBoolean jobListenerInstalled = new AtomicBoolean(false);
     private static final AtomicBoolean errorLogListenerInstalled = new AtomicBoolean(false);
@@ -198,6 +201,12 @@ public final class LongOperationNotifyHook implements IStartup
             this.errors = errors;
             this.firstError = firstError;
         }
+    }
+
+    private static final class InfobaseUpdate
+    {
+        final List<String> applicationNames = new ArrayList<>();
+        volatile boolean successful = true;
     }
 
     /** Снимок записи журнала для поиска её строки в штатном журнале ошибок. */
@@ -512,7 +521,8 @@ public final class LongOperationNotifyHook implements IStartup
                 if (job == null)
                     return;
                 runningTrackedJobs.remove(job);
-                String operation = matchOperation(job);
+                InfobaseUpdate update = infobaseUpdates.remove(job);
+                String operation = update != null ? TITLE_UPDATE : matchOperation(job);
                 if (operation == null)
                 {
                     // Не отслеживаемая операция — привязку потока держать незачем.
@@ -523,31 +533,78 @@ public final class LongOperationNotifyHook implements IStartup
                 // в журнале и ошибки отправки Git без диалога результата).
                 boolean ok = result != null && result.getSeverity() <= IStatus.INFO;
                 final boolean jobFailed = isPushFailed(job, result, operation);
-                long doneMs = System.currentTimeMillis();
-                long durationMs = track != null ? Math.max(0L, doneMs - track.startMs) : -1L;
                 String tracked = track != null ? track.projectNames : ""; //$NON-NLS-1$
                 // Имя проекта у DeployConfigurationJob есть только в имени самого Job.
-                final String projectNames = tracked.isEmpty() ? projectFromJobName(job) : tracked;
-                Display display = Display.getDefault();
-                if (display == null || display.isDisposed())
-                    return;
-                JobTrack finished = track;
-                // Пауза: последние ошибки Job могут попасть в журнал уже после done.
-                // timerExec — только из UI-потока, done приходит из потока Job.
-                display.asyncExec(() -> display.timerExec(ERROR_LOG_SETTLE_MS, () ->
-                {
-                    int errorCount = finished != null ? finished.errors.get() : 0;
-                    ErrorRef firstError = finished != null ? finished.firstError.get() : null;
-                    unbindJobThreads(finished);
-                    // Без ошибок — прежнее поведение (тост только при успехе).
-                    if (errorCount == 0 && !ok && !jobFailed)
-                        return;
-                    boolean startedInBackground = finished != null && !finished.edtForegroundAtStart;
-                    notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError,
-                        startedInBackground, jobFailed);
-                }));
+                String projectNames = update != null ? String.join(", ", update.applicationNames) //$NON-NLS-1$
+                    : tracked.isEmpty() ? projectFromJobName(job) : tracked;
+                scheduleCompletion(operation, projectNames, track,
+                    ok && (update == null || update.successful), jobFailed);
             }
         });
+    }
+
+    /** Обновление EDT 2026 может выполняться в IRunnableWithProgress без Job. */
+    static Consumer<Boolean> trackInfobaseUpdate(String applicationName)
+    {
+        ensureJobListener();
+        ensureErrorLogListener();
+        Job job = Job.getJobManager().currentJob();
+        Global.tempLog("infobase-sync-context", "notification update start application=" + applicationName //$NON-NLS-1$ //$NON-NLS-2$
+            + " job=" + (job == null ? "none" : job.getName())); //$NON-NLS-1$ //$NON-NLS-2$
+        if (job != null)
+        {
+            rememberJobStart(job);
+            InfobaseUpdate update = infobaseUpdates.computeIfAbsent(job, ignored -> new InfobaseUpdate());
+            synchronized (update)
+            {
+                if (!update.applicationNames.contains(applicationName))
+                    update.applicationNames.add(applicationName);
+            }
+            bindJobThread(job);
+            return successful ->
+            {
+                if (!successful)
+                    update.successful = false;
+                Global.tempLog("infobase-sync-context", "notification update returned application=" + applicationName //$NON-NLS-1$ //$NON-NLS-2$
+                    + " updated=" + successful + " waitingForJob=true"); //$NON-NLS-1$ //$NON-NLS-2$
+            };
+        }
+        JobTrack track = new JobTrack(System.currentTimeMillis(), applicationName, isEdtProcessForeground());
+        Thread thread = Thread.currentThread();
+        JobTrack previous = tracksByThread.put(thread, track);
+        return successful ->
+        {
+            if (previous != null)
+                tracksByThread.replace(thread, track, previous);
+            Global.tempLog("infobase-sync-context", "notification update returned application=" + applicationName //$NON-NLS-1$ //$NON-NLS-2$
+                + " updated=" + successful + " waitingForJob=false"); //$NON-NLS-1$ //$NON-NLS-2$
+            scheduleCompletion(TITLE_UPDATE, applicationName, track, successful, false);
+        };
+    }
+
+    private static void scheduleCompletion(String operation, String projectNames, JobTrack finished,
+        boolean ok, boolean jobFailed)
+    {
+        long doneMs = System.currentTimeMillis();
+        long durationMs = finished != null ? Math.max(0L, doneMs - finished.startMs) : -1L;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+        {
+            unbindJobThreads(finished);
+            return;
+        }
+        // Последние записи журнала могут прийти после возврата операции.
+        display.asyncExec(() -> display.timerExec(ERROR_LOG_SETTLE_MS, () ->
+        {
+            int errorCount = finished != null ? finished.errors.get() : 0;
+            ErrorRef firstError = finished != null ? finished.firstError.get() : null;
+            unbindJobThreads(finished);
+            if (errorCount == 0 && !ok && !jobFailed)
+                return;
+            boolean startedInBackground = finished != null && !finished.edtForegroundAtStart;
+            notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError,
+                startedInBackground, jobFailed);
+        }));
     }
 
     /**
@@ -636,6 +693,8 @@ public final class LongOperationNotifyHook implements IStartup
 
     private static String matchOperation(Job job)
     {
+        if (infobaseUpdates.containsKey(job))
+            return TITLE_UPDATE;
         // Классы фоновой загрузки/обновления приложений (как DeployConfigurationFixHook).
         String className = job.getClass().getName();
         if (className.contains("DeployWithProgressOperation") //$NON-NLS-1$
@@ -644,7 +703,7 @@ public final class LongOperationNotifyHook implements IStartup
             // Обновление конфигурации базы (EDT 2026): infobases.deploy.DeployConfigurationJob,
             // имя Job — «Загружается конфигурация <проект>».
             || className.contains("DeployConfigurationJob")) //$NON-NLS-1$
-            return TITLE_LOAD;
+            return TITLE_UPDATE;
         if (className.contains("DefaultContextsStartJob")) //$NON-NLS-1$
             return TITLE_PROJECT_CONTEXT;
         // Объединение/слияние: com._1c.g5.v8.dt.internal.merge.MergeProcessJob,

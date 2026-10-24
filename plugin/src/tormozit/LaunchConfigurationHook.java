@@ -7,6 +7,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
+import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -19,6 +21,10 @@ import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
@@ -28,6 +34,7 @@ import org.eclipse.debug.core.ILaunchDelegate;
 import org.eclipse.debug.core.ILaunchListener;
 import org.eclipse.debug.ui.ILaunchConfigurationDialog;
 import org.eclipse.debug.ui.ILaunchConfigurationTab;
+import org.eclipse.jface.viewers.ComboViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionListener;
 import org.eclipse.swt.graphics.Point;
@@ -40,6 +47,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
@@ -50,9 +58,10 @@ import org.objectweb.asm.Opcodes;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseManager;
 import com._1c.g5.v8.dt.platform.services.core.runtimes.execution.IRuntimeComponentManager;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
+import com._1c.g5.v8.dt.platform.services.model.ServerConnectionString;
 
 /**
- * Доработки вкладки «Аргументы» диалога конфигураций запуска ({@code ArgumentsTab}).
+ * Доработки диалога конфигураций запуска: вкладки «Аргументы» и «Соединить».
  *
  * <h3>1. История значений текстовых полей</h3>
  * Разделение данных, параметр запуска, файл журнала, имя PWA
@@ -243,6 +252,11 @@ public final class LaunchConfigurationHook implements IStartup
             return;
         for (ILaunchConfigurationTab tab : tabs)
         {
+            if (tab != null && tab.getClass().getName().equals(DebugAddressField.TAB_CLASS))
+            {
+                DebugAddressField.attach(tab, dialog);
+                continue;
+            }
             if (tab == null || !tab.getClass().getName().endsWith(ARGUMENTS_TAB_SUFFIX))
                 continue;
             Control control = tab.getControl();
@@ -579,6 +593,259 @@ public final class LaunchConfigurationHook implements IStartup
         Object viewer = Global.invoke(dialog, "getTabViewer"); //$NON-NLS-1$
         Object copy = viewer == null ? null : Global.invoke(viewer, "getWorkingCopy"); //$NON-NLS-1$
         return copy instanceof ILaunchConfiguration config ? config : null;
+    }
+
+    /**
+     * Разовое получение адреса отладки через существующий агент конфигуратора (issue #884).
+     * Поля вкладки подтверждены в debug.ui 9.3.400.v202605050943. Цепочка
+     * DesignerAgentConnection.use() → getSession().infobaseTools().retrieveDebugSettings().exec()
+     * используется в DesignerSessionThickClientLauncher (platform.services.core 21.0.0.v202605050943).
+     */
+    private static final class DebugAddressField
+    {
+        private static final String TYPE = "com._1c.g5.v8.dt.debug.core.RemoteRuntime"; //$NON-NLS-1$
+        private static final String URL = "com._1c.g5.v8.dt.debug.core.ATTR_DEBUG_SERVER_URL"; //$NON-NLS-1$
+        private static final String TAB_CLASS =
+            "com._1c.g5.v8.dt.debug.ui.launchconfigurations.RemoteDebugConnectionTab"; //$NON-NLS-1$
+        private static final String KEY = "tormozit.debugAddressField"; //$NON-NLS-1$
+        private final ILaunchConfigurationTab tab;
+        private final ILaunchConfigurationDialog dialog;
+        private final Text address;
+        private final ComboViewer infobases;
+        private final Button useInfobase;
+        private final Link fill;
+        private long requestVersion;
+
+        private DebugAddressField(ILaunchConfigurationTab tab, ILaunchConfigurationDialog dialog,
+            Text address, ComboViewer infobases, Button useInfobase)
+        {
+            this.tab = tab;
+            this.dialog = dialog;
+            this.address = address;
+            this.infobases = infobases;
+            this.useInfobase = useInfobase;
+            Composite parent = address.getParent();
+            ((GridData)address.getLayoutData()).horizontalSpan = 1;
+            fill = new Link(parent, SWT.NONE);
+            fill.setText("<a>Заполнить</a>");
+            fill.setFont(address.getFont());
+            fill.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+            fill.setToolTipText(TooltipText.wrap(fill,
+                "Получить адрес сервера HTTP-отладки через подключённый агент конфигуратора выбранной базы."
+                    + Global.pluginSignForTooltip()));
+            fill.moveBelow(address);
+            fill.addListener(SWT.Dispose, event -> requestVersion++);
+            fill.addListener(SWT.Selection, event -> request());
+            // Ответ прежнего запроса не должен попадать в изменённое поле/контекст.
+            infobases.addSelectionChangedListener(event -> invalidateRequest());
+            useInfobase.addListener(SWT.Selection, event -> invalidateRequest());
+            if (Global.getField(tab, "useInfobaseName") instanceof Button byName) //$NON-NLS-1$
+                byName.addListener(SWT.Selection, event -> invalidateRequest());
+            address.addModifyListener(event -> invalidateRequest());
+            parent.layout(true, true);
+        }
+
+        private static void attach(ILaunchConfigurationTab tab, ILaunchConfigurationDialog dialog)
+        {
+            Control control = tab.getControl();
+            if (control == null || control.isDisposed() || control.getData(KEY) != null)
+                return;
+            try
+            {
+                ILaunchConfiguration config = workingCopyOf(dialog);
+                if (config == null || !TYPE.equals(config.getType().getIdentifier()))
+                    return;
+                if (Global.getField(tab, "debugServerUrl") instanceof Text address //$NON-NLS-1$
+                    && address.getLayoutData() instanceof GridData
+                    && Global.getField(tab, "infobaseViewer") instanceof ComboViewer infobases //$NON-NLS-1$
+                    && Global.getField(tab, "useSelectedInfobase") instanceof Button useInfobase) //$NON-NLS-1$
+                    control.setData(KEY, new DebugAddressField(tab, dialog, address, infobases, useInfobase));
+            }
+            catch (CoreException | RuntimeException e)
+            {
+                Global.tempLog("auto-debug-address", "attach: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private void invalidateRequest()
+        {
+            requestVersion++;
+            if (!fill.isDisposed())
+            {
+                fill.setEnabled(true);
+            }
+        }
+
+        private void request()
+        {
+            Global.tempLog("auto-debug-address", "fill requested"); //$NON-NLS-1$ //$NON-NLS-2$
+            ILaunchConfiguration config = workingCopyOf(dialog);
+            Object selected = infobases.getStructuredSelection().getFirstElement();
+            if (config == null || !useInfobase.getSelection() || !(selected instanceof InfobaseReference reference))
+            {
+                notifyResult("Выберите информационную базу из списка, чтобы получить адрес отладки.");
+                return;
+            }
+            String base = reference.getUuid() + ":" + reference.getConnectionString(); //$NON-NLS-1$
+            String previousAddress = address.getText();
+            long version = ++requestVersion;
+            fill.setEnabled(false);
+            Display display = fill.getDisplay();
+            Job job = new Job("Получение адреса сервера отладки")
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    String result = null;
+                    String problem = null;
+                    try
+                    {
+                        result = urlOf(reference);
+                    }
+                    catch (Exception e)
+                    {
+                        problem = failureMessage(e);
+                        Global.tempLog("auto-debug-address", "fill failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    String url = result;
+                    String error = problem;
+                    if (!display.isDisposed())
+                        display.asyncExec(() ->
+                        {
+                            if (fill.isDisposed() || version != requestVersion)
+                                return;
+                            fill.setEnabled(true);
+                            if (workingCopyOf(dialog) != config || !useInfobase.getSelection()
+                                || !address.getText().equals(previousAddress)
+                                || !(infobases.getStructuredSelection().getFirstElement() instanceof InfobaseReference current)
+                                || !base.equals(current.getUuid() + ":" + current.getConnectionString())) //$NON-NLS-1$
+                            {
+                                Global.tempLog("auto-debug-address", "fill discarded: context changed"); //$NON-NLS-1$ //$NON-NLS-2$
+                                return;
+                            }
+                            if (error != null)
+                                notifyResult("Адрес не получен: " + error + " Можно указать адрес вручную.");
+                            else
+                            {
+                                address.setText(url);
+                                if (config instanceof ILaunchConfigurationWorkingCopy copy)
+                                    copy.setAttribute(URL, url);
+                                Global.invoke(tab, "updateLaunchConfigurationDialog"); //$NON-NLS-1$
+                                Global.tempLog("auto-debug-address", "filled URL=" + url); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
+                        });
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private void notifyResult(String text)
+        {
+            ToastNotification.show("Сервер отладки", text, 6000, null, null, fill.getShell());
+        }
+
+        private static String urlOf(InfobaseReference reference) throws Exception
+        {
+            Global.tempLog("auto-debug-address", "resolve connection=" + reference.getConnectionString()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!(reference.getConnectionString() instanceof ServerConnectionString))
+                throw new IllegalArgumentException("Для автоматического адреса нужна серверная информационная база.");
+            List<Object> active = new ArrayList<>();
+            for (Object connection : DesignerSessionPoolAccessor.getInstance().findExistingConnections(reference))
+                if (Boolean.TRUE.equals(call(connection, "isAlive"))) //$NON-NLS-1$
+                    active.add(connection);
+            Global.tempLog("auto-debug-address", "resolve active agents=" + active.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (active.isEmpty())
+                throw new IllegalArgumentException("Нет подключённого агента конфигуратора для выбранной базы.");
+            if (active.size() != 1)
+                throw new IllegalArgumentException("Для выбранной базы подключено несколько агентов конфигуратора.");
+            Object connection = active.get(0);
+            Method use = null;
+            for (Method method : connection.getClass().getMethods())
+                if ("use".equals(method.getName()) && method.getParameterCount() == 1) //$NON-NLS-1$
+                {
+                    use = method;
+                    break;
+                }
+            if (use == null)
+                throw new NoSuchMethodException("DesignerAgentConnection.use"); //$NON-NLS-1$
+            Class<?> actionType = use.getParameterTypes()[0];
+            Object action = Proxy.newProxyInstance(actionType.getClassLoader(), new Class<?>[] { actionType },
+                (proxy, method, args) ->
+                {
+                    if ("toString".equals(method.getName())) //$NON-NLS-1$
+                        return "Comfort retrieve debug settings"; //$NON-NLS-1$
+                    if ("hashCode".equals(method.getName())) //$NON-NLS-1$
+                        return System.identityHashCode(proxy);
+                    if ("equals".equals(method.getName())) //$NON-NLS-1$
+                        return proxy == args[0];
+                    if (!"run".equals(method.getName())) //$NON-NLS-1$
+                        throw new UnsupportedOperationException(method.getName());
+                    Object session = call(connection, "getSession"); //$NON-NLS-1$
+                    Object tools = call(session, "infobaseTools"); //$NON-NLS-1$
+                    Object operation = call(tools, "retrieveDebugSettings"); //$NON-NLS-1$
+                    Object settings = invokeOriginal(operation.getClass().getMethod("exec", Duration.class), //$NON-NLS-1$
+                        operation, new Object[] { Duration.ofSeconds(15) });
+                    if (settings == null)
+                        throw new IllegalArgumentException("Агент не вернул настройки отладки.");
+                    String protocol = (String)call(settings, "getProtocol"); //$NON-NLS-1$
+                    String value = (String)call(settings, "getAddress"); //$NON-NLS-1$
+                    Global.tempLog("auto-debug-address", "resolve protocol=" + protocol + " address=" + value); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    if (!"http".equalsIgnoreCase(protocol)) //$NON-NLS-1$
+                        throw new IllegalArgumentException("HTTP-отладка недоступна: протокол «" + protocol + "».");
+                    if (value == null || value.isBlank())
+                        throw new IllegalArgumentException("В настройках отладки отсутствует адрес сервера.");
+                    URI url = new URI(value.trim());
+                    if (!("http".equalsIgnoreCase(url.getScheme()) || "https".equalsIgnoreCase(url.getScheme())) //$NON-NLS-1$ //$NON-NLS-2$
+                        || url.getHost() == null || url.getRawUserInfo() != null
+                        || url.getPort() < -1 || url.getPort() > 65535 || url.getPort() == 0)
+                        throw new IllegalArgumentException("Агент вернул некорректный адрес сервера отладки.");
+                    return url.toASCIIString();
+                });
+            try
+            {
+                return (String)use.invoke(connection, action);
+            }
+            catch (InvocationTargetException e)
+            {
+                if (e.getCause() instanceof Exception failure)
+                    throw failure;
+                throw e;
+            }
+        }
+
+        private static Object call(Object target, String name) throws Exception
+        {
+            try
+            {
+                return target.getClass().getMethod(name).invoke(target);
+            }
+            catch (InvocationTargetException e)
+            {
+                if (e.getCause() instanceof Exception failure)
+                    throw failure;
+                throw e;
+            }
+        }
+
+        private static String failureMessage(Exception failure)
+        {
+            return failure.getMessage() == null || failure.getMessage().isBlank()
+                ? failure.getClass().getSimpleName() : failure.getMessage();
+        }
+
+        private static Object invokeOriginal(Method method, Object target, Object[] args) throws Throwable
+        {
+            try
+            {
+                return method.invoke(target, args);
+            }
+            catch (InvocationTargetException e)
+            {
+                throw e.getCause();
+            }
+        }
     }
 
     private static int indexOfVariant(String value)

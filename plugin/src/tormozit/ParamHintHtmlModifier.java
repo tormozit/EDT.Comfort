@@ -8303,8 +8303,7 @@ public final class ParamHintHtmlModifier
             {
                 log("schedule key=" + key + " param=" + paramName //$NON-NLS-1$ //$NON-NLS-2$
                     + " openEditor=" + (document != null)); //$NON-NLS-1$
-                schedule(key, uri, file, methodName, ForeignModuleModel.snapshot(document), ctx.browser,
-                    ctx.pages);
+                schedule(key, uri, file, methodName, document, ctx.browser, ctx.pages);
             }
             else
                 log("pending key=" + key + " param=" + paramName); //$NON-NLS-1$ //$NON-NLS-2$
@@ -8333,7 +8332,7 @@ public final class ParamHintHtmlModifier
         }
 
         private static void schedule(String key, URI uri, IFile file, String methodName,
-            String text, Browser browser, List<Object> pages)
+            IXtextDocument document, Browser browser, List<Object> pages)
         {
             Job job = new Job("Комфорт: типы параметров " + methodName) //$NON-NLS-1$
             {
@@ -8346,7 +8345,7 @@ public final class ParamHintHtmlModifier
                     try
                     {
                         ForeignModuleModel.Read<Map<String, ParamInfo>> read = ForeignModuleModel.read(
-                            uri, file, text, resource -> typesOf(resource, methodName));
+                            uri, file, document, resource -> typesOf(resource, methodName));
                         types = read.value();
                         source = read.source();
                     }

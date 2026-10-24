@@ -3,6 +3,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -20,6 +21,9 @@ import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.xtext.nodemodel.INode;
+import org.eclipse.xtext.scoping.IScope;
+import org.eclipse.xtext.naming.QualifiedName;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.objectweb.asm.ClassReader;
@@ -38,6 +42,11 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.ReturnSection;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Method;
+import com._1c.g5.v8.dt.bsl.model.Block;
+import com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService;
+import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeState;
+import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
@@ -63,9 +72,10 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
  * в которых их описал бы человек. Дальше штатный расчёт работает сам, без единой правки
  * в недоступном для подмены классе.
  * <p>
- * <b>Главный инвариант: при выключенном флажке проекта не меняется ничего.</b>
+ * <b>Слияние с документирующим комментарием зависит от флажка проекта.</b>
  * {@link #afterParseTemplateComment} первым делом проверяет флажок и при выключенном
- * возвращает разобранный комментарий как есть.
+ * возвращает разобранный комментарий как есть. Исправление начального состояния
+ * неявных переменных от флажка не зависит.
  */
 public final class BslDocCommentComputedTypes
 {
@@ -1910,7 +1920,40 @@ public final class BslDocCommentComputedTypes
     }
 
     /**
-     * Инструментализация {@code CreatorTreeState}: в хвост
+     * EDT bsl 28.0.1.v202605050943: setInitialStateForExplicitMethodVariable задаёт
+     * Undefined только переменным из Перем. У неявной переменной ветка без присваивания
+     * поэтому не имеет исходного состояния. Добавляем такое же состояние в начале метода;
+     * присваивания и объединение веток дальше выполняет штатный CreatorTreeState.
+     */
+    public static void afterInitialVariableStates(Block block, IScope scope,
+        IBslOwnerComputerService owner, TypeSystemMode mode, INode node,
+        Deque<VariableTreeTypeState> states)
+    {
+        if (!(block instanceof Method) || block.getImplicitVariables().isEmpty())
+            return;
+        try
+        {
+            var undefined = scope.getSingleElement(QualifiedName.create("Undefined")); //$NON-NLS-1$
+            if (undefined == null || !(undefined.getEObjectOrProxy() instanceof TypeItem type))
+                return;
+            for (var variable : block.getImplicitVariables())
+            {
+                var environments = TypeSystemUtil.getActualEnvironments(variable, owner);
+                var provider = TypeSystemUtil.getOrInitVariableProvider(variable, mode);
+                var state = provider.createTypeState(variable, environments, node.getOffset(), node);
+                state.addTypes(List.of(type));
+                provider.addState(state);
+                states.add(state);
+                state.setHasNewTypes(true);
+            }
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /**
+     * Инструментализация {@code CreatorTreeState}: начальные состояния неявных переменных; в хвост
      * {@code isReplaceTypesByDocumentationComment} добавляется наш ответ, который умеет
      * отменить замещение при знаке {@code ^} в боковом комментарии.
      * В обработке SimpleStatement наблюдаем штатное расширение колонок и восполняем пропуск.
@@ -1929,6 +1972,35 @@ public final class BslDocCommentComputedTypes
                 String signature, String[] exceptions)
             {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (mv != null && "setInitialStateForExplicitMethodVariable".equals(name) //$NON-NLS-1$
+                    && "()V".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                String creator = TARGET_CREATOR.replace('.', '/');
+                                String[] fields = { "block", "typeScope", "ownerComputerService", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                    "mode", "blockNode", "allComputedState" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                String[] types = { "Lcom/_1c/g5/v8/dt/bsl/model/Block;", //$NON-NLS-1$
+                                    "Lorg/eclipse/xtext/scoping/IScope;", //$NON-NLS-1$
+                                    "Lcom/_1c/g5/v8/dt/bsl/model/resource/owner/IBslOwnerComputerService;", //$NON-NLS-1$
+                                    "Lcom/_1c/g5/v8/dt/bsl/model/typesytem/TypeSystemMode;", //$NON-NLS-1$
+                                    "Lorg/eclipse/xtext/nodemodel/INode;", "Ljava/util/Deque;" }; //$NON-NLS-1$ //$NON-NLS-2$
+                                for (int i = 0; i < fields.length; i++)
+                                {
+                                    visitVarInsn(Opcodes.ALOAD, 0);
+                                    visitFieldInsn(Opcodes.GETFIELD, creator, fields[i], types[i]);
+                                }
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "afterInitialVariableStates", //$NON-NLS-1$
+                                    "(" + String.join("", types) + ")V", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
                 if (mv != null && "doInternalProcess".equals(name) //$NON-NLS-1$
                     && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/bsl/model/SimpleStatement;") //$NON-NLS-1$
                     && descriptor.endsWith(")V")) //$NON-NLS-1$

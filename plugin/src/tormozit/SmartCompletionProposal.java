@@ -37,6 +37,7 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.jface.text.source.SourceViewer;
 
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -96,9 +97,14 @@ public class SmartCompletionProposal implements
     /** Функция конфигурации строки ({@link FunctionReturnTypes}); {@code null} — не функция. */
     private FunctionReturnTypes.Target functionTarget;
     private boolean functionTargetResolved;
+    /** {@link #moduleParams()}: посчитано один раз на строку. */
+    private int[] moduleParams;
+    private boolean moduleParamsResolved;
     /** Переменная строки ({@link FunctionReturnTypes#variableTargetOf}); {@code null} — не переменная. */
     private FunctionReturnTypes.VariableTarget variableTarget;
     private boolean variableTargetResolved;
+    /** Временно #877: строка уже записана в лог. */
+    private boolean rowLogged;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
@@ -149,12 +155,26 @@ public class SmartCompletionProposal implements
             ? overlapDisplay
             : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
         String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
+        // #region temp #877 — почему строка без типа: первый показ каждой строки
+        if (!rowLogged)
+        {
+            rowLogged = true;
+            Object info = delegate instanceof ConfigurableCompletionProposal c
+                ? Global.getField(c, "additionalProposalInfo") : null; //$NON-NLS-1$
+            Global.tempLog("assist-function-return-type", "row display=" + sourceDisplay //$NON-NLS-1$ //$NON-NLS-2$
+                + " delegate=" + (delegate == null ? null : delegate.getClass().getSimpleName()) //$NON-NLS-1$
+                + " overlap=" + (overlapDisplay != null) //$NON-NLS-1$
+                + " info=" + (info == null ? null : info.getClass().getSimpleName()) //$NON-NLS-1$
+                + " var=" + (variableTarget() != null) + " fn=" + (functionTarget() != null)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
         // Подпись совпадения с ИР несёт тип ИР — его досчитывает активация ИР.
         if (overlapDisplay == null)
-            FunctionReturnTypes.prefetchEditorModule(functionTarget());
+            FunctionReturnTypes.rowShown(this);
         String collapsed = collapseParams(overlapDisplay != null
-            ? localized : decorateVariableType(decorateFunctionType(localized, functionTarget()),
-                variableTarget()));
+            ? localized : decoratePropertyType(decorateVariableType(
+                decorateFunctionType(localized, functionTarget()), variableTarget())),
+            moduleParams(), hasSeveralSignatures(sourceDisplay) ? signatureFirstParam(sourceDisplay) : null);
         StyledString result;
         if (collapsed != localized)
         {
@@ -177,6 +197,11 @@ public class SmartCompletionProposal implements
             if (!nameOnly.isEmpty())
                 SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
         }
+        // #region temp #877: тип есть в кэше, но отсутствует на экране
+        Global.tempLog("assist-type-display", "render proposal=" + System.identityHashCode(this) //$NON-NLS-1$ //$NON-NLS-2$
+            + " source=" + sourceDisplay + " decorated=" + collapsed + " result=" + result.getString() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " variable=" + variableTarget()); //$NON-NLS-1$
+        // #endregion
         return result;
 
 
@@ -186,8 +211,19 @@ public class SmartCompletionProposal implements
      * {@code Имя(А, Б, В) : <Тип> ~ Родитель} → {@code Имя(3) : <Тип> ~ Родитель} при флажке
      * «Сворачивать параметры в списке автодополнения» (issue #877). Только для показа: разбор
      * сигнатуры идёт по исходной подписи delegate. Без изменений — тот же экземпляр строки.
+     *
+     * <p>Число — номер последнего обязательного параметра. У платформенного метода это строка
+     * с минимумом (перегрузки схлопываются до неё) — число по подписи. У метода модуля строка
+     * одна со всеми параметрами — номер берётся из {@code moduleParams}: {@code [номер, всего]},
+     * применяется, только если {@code всего} совпало с подписью. Номер {@code 0} — пустые
+     * скобки, как у платформенной строки без обязательных.
+     *
+     * <p>{@code severalSignatures} не {@code null} — у имени несколько сигнатур: перед числом
+     * имя первого параметра, {@code Структура(Ключи, 0)}; число выводится и при {@code 0}.
+     * В пустой подписи (строка-минимум без обязательных) имени нет — оно в
+     * {@code severalSignatures} (из сигнатуры); пустая строка — оставить {@code Имя()}.
      */
-    static String collapseParams(String display)
+    static String collapseParams(String display, int[] moduleParams, String severalSignatures)
     {
         if (display == null || !ComfortSettings.isCollapseAssistParamsEnabled())
             return display;
@@ -196,10 +232,14 @@ public class SmartCompletionProposal implements
         if (close < 0)
             return display;
         String inside = display.substring(open + 1, close).trim();
+        if (inside.isEmpty() && severalSignatures != null && !severalSignatures.isEmpty())
+            return display.substring(0, open + 1) + severalSignatures + ", 0" //$NON-NLS-1$
+                + display.substring(close);
         if (inside.isEmpty() || inside.chars().allMatch(Character::isDigit))
             return display;
         int depth = 0;
         int count = 1;
+        int firstEnd = close;
         for (int i = open + 1; i < close; i++)
         {
             char c = display.charAt(i);
@@ -208,9 +248,150 @@ public class SmartCompletionProposal implements
             else if (c == ')' || c == '>' || c == ']')
                 depth--;
             else if (c == ',' && depth == 0)
+            {
+                if (count == 1)
+                    firstEnd = i;
                 count++;
+            }
         }
-        return display.substring(0, open + 1) + count + display.substring(close);
+        if (moduleParams != null && moduleParams[1] == count)
+            count = moduleParams[0];
+        String first = severalSignatures != null
+            ? firstParamName(display.substring(open + 1, firstEnd)) : ""; //$NON-NLS-1$
+        String text = !first.isEmpty() ? first + ", " + count //$NON-NLS-1$
+            : count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
+        return display.substring(0, open + 1) + text + display.substring(close);
+    }
+
+    /** {@code Ключи: Строка = ""} → {@code Ключи}. */
+    private static String firstParamName(String segment)
+    {
+        String name = segment.trim();
+        int colon = name.indexOf(':');
+        if (colon >= 0)
+            name = name.substring(0, colon).trim();
+        int eq = name.indexOf('=');
+        if (eq >= 0)
+            name = name.substring(0, eq).trim();
+        return name;
+    }
+
+    /**
+     * Первый параметр сигнатуры платформенного метода ({@code ParamSet}) на языке подписи:
+     * у строки-минимума без обязательных в подписи его нет. {@code ""} — не известен.
+     */
+    private String signatureFirstParam(String sourceDisplay)
+    {
+        com._1c.g5.v8.dt.mcore.ParamSet set = SmartContentAssistProcessor.paramSetSignatureOf(delegate);
+        if (set == null || set.getParams().isEmpty())
+            return ""; //$NON-NLS-1$
+        com._1c.g5.v8.dt.mcore.Parameter param = set.getParams().get(0);
+        String listName = SmartContentAssistProcessor.parseProposalListName(sourceDisplay);
+        boolean ru = !(set.eContainer() instanceof com._1c.g5.v8.dt.mcore.DuallyNamedElement owner)
+            || listName.equalsIgnoreCase(owner.getNameRu());
+        String name = ru ? param.getNameRu() : param.getName();
+        return name != null ? name : ""; //$NON-NLS-1$
+    }
+
+    /** Список окна, по которому посчитан {@link #severalSignatureKeys}, и его размер. */
+    private static java.lang.ref.WeakReference<java.util.List<ICompletionProposal>> severalSignatureList =
+        new java.lang.ref.WeakReference<>(null);
+    private static int severalSignatureListSize = -1;
+    /** Имена (ключ dedup), у которых в окне больше одной строки со скобками. */
+    private static java.util.Set<String> severalSignatureKeys = java.util.Collections.emptySet();
+
+    /**
+     * У имени несколько сигнатур: перегрузки одной сигнатуры к показу уже схлопнуты
+     * (см. {@code SmartContentAssistProcessor.collapseOptionalParamOverlaps}), значит,
+     * оставшиеся в окне строки со скобками и тем же именем — разные сигнатуры. Модель не
+     * читаем: сигнатуры конструктора без {@code readOnly} не получить, а это отрисовка.
+     */
+    private boolean hasSeveralSignatures(String sourceDisplay)
+    {
+        if (!ComfortSettings.isCollapseAssistParamsEnabled() || delegate instanceof IrCompletionProposal
+            || SmartContentAssistProcessor.parseProposalSignature(sourceDisplay).indexOf('(') < 0)
+            return false;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        java.util.List<ICompletionProposal> rows = assistant != null
+            ? ContentAssistPopupSync.visibleProposals(assistant) : null;
+        if (rows == null)
+            return false;
+        if (severalSignatureList.get() != rows || severalSignatureListSize != rows.size())
+        {
+            java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+            for (ICompletionProposal row : rows)
+            {
+                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(row);
+                if (raw == null || raw instanceof IrCompletionProposal
+                    || SmartContentAssistProcessor.parseProposalSignature(raw.getDisplayString())
+                        .indexOf('(') < 0)
+                    continue;
+                counts.merge(rowKey(row), 1, Integer::sum);
+            }
+            java.util.Set<String> keys = new java.util.HashSet<>();
+            counts.forEach((key, n) -> {
+                if (n > 1)
+                    keys.add(key);
+            });
+            severalSignatureKeys = keys;
+            severalSignatureList = new java.lang.ref.WeakReference<>(rows);
+            severalSignatureListSize = rows.size();
+        }
+        return severalSignatureKeys.contains(rowKey(this));
+    }
+
+    private static String rowKey(ICompletionProposal proposal)
+    {
+        return SmartContentAssistProcessor.dedupKeyForMerge(proposal).toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * Строка со всеми параметрами, у которой обязательность из подписи не видна:
+     * {@code [номер последнего обязательного параметра, всего]}. Метод модуля — параметры без
+     * значения по умолчанию; конструктор ({@code FakeCtor}) — {@code Ctor.getMinParams()} из
+     * фонового кэша типов; платформенный метод — {@code ParamSet.getMinParams()} (строки-минимума
+     * сигнатуры в списке может не быть: у двух {@code ParamSet} с минимумом 0 EDT даёт одну
+     * {@code Имя()}). {@code null} — не такая строка или ещё не известно.
+     */
+    private int[] moduleParams()
+    {
+        if (moduleParamsResolved)
+            return moduleParams;
+        com._1c.g5.v8.dt.mcore.ParamSet set = SmartContentAssistProcessor.paramSetSignatureOf(delegate);
+        if (set != null)
+        {
+            moduleParamsResolved = true;
+            int total = set.getMaxParams() >= 0 ? set.getMaxParams() : set.getParams().size();
+            moduleParams = new int[] { Math.max(0, set.getMinParams()), total };
+            return moduleParams;
+        }
+        Object info = delegate instanceof ConfigurableCompletionProposal configurable
+            ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
+        if (info instanceof com._1c.g5.v8.dt.mcore.FakeCtor fake)
+        {
+            java.util.List<String> names = new java.util.ArrayList<>();
+            for (com._1c.g5.v8.dt.mcore.FakeParameter param : fake.getParams())
+                names.add(param.getName() != null ? param.getName() : ""); //$NON-NLS-1$
+            int lastRequired = SmartContentAssistProcessor.ctorLastRequiredParam(fake.getTypeName(), names);
+            // Не известно — спросить снова при следующей отрисовке (кэш типов наполняется в фоне).
+            if (lastRequired < 0)
+                return null;
+            moduleParamsResolved = true;
+            moduleParams = new int[] { lastRequired, names.size() };
+            return moduleParams;
+        }
+        moduleParamsResolved = true;
+        if (!(info instanceof com._1c.g5.v8.dt.bsl.model.Method method) || method.eIsProxy())
+            return null;
+        java.util.List<FormalParam> params = method.getFormalParams();
+        int lastRequired = 0;
+        for (int i = 0; i < params.size(); i++)
+        {
+            if (params.get(i).getDefaultValue() == null)
+                lastRequired = i + 1;
+        }
+        moduleParams = new int[] { lastRequired, params.size() };
+        return moduleParams;
     }
 
     /** {@code (} списка параметров в подписи {@code Имя(…) : <Тип> ~ Родитель}; {@code -1} — нет. */
@@ -275,6 +456,11 @@ public class SmartCompletionProposal implements
             variableTarget = delegate instanceof ConfigurableCompletionProposal configurable
                 ? FunctionReturnTypes.variableTargetOf(Global.getField(configurable, "additionalProposalInfo")) //$NON-NLS-1$
                 : null;
+            Object info = delegate instanceof ConfigurableCompletionProposal configurable
+                ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
+            Global.tempLog("assist-variable-target", "row proposal=" + System.identityHashCode(this)
+                + " display=" + delegate.getDisplayString() + " info=" + System.identityHashCode(info)
+                + " target=" + variableTarget);
         }
         return variableTarget;
     }
@@ -286,15 +472,40 @@ public class SmartCompletionProposal implements
      */
     private static String decorateVariableType(String display, FunctionReturnTypes.VariableTarget target)
     {
-        if (target == null || display == null || display.isEmpty())
+        if (target == null || display == null || display.isEmpty() || hasNameType(display))
             return display;
+        return decorateNameType(display, FunctionReturnTypes.variableState(target));
+    }
+
+    /**
+     * Подпись строки свойства (общие модули глобального контекста и т.п.) с его типом, если EDT его
+     * не написала: {@code имя : <ОбщийМодуль>}; пока ссылки на типы загружаются — {@code : <?>}.
+     */
+    private String decoratePropertyType(String display)
+    {
+        if (display == null || display.isEmpty() || hasNameType(display)
+            || !(delegate instanceof ConfigurableCompletionProposal configurable))
+            return display;
+        return decorateNameType(display,
+            FunctionReturnTypes.propertyState(Global.getField(configurable, "additionalProposalInfo"))); //$NON-NLS-1$
+    }
+
+    /** У имени строки уже есть тип ({@code имя : <Тип> ~ Родитель}). */
+    private static boolean hasNameType(String display)
+    {
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        return display.substring(0, sep >= 0 ? sep : display.length()).contains(" : "); //$NON-NLS-1$
+    }
+
+    /** Тип после имени строки: итоговый, или с {@code ?}, пока пересчёт идёт; {@code null} — как есть. */
+    private static String decorateNameType(String display, FunctionReturnTypes.State state)
+    {
         int sep = display.indexOf(" ~ "); //$NON-NLS-1$
         int nameEnd = sep >= 0 ? sep : display.length();
-        if (display.substring(0, nameEnd).contains(" : ")) //$NON-NLS-1$
+        if (state == null)
             return display;
-        FunctionReturnTypes.State state = FunctionReturnTypes.variableState(target);
         String type;
-        if (state != null && state.fresh())
+        if (state.fresh())
         {
             if (state.type().isEmpty())
                 return display;
@@ -302,7 +513,7 @@ public class SmartCompletionProposal implements
         }
         else
         {
-            String preliminary = state != null ? state.type() : ""; //$NON-NLS-1$
+            String preliminary = state.type();
             if (preliminary.length() >= 2 && preliminary.charAt(0) == '<'
                 && preliminary.charAt(preliminary.length() - 1) == '>')
                 preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
@@ -314,11 +525,11 @@ public class SmartCompletionProposal implements
     }
 
     /**
-     * Подпись строки с типом функции ({@link FunctionReturnTypes}). Итоговый — только тип,
-     * рассчитанный по текущему состоянию модуля; если рассчитать не удалось, остаётся тип EDT без
-     * {@code ?}. Иначе тип предварительный, с {@code ?} первым элементом: рассчитанный по прежнему
-     * состоянию модуля, а без него — тип EDT из «Возвращаемое значение» ({@code : <?, Строка>});
-     * нет ни того, ни другого — {@code : <?>}.
+     * Подпись строки с типом функции ({@link FunctionReturnTypes}). Пересчёта нет и итога нет —
+     * подпись EDT как есть. Итог — рассчитанный по текущему состоянию модуля тип; пустой — тип EDT
+     * без {@code ?}. Пока пересчёт ждёт или идёт — последний известный тип с {@code ?} первым
+     * элементом: прежний итог, а без него — тип EDT из «Возвращаемое значение»
+     * ({@code : <?, Строка>}); нет ни того, ни другого — {@code : <?>}.
      */
     private static String decorateFunctionType(String display, FunctionReturnTypes.Target target)
     {
@@ -334,9 +545,11 @@ public class SmartCompletionProposal implements
         String head = display.substring(0, close + 1);
         String tail = display.substring(typeEnd);
         FunctionReturnTypes.State state = FunctionReturnTypes.state(target);
-        if (state != null && state.fresh())
+        if (state == null)
+            return display;
+        if (state.fresh())
             return state.type().isEmpty() ? display : head + " : " + state.type() + tail; //$NON-NLS-1$
-        String preliminary = state != null && !state.type().isEmpty() ? state.type() : edtType;
+        String preliminary = !state.type().isEmpty() ? state.type() : edtType;
         if (preliminary.length() >= 2 && preliminary.charAt(0) == '<'
             && preliminary.charAt(preliminary.length() - 1) == '>')
             preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
@@ -618,6 +831,15 @@ public class SmartCompletionProposal implements
         return handled;
     }
 
+    /** Запрос готовых типов этой строки: текущая сразу, прочие — после паузы ввода. */
+    void requestRowTypes(boolean current)
+    {
+        FunctionReturnTypes.requestFunction(functionTarget(), current);
+        FunctionReturnTypes.requestVariable(variableTarget(), current);
+        if (delegate instanceof ConfigurableCompletionProposal configurable)
+            FunctionReturnTypes.requestProperty(Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
+    }
+
     /** Активация строки assist (Eclipse {@code selected}), не подтверждение {@code apply}. */
     @Override
     public void selected(ITextViewer viewer, boolean smartToggle)
@@ -630,7 +852,7 @@ public class SmartCompletionProposal implements
         {
             ensureLiteralOverlapBrowserIfNeeded(viewer);
             scheduleEdtRowActivation(null);
-            FunctionReturnTypes.activate(functionTarget());
+            requestRowTypes(true);
         }
         if (!(delegate instanceof SmartCompletionProposal)
             && delegate instanceof ICompletionProposalExtension2 ext2)
@@ -1803,6 +2025,22 @@ public class SmartCompletionProposal implements
     }
 
     private static String edtDocumentationContainerProblem(EObject object)
+    {
+        try
+        {
+            return availableEdtDocumentationContainerProblem(object);
+        }
+        catch (IllegalStateException error)
+        {
+            if (!"Object is removed".equals(error.getMessage())) //$NON-NLS-1$
+                throw error;
+            Global.tempLogException("assist-removed-object", "documentation infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
+                + object.getClass().getName(), error);
+            return "removedBmObject"; //$NON-NLS-1$
+        }
+    }
+
+    private static String availableEdtDocumentationContainerProblem(EObject object)
     {
         java.util.Set<EObject> path = java.util.Collections.newSetFromMap(
             new java.util.IdentityHashMap<>());

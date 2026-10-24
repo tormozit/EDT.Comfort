@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.BadLocationException;
@@ -40,6 +41,7 @@ import com._1c.g5.v8.dt.bsl.util.BslUtil;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.lcore.ui.texteditor.IndentTextEditorProvider;
 import com._1c.g5.v8.dt.mcore.Environmental;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
@@ -211,7 +213,20 @@ public final class DeclareExpressionTypeHandler
                 return edit;
             var types = resource.getResourceServiceProvider().get(TypesComputer.class)
                 .computeTypes(target, owner.environments());
-            String computed = SmartContentAssistProcessor.ReceiverTypeLabel.formatTypeItems(types);
+            // McoreUtil получает имя прокси через штатный ITypeNameResolver EDT.
+            // Форматирование для автодополнения при пустом имени возвращает TypeItem.toString().
+            var names = new LinkedHashSet<String>();
+            for (var type : types)
+            {
+                if (type == null)
+                    continue;
+                String name = McoreUtil.getTypeNameRu(type);
+                if (name == null || name.isBlank())
+                    name = McoreUtil.getTypeName(type);
+                if (name != null && !name.isBlank())
+                    names.add(name);
+            }
+            String computed = String.join(", ", names);
             if (computed.isBlank())
                 return edit;
             return insertComputedType(edit, computed);

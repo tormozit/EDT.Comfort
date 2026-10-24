@@ -1,10 +1,5 @@
 package tormozit;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.function.Function;
 
 import org.eclipse.core.resources.IFile;
@@ -29,13 +24,12 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 /**
  * Модель BSL-модуля с рассчитанными типами для фоновых досчётов, которым не хватает копии модуля
  * у вызывающего редактора (у каждого редактора EDT свой {@code ResourceSet}, чужой модуль там без
- * {@code linkBatched}): полный расчёт модуля в новом наборе ресурсов — из снимка текста открытого
- * редактора (несохранённые правки) или с диска.
+ * {@code linkBatched}): модель открытого редактора модуля, иначе полный расчёт в новом наборе
+ * ресурсов с диска. Расчёты — по одному ({@link #SERIAL}).
  *
- * <p>Модель самого редактора здесь не читается: {@code readOnly} держит блокировку документа, и ввод
- * в редакторе ждёт фоновый расчёт. Снимок текста — {@code IDocument.get()} в UI-потоке, без
- * блокировки модели. Расчёты — по одному ({@link #SERIAL}). Готовые состояния родной модели
- * редактора потребитель читает сам — по согласованию с автором.
+ * <p>Модель модуля из снимка текста открытого редактора не строить: её связывание и производное
+ * состояние задевали общий объект модуля, и в других редакторах переставали разрешаться обращения
+ * через точку (#877, 23.10.2026).
  */
 final class ForeignModuleModel
 {
@@ -126,82 +120,38 @@ final class ForeignModuleModel
     }
 
     /**
-     * Снимок текста открытого редактора без блокировки модели; {@code null} — редактора нет.
-     * UI-поток.
+     * Чтение модели модуля вне UI-потока: сначала модель открытого редактора ({@code readOnly}),
+     * если она не дала ответа — полный расчёт модуля с диска. {@code reader} получает ресурс модуля.
      */
-    static String snapshot(IXtextDocument document)
+    static <T> Read<T> read(URI uri, IFile file, IXtextDocument document,
+        Function<Resource, T> reader)
     {
-        return document != null ? document.get() : null;
+        T value = null;
+        if (document != null)
+            value = document.readOnly(resource -> reader.apply(resource));
+        if (value != null)
+            return new Read<>(value, "editor"); //$NON-NLS-1$
+        return new Read<>(fromFullComputation(uri, file, reader), "full"); //$NON-NLS-1$
     }
 
-    /**
-     * Полный расчёт модуля в новом наборе ресурсов вне UI-потока: из снимка {@code text}, если он
-     * есть, иначе с диска. {@code reader} получает рассчитанный ресурс модуля.
-     */
-    static <T> Read<T> read(URI uri, IFile file, String text, Function<Resource, T> reader)
+    /** Полный расчёт модуля, как у редактора, в новом наборе ресурсов (с диска). */
+    private static <T> T fromFullComputation(URI uri, IFile file, Function<Resource, T> reader)
     {
-        String source = text != null ? "editor" : "disk"; //$NON-NLS-1$ //$NON-NLS-2$
         IResourceServiceProvider rsp =
             IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
         if (rsp == null)
-            return new Read<>(null, source);
+            return null;
         ResourceSet set = BslOccurrenceContextResolver.newLiveResourceSet(rsp, file.getProject());
         if (set == null)
-            return new Read<>(null, source);
+            return null;
         try
         {
-            if (text != null && !loadText(set, uri, text))
-                return new Read<>(null, source);
             XtextResource resource = BslOccurrenceContextResolver.loadLinkedResource(uri, set);
-            return new Read<>(reader.apply(resource), source);
+            return reader.apply(resource);
         }
         finally
         {
             set.getResources().clear();
-        }
-    }
-
-    /**
-     * Только разбор модуля, без связывания и расчёта типов (быстро) — для того, что видно по
-     * синтаксису и комментариям. Новый набор ресурсов, из снимка {@code text} или с диска.
-     */
-    static <T> T parse(URI uri, IFile file, String text, Function<Resource, T> reader)
-    {
-        IResourceServiceProvider rsp =
-            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
-        if (rsp == null)
-            return null;
-        ResourceSet set = BslOccurrenceContextResolver.newLiveResourceSet(rsp, file.getProject());
-        if (set == null)
-            return null;
-        try
-        {
-            if (text != null && !loadText(set, uri, text))
-                return null;
-            return reader.apply(set.getResource(uri, true));
-        }
-        finally
-        {
-            set.getResources().clear();
-        }
-    }
-
-    /** Ресурс модуля из текста: дальше {@code loadLinkedResource} найдёт его уже загруженным. */
-    private static boolean loadText(ResourceSet set, URI uri, String text)
-    {
-        Resource resource = set.createResource(uri);
-        if (resource == null)
-            return false;
-        Map<Object, Object> options = new HashMap<>(set.getLoadOptions());
-        options.put(XtextResource.OPTION_ENCODING, StandardCharsets.UTF_8.name());
-        try
-        {
-            resource.load(new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)), options);
-            return true;
-        }
-        catch (IOException e)
-        {
-            return false;
         }
     }
 }
