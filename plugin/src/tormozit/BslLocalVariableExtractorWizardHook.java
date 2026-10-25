@@ -1,51 +1,93 @@
 package tormozit;
 
-import java.util.ArrayList;
-import java.util.List;
-
-import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
 import org.eclipse.ltk.core.refactoring.Refactoring;
 import org.eclipse.ltk.core.refactoring.RefactoringStatus;
 import org.eclipse.ltk.ui.refactoring.RefactoringWizard;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
-import org.eclipse.xtext.nodemodel.ICompositeNode;
-import org.eclipse.xtext.nodemodel.ILeafNode;
-import org.eclipse.xtext.nodemodel.INode;
-import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
-import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.xtext.ui.editor.XtextEditor;
+import org.eclipse.xtext.util.TextRegion;
 
-import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
-import com._1c.g5.v8.dt.bsl.model.Expression;
-import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
-import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
-import com._1c.g5.v8.dt.bsl.model.Invocation;
-import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
-import com._1c.g5.v8.dt.mcore.ParamSet;
-import com._1c.g5.v8.dt.mcore.Parameter;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Окно «Извлечь локальную переменную»: предлагает имя формального параметра для
- * выделенного аргумента вызова (issue 809).
+ * Окно «Извлечь локальную переменную»: подбор имени из «СоздатьПеременную» ИР
+ * по ожидаемому типу, типу выделения и выражению.
  *
  * <p>Поля editor/selection в AbstractBslExtractRefactoring и textField в
  * TextInputWizardPage проверены через javap бандла bsl-ui 22.0.0. Изменение Text
  * вызывает штатный textModified: он обновляет рефакторинг и проверяет имя.
- * Номер аргумента считается по узлам запятых, как в ParamHintHtmlModifier,
- * с учётом пустых слотов. Неоднозначное или занятое имя оставляет штатное предложение.
+ * Имя проходит штатную проверку; при ошибке остаётся предложение EDT.
  */
 public final class BslLocalVariableExtractorWizardHook implements IStartup
 {
     private static final String WIZARD_CLASS =
         "com._1c.g5.v8.dt.internal.bsl.ui.refactoring.BslLocalVariableExtractorWizard"; //$NON-NLS-1$
     private static final String HANDLED_KEY = "tormozit.extractLocalVariableName"; //$NON-NLS-1$
+    private static final String COMMAND_ID = "com._1c.g5.v8.dt.bsl.ui.BslLocalVariableExtractor"; //$NON-NLS-1$
+    private static final String NAME_HISTORY_SCOPE = "extractLocalVariable.name"; //$NON-NLS-1$
+
+    /** После закрытия автодополнения запускает тот же обработчик, что меню «Рефакторинг». */
+    static void extract(ITextViewer viewer, IDocument document, int offset, String selected)
+    {
+        // CompletionProposalPopup закрывает сеанс до apply: активного reloader здесь уже нет.
+        var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        var page = window != null ? window.getActivePage() : null;
+        var activeEditor = page != null ? page.getActiveEditor() : null;
+        BslXtextEditor editor = GetRef.getActiveBslEditor(activeEditor);
+        ITextViewer sourceViewer = editor != null ? editor.getInternalSourceViewer() : null;
+        Global.tempLog("create-variable", "command requested offset=" + offset + " selected=" + selected //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " editor=" + (activeEditor == null ? null : activeEditor.getClass().getName()) //$NON-NLS-1$
+            + " bslEditor=" + (editor == null ? null : editor.getClass().getName()) //$NON-NLS-1$
+            + " suppliedViewer=" + (viewer != null) + " sourceViewer=" + (sourceViewer != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " sameDocument=" + (editor != null && editor.getDocument() == document)); //$NON-NLS-1$
+        if (editor == null || editor.getDocument() != document || sourceViewer == null
+            || sourceViewer.getTextWidget() == null || sourceViewer.getTextWidget().isDisposed())
+        {
+            Global.tempLog("create-variable", "command skipped: no matching live editor/viewer"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        sourceViewer.getTextWidget().getDisplay().asyncExec(() ->
+        {
+            try
+            {
+                if (sourceViewer.getTextWidget() == null || sourceViewer.getTextWidget().isDisposed()
+                    || sourceViewer.getDocument() != document || editor.getDocument() != document
+                    || GetRef.getActiveBslEditor(editor.getSite().getPage().getActiveEditor()) != editor
+                    || !document.get(offset, selected.length()).equals(selected))
+                {
+                    Global.tempLog("create-variable", "command skipped: editor or selection changed"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                sourceViewer.setSelectedRange(offset, selected.length());
+                sourceViewer.getTextWidget().setFocus();
+                editor.getSelectionProvider().setSelection(new TextSelection(document, offset, selected.length()));
+                IHandlerService handlers = editor.getSite().getService(IHandlerService.class);
+                Global.tempLog("create-variable", "execute command service=" + (handlers != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (handlers != null)
+                    handlers.executeCommand(COMMAND_ID, null);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("create-variable", "command error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
 
     @Override
     public void earlyStartup()
@@ -79,10 +121,13 @@ public final class BslLocalVariableExtractorWizardHook implements IStartup
         {
             return;
         }
+        configureReplaceAll(page, refactoring, selection);
+        installNameHistory(text);
         try
         {
             String proposal = editor.getDocument().readOnly(resource ->
-                parameterName(resource, selection));
+                BslExpectedTypePremiums.suggestExtractedVariableName(resource, editor.getDocument(), selection));
+            Global.tempLog("create-variable", "wizard selected=" + selection.getText() + " proposal=" + proposal); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (proposal == null || proposal.isBlank())
                 return;
             String previous = text.getText();
@@ -99,136 +144,77 @@ public final class BslLocalVariableExtractorWizardHook implements IStartup
             }
             if (!(status instanceof RefactoringStatus validation) || validation.hasError())
             {
+                Global.tempLog("create-variable", "wizard name rejected=" + proposal + " status=" + status); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
             text.setText(proposal);
             text.selectAll();
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
+            Global.tempLog("create-variable", "wizard error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
-    private static String parameterName(XtextResource resource, ITextSelection selection)
+    /** Оставляем штатный Text и его ModifyListener, как у полей LaunchConfigurationHook. */
+    private static void installNameHistory(Text text)
     {
-        if (resource == null || resource.getParseResult() == null || selection.getLength() == 0)
-            return null;
-        String selected = selection.getText();
-        if (selected == null)
-            return null;
-        int start = selection.getOffset();
-        int end = start + selection.getLength();
-        int leading = 0;
-        while (leading < selected.length() && Character.isWhitespace(selected.charAt(leading)))
-            leading++;
-        start += leading;
-        int trailing = selected.length();
-        while (trailing > leading && Character.isWhitespace(selected.charAt(trailing - 1)))
-            trailing--;
-        end -= selected.length() - trailing;
-        if (start >= end)
-            return null;
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), start);
-        EObject object = leaf != null ? NodeModelUtils.findActualSemanticObjectFor(leaf) : null;
-        for (EObject current = object; current != null; current = current.eContainer())
+        Composite parent = text.getParent();
+        Composite row = new Composite(parent, SWT.NONE);
+        GridLayout layout = new GridLayout(1, false);
+        layout.marginWidth = 0;
+        layout.marginHeight = 0;
+        layout.horizontalSpacing = 2;
+        row.setLayout(layout);
+        row.setLayoutData(text.getLayoutData());
+        row.moveAbove(text);
+        text.setParent(row);
+        text.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        FilterHistoryUi.wireKeyboard(text, NAME_HISTORY_SCOPE);
+        // Закрытие окна может уничтожить поле без отдельного FocusOut.
+        text.addDisposeListener(event -> FilterHistoryStore.remember(NAME_HISTORY_SCOPE, text.getText()));
+        Composite buttons = FilterHistoryUi.createButtonsRow(row);
+        FilterHistoryUi.addHistoryButton(buttons, text, NAME_HISTORY_SCOPE,
+            TooltipText.wrap(buttons, "История имён переменной (Ctrl+↓)" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        parent.layout(true, true);
+        Global.tempLog("create-variable", "name-history installed count=" + FilterHistoryStore.load(NAME_HISTORY_SCOPE).size()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * checkInitialConditions уже заполнил additionalReplaceRegions штатным NodeOccurencesFinder
+     * (проверено в bsl-ui 22.0.0). Массив включает выделение: считаем только остальные места.
+     */
+    private static void configureReplaceAll(IWizardPage page, Refactoring refactoring, ITextSelection selection)
+    {
+        if (!(page.getControl() instanceof Composite parent))
+            return;
+        for (var control : parent.getChildren())
         {
-            if (!(current instanceof Expression argument)
-                || !(argument.eContainer() instanceof Invocation invocation)
-                || !invocation.getParams().contains(argument))
+            if (!(control instanceof Button button) || (button.getStyle() & SWT.CHECK) == 0)
                 continue;
-            ICompositeNode node = NodeModelUtils.findActualNodeFor(argument);
-            // Часть аргумента сама по себе не соответствует формальному параметру.
-            if (node == null || node.getOffset() != start || node.getEndOffset() != end)
-                continue;
-            int index = argumentIndex(invocation, start);
-            return index >= 0 ? resolvedParameterName(invocation, index) : null;
+            // На этой странице единственный флажок — штатная замена всех вхождений.
+            button.setSelection(false);
+            Global.invoke(refactoring, "setReplaceAllOccurrences", false); //$NON-NLS-1$
+            Object found = Global.getField(refactoring, "additionalReplaceRegions"); //$NON-NLS-1$
+            if (!(found instanceof TextRegion[] regions))
+            {
+                Global.tempLog("create-variable", "replace-all regions unavailable=" + found); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            int count = 0;
+            int start = selection.getOffset();
+            int end = start + selection.getLength();
+            for (TextRegion region : regions)
+                if (region.getOffset() + region.getLength() <= start || region.getOffset() >= end)
+                    count++;
+            boolean allowed = button.getEnabled();
+            button.setText("Заменить остальные вхождения (" + count + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            button.setEnabled(allowed && count > 0);
+            parent.layout(true, true);
+            Global.tempLog("create-variable", "replace-all total=" + regions.length + " other=" + count //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " allowed=" + allowed + " enabled=" + button.getEnabled()); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
-        return null;
-    }
-
-    private static int argumentIndex(Invocation invocation, int offset)
-    {
-        ICompositeNode call = NodeModelUtils.findActualNodeFor(invocation);
-        if (call == null)
-            return -1;
-        List<INode> parts = new ArrayList<>();
-        ICompositeNode method = NodeModelUtils.findActualNodeFor(invocation.getMethodAccess());
-        if (method != null)
-            parts.add(method);
-        for (Expression argument : invocation.getParams())
-        {
-            ICompositeNode node = NodeModelUtils.findActualNodeFor(argument);
-            if (node != null)
-                parts.add(node);
-        }
-        int index = 0;
-        for (ILeafNode leaf : call.getLeafNodes())
-        {
-            if (leaf.getOffset() >= offset)
-                break;
-            if (leaf.isHidden() || !",".equals(leaf.getText())) //$NON-NLS-1$
-                continue;
-            boolean nested = false;
-            for (INode part : parts)
-                if (leaf.getOffset() >= part.getOffset() && leaf.getOffset() < part.getEndOffset())
-                {
-                    nested = true;
-                    break;
-                }
-            if (!nested)
-                index++;
-        }
-        return index;
-    }
-
-    private static String resolvedParameterName(Invocation invocation, int index)
-    {
-        FeatureAccess access = invocation.getMethodAccess();
-        List<FeatureEntry> entries;
-        if (access instanceof StaticFeatureAccess stat)
-            entries = stat.getFeatureEntries();
-        else if (access instanceof DynamicFeatureAccess dynamic)
-            entries = dynamic.getFeatureEntries();
-        else
-            return null;
-        String result = null;
-        for (FeatureEntry entry : entries)
-        {
-            EObject feature = entry.getFeature();
-            String name;
-            if (feature instanceof com._1c.g5.v8.dt.bsl.model.Method method)
-                name = index < method.getFormalParams().size()
-                    ? method.getFormalParams().get(index).getName() : null;
-            else if (feature instanceof com._1c.g5.v8.dt.mcore.Method method)
-                name = platformParameterName(method, access, index);
-            else
-                return null;
-            if (name == null || name.isBlank() || result != null && !result.equalsIgnoreCase(name))
-                return null;
-            result = name;
-        }
-        return result;
-    }
-
-    private static String platformParameterName(com._1c.g5.v8.dt.mcore.Method method,
-        FeatureAccess access, int index)
-    {
-        String calledName = access.getName();
-        boolean russian = calledName != null && calledName.equalsIgnoreCase(method.getNameRu());
-        if (!russian && (calledName == null || !calledName.equalsIgnoreCase(method.getName())))
-            return null;
-        String result = null;
-        for (ParamSet signature : method.getParamSet())
-        {
-            if (index >= signature.getParams().size())
-                return null;
-            Parameter parameter = signature.getParams().get(index);
-            String name = russian ? parameter.getNameRu() : parameter.getName();
-            if (name == null || name.isBlank() || result != null && !result.equalsIgnoreCase(name))
-                return null;
-            result = name;
-        }
-        return result;
+        Global.tempLog("create-variable", "replace-all control not found"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }
-

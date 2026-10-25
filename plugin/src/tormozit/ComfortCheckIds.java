@@ -40,6 +40,15 @@ public final class ComfortCheckIds
     /** Неизвестное поле выборки с достоверно рассчитанной схемой запроса. */
     public static final String BSL_QUERY_RESULT_FIELD = "comfort-bsl-query-result-field"; //$NON-NLS-1$
 
+    /** Несовместимость типов выражений, аргументов и значений свойств платформы. */
+    public static final String BSL_VALUE_TYPE = "comfort-bsl-value-type"; //$NON-NLS-1$
+
+    /** Обращение по числовому индексу к типу, который его не поддерживает. */
+    public static final String BSL_NUMERIC_INDEX = "comfort-bsl-numeric-index"; //$NON-NLS-1$
+
+    /** Литерал вне полного списка допустимых значений; прежний id сохраняет настройки проверки. */
+    public static final String BSL_UNKNOWN_LITERAL = "comfort-bsl-unknown-column"; //$NON-NLS-1$
+
     /**
      * Штатные проверки EDT, которые целиком заменены проверками «Комфорта». Включить их нельзя:
      * страница «Проверки» сразу возвращает им «выключено», а при запуске и изменении настроек
@@ -47,7 +56,8 @@ public final class ComfortCheckIds
      */
     public static final Set<String> REPLACED_BUILTIN_CHECKS = Set.of(
         "bsl-legacy-check-static-feature-access", //$NON-NLS-1$
-        "bsl-legacy-check-for-each-statetement-collection"); //$NON-NLS-1$
+        "bsl-legacy-check-for-each-statetement-collection", //$NON-NLS-1$
+        "bsl-legacy-check-expression-type"); //$NON-NLS-1$
 
     private ComfortCheckIds() {}
 }

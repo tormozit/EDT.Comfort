@@ -358,6 +358,31 @@ final class TypeDescriptionPresentationHook
         return new TypeOrder(priority, sortCode);
     }
 
+    /** Классификатор для просмотра расчётных типов: тот же сервис и категории, что у сортировки. */
+    static Object typeClassifier(TypeItem item) throws ReflectiveOperationException
+    {
+        SelectedClassifiers classifiers = SelectedClassifiers.get();
+        TypeItem current = item;
+        for (int depth = 0; current != null && depth < 32; depth++)
+        {
+            String name = McoreUtil.getTypeName(current);
+            if (name != null && !name.isBlank())
+            {
+                int dot = name.indexOf('.');
+                String category = dot < 0 ? name : name.substring(0, dot);
+                Object classifier = classifiers.getClassifier.invoke(classifiers.service, category,
+                    current instanceof TypeSet);
+                Global.tempLog("assist-type-menu", "classifier type=" + McoreUtil.getTypeName(item) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " category=" + category + " typeSet=" + (current instanceof TypeSet) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " service=" + classifiers.service.getClass().getName() + " result=" + classifier); //$NON-NLS-1$ //$NON-NLS-2$
+                if (classifier != null)
+                    return classifier;
+            }
+            current = current instanceof Type type ? type.getParentType() : null;
+        }
+        return null;
+    }
+
     /** Штатный классификатор EDT; приоритеты категорий не зависят от проекта и списка типов. */
     private static final class SelectedClassifiers
     {

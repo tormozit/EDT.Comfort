@@ -14,8 +14,10 @@ import org.eclipse.xtext.resource.XtextResource;
 
 import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.EmptyExpression;
 import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Function;
@@ -25,6 +27,7 @@ import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.validation.IMessages;
 import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -119,23 +122,40 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         {
             EObject next = all.next();
             if (next instanceof StaticFeatureAccess access)
-                new Copy(access, acceptor, group(), projectManager, preferences).check();
+                new Copy(access, access.getFeatureEntries(), acceptor, group(), projectManager, preferences).check();
+            else if (group() == Group.PARAMETERS && next instanceof DynamicFeatureAccess access
+                && BslUtil.getInvocation(access) != null)
+            {
+                List<FeatureEntry> entries = access.getFeatureEntries();
+                if (entries.isEmpty() && module.eResource() instanceof XtextResource resource)
+                {
+                    DynamicFeatureAccessComputer computer = resource.getResourceServiceProvider()
+                        .get(DynamicFeatureAccessComputer.class);
+                    if (computer != null)
+                        entries = DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer);
+                }
+                // EDT проверяет число параметров динамического вызова только у mcore.Method.
+                // Для BSL Method используем ту же проверку, что и при вызове без точки.
+                new Copy(access, entries, acceptor, group(), projectManager, preferences).check();
+            }
         }
     }
 
     private static final class Copy
     {
-        private final StaticFeatureAccess access;
+        private final FeatureAccess access;
+        private final List<FeatureEntry> entries;
         private final ResultAcceptor acceptor;
         private final Group group;
         private final IV8ProjectManager projectManager;
         private final IBslPreferences preferences;
         private final Set<String> reported = new HashSet<>();
 
-        Copy(StaticFeatureAccess access, ResultAcceptor acceptor, Group group,
+        Copy(FeatureAccess access, List<FeatureEntry> entries, ResultAcceptor acceptor, Group group,
             IV8ProjectManager projectManager, IBslPreferences preferences)
         {
             this.access = access;
+            this.entries = entries;
             this.acceptor = acceptor;
             this.group = group;
             this.projectManager = projectManager;
@@ -151,7 +171,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                     return;
                 checkInvocation(invocation);
             }
-            else if (BslUtil.isEventHandler(access))
+            else if (access instanceof StaticFeatureAccess staticAccess && BslUtil.isEventHandler(staticAccess))
             {
                 if (group == Group.EVENT_HANDLER)
                     checkEventHandler();
@@ -165,10 +185,12 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
 
         private void checkInvocation(Invocation invocation)
         {
-            for (FeatureEntry entry : access.getFeatureEntries())
+            for (FeatureEntry entry : entries)
             {
                 EObject feature = entry.getFeature();
                 if (feature == null || feature.eIsProxy())
+                    continue;
+                if (access instanceof DynamicFeatureAccess && !(feature instanceof Method))
                     continue;
                 Environments envs = entry.getEnvironments();
                 if (feature instanceof Method method)
@@ -200,15 +222,16 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
             int actual = invocation.getParams().size();
             int formal = method.getFormalParams().size();
             if (actual > formal)
-                issue(MESSAGES.too_many_actual_parameters(), invocation, null, -1, envs);
+                issue(MESSAGES.too_many_actual_parameters(), invocation.getMethodAccess(),
+                    BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
             else if (actual < formal)
                 for (int i = actual; i < formal; i++)
                 {
                     FormalParam parameter = method.getFormalParams().get(i);
                     if (parameter.getDefaultValue() == null)
                     {
-                        issue(MESSAGES.not_enough_actual_parameters(), invocation,
-                            BslPackage.Literals.INVOCATION__PARAMS, i, envs);
+                        issue(MESSAGES.not_enough_actual_parameters(), invocation.getMethodAccess(),
+                            BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
                         break;
                     }
                 }
@@ -258,7 +281,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
 
         private boolean isBuiltInFunction()
         {
-            for (FeatureEntry entry : access.getFeatureEntries())
+            for (FeatureEntry entry : entries)
                 if (entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Method method
                     && method.eContainer() instanceof GeneralContextDef && method.isRetVal()
                     && access.getName() != null
@@ -269,7 +292,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
 
         private void checkEventHandler()
         {
-            for (FeatureEntry entry : access.getFeatureEntries())
+            for (FeatureEntry entry : entries)
             {
                 EObject feature = entry.getFeature();
                 if (!(feature instanceof Method) && !(feature instanceof com._1c.g5.v8.dt.mcore.Method))
@@ -280,13 +303,15 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
 
         private void checkVariable()
         {
+            if (!(access instanceof StaticFeatureAccess staticAccess))
+                return;
             if (group == Group.VARIABLE && "?".equals(access.getName()))
             {
                 Environmental environmental = EcoreUtil2.getContainerOfType(access, Environmental.class);
                 issue(MESSAGES.invalid_variable_name(), access, BslPackage.Literals.FEATURE_ACCESS__NAME,
                     -1, environmental == null ? null : environmental.environments());
             }
-            for (FeatureEntry entry : access.getFeatureEntries())
+            for (FeatureEntry entry : entries)
             {
                 EObject feature = entry.getFeature();
                 if (feature instanceof Property property)
@@ -297,10 +322,10 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                             && com._1c.g5.v8.dt.bsl.util.BslUtil.isRussian(feature, projectManager);
                         String name = russian ? property.getNameRu() : property.getName();
                         String typeName = typeName(property, russian);
-                        if (BslUtil.isTargetOfAssignment(access) && !property.isWritable())
+                        if (BslUtil.isTargetOfAssignment(staticAccess) && !property.isWritable())
                             issue(MESSAGES.property_is_not_writable(name, typeName), access,
                                 BslPackage.Literals.FEATURE_ACCESS__NAME, -1, entry.getEnvironments());
-                        else if (!BslUtil.isTargetOfAssignment(access) && !property.isReadable())
+                        else if (!BslUtil.isTargetOfAssignment(staticAccess) && !property.isReadable())
                             issue(MESSAGES.property_is_not_readable(name, typeName), access,
                                 BslPackage.Literals.FEATURE_ACCESS__NAME, -1, entry.getEnvironments());
                     }

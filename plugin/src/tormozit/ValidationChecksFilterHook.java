@@ -47,6 +47,7 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.emf.common.util.Diagnostic;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.browser.BrowserFunction;
 import org.eclipse.swt.browser.ProgressListener;
 import org.eclipse.swt.custom.BusyIndicator;
 import org.eclipse.swt.custom.SashForm;
@@ -80,6 +81,8 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPropertyPage;
 import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.PreferencesUtil;
@@ -204,7 +207,9 @@ public final class ValidationChecksFilterHook implements IStartup
             ComfortCheckIds.STATIC_ACCESS_COMPATIBILITY, ComfortCheckIds.STATIC_ACCESS_VARIABLE,
             ComfortCheckIds.STATIC_ACCESS_EVENT_HANDLER) + ".</p>", //$NON-NLS-1$
         "bsl-legacy-check-for-each-statetement-collection", //$NON-NLS-1$
-        "<p><b>Включить нельзя</b>: её проблемы дублирует замена " + ComfortCheckIds.BSL_FOR_EACH_COLLECTION + ".</p>"); //$NON-NLS-1$ //$NON-NLS-2$
+        "<p><b>Включить нельзя</b>: её проблемы дублирует замена " + ComfortCheckIds.BSL_FOR_EACH_COLLECTION + ".</p>", //$NON-NLS-1$ //$NON-NLS-2$
+        "bsl-legacy-check-expression-type", //$NON-NLS-1$
+        "<p><b>Включить нельзя</b>: её проблемы дублирует замена " + ComfortCheckIds.BSL_VALUE_TYPE + ".</p>"); //$NON-NLS-1$ //$NON-NLS-2$
     /** Название типа {@code IssueType.WARNING} в местах, которые перехватывает плагин (issue 401). */
     static final String OTHER_WARNING_TYPE_TITLE = "Прочее предупреждение"; //$NON-NLS-1$
     /**
@@ -404,7 +409,7 @@ public final class ValidationChecksFilterHook implements IStartup
             {
                 InternalBslChecks.installDetails(control);
                 ChecksSelectionMemory.install(control, treeViewer, dialog);
-                CheckDescriptionRefresh.install(page.getControl());
+                CheckDescriptionRefresh.install(page);
                 return true;
             }
             if (Boolean.TRUE.equals(treeViewer.getControl().getData(PATCHED_KEY)))
@@ -452,7 +457,7 @@ public final class ValidationChecksFilterHook implements IStartup
             compactSettingsRow(control);
             InternalBslChecks.installDetails(control);
             ChecksSelectionMemory.install(control, treeViewer, dialog);
-            CheckDescriptionRefresh.install(pageControl);
+            CheckDescriptionRefresh.install(page);
 
             Object pageData = Global.getField(dialog, "pageData"); //$NON-NLS-1$
             if (pageData instanceof Map<?, ?> data
@@ -628,8 +633,9 @@ public final class ValidationChecksFilterHook implements IStartup
     {
         private static final String INSTALLED_KEY = "tormozit.checkDescriptionRefresh"; //$NON-NLS-1$
 
-        static void install(Control pageControl)
+        static void install(IPreferencePage page)
         {
+            Control pageControl = page.getControl();
             Control checkViewer = pageControl != null ? findCheckViewer(pageControl) : null;
             Browser browser = checkViewer instanceof Composite composite ? findBrowser(composite) : null;
             if (browser == null)
@@ -640,6 +646,49 @@ public final class ValidationChecksFilterHook implements IStartup
             if (Boolean.TRUE.equals(browser.getData(INSTALLED_KEY)))
                 return;
             browser.setData(INSTALLED_KEY, Boolean.TRUE);
+            browser.setData("tormozit.checkDescriptionPreferencesLink", //$NON-NLS-1$
+                new BrowserFunction(browser, "comfortOpenBslPreferences") //$NON-NLS-1$
+                {
+                    @Override
+                    public Object function(Object[] arguments)
+                    {
+                        browser.getDisplay().asyncExec(() ->
+                        {
+                            if (browser.isDisposed())
+                                return;
+                            PreferenceDialog preferences = PreferencesUtil.createPreferenceDialogOn(
+                                browser.getShell(), "com._1c.g5.v8.dt.bsl.Bsl", null, null); //$NON-NLS-1$
+                            if (preferences != null)
+                                preferences.open();
+                        });
+                        return null;
+                    }
+                });
+            browser.setData("tormozit.checkDescriptionProjectPreferencesLink", //$NON-NLS-1$
+                new BrowserFunction(browser, "comfortOpenProjectPreferences") //$NON-NLS-1$
+                {
+                    @Override
+                    public Object function(Object[] arguments)
+                    {
+                        browser.getDisplay().asyncExec(() ->
+                        {
+                            if (browser.isDisposed())
+                                return;
+                            IProject project = page instanceof IWorkbenchPropertyPage propertyPage
+                                && propertyPage.getElement() != null
+                                    ? propertyPage.getElement().getAdapter(IProject.class) : null;
+                            if (project == null)
+                                project = Global.getActiveProject((IWorkbenchPage)null, true);
+                            if (project == null)
+                                return;
+                            PreferenceDialog preferences = PreferencesUtil.createPropertyDialogOn(
+                                browser.getShell(), project, "tormozit.ComfortPropertyPage", null, null); //$NON-NLS-1$
+                            if (preferences != null)
+                                preferences.open();
+                        });
+                        return null;
+                    }
+                });
             Runnable refresh = () -> {
                 if (!browser.isDisposed())
                     Global.invokeVoid(checkViewer, "updateHtmlContent"); //$NON-NLS-1$

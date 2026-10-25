@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-SymbolicName: tormozit.comfort;singleton:=true
 Bundle-Name: EDT Comfort
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.5.qualifier
+Bundle-Version: 1.0.6.qualifier
 Bundle-Activator: tormozit.Activator
 Bundle-ActivationPolicy: lazy
 Export-Package: tormozit
@@ -62,6 +62,7 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  com._1c.g5.v8.dt.platform.services.ui,
  com.e1c.g5.dt.core.api,
  com._1c.g5.v8.dt.platform,
+ com._1c.g5.v8.dt.platform.doc,
  com._1c.g5.v8.dt.export,
  com._1c.g5.v8.dt.dcs.ui,
  com._1c.g5.v8.dt.dcs.model,
@@ -71,6 +72,7 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  org.eclipse.e4.ui.workbench,
  org.eclipse.e4.ui.model.workbench,
  org.eclipse.e4.ui.workbench.renderers.swt,
+ org.eclipse.e4.ui.css.swt,
  org.eclipse.e4.core.di,
  org.eclipse.e4.core.contexts,
  org.eclipse.ui.navigator,

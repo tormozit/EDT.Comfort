@@ -230,8 +230,8 @@ public class SmartCompletionProposal implements
      * <p>Число — номер последнего обязательного параметра. У платформенного метода это строка
      * с минимумом (перегрузки схлопываются до неё) — число по подписи. У метода модуля строка
      * одна со всеми параметрами — номер берётся из {@code moduleParams}: {@code [номер, всего]},
-     * применяется, только если {@code всего} совпало с подписью. Номер {@code 0} — пустые
-     * скобки, как у платформенной строки без обязательных.
+     * применяется, только если {@code всего} совпало с подписью. Номер {@code 0} выводится,
+     * если есть необязательные параметры; пустые скобки — у метода без параметров.
      *
      * <p>{@code severalSignatures} не {@code null} — у имени несколько сигнатур: перед числом
      * имя первого параметра, {@code Структура(Ключи, 0)}; число выводится и при {@code 0}.
@@ -250,6 +250,8 @@ public class SmartCompletionProposal implements
         if (inside.isEmpty() && severalSignatures != null && !severalSignatures.isEmpty())
             return display.substring(0, open + 1) + severalSignatures + ", 0" //$NON-NLS-1$
                 + display.substring(close);
+        if (inside.isEmpty() && moduleParams != null && moduleParams[0] == 0 && moduleParams[1] > 0)
+            return display.substring(0, open + 1) + "0" + display.substring(close); //$NON-NLS-1$
         if (inside.isEmpty() || inside.chars().allMatch(Character::isDigit))
             return display;
         int depth = 0;
@@ -274,7 +276,7 @@ public class SmartCompletionProposal implements
         String first = severalSignatures != null
             ? firstParamName(display.substring(open + 1, firstEnd)) : ""; //$NON-NLS-1$
         String text = !first.isEmpty() ? first + ", " + count //$NON-NLS-1$
-            : count > 0 ? String.valueOf(count) : ""; //$NON-NLS-1$
+            : String.valueOf(count);
         return display.substring(0, open + 1) + text + display.substring(close);
     }
 
@@ -1022,6 +1024,18 @@ public class SmartCompletionProposal implements
         if (replaceParent)
             IR_REPLACE_PARENT_APPLY.set(Boolean.TRUE);
         SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
+        // Пустая строка-минимум EDT не создаёт поле LinkedMode для необязательного параметра.
+        // getSelection() штатного proposal берёт позицию из cursorPosition.
+        ConfigurableCompletionProposal cp = asConfigurable(delegate);
+        if (!irApply && !replaceParentOverlap && cp != null)
+        {
+            int[] params = moduleParams();
+            String replacement = cp.getReplacementString();
+            int open = replacement != null ? replacement.indexOf('(') : -1;
+            if (params != null && params[0] == 0 && params[1] > 0 && open >= 0
+                && replacement.indexOf(')', open + 1) == open + 1)
+                cp.setCursorPosition(open + 1);
+        }
     }
 
     private static void endProposalApply()
@@ -1607,8 +1621,41 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
-        return BslExpectedTypePremiums.withReceiverType(resolveEdtAssistSideHint(baseInfo));
+        return BslExpectedTypePremiums.withReceiverType(withParentLine(resolveEdtAssistSideHint(baseInfo)));
 
+    }
+
+    private static final String PARENT_LINE_CLASS = "comfort-row-parent"; //$NON-NLS-1$
+
+    /**
+     * Боковая подсказка строки, когда у строк списка больше одного родителя (например, после {@code База_.} группы
+     * общих модулей): сверху {@code Родитель: <родитель строки>} — часть подписи после {@code ~}. Строку
+     * {@code Приемник.Тип} {@link BslExpectedTypePremiums#withReceiverType} ставит выше неё.
+     */
+    private Object withParentLine(Object info)
+    {
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor == null || !processor.hasSeveralParentTypes())
+            return info;
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
+        String parent = raw != null ? SmartContentAssistProcessor.extractParentType(raw.getDisplayString()) : null;
+        if (parent == null || parent.isEmpty())
+            return info;
+        String line = "<div class=\"" + PARENT_LINE_CLASS + "\"><b>Родитель</b>: " //$NON-NLS-1$ //$NON-NLS-2$
+            + parent.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+        if (info == null)
+            return IrBslHoverHtml.mergeHtml("", line); //$NON-NLS-1$
+        boolean browserInput = IrBslHoverHtml.isBslBrowserInput(info);
+        String html = browserInput ? IrBslHoverHtml.readDisplayHtml(info) : info instanceof String text ? text : null;
+        if (html == null || html.contains(PARENT_LINE_CLASS))
+            return info;
+        if (!browserInput && !IrBslHoverHtml.isFullHtmlDocument(html))
+            return IrBslHoverHtml.mergeHtml("", line + html); //$NON-NLS-1$
+        int body = html.toLowerCase(java.util.Locale.ROOT).indexOf("<body"); //$NON-NLS-1$
+        int bodyEnd = body >= 0 ? html.indexOf('>', body) : -1;
+        String result = bodyEnd >= 0 ? html.substring(0, bodyEnd + 1) + line + html.substring(bodyEnd + 1)
+            : line + html;
+        return browserInput ? IrBslHoverHtml.withHtml(info, result) : result;
     }
 
     @Override
@@ -2035,6 +2082,8 @@ public class SmartCompletionProposal implements
         }
         try
         {
+            // Подключаем общую цепочку здесь: штатные, добавленные и поздно созданные строки проходят этот путь.
+            BslEditorHoverHook.prepareSideHint(delegate, ContentAssistSessionReloader.getActiveViewer());
             Object info = delegate instanceof ICompletionProposalExtension5 ext5
                 ? ext5.getAdditionalProposalInfo(monitor != null ? monitor : new NullProgressMonitor())
                 : delegate.getAdditionalProposalInfo();

@@ -616,6 +616,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return "(" + types.size() + ") " + String.join(", ", types); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
+    /** Больше одного родителя у строк текущего списка — те же, что в {@link #resolveReceiverTypeLabel}. */
+    boolean hasSeveralParentTypes()
+    {
+        java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
+        if (types.isEmpty())
+            types = collectParentTypesFromProposals(memberStockFullList);
+        return types.size() > 1;
+    }
+
     private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
             ICompletionProposal[] proposals)
     {
@@ -1359,6 +1368,24 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     boolean isLiteralManualIrMode()
     {
         return isIrOnlyManualMode();
+    }
+
+    private static boolean hasTextSelection(ITextViewer viewer)
+    {
+        Point range = viewer != null ? viewer.getSelectedRange() : null;
+        return ComfortSettings.isReplaceListFiltersEnabled() && range != null && range.y > 0;
+    }
+
+    /** Выделение: только перенесённые команды, без подключения ИР и списка EDT. */
+    private ICompletionProposal[] computeSelectionProposals(ITextViewer viewer)
+    {
+        if (RepeatedInvocationDetect.isActive())
+            applyRepeatedFilterToggleOnce();
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant != null)
+            ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
+        // Первый расчёт идёт в фоне; пустое окно дождётся обновления готовым снимком.
+        return buildWrappedList(BslExpectedTypePremiums.forSelection(viewer));
     }
 
     /** IR-only список для отложенного ручного assist (literal и др.). */
@@ -2334,6 +2361,8 @@ return result;
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
     {
+        if (hasTextSelection(viewer))
+            return computeSelectionProposals(viewer);
         ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
         if (result == null || result.length == 0)
         return result;
@@ -2666,6 +2695,11 @@ return;
         ICompletionProposal[] result = EMPTY;
         try
         {
+        if (hasTextSelection(viewer))
+        {
+            result = computeSelectionProposals(viewer);
+            return result;
+        }
         dropMemberCachesOnOtherModuleChange(viewer != null ? viewer.getDocument() : null);
         dropListCachesOnTypesChange();
 
@@ -3158,7 +3192,7 @@ return;
                         BslExpectedTypePremiums.ensure(liveDoc, lastProbe, result);
                         long tFilter = System.nanoTime();
                         popup = popupFilter.isEmpty()
-                            ? result : filterAndSort(result, popupFilter);
+                            ? buildDelegateOrderedList(result) : filterAndSort(result, popupFilter);
                         uiBlockLog("wordListBackground.filter", //$NON-NLS-1$
                             "ms=" + ((System.nanoTime() - tFilter) / 1_000_000L) //$NON-NLS-1$
                                 + " raw=" + result.length + " n=" + popup.length //$NON-NLS-1$ //$NON-NLS-2$
@@ -4055,8 +4089,9 @@ return probeDelegateOnce(viewer, offset);
             ICompletionProposal[] cached;
             try
             {
-                cached = filter.isEmpty() || unfilteredText
-                    ? unwrapProposals(fullListCache) : filterAndSort(fullListCache, filter);
+                cached = unfilteredText ? unwrapProposals(fullListCache)
+                    : filter.isEmpty() ? buildDelegateOrderedList(fullListCache)
+                    : filterAndSort(fullListCache, filter);
             }
             catch (RuntimeException ex)
             {
@@ -4186,7 +4221,8 @@ if (RepeatedInvocationDetect.isActive())
     {
         ICompletionProposal[] result = EMPTY;
         {
-            result = queryParametersOnly(viewer, offset, computeForPopupRefreshImpl(viewer, offset));
+            result = hasTextSelection(viewer) ? computeSelectionProposals(viewer)
+                : queryParametersOnly(viewer, offset, computeForPopupRefreshImpl(viewer, offset));
             return result;
         }
     }
@@ -4626,6 +4662,12 @@ return EMPTY;
         {
             if (stock == null)
                 return true;
+            return countNativeVariants(stock, 1) > 0;
+        }
+
+        private static int countNativeVariants(ICompletionProposal[] stock, int limit)
+        {
+            int count = 0;
             // Тем же значком EDT помечает простые шаблоны «см. …» и имена полей.
             Image templateImage = BslSharedImages.getImage(
                 "com._1c.g5.v8.dt.bsl.ui/obj16/templateprop_co.png"); //$NON-NLS-1$
@@ -4638,9 +4680,10 @@ return EMPTY;
                     continue;
                 if (isTemplateProposal(raw) || (templateImage != null && raw.getImage() == templateImage))
                     continue;
-                return true;
+                if (++count >= limit)
+                    break;
             }
-            return false;
+            return count;
         }
     }
 
@@ -4724,6 +4767,44 @@ return EMPTY;
         return BslQueryLiteralSupport.segmentKeyAt(doc, caret) >= 0;
     }
 
+    /**
+     * Текст документа вне литерала (до его начала и после конца) на момент расчёта списка. Значения литерала
+     * зависят от кода вокруг (issue 888: ключи структуры по месту её передачи), поэтому правка снаружи делает
+     * список устаревшим. Набор внутри литерала отпечаток не меняет.
+     */
+    private record LiteralOutside(String before, String after)
+    {
+        static LiteralOutside of(IDocument doc, int key)
+        {
+            if (doc == null || key < 0 || key >= doc.getLength())
+                return null;
+            try
+            {
+                var partition = doc.getPartition(key);
+                if (!org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper
+                    .STRING_LITERAL_PARTITION.equals(partition.getType()))
+                    return null;
+                int end = partition.getOffset() + partition.getLength();
+                return new LiteralOutside(doc.get(0, partition.getOffset()), doc.get(end, doc.getLength() - end));
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                return null;
+            }
+        }
+
+        static boolean isCurrent(LiteralOutside recorded, IDocument doc, int key)
+        {
+            if (recorded == null)
+                return true;
+            LiteralOutside now = of(doc, key);
+            return now != null && recorded.before.equals(now.before) && recorded.after.equals(now.after);
+        }
+    }
+
+    private LiteralOutside literalArgOutside;
+    private LiteralOutside literalArgJobOutside;
+    private LiteralOutside literalArgEmptyOutside;
     private ICompletionProposal[] literalArgList = EMPTY;
     private boolean literalArgListConfirmed;
     private IDocument literalArgDoc;
@@ -4763,7 +4844,8 @@ return EMPTY;
     {
         return doc == literalArgEmptyDoc && quote == literalArgEmptyQuote
             && literalArgEmptyTyped != null && typed.length() >= literalArgEmptyTyped.length()
-            && typed.regionMatches(true, 0, literalArgEmptyTyped, 0, literalArgEmptyTyped.length());
+            && typed.regionMatches(true, 0, literalArgEmptyTyped, 0, literalArgEmptyTyped.length())
+            && LiteralOutside.isCurrent(literalArgEmptyOutside, doc, quote);
     }
 
     /**
@@ -4864,6 +4946,19 @@ return EMPTY;
         return list != null;
     }
 
+    /** По кавычке — небольшой список либо слово с разрешающей автооткрытие премией, как в ИР. */
+    boolean allowsLiteralQuoteAutoOpen(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ICompletionProposal[] list = literalArgPopupBaseForCaret(viewer, caret);
+        if (list != null)
+            BslExpectedTypePremiums.ensure(doc, caret, list);
+        int count = list != null ? TextNameProposals.countNativeVariants(list, 51) : 0;
+        boolean premium = list != null && BslExpectedTypePremiums.hasAutoOpenWord(doc, caret);
+        boolean allowed = count > 0 && count <= 50 || premium;
+        return allowed;
+    }
+
     private ICompletionProposal[] literalArgListForCaret(IDocument doc, int caret)
     {
         if (doc == null || doc != literalArgDoc
@@ -4876,7 +4971,22 @@ return EMPTY;
         if (typed == null || typed.length() < literalArgTyped.length()
             || !typed.regionMatches(true, 0, literalArgTyped, 0, literalArgTyped.length()))
             return null;
+        if (!LiteralOutside.isCurrent(literalArgOutside, doc, quote))
+            return null;
         return literalArgList;
+    }
+
+    /**
+     * Готовый список литерала документа устарел без правки текста (опубликован сеанс менеджера временных
+     * таблиц, issue 889): следующий расчёт посчитает его заново. Только UI.
+     */
+    void invalidateLiteralArgList(IDocument doc)
+    {
+        if (doc == null || doc != literalArgDoc)
+            return;
+        literalArgDoc = null;
+        literalArgList = EMPTY;
+        literalArgListConfirmed = false;
     }
 
     private void storeLiteralArgList(IDocument doc, int caret, ICompletionProposal[] list)
@@ -4888,6 +4998,7 @@ return EMPTY;
         literalArgDoc = doc;
         literalArgQuote = quote;
         literalArgTyped = typed;
+        literalArgOutside = LiteralOutside.of(doc, quote);
         // В обёртках, как список слов: иначе при пустом фильтре окно получает сырые
         // предложения EDT и рисует штатную, а не нашу подсветку вхождений фильтра.
         literalArgList = buildDelegateOrderedList(list);
@@ -4932,7 +5043,8 @@ return EMPTY;
             && literalArgJobQuote == quote && literalArgJobTyped != null
             && typed.length() >= literalArgJobTyped.length()
             && typed.regionMatches(true, 0, literalArgJobTyped, 0, literalArgJobTyped.length())
-            && (literalArgJobNames || !namesAfterDot))
+            && (literalArgJobNames || !namesAfterDot)
+            && LiteralOutside.isCurrent(literalArgJobOutside, doc, quote))
         {
             if (onReady != null)
                 literalArgJobOnReady = onReady;
@@ -4956,6 +5068,7 @@ return EMPTY;
         final int epoch = ++literalArgEpoch;
         literalArgJobQuote = quote;
         literalArgJobDoc = doc;
+        literalArgJobOutside = LiteralOutside.of(doc, quote);
         // Зонд на начале сегмента — как у списка слов (зонд на начале слова): у EDT пустой
         // префикс, список полный и годен всему сегменту, включая Backspace. Ключ набранного
         // поэтому пустой: кэш, «в полёте» и «заведомо пусто» относятся ко всему сегменту.
@@ -5082,6 +5195,7 @@ return EMPTY;
         final int epoch = ++literalArgEpoch;
         literalArgJobQuote = key;
         literalArgJobDoc = doc;
+        literalArgJobOutside = LiteralOutside.of(doc, key);
         literalArgJobTyped = ""; //$NON-NLS-1$
         literalArgJobOnReady = onReady;
         literalArgBusy = true;
@@ -5130,6 +5244,7 @@ return EMPTY;
         final int epoch = ++literalArgEpoch;
         literalArgJobQuote = quote;
         literalArgJobDoc = doc;
+        literalArgJobOutside = LiteralOutside.of(doc, quote);
         literalArgJobTyped = ""; //$NON-NLS-1$
         literalArgJobOnReady = onReady;
         literalArgBusy = true;
@@ -5221,6 +5336,7 @@ return EMPTY;
         literalArgEmptyDoc = doc;
         literalArgEmptyQuote = quote;
         literalArgEmptyTyped = ""; //$NON-NLS-1$
+        literalArgEmptyOutside = LiteralOutside.of(doc, quote);
     }
 
     /** UI: предложения параметров запроса; длину замены Xtext берёт при вставке от {@code offset}. */
@@ -5291,6 +5407,7 @@ return EMPTY;
             literalArgEmptyDoc = doc;
             literalArgEmptyQuote = quote;
             literalArgEmptyTyped = literalArgJobTyped;
+            literalArgEmptyOutside = literalArgJobOutside;
         }
         if (drop != null)
         {
@@ -5306,6 +5423,7 @@ return EMPTY;
         literalArgDoc = doc;
         literalArgQuote = quote;
         literalArgTyped = literalArgJobTyped != null ? literalArgJobTyped : ""; //$NON-NLS-1$
+        literalArgOutside = literalArgJobOutside;
         // В обёртках, как список слов (см. storeLiteralArgList).
         literalArgList = buildDelegateOrderedList(list);
         literalArgListConfirmed = true;
@@ -8584,6 +8702,8 @@ return result;
     static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
                                          int offset, DocumentEvent event)
     {
+        if (hasTextSelection(ContentAssistSessionReloader.getActiveViewer()))
+            return unwrapProposal(proposal) instanceof BslAddedWordProposal;
         if (selectionForcesIrOnlyFullList())
             return true;
 if (!SmartAssistFilterState.isSmartFilterEnabled())
@@ -9129,6 +9249,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         shown[0] = true;
                         ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
                     });
+                    // Сеансы менеджера временных таблиц метода под кареткой (issue 889)
+                    BslTempTableSessions.refreshDocument(refreshDoc, resource, refreshOffset);
                     return null;
                 });
             }
@@ -9139,11 +9261,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             }
         }
         boolean delegateCompleted = false;
+        // Провайдер значений литерала (issue 888) отвечает только внутри этого расчёта.
+        BslLiteralValues.beginAssist(Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()));
         try
         {
             raw = dropTemplateTypes(delegate.computeCompletionProposals(viewer, off));
             FunctionReturnTypes.rememberVariableTargets(raw);
-            BslStructureInsertCommentTypes.installPropertyProposalDescriptions(raw, viewer);
             delegateCompleted = true;
         }
         catch (NullPointerException npe)
@@ -9159,7 +9282,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             endKeywordProbe(keywordProbe);
         }
         if (delegateCompleted)
+        {
             raw = TextNameProposals.merge(viewer, off, raw);
+            raw = BslLiteralValues.merge(viewer, off, raw);
+        }
         // Ключевые слова — в каретке, из контекстов этого же опроса. После «&» грамматика
         // допускает только аннотации, и ответ EDT там окончательный. Грамматика EDT
         // (Bsl.xtext, PreprocessorLiteralName) объявляет «НаКлиенте» и «НаСервере»
@@ -9174,6 +9300,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         finally
         {
+        BslLiteralValues.endAssist();
         DELEGATE_LOCK.unlock();
         IDocument d = viewer != null ? viewer.getDocument() : null;
         long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
@@ -9767,8 +9894,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     uiBlockLog("memberStock.bg.run", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
                     ICompletionProposal[] raw = EMPTY;
                     java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
+                    // «База_.» — группа общих модулей (issue 891): у EDT такого имени нет, члены — свои
+                    ICompletionProposal[] group = CommonModuleAssistGroups.members(viewer, (IXtextDocument)doc,
+                        dotContextKey);
+                    if (group != null)
+                        raw = group;
                     int attempts = 0;
-                    while (attempts < MEMBER_STOCK_BG_ATTEMPTS)
+                    while (group == null && attempts < MEMBER_STOCK_BG_ATTEMPTS)
                     {
                         // Бросаем расчёт, только если место ввода действительно сменилось
                         // (новое задание на другую точку), а не по смене поколения.

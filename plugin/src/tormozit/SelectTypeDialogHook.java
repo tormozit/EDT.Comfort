@@ -146,6 +146,56 @@ public class SelectTypeDialogHook implements IStartup
     /** Штатный редактор описания типов в режиме просмотра, поверх отдельной копии значения. */
     static void openReadOnly(Shell parent, TypeDescription type, EObject context)
     {
+        openReadOnly(parent, type, context, null);
+    }
+
+    /** Расчётные типы выражения: тот же просмотр, без владельца реквизита в модели МД. */
+    static void openReadOnly(Shell parent, java.util.List<TypeItem> types,
+        org.eclipse.xtext.resource.XtextResource resource)
+    {
+        try
+        {
+            if (resource == null || resource.getContents().isEmpty() || types.isEmpty())
+                return;
+            Bundle core = Platform.getBundle(TYPE_PROVIDER_BUNDLE);
+            Object info = Global.newInstance(core.loadClass(
+                "com._1c.g5.v8.dt.platform.core.typeinfo.TypeDescriptionInfoWithTypeInfo")); //$NON-NLS-1$
+            Class<?> typeInfoClass = core.loadClass("com._1c.g5.v8.dt.platform.core.typeinfo.TypeInfo"); //$NON-NLS-1$
+            java.util.List<Object> items = new java.util.ArrayList<>();
+            TypeDescription description = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeDescription();
+            for (TypeItem type : types)
+            {
+                String name = McoreUtil.getTypeName(type);
+                String russian = McoreUtil.getTypeNameRu(type);
+                Global.tempLog("assist-type-menu", "prepareType name=" + name + " russian=" + russian //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " uri=" + EcoreUtil.getURI(type) + " proxy=" + type.eIsProxy()); //$NON-NLS-1$ //$NON-NLS-2$
+                Object classifier = TypeDescriptionPresentationHook.typeClassifier(type);
+                if (name == null || classifier == null)
+                    throw new IllegalStateException("Не получено описание типа " + (russian != null ? russian : name)); //$NON-NLS-1$
+                Object item = Global.newInstance(typeInfoClass, type, classifier,
+                    org.eclipse.xtext.naming.QualifiedName.create(name.split("\\.")), //$NON-NLS-1$
+                    org.eclipse.xtext.naming.QualifiedName.create((russian != null ? russian : name).split("\\.")), //$NON-NLS-1$
+                    com._1c.g5.v8.dt.mcore.util.Environments.ALL);
+                if (item == null)
+                    throw new IllegalStateException("Не удалось создать описание типа " + name); //$NON-NLS-1$
+                items.add(item);
+                description.getTypes().add(type);
+            }
+            if (!Global.invokeVoid(info, "setTypeInfos", items)) //$NON-NLS-1$
+                throw new IllegalStateException("Не удалось передать список типов"); //$NON-NLS-1$
+            Global.invokeVoid(info, "setCompositeTypeEnable", Boolean.TRUE); //$NON-NLS-1$
+            Global.invokeVoid(info, "setMixSingleEnable", Boolean.TRUE); //$NON-NLS-1$
+            openReadOnly(parent, description, resource.getContents().get(0), info);
+        }
+        catch (ReflectiveOperationException | RuntimeException | LinkageError error)
+        {
+            Global.tempLogException("assist-type-menu", "openTypes.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+            ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + error.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static void openReadOnly(Shell parent, TypeDescription type, EObject context, Object suppliedInfo)
+    {
         if (parent == null || parent.isDisposed() || type == null)
             return;
         Object engine = null;
@@ -153,7 +203,7 @@ public class SelectTypeDialogHook implements IStartup
         {
             EObject owner = type.eContainer() != null ? type.eContainer() : context;
             EReference feature = type.eContainingFeature() instanceof EReference reference ? reference : null;
-            if (feature == null && owner != null)
+            if (feature == null && owner != null && suppliedInfo == null)
             {
                 for (EReference reference : owner.eClass().getEAllReferences())
                 {
@@ -164,7 +214,7 @@ public class SelectTypeDialogHook implements IStartup
                     feature = reference;
                 }
             }
-            if (owner == null || feature == null)
+            if (owner == null || feature == null && suppliedInfo == null)
                 throw new IllegalStateException("Не найден владелец описания типов"); //$NON-NLS-1$
             IV8ProjectManager manager = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
             IV8Project project = manager.getProject(owner);
@@ -181,8 +231,9 @@ public class SelectTypeDialogHook implements IStartup
             Bundle bundle = Platform.getBundle(MD_UI_BUNDLE);
             Bundle core = Platform.getBundle(TYPE_PROVIDER_BUNDLE);
             Object service = core.loadClass(TYPE_PROVIDER_SERVICE).getField("INSTANCE").get(null); //$NON-NLS-1$
-            Object info = Global.invoke(service, "getTypeDescriptionInfoWithTypeInfo", //$NON-NLS-1$
-                owner, owner.eContainer(), feature, null);
+            Object info = suppliedInfo != null ? suppliedInfo
+                : Global.invoke(service, "getTypeDescriptionInfoWithTypeInfo", //$NON-NLS-1$
+                    owner, owner.eContainer(), feature, null);
             if (info == null)
                 throw new IllegalStateException("Не получено описание доступных типов"); //$NON-NLS-1$
             registerTypeProvider(bundle);
@@ -225,6 +276,8 @@ public class SelectTypeDialogHook implements IStartup
         {
             if (engine != null)
                 Global.invoke(engine, "dispose"); //$NON-NLS-1$
+            if (suppliedInfo != null)
+                Global.tempLogException("assist-type-menu", "dialog.failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + e.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }

@@ -11,6 +11,8 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 
@@ -135,8 +137,11 @@ public final class ContentAssistPopupUi
             if (viewer != null)
                 applyContextTypeLabel(contextLabel, viewer);
             else
+            {
                 // Редактор не найден — хотя бы не оставлять надпись о пересчёте.
                 contextLabel.setText(status != null ? status : PARENT_PLACEHOLDER);
+                contextLabel.setData(TypeLabelMenu.TEXT_KEY, ""); //$NON-NLS-1$
+            }
         }
         catch (Exception ignored)
         {
@@ -158,6 +163,7 @@ public final class ContentAssistPopupUi
             shown = truncateToPopupWidth(contextLabel, bar, text);
 
         contextLabel.setText(shown);
+        contextLabel.setData(TypeLabelMenu.TEXT_KEY, status == null ? text : ""); //$NON-NLS-1$
         Global.tempLog("assist-parent-type", "apply text=" + text + " shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " bounds=" + contextLabel.getBounds() + " status=" + status); //$NON-NLS-1$ //$NON-NLS-2$
         if (shown.equals(text))
@@ -198,6 +204,7 @@ public final class ContentAssistPopupUi
         String shown = truncateToPopupWidth(label, bar, text);
         boolean changed = !shown.equals(label.getText()) || label.getVisible() != !text.isEmpty();
         label.setText(shown);
+        label.setData(TypeLabelMenu.TEXT_KEY, text);
         label.setVisible(!text.isEmpty());
         ((GridData)label.getLayoutData()).exclude = text.isEmpty();
         label.setToolTipText(shown.equals(text) ? null : TooltipText.wrap(label, text));
@@ -501,10 +508,12 @@ public final class ContentAssistPopupUi
         Label contextLabel = new Label(bar, SWT.NONE);
         contextLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         contextLabel.addListener(SWT.MouseDoubleClick, e -> copyContextTypeLabel(viewer));
+        TypeLabelMenu.install(contextLabel, viewer);
 
         Label expectedLabel = new Label(bar, SWT.NONE);
         expectedLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         expectedLabel.addListener(SWT.MouseDoubleClick, e -> copyTypeLabel(viewer, resolveExpectedTypeLabel(viewer)));
+        TypeLabelMenu.install(expectedLabel, viewer);
 
         bar.setData(TOGGLE_DATA_KEY, toggle);
         bar.setData(CONTEXT_LABEL_DATA_KEY, contextLabel);
@@ -521,6 +530,128 @@ public final class ContentAssistPopupUi
         shell.layout(true, true);
         ContentAssistDebug.log("filterBar UI created"); //$NON-NLS-1$
         return bar;
+    }
+
+    /** Контекстное меню полного текста типов, независимо от обрезки надписи. */
+    private static final class TypeLabelMenu
+    {
+        static final String TEXT_KEY = "tormozit.assist.typeLabelText"; //$NON-NLS-1$
+        private final Label label;
+        private final SourceViewer viewer;
+        private final Menu menu;
+        private String fullText;
+
+        private TypeLabelMenu(Label label, SourceViewer viewer)
+        {
+            this.label = label;
+            this.viewer = viewer;
+            menu = new Menu(label);
+            label.setMenu(menu);
+        }
+
+        static void install(Label label, SourceViewer viewer)
+        {
+            TypeLabelMenu support = new TypeLabelMenu(label, viewer);
+            support.menu.addListener(SWT.Show, event -> {
+                try
+                {
+                    support.show();
+                }
+                catch (RuntimeException | LinkageError error)
+                {
+                    Global.tempLogException("assist-type-menu", "show.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+                    for (MenuItem item : support.menu.getItems())
+                        item.dispose();
+                }
+            });
+            label.addListener(SWT.Dispose, event -> {
+                if (!support.menu.isDisposed())
+                    support.menu.dispose();
+            });
+        }
+
+        private void show()
+        {
+            for (MenuItem item : menu.getItems())
+                item.dispose();
+            fullText = (String)label.getData(TEXT_KEY);
+            if (fullText == null || fullText.isBlank() || fullText.equals(PARENT_PLACEHOLDER))
+                return;
+            Global.tempLog("assist-type-menu", "show text=" + fullText); //$NON-NLS-1$ //$NON-NLS-2$
+            addAction("Копировать", () -> copyTypeLabel(viewer, fullText)); //$NON-NLS-1$
+            java.util.List<String> names = typeNames(fullText);
+            com._1c.g5.v8.dt.mcore.TypeItem single = names.size() == 1
+                ? MetadataTypeMenu.resolveType(viewer, names.get(0)) : null;
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(viewer);
+            TextEditorFacade facade = reloader != null ? reloader.getFacade() : null;
+            if (single != null && BslEditorHyperlinkHook.typeProducer(single) != null
+                && facade != null && facade.getRaw() instanceof com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor editor)
+            {
+                for (org.eclipse.jface.text.hyperlink.IHyperlink link : BslEditorHyperlinkHook.metadataTypeLinks(single, editor))
+                {
+                    if (!BslEditorHyperlinkHook.isPrimary(link))
+                        addAction(link.getHyperlinkText(), () -> {
+                            label.getShell().setVisible(false);
+                            link.open();
+                        });
+                }
+            }
+            else if (names.size() > 1)
+                addAction("Открыть типы", () -> openTypes(names)); //$NON-NLS-1$
+        }
+
+        private void addAction(String text, Runnable action)
+        {
+            MenuItem item = new MenuItem(menu, SWT.PUSH);
+            item.setText(text);
+            item.addListener(SWT.Selection, event -> {
+                Global.tempLog("assist-type-menu", "action text=" + text + " types=" + fullText); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                try
+                {
+                    action.run();
+                }
+                catch (RuntimeException | LinkageError error)
+                {
+                    Global.tempLogException("assist-type-menu", "action.failed text=" + text, error); //$NON-NLS-1$ //$NON-NLS-2$
+                    ToastNotification.show(text, "Не удалось выполнить команду: " + error.getMessage(), 5000); //$NON-NLS-1$
+                }
+            });
+        }
+
+        private void openTypes(java.util.List<String> names)
+        {
+            Global.tempLog("assist-type-menu", "openTypes names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.List<com._1c.g5.v8.dt.mcore.TypeItem> types = new java.util.ArrayList<>();
+            for (String name : names)
+            {
+                var type = MetadataTypeMenu.resolveType(viewer, name);
+                if (type == null)
+                {
+                    Global.tempLog("assist-type-menu", "unresolved=" + name); //$NON-NLS-1$ //$NON-NLS-2$
+                    ToastNotification.show("Открыть типы", "Не удалось найти тип: " + name, 5000); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                types.add(type);
+            }
+            if (viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document)
+            {
+                org.eclipse.xtext.resource.XtextResource resource = ContentAssistSessionReloader.readOnlyPeekAst(
+                    document, value -> value);
+                Shell parent = viewer.getTextWidget().getShell();
+                label.getShell().setVisible(false);
+                SelectTypeDialogHook.openReadOnly(parent, types, resource);
+            }
+        }
+
+        private static java.util.List<String> typeNames(String text)
+        {
+            String types = text.substring(text.indexOf(':') + 1).trim().replaceFirst("^\\(\\d+\\)\\s*", ""); //$NON-NLS-1$ //$NON-NLS-2$
+            if (types.startsWith("<") && types.endsWith(">")) //$NON-NLS-1$ //$NON-NLS-2$
+                types = types.substring(1, types.length() - 1);
+            return java.util.Arrays.stream(types.split("[,|]")) //$NON-NLS-1$
+                .map(String::trim).filter(name -> !name.isEmpty()).distinct().toList();
+        }
+
     }
 
     private static void setToggleSelectionQuiet(Button toggle, boolean selected)

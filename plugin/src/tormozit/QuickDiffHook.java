@@ -3,6 +3,7 @@ package tormozit;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,6 +44,7 @@ import org.eclipse.jface.text.IViewportListener;
 import org.eclipse.jface.text.TextEvent;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.information.IInformationProviderExtension2;
+import org.eclipse.jface.text.revisions.RevisionInformation;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.CompositeRuler;
 import org.eclipse.jface.text.source.IAnnotationHover;
@@ -59,7 +61,9 @@ import org.eclipse.jface.text.source.ILineDiffInfo;
 import org.eclipse.jface.text.source.ILineRange;
 import org.eclipse.jface.text.source.IOverviewRuler;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.ISharedTextColors;
 import org.eclipse.jface.text.source.IVerticalRuler;
+import org.eclipse.jface.text.source.IVerticalRulerColumn;
 import org.eclipse.jface.text.source.LineChangeHover;
 import org.eclipse.jface.text.source.LineNumberChangeRulerColumn;
 import org.eclipse.jface.text.source.LineRange;
@@ -92,6 +96,7 @@ import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.ui.texteditor.AnnotationPreference;
 import org.eclipse.ui.texteditor.ITextEditor;
+import org.eclipse.ui.texteditor.rulers.AbstractContributedRulerColumn;
 
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
@@ -119,6 +124,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * В режиме «Отображать информацию о ревизии» штатный тултип ревизии
  * ({@code RevisionPainter}) не подменяется: обёртка срабатывает только на
  * изменённых строках, где ревизионной подсказки нет.
+ *
+ * <p>В режиме «Отображать информацию о ревизии» незафиксированные строки окрашиваются
+ * как Quick Diff без этого режима ({@link RevisionDiffColumn}, #871).
  */
 public final class QuickDiffHook implements IStartup
 {
@@ -246,7 +254,7 @@ public final class QuickDiffHook implements IStartup
             display = Display.getDefault();
         ISourceViewer viewer = TextEditor.getSourceViewer(editor);
         StyledText text = viewer != null ? viewer.getTextWidget() : null;
-        LineNumberChangeRulerColumn column = findLineNumberColumn(viewer);
+        LineNumberChangeRulerColumn column = ensureRevisionDiffColumn(editor, viewer);
         IOverviewRuler overview = overviewRulerOf(viewer);
         Control lineControl = column != null ? column.getControl() : null;
         Control overviewControl = overview != null ? overview.getControl() : null;
@@ -318,6 +326,149 @@ public final class QuickDiffHook implements IStartup
     private static LineNumberChangeRulerColumn findLineNumberColumn(ISourceViewer viewer)
     {
         return asChangeColumn(findRulerColumnRaw(viewer));
+    }
+
+    /**
+     * Ставит в {@code LineNumberColumn.fDelegate} колонку {@link RevisionDiffColumn} вместо
+     * штатной {@link LineNumberChangeRulerColumn}: в режиме «Отображать информацию о ревизии»
+     * штатная не рисует окраску Quick Diff ({@code doPaint}: {@code if (revisions) … else if (diff)}),
+     * и незафиксированные строки остаются цвета фона — в тёмной теме не отличить от старых
+     * ревизий (#871).
+     *
+     * <p>Колонка пересоздаётся тем же путём, что при штатном включении колонки
+     * ({@link CompositeRuler#removeDecorator}/{@link CompositeRuler#addDecorator}):
+     * {@code LineNumberColumn.createControl} заново применяет к делегату настройки и модель,
+     * {@code childAdded} переносит на новую канву слушатели и меню линейки. Слушатели
+     * настроек {@code LineNumberColumn} читают поле {@code fDelegate} при каждом вызове.
+     * Чужой наследник колонки и колонка без оболочки (свои редакторы плагина) не трогаются.
+     *
+     * @return колонка номеров после подмены (или текущая, если подмена не нужна/невозможна)
+     */
+    private static LineNumberChangeRulerColumn ensureRevisionDiffColumn(ITextEditor editor, ISourceViewer viewer)
+    {
+        Object holder = findRulerColumnRaw(viewer);
+        LineNumberChangeRulerColumn current = asChangeColumn(holder);
+        if (current == null || holder == current || current.getClass() != LineNumberChangeRulerColumn.class)
+            return current;
+        Control control = current.getControl();
+        if (control == null || control.isDisposed())
+            return current;
+        if (!(verticalRulerOf(viewer) instanceof CompositeRuler composite)
+            || !(holder instanceof IVerticalRulerColumn holderColumn))
+            return current;
+        int index = decoratorIndex(composite, holder);
+        if (index < 0)
+            return current;
+
+        Object stockHover = Global.getField(Global.getField(current, "fDiffPainter"), "fHover"); //$NON-NLS-1$ //$NON-NLS-2$
+        Object revisionPainter = Global.getField(current, "fRevisionPainter"); //$NON-NLS-1$
+        Object revisionInfo = Global.getField(revisionPainter, "fRevisionInfo"); //$NON-NLS-1$
+        Object sharedColors = Global.getField(revisionPainter, "fSharedColors"); //$NON-NLS-1$
+        RevisionDiffColumn replacement = new RevisionDiffColumn(sharedColors instanceof ISharedTextColors colors
+            ? colors : EditorsUI.getSharedTextColors());
+        if (stockHover instanceof IAnnotationHover hover)
+            replacement.setHover(hover);
+
+        composite.removeDecorator(holderColumn);
+        if (holder instanceof AbstractContributedRulerColumn contributed)
+            contributed.columnRemoved(); // слушатель настроек; новый создаст initialize() в createControl
+        Global.setField(holder, "fDelegate", replacement); //$NON-NLS-1$
+        composite.addDecorator(index, holderColumn);
+        if (Global.getField(editor, "fLineNumberRulerColumn") == current) //$NON-NLS-1$
+            Global.setField(editor, "fLineNumberRulerColumn", replacement); //$NON-NLS-1$
+        if (revisionInfo instanceof RevisionInformation info)
+            replacement.setRevisionInformation(info);
+
+        boolean swapped = Global.getField(holder, "fDelegate") == replacement //$NON-NLS-1$
+            && replacement.getControl() != null && !replacement.getControl().isDisposed();
+        return swapped ? replacement : findLineNumberColumn(viewer);
+    }
+
+    private static int decoratorIndex(CompositeRuler composite, Object column)
+    {
+        Iterator<?> columns = composite.getDecoratorIterator();
+        for (int i = 0; columns.hasNext(); i++)
+        {
+            if (columns.next() == column)
+                return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Колонка номеров, которая в режиме «Отображать информацию о ревизии» поверх цветов
+     * ревизий рисует окраску Quick Diff — как без этого режима. Ревизии оставляют
+     * изменённые относительно ссылки строки пустыми ({@code RevisionPainter} вычитает хунки),
+     * так что окраски не пересекаются; удаления — черта на границе строк.
+     *
+     * <p>Рисуется в {@link #paintLine} — он вызывается в буфере колонки после ревизий и до
+     * номера строки, поэтому окраска переживает и {@code redraw()} через {@code new GC}
+     * (Windows), и перерисовку при наведении на ревизию. {@code DiffPainter} — тот же,
+     * что у штатной колонки, со всеми цветами и фильтром пробельных изменений {@link Session}.
+     * Без номеров строк ({@code paintLine} не вызывается) окраски нет, как и раньше.
+     */
+    private static final class RevisionDiffColumn extends LineNumberChangeRulerColumn
+    {
+        private static volatile Method diffPaint;
+
+        private Object diffPainter;
+
+        RevisionDiffColumn(ISharedTextColors sharedColors)
+        {
+            super(sharedColors);
+        }
+
+        @Override
+        protected void paintLine(int line, int y, int lineheight, GC gc, Display display)
+        {
+            if (isShowingRevisionInformation())
+                paintQuickDiff(line, gc);
+            super.paintLine(line, y, lineheight, gc, display);
+        }
+
+        private void paintQuickDiff(int line, GC gc)
+        {
+            if (diffPainter == null)
+                diffPainter = Global.getField(this, "fDiffPainter"); //$NON-NLS-1$
+            Method paint = diffPaintMethod(diffPainter);
+            if (paint == null)
+                return;
+            Color foreground = gc.getForeground();
+            Color background = gc.getBackground();
+            int lineWidth = gc.getLineWidth();
+            try
+            {
+                paint.invoke(diffPainter, gc, new LineRange(line, 1));
+            }
+            catch (Exception ex)
+            {
+                // окраска необязательна: номер строки рисуется в любом случае
+            }
+            finally
+            {
+                gc.setForeground(foreground);
+                gc.setBackground(background);
+                gc.setLineWidth(lineWidth);
+            }
+        }
+
+        private static Method diffPaintMethod(Object painter)
+        {
+            Method paint = diffPaint;
+            if (paint != null || painter == null)
+                return paint;
+            try
+            {
+                paint = painter.getClass().getMethod("paint", GC.class, ILineRange.class); //$NON-NLS-1$
+                paint.setAccessible(true);
+                diffPaint = paint;
+            }
+            catch (Exception ex)
+            {
+                return null;
+            }
+            return paint;
+        }
     }
 
     /**

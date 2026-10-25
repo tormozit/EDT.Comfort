@@ -177,6 +177,7 @@ import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -3070,7 +3071,8 @@ public final class BslModuleSpellCheckHook implements IStartup
 
     /**
      * issue #862: «Заменить на функцию» для «Процедура не может возвращать значение» и
-     * «Заменить на процедуру» для «Оператор 'Возврат' в функции должен возвращать определенное значение».
+     * «Заменить на процедуру» для «Оператор 'Возврат' в функции должен возвращать определенное значение»
+     * и «Функция должна возвращать значение».
      * Проблемы — legacy-проверка EDT: код аннотации короткий SU…, поэтому штатный
      * {@code @Fix} по коду валидатора их не находит — только живое предложение здесь.
      */
@@ -3078,6 +3080,9 @@ public final class BslModuleSpellCheckHook implements IStartup
     {
         /** Идентификатор проверки: префикс {@code bsl-legacy-} плюс имя метода {@code BslJavaValidator}. */
         private static final String CHECK_ID = "bsl-legacy-check-return-statement"; //$NON-NLS-1$
+        private static final String FUNCTION_CHECK_ID =
+            "bsl-legacy-check-method-for-statements-after-return"; //$NON-NLS-1$
+        private static final String FUNCTION_CODE = "function-should-return-value"; //$NON-NLS-1$
         /** Коды тех же проблем в самом валидаторе — на случай, когда реестр не подменил их коротким. */
         private static final Set<String> VALIDATOR_CODES =
             Set.of("procedure-return-value", "return-without-expression"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -3086,6 +3091,8 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             Issue issue = annotation.getIssue();
             IXtextDocument document = annotation.getDocument();
+            Global.tempLog("method-kind-fix", "proposal code=" + (issue == null ? null : issue.getCode()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + (issue == null ? null : issue.getOffset()) + " document=" + (document != null)); //$NON-NLS-1$ //$NON-NLS-2$
             if (issue == null || document == null || issue.getOffset() == null || issue.getCode() == null)
                 return null;
             int offset = issue.getOffset();
@@ -3094,26 +3101,31 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 com._1c.g5.v8.dt.bsl.model.Method method = document.readOnly(
                     (IUnitOfWork<com._1c.g5.v8.dt.bsl.model.Method, XtextResource>) resource -> {
-                        if (!isReturnCheck(resource, code))
-                            return null;
                         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                        EObject element = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+                        if (!isReturnCheck(resource, code, element instanceof com._1c.g5.v8.dt.bsl.model.Function))
+                            return null;
                         com._1c.g5.v8.dt.bsl.model.Method target =
-                            leaf == null ? null : method(NodeModelUtils.findActualSemanticObjectFor(leaf));
-                        return edit(target) == null ? null : target;
+                            method(element);
+                        boolean available = edit(target) != null;
+                        Global.tempLog("method-kind-fix", "target code=" + code + " element=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + (element == null ? null : element.eClass().getName()) + " available=" + available); //$NON-NLS-1$
+                        return available ? target : null;
                     });
                 return method == null ? null : new Proposal(document, issue, method.getName(),
                     method instanceof com._1c.g5.v8.dt.bsl.model.Procedure, icon);
             }
             catch (RuntimeException e)
             {
+                Global.tempLog("method-kind-fix", "proposal failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 // Документ или аннотация уже недоступны — исправление не предлагается.
                 return null;
             }
         }
 
-        private static boolean isReturnCheck(XtextResource resource, String code)
+        private static boolean isReturnCheck(XtextResource resource, String code, boolean onFunction)
         {
-            if (VALIDATOR_CODES.contains(code))
+            if (onFunction ? FUNCTION_CODE.equals(code) : VALIDATOR_CODES.contains(code))
                 return true;
             URI uri = resource.getURI();
             if (uri == null || !uri.isPlatformResource())
@@ -3122,15 +3134,18 @@ public final class BslModuleSpellCheckHook implements IStartup
                 .getFile(new Path(uri.toPlatformString(true))).getProject();
             ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
             CheckUid uid = repository == null ? null : repository.getUidForShortUid(code, project);
-            return uid != null && CHECK_ID.equals(uid.getCheckId());
+            Global.tempLog("method-kind-fix", "check code=" + code + " uid=" + uid + " onFunction=" + onFunction); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return uid != null && (onFunction ? FUNCTION_CHECK_ID : CHECK_ID).equals(uid.getCheckId());
         }
 
         /**
-         * Метод для исправления: процедура с «Возврат» со значением либо функция с «Возврат» без значения.
-         * Та же проверка выдаёт и проблему «Возврат» вне метода — она отсеивается здесь.
+         * Метод для исправления: функция без возврата либо метод с ошибочным оператором «Возврат».
+         * Остальные проблемы тех же проверок (недостижимый код, «Возврат» вне метода) отсеиваются.
          */
         private static com._1c.g5.v8.dt.bsl.model.Method method(EObject element)
         {
+            if (element instanceof com._1c.g5.v8.dt.bsl.model.Function function)
+                return function;
             com._1c.g5.v8.dt.bsl.model.ReturnStatement statement =
                 EcoreUtil2.getContainerOfType(element, com._1c.g5.v8.dt.bsl.model.ReturnStatement.class);
             com._1c.g5.v8.dt.bsl.model.Method method = statement == null ? null
@@ -3243,6 +3258,8 @@ public final class BslModuleSpellCheckHook implements IStartup
             @Override
             public void apply(IDocument target)
             {
+                Global.tempLog("method-kind-fix", "apply name=" + name + " toFunction=" + toFunction //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " sameDocument=" + (target == document)); //$NON-NLS-1$
                 if (target != document)
                     return;
                 try
@@ -3270,6 +3287,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                 }
                 catch (Exception e)
                 {
+                    Global.tempLog("method-kind-fix", "apply failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                     // Исправление не применено — документ остался прежним.
                 }
             }
@@ -3370,7 +3388,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         return base;
     }
 
-    /** Штатный Ctrl+1 плюс то же исправление, которое показывается в подсказке ошибки. */
+    /** Штатный Ctrl+1 плюс общие исправления имён и литералов из подсказки ошибки. */
     private static final class QueryResultQuickAssistProcessor implements IQuickAssistProcessor
     {
         private final IQuickAssistProcessor delegate;
@@ -3497,7 +3515,7 @@ public final class BslModuleSpellCheckHook implements IStartup
     }
 
     private static ICompletionProposal similarNameProposalForUnresolvedReference(XtextAnnotation xa,
-        ISourceViewer viewer, Image icon, boolean onlyQueryFieldCheck)
+        ISourceViewer viewer, Image icon, boolean onlyComfortCheck)
     {
         try
         {
@@ -3513,17 +3531,26 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (offset == null || length == null || document == null)
                 return null;
             boolean queryFieldCheck = false;
-            if (onlyQueryFieldCheck || !(isLinking || isDeclaredNameCode))
+            boolean literalCheck = false;
+            if (onlyComfortCheck || !(isLinking || isDeclaredNameCode))
             {
-                queryFieldCheck = document.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+                int checkKind = document.readOnly((IUnitOfWork<Integer, XtextResource>) resource -> {
                     IProject project = projectOf(resource);
                     ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
                     CheckUid uid = project == null || repository == null || code == null ? null
                         : repository.getUidForShortUid(code, project);
-                    return new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid); //$NON-NLS-1$
+                    if (new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
+                        return 1;
+                    if (new CheckUid(ComfortCheckIds.BSL_UNKNOWN_LITERAL, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
+                        return 2;
+                    return 0;
                 });
+                queryFieldCheck = checkKind == 1;
+                literalCheck = checkKind == 2;
             }
-            if (onlyQueryFieldCheck ? !queryFieldCheck : !(isLinking || isDeclaredNameCode || queryFieldCheck))
+            if (literalCheck)
+                return similarLiteralProposal(document, offset, icon);
+            if (onlyComfortCheck ? !queryFieldCheck : !(isLinking || isDeclaredNameCode || queryFieldCheck))
                 return null;
             return buildSimilarNameProposal(document, viewer, offset, length, icon, null, queryFieldCheck);
         }
@@ -3531,6 +3558,42 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             return null;
         }
+    }
+
+    /** Общий поиск по Левенштейну, ограниченный допустимыми значениями текущего литерала. */
+    private static ICompletionProposal similarLiteralProposal(IXtextDocument document, int offset, Image icon)
+    {
+        Global.tempLog("unknown-literal", "quickfix enter offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
+        return document.readOnly((IUnitOfWork<ICompletionProposal, XtextResource>) resource -> {
+            if (resource.getParseResult() == null)
+                return null;
+            INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+            EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+            StringLiteral literal = semantic instanceof StringLiteral string ? string
+                : EcoreUtil2.getContainerOfType(semantic, StringLiteral.class);
+            ICompositeNode node = literal == null ? null : NodeModelUtils.findActualNodeFor(literal);
+            if (node == null)
+                return null;
+            String source = document.get(node.getOffset(), node.getLength());
+            Map<String, List<String>> legal = BslLiteralValues.literalCorrectionNames(literal);
+            for (var entry : legal.entrySet())
+            {
+                NameMatch match = matchInNames(entry.getValue(), entry.getKey());
+                if (match == null || match.exact)
+                    continue;
+                String typed = entry.getKey().replace("\"", "\"\""); //$NON-NLS-1$ //$NON-NLS-2$
+                int at = source.indexOf(typed);
+                if (at < 0)
+                    continue;
+                String replacement = match.name.replace("\"", "\"\""); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("unknown-literal", "quickfix typed=" + entry.getKey() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " replacement=" + match.name + " candidates=" + entry.getValue().size()); //$NON-NLS-1$ //$NON-NLS-2$
+                return new CompletionProposal(replacement, node.getOffset() + at, typed.length(),
+                    replacement.length(), icon, ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
+            }
+            Global.tempLog("unknown-literal", "quickfix no close legal name offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        });
     }
 
     /**

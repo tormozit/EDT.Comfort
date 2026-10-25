@@ -69,6 +69,33 @@ final class MetadataTypeMenu
 
     private MetadataTypeMenu() {}
 
+    /** Разрешение полного имени типа для нижней панели списка; без пересчёта документа. */
+    static TypeItem resolveType(ITextViewer viewer, String name)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        return ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+            if (resource == null || resource.getContents().isEmpty())
+                return null;
+            var services = resource.getResourceServiceProvider();
+            var scopes = services.get(IScopeProvider.class);
+            var converter = services.get(IQualifiedNameConverter.class);
+            if (scopes == null || converter == null)
+                return null;
+            var scope = scopes.getScope(resource.getContents().get(0), McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+            var description = scope == null ? null : scope.getSingleElement(converter.toQualifiedName(name));
+            if (description == null)
+            {
+                var platform = platformTypes(resource);
+                description = platform == null ? null : platform.getEObjectDescription(name);
+            }
+            var object = description == null ? null : description.getEObjectOrProxy();
+            if (object != null && object.eIsProxy())
+                object = EcoreUtil.resolve(object, resource);
+            return object instanceof TypeItem resolved && !resolved.eIsProxy() ? resolved : null;
+        });
+    }
+
     static void install(Display display)
     {
         display.addFilter(SWT.Show, event -> {

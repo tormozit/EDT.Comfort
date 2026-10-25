@@ -43,6 +43,7 @@ import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextHoverExtension2;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.nodemodel.ILeafNode;
@@ -52,6 +53,8 @@ import org.eclipse.xtext.parser.IParseResult;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.hover.AbstractCompositeHover;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.hover.AbstractProblemHover;
 import org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
@@ -530,12 +533,67 @@ public final class BslEditorHoverHook implements IStartup
     }
 
     /**
+     * Единственная точка подключения обработчиков боковой подсказки. Вызывается перед
+     * чтением описания в SmartCompletionProposal, независимо от источника строки списка.
+     * Источники предложений сами обработчики не устанавливают.
+     */
+    static void prepareSideHint(ICompletionProposal proposal, ITextViewer viewer)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        if (!(raw instanceof ConfigurableCompletionProposal configurable))
+            return;
+        Object hover = Global.getField(configurable, "hover"); //$NON-NLS-1$
+        Global.tempLog("method-description-links", "prepare side proposal=" + raw.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " hover=" + (hover == null ? null : hover.getClass().getName())); //$NON-NLS-1$
+        if (hover instanceof SideHintHover installed)
+            installed.proposalViewer = viewer;
+        else if (hover instanceof IEObjectHover original)
+            configurable.setHover(new SideHintHover(original, viewer));
+    }
+
+    /** Общая цепочка обработчиков боковой подсказки; новые обработчики добавляются здесь. */
+    private static final class SideHintHover implements IEObjectHover, ITextHoverExtension
+    {
+        private final IEObjectHover delegate;
+        private ITextViewer proposalViewer;
+
+        SideHintHover(IEObjectHover delegate, ITextViewer proposalViewer)
+        {
+            this.delegate = delegate;
+            this.proposalViewer = proposalViewer;
+        }
+
+        @Override
+        public Object getHoverInfo(EObject object, ITextViewer viewer, IRegion region)
+        {
+            // Провайдер предложения может вернуть EObject только здесь, после первой проверки строки.
+            if (!SmartCompletionProposal.isEdtDocumentationObjectReady(object))
+                return null;
+            Object info = delegate.getHoverInfo(object, viewer, region);
+            // EDT не всегда задаёт viewer предложения; используем контекст общего чтения описания.
+            ITextViewer context = viewer != null ? viewer : proposalViewer;
+            BslStructureInsertCommentTypes.completePropertyHover(info, object, context);
+            return decorateSideHint(info, object, context);
+        }
+
+        @Override
+        public org.eclipse.jface.text.IInformationControlCreator getHoverControlCreator()
+        {
+            return delegate instanceof ITextHoverExtension extension
+                ? IrBslHoverHtml.wrapCreator(extension.getHoverControlCreator()) : null;
+        }
+    }
+
+    /**
      * Боковая подсказка списка: те же переход по имени свойства и блок «: Конструктор()»
      * с меню, что и при наведении. Возвращает исходное {@code info}, если добавлять нечего.
      */
     static Object decorateSideHint(Object info, org.eclipse.emf.ecore.EObject member,
         ITextViewer viewer)
     {
+        Global.tempLog("method-description-links", "side enter info=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (info == null ? null : info.getClass().getName()) + " bsl=" + IrBslHoverHtml.isBslBrowserInput(info) //$NON-NLS-1$
+            + " member=" + (member == null ? null : member.eClass().getName()) + " viewer=" + viewer); //$NON-NLS-1$ //$NON-NLS-2$
         try
         {
             if (info == null || viewer == null || !IrBslHoverHtml.isBslBrowserInput(info)
@@ -566,10 +624,24 @@ public final class BslEditorHoverHook implements IStartup
                 linked = html;
             String injected = ParamHintHtmlModifier.injectMemberSeeLinks(linked, block);
             String result = injected != null ? injected : linked;
+            String descriptionHtml = result;
+            result = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                var descriptionLinks = ParamHintHtmlModifier.methodDescriptionLinksForInput(info,
+                    document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
+                if (descriptionLinks.isEmpty())
+                    descriptionLinks = ParamHintHtmlModifier.methodDescriptionLinks(member,
+                        document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
+                return ParamHintHtmlModifier.injectMethodDescriptionLinks(descriptionHtml, descriptionLinks);
+            });
+            if (result == null)
+                result = descriptionHtml;
             return result.equals(IrBslHoverHtml.readHtml(info)) ? info : IrBslHoverHtml.withHtml(info, result);
         }
         catch (Throwable ex)
         {
+            Global.tempLog("method-description-links", "side failed=" + ex //$NON-NLS-1$ //$NON-NLS-2$
+                + " stack=" + java.util.Arrays.toString(ex.getStackTrace())); //$NON-NLS-1$
             return info;
         }
     }
@@ -654,16 +726,17 @@ public final class BslEditorHoverHook implements IStartup
                     @Override
                     public Object function(Object[] arguments)
                     {
-                        if (arguments == null || arguments.length != 1
+                        if (arguments == null || arguments.length < 1 || arguments.length > 2
                             || !(arguments[0] instanceof String encoded))
                             return Boolean.FALSE;
+                        boolean closeWindow = arguments.length == 1 || !Boolean.FALSE.equals(arguments[1]);
                         if (encoded.startsWith("formhandler:"))
                         {
                             Runnable action = formHandlerActions.get(encoded);
                             if (action == null)
                                 return Boolean.FALSE;
                             display.asyncExec(() -> {
-                                if (!shell.isDisposed())
+                                if (closeWindow && !shell.isDisposed())
                                     shell.setVisible(false);
                                 action.run();
                             });
@@ -810,6 +883,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastFormHandlersHtml;
         /** «: Конструктор()» с меню для свойства или параметра под указателем (issue 828). */
         private volatile String lastMemberSeeLinksHtml;
+        private volatile Map<String, String> lastMethodDescriptionLinks = Map.of();
         private volatile String lastPlatformAvailabilityHtml;
         /** «Приемник.Тип: …» места слова под указателем — как в боковой подсказке списка. */
         private volatile String lastReceiverTypeLine;
@@ -1057,10 +1131,20 @@ public final class BslEditorHoverHook implements IStartup
 
         private void prepareHoverDecorations(ITextViewer textViewer, IRegion region, Object info)
         {
+            Global.tempLog("method-description-links", "hover enter offset=" + region.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                + " info=" + (info == null ? null : info.getClass().getName())); //$NON-NLS-1$
             String directive = resolveHoverDirective(region.getOffset());
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(region);
             lastMethodLink = resolveMethodLink(region);
+            if (editor.getDocument() instanceof IXtextDocument document)
+            {
+                var descriptionLinks = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                    ParamHintHtmlModifier.methodDescriptionLinksForInput(info, document.getResourceURI(),
+                        MethodDefinitionLink::registerFormHandler));
+                if (descriptionLinks != null && !descriptionLinks.isEmpty())
+                    lastMethodDescriptionLinks = descriptionLinks;
+            }
             lastDefinedTypeLinks = resolveDefinedTypeLinks(IrBslHoverHtml.readHtml(info));
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
             lastMemberSeeLinksHtml = resolveMemberSeeLinksHtml(textViewer, region);
@@ -1411,6 +1495,7 @@ public final class BslEditorHoverHook implements IStartup
             String withSeeLinks = ParamHintHtmlModifier.injectMemberSeeLinks(result, lastMemberSeeLinksHtml);
             if (withSeeLinks != null)
                 result = withSeeLinks;
+            result = ParamHintHtmlModifier.injectMethodDescriptionLinks(result, lastMethodDescriptionLinks);
             result = BslExpectedTypePremiums.prependReceiverType(result, lastReceiverTypeLine);
             return MetadataTypeMenu.decorate(
                 PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml),
@@ -1486,6 +1571,8 @@ public final class BslEditorHoverHook implements IStartup
                 document.readOnly(resource ->
                 {
                     BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset, status -> {});
+                    // Сеансы менеджера временных таблиц метода под курсором (issue 889)
+                    BslTempTableSessions.refreshDocument(document, resource, offset);
                     return null;
                 });
             }
@@ -1547,6 +1634,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             lastMethodName = null;
             lastFunctionTarget = null;
+            lastMethodDescriptionLinks = Map.of();
             if (!(editor.getDocument() instanceof IXtextDocument document))
                 return null;
             return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
@@ -1581,6 +1669,9 @@ public final class BslEditorHoverHook implements IStartup
                 for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : entries)
                 {
                     EObject feature = entry.getFeature();
+                    if (lastMethodDescriptionLinks.isEmpty())
+                        lastMethodDescriptionLinks = ParamHintHtmlModifier.methodDescriptionLinks(feature,
+                            document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
                     if (lastFunctionTarget == null)
                         lastFunctionTarget = FunctionReturnTypes.targetOf(feature, 0);
                     org.eclipse.emf.common.util.URI sourceUri =

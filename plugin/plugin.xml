@@ -27,6 +27,7 @@
   </extension>
   <extension point="com._1c.g5.v8.dt.bsl.stringLiteralProposals">
     <stringLiteralProposals class="tormozit.BslQueryResultTypes$ColumnProposals"/>
+    <stringLiteralProposals class="tormozit.BslLiteralValues"/>
   </extension>
   <extension point="com._1c.g5.v8.dt.bsl.invocationTypesComputerExtension">
     <computers computer="tormozit.BslQueryResultTypes" name="Execute" nameRu="Выполнить"/>
@@ -34,6 +35,29 @@
     <computers computer="tormozit.BslQueryResultTypes" name="Select" nameRu="Выбрать"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Unload" nameRu="Выгрузить"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Get" nameRu="Получить"/>
+    <!-- Правила вычисления результата функции из ИР (#893) -->
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="CommonModule" nameRu="ОбщийМодуль"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectAttributesValues" nameRu="ЗначенияРеквизитовОбъекта"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectsAttributesValues" nameRu="ЗначенияРеквизитовОбъектов"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectAttributeValue" nameRu="ЗначениеРеквизитаОбъекта"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="CopyRecursive" nameRu="СкопироватьРекурсивно"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ValueTableRowToStructure" nameRu="СтрокаТаблицыЗначенийВСтруктуру"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ValueTableToArray" nameRu="ТаблицаЗначенийВМассив"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="PrintFormTemplate" nameRu="МакетПечатнойФормы"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectManagerByFullName" nameRu="МенеджерОбъектаПоПолномуИмени"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectManagerByRef" nameRu="МенеджерОбъектаПоСсылке"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="Add" nameRu="Добавить"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="Insert" nameRu="Вставить"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="Copy" nameRu="Скопировать"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="CopyColumns" nameRu="СкопироватьКолонки"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="UnloadColumns" nameRu="ВыгрузитьКолонки"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="Unload" nameRu="Выгрузить"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="UnloadColumn" nameRu="ВыгрузитьКолонку"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="FormDataToValue" nameRu="ДанныеФормыВЗначение"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="ReadJSON" nameRu="ПрочитатьJSON"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="GetFromTempStorage" nameRu="ПолучитьИзВременногоХранилища"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="ValueFromStringInternal" nameRu="ЗначениеИзСтрокиВнутр"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="ReadJSONValue" nameRu="ПрочитатьЗначениеJSON"/>
   </extension>
   <extension-point id="startup" name="Старт хуков Комфорт" schema="schema/startup.exsd"/>
   <!-- Один IStartup на плагин: Eclipse иначе обрывает остальные хуки того же расширения
@@ -252,6 +276,8 @@
     <startup class="tormozit.TextTemplateFormatPagesHook"/>
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
+    <startup class="tormozit.ThemeSwitchPreferencesHook"/>
+      <startup class="tormozit.BslLanguagePreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>
     <startup class="tormozit.DecoratorsPageHook"/>
     <startup class="tormozit.SuppressionSettingsDialogHook"/>

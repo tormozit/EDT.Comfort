@@ -21,11 +21,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.util.EcoreUtil;
-import org.eclipse.jface.text.IInformationControlCreator;
-import org.eclipse.jface.text.IRegion;
-import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextViewer;
-import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.EcoreUtil2;
@@ -36,8 +32,6 @@ import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.util.OnChangeEvictingCache;
 import org.eclipse.xtext.scoping.IScope;
 import org.eclipse.xtext.scoping.IScopeProvider;
-import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
-import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
 import org.eclipse.xtext.util.Triple;
@@ -1502,61 +1496,8 @@ public final class BslStructureInsertCommentTypes
         return node == null ? null : TypeSystemUtil.getCommentAfterObject(statement, node, false);
     }
 
-    /** Штатные предложения Xtext, включая режим без «Улучшать списки». */
-    static void installPropertyProposalDescriptions(ICompletionProposal[] proposals, ITextViewer viewer)
-    {
-        if (proposals == null)
-            return;
-        java.util.Map<IEObjectHover, PropertyDescriptionHover> wrappers = new java.util.IdentityHashMap<>();
-        for (ICompletionProposal proposal : proposals)
-        {
-            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
-            if (!(raw instanceof ConfigurableCompletionProposal configurable))
-                continue;
-            Object hover = Global.getField(configurable, "hover"); //$NON-NLS-1$
-            if (!(hover instanceof IEObjectHover original) || hover instanceof PropertyDescriptionHover)
-                continue;
-            configurable.setHover(wrappers.computeIfAbsent(original,
-                hoverProvider -> new PropertyDescriptionHover(hoverProvider, viewer)));
-        }
-    }
-
-    private static final class PropertyDescriptionHover implements IEObjectHover, ITextHoverExtension
-    {
-        private final IEObjectHover delegate;
-        private final ITextViewer proposalViewer;
-
-        PropertyDescriptionHover(IEObjectHover delegate, ITextViewer proposalViewer)
-        {
-            this.delegate = delegate;
-            this.proposalViewer = proposalViewer;
-        }
-
-        @Override
-        public Object getHoverInfo(EObject object, ITextViewer viewer, IRegion region)
-        {
-            // Provider в ConfigurableCompletionProposal может вернуть EObject только
-            // здесь; проверка нужна и после него, до фонового построителя EDT.
-            if (!SmartCompletionProposal.isEdtDocumentationObjectReady(object))
-                return null;
-            Object info = delegate.getHoverInfo(object, viewer, region);
-            // У свойства ConfigurableCompletionProposal.viewer == null: EDT задаёт его
-            // только в setSimpleLinkedMode. Контекст берём из расчёта списка.
-            ITextViewer context = viewer != null ? viewer : proposalViewer;
-            completePropertyHover(info, object, context);
-            return BslEditorHoverHook.decorateSideHint(info, object, context);
-        }
-
-        @Override
-        public IInformationControlCreator getHoverControlCreator()
-        {
-            return delegate instanceof ITextHoverExtension extension
-                ? IrBslHoverHtml.wrapCreator(extension.getHoverControlCreator()) : null;
-        }
-    }
-
     /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
-    private static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
+    static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
     {
         if (object == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))

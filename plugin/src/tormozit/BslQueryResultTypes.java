@@ -116,7 +116,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 {
     private static final Set<String> RESULT_METHODS = Set.of(
         "execute", "выполнить", "executebatch", "выполнитьпакет", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "select", "выбрать", "unload", "выгрузить", "get", "получить"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        "select", "выбрать", "unload", "выгрузить", "get", "получить", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        "getdata", "получитьданные"); //$NON-NLS-1$ //$NON-NLS-2$
 
     @Override
     public List<TypeItem> getTypes(Invocation invocation)
@@ -275,6 +276,36 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         catch (RuntimeException | LinkageError failure)
         {
             Global.tempLog("expected-type", "query totals failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /**
+     * Колонки результата запроса {@code expression} ({@code РезультатЗапроса.Колонки} ИР) с типами: имя (русское,
+     * если есть) → типы. {@code null} — текст запроса не определён. Вызывающий держит readOnly документа.
+     */
+    static Map<String, List<TypeItem>> resultColumnsOf(Expression expression)
+    {
+        Method method = expression == null ? null : EcoreUtil2.getContainerOfType(expression, Method.class);
+        if (method == null)
+            return null;
+        try
+        {
+            Plan plan = new Plan(method, ""); //$NON-NLS-1$
+            Shape shape = plan.shape(expression, Collections.newSetFromMap(new IdentityHashMap<>()));
+            if (shape == null || !shape.kind.equals("QueryResult") || shape.results.isEmpty()) //$NON-NLS-1$
+                return null;
+            Map<String, List<TypeItem>> columns = new java.util.LinkedHashMap<>();
+            for (Field field : shape.results.get(0).fields)
+            {
+                String name = field.nameRu != null && !field.nameRu.isBlank() ? field.nameRu : field.name;
+                if (name != null && !name.isBlank())
+                    columns.putIfAbsent(name, field.types != null ? field.types : List.of());
+            }
+            return columns;
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
             return null;
         }
     }
@@ -523,6 +554,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             marks[0] = System.nanoTime();
                             BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
                                 status -> marks[2] = System.nanoTime(), () -> marks[1] = System.nanoTime());
+                            // Сеансы менеджера временных таблиц для литералов модуля (issue 889, решение 1А)
+                            BslTempTableSessions.refreshDocument(document, resource, offset);
                             return null;
                         });
                     }
@@ -1149,6 +1182,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     return assignment == null || !dominates(assignment, expression)
                         ? null : shape(assignment.getRight(), visiting);
                 }
+                // Временная таблица менеджера: М.Таблицы["Вт"], М.Таблицы.Найти("Вт") (issue 889)
+                if (BslTempTableSessions.isTempTableExpression(expression))
+                    return tempTable(expression);
                 if (expression instanceof IndexAccess index)
                     return indexed(shape(index.getSource(), visiting), index.getIndex());
                 if (!(expression instanceof Invocation invocation)
@@ -1185,6 +1221,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     return null;
                 if ((name.equals("get") || name.equals("получить")) && invocation.getParams().size() == 1) //$NON-NLS-1$ //$NON-NLS-2$
                     return indexed(source, invocation.getParams().get(0));
+                if ((name.equals("getdata") || name.equals("получитьданные")) && invocation.getParams().isEmpty() //$NON-NLS-1$ //$NON-NLS-2$
+                    && source.kind.equals("QueryTempTable")) //$NON-NLS-1$
+                    return new Shape("QueryResult", source.results); //$NON-NLS-1$
                 if (source.kind.equals("QueryResult") || source.kind.equals("QueryResultSelection")) //$NON-NLS-1$ //$NON-NLS-2$
                 {
                     if (name.equals("select") || name.equals("выбрать")) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1198,6 +1237,26 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             {
                 visiting.remove(expression);
             }
+        }
+
+        /** Временная таблица менеджера ({@code ВременнаяТаблицаЗапроса} ИР) — поля {@code ПолучитьДанные()}. */
+        private Shape tempTable(Expression expression)
+        {
+            if (originsOnly)
+                return new Shape("QueryTempTable", List.of(new Result(List.of(), true, false, List.of()))); //$NON-NLS-1$
+            BslTempTableSessions.Table table = BslTempTableSessions.tempTable(expression, cancellation);
+            if (table == null)
+                return null;
+            List<Field> fields = new ArrayList<>();
+            for (BslTempTableSessions.Column column : table.columns())
+            {
+                var target = column.target();
+                fields.add(new Field(column.name(), column.name(),
+                    column.type() == null ? List.of() : List.copyOf(column.type().getTypes()),
+                    target == null ? null : target.uri(), target == null ? -1 : target.offset(),
+                    target == null ? 0 : target.length()));
+            }
+            return new Shape("QueryTempTable", List.of(new Result(List.copyOf(fields), true, false, List.of()))); //$NON-NLS-1$
         }
 
         private Shape indexed(Shape source, Expression index)
@@ -1237,24 +1296,45 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 || hasLoopWrite(variable, execute, true) || escaped(variable, creation, execute)))
                 return null;
             Expression constructor = creation == null ? expression : creation.getRight();
-            if (!(constructor instanceof OperatorStyleCreator creator)
-                || !"Query".equals(McoreUtil.getTypeName(creator.getType()))) //$NON-NLS-1$
+            OperatorStyleCreator creator = constructor instanceof OperatorStyleCreator created
+                && "Query".equals(McoreUtil.getTypeName(created.getType())) ? created : null; //$NON-NLS-1$
+            // Запрос из функции («Запрос = Главный2()», issue 889): текст — только присваиванием после неё
+            if (creator == null && (variable == null || creation == null || !BslTempTableSessions.returnsQuery(constructor)))
                 return null;
             if (variable != null)
             {
                 SimpleStatement textAssignment = lastAssignment(variable, execute, true, end(creation));
                 if (textAssignment != null)
                     return dominates(textAssignment, execute)
-                        && textAssignment.getRight() instanceof StringLiteral literal ? literal : null;
+                        ? queryTextLiteral(textAssignment.getRight()) : null;
             }
-            return creator.getParams().size() == 1 && creator.getParams().get(0) instanceof StringLiteral literal
-                ? literal : null;
+            return creator != null && creator.getParams().size() == 1 ? queryTextLiteral(creator.getParams().get(0)) : null;
+        }
+
+        /** Исходный полный текст переменной; последующие преобразования строки не вычисляем. */
+        private StringLiteral queryTextLiteral(Expression expression)
+        {
+            if (expression instanceof StringLiteral literal)
+                return literal;
+            Variable target = variable(expression);
+            if (target == null)
+                return null;
+            SimpleStatement last = null;
+            for (SimpleStatement assignment : assignments)
+            {
+                if (!(assignment.getRight() instanceof StringLiteral)
+                    || variable(assignment.getLeft()) != target || end(assignment) > start(expression))
+                    continue;
+                if (last == null || start(assignment) > start(last))
+                    last = assignment;
+            }
+            return last != null && dominates(last, expression) ? (StringLiteral)last.getRight() : null;
         }
 
         /**
          * Только однозначное присваивание до использования. Запись в соседней ветви
          * не выбирается по текстовому смещению: если она могла изменить значение,
-         * результат не определяем. Текст через переменную/конкатенацию не вычисляем.
+         * результат не определяем. Конкатенацию и вызовы не вычисляем.
          */
         private SimpleStatement lastAssignment(Variable target, EObject use, boolean queryText, int after)
         {
@@ -1346,30 +1426,12 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             {
                 return cached;
             }
-            IDependentQuerySchemaProvider provider = Global.getOsgiService(IDependentQuerySchemaProvider.class);
-            if (provider == null)
-                throw new IllegalStateException("IDependentQuerySchemaProvider unavailable"); //$NON-NLS-1$
             DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
-            QuerySchema schema = provider.getQuerySchema(literal,
-                com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
-                (object, feature) -> textProvider.getText(), cancellation);
-            // EDT держит схему на литерале, пока не изменится сам литерал: после правки
-            // метаданных её ссылки ведут на прежние поля, и тип поля остаётся старым.
-            long generation = METADATA_GENERATION.get();
-            SchemaGeneration stamp = schema == null ? null
-                : (SchemaGeneration)EcoreUtil.getExistingAdapter(schema, SchemaGeneration.class);
-            if (stamp != null && stamp.generation != generation)
-            {
-                provider.unload(schema);
-                schema = provider.getQuerySchema(literal,
-                    com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
-                    (object, feature) -> textProvider.getText(), cancellation);
-                stamp = null;
-            }
-            if (schema != null && stamp == null)
-                schema.eAdapters().add(new SchemaGeneration(generation));
+            QuerySchema schema = literalSchema(literal, cancellation);
             if (schema == null || schema.eResource() == null)
                 throw new IllegalStateException("Query schema unavailable"); //$NON-NLS-1$
+            // Временные таблицы других пакетов менеджера и таблицы-параметры (issue 889)
+            BslTempTableSessions.enrich(schema.eResource(), BslTempTableSessions.compute(literal, cancellation));
             // DependentModelProvider.createDependentModel уже вызывает
             // EcoreUtil2.resolveLazyCrossReferences перед возвратом схемы.
             // #region temp — поля выборки пропали у запроса с ИТОГИ: ошибки схемы и состав пакета
@@ -1469,7 +1531,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         }
 
         /** Псевдоним SELECT; без псевдонима — имя поля, иначе само выражение (в том числе *). */
-        private INode fieldNode(DbViewFieldDef field, QuerySchemaSelectQuery select, QlMapper mapper)
+        private static INode fieldNode(DbViewFieldDef field, QuerySchemaSelectQuery select, QlMapper mapper)
         {
             QuerySchemaExpression expression = mapper.getSourceObjects(field).stream()
                 .filter(object -> object instanceof QuerySchemaExpression
@@ -1614,6 +1676,66 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 type.getContextDef().getProperties().add(property);
             }
         }
+    }
+
+    /**
+     * Схема запроса литерала штатным сервисом хаба (одна на литерал). EDT держит схему на литерале, пока не
+     * изменится сам литерал: после правки метаданных её ссылки ведут на прежние поля — тогда схема перечитывается.
+     */
+    static QuerySchema literalSchema(StringLiteral literal, CancelIndicator cancellation)
+    {
+        IDependentQuerySchemaProvider provider = Global.getOsgiService(IDependentQuerySchemaProvider.class);
+        if (provider == null)
+            throw new IllegalStateException("IDependentQuerySchemaProvider unavailable"); //$NON-NLS-1$
+        DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
+        QuerySchema schema = provider.getQuerySchema(literal,
+            com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
+            (object, feature) -> textProvider.getText(), cancellation);
+        long generation = METADATA_GENERATION.get();
+        SchemaGeneration stamp = schema == null ? null
+            : (SchemaGeneration)EcoreUtil.getExistingAdapter(schema, SchemaGeneration.class);
+        if (stamp != null && stamp.generation != generation)
+        {
+            provider.unload(schema);
+            schema = provider.getQuerySchema(literal,
+                com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
+                (object, feature) -> textProvider.getText(), cancellation);
+            stamp = null;
+        }
+        if (schema != null && stamp == null)
+            schema.eAdapters().add(new SchemaGeneration(generation));
+        return schema;
+    }
+
+    /** Версия структуры данных: типы полей запросов действительны в пределах одной версии. */
+    static long metadataGeneration()
+    {
+        return METADATA_GENERATION.get();
+    }
+
+    /** Место поля запроса литерала в модуле: псевдоним, иначе имя поля или выражение; {@code null} — места нет. */
+    static BslStructureInsertCommentTypes.PropertySourceTarget queryFieldTarget(StringLiteral literal,
+        DbViewFieldDef field, QuerySchemaSelectQuery select, XtextResource qlResource)
+    {
+        INode source = Plan.fieldNode(field, select, qlResource.getResourceServiceProvider().get(QlMapper.class));
+        return source == null ? null : literalTarget(literal, source.getOffset(), source.getEndOffset());
+    }
+
+    /** Диапазон {@code [from, to)} текста запроса литерала — место в модуле; {@code null} — вне литерала. */
+    static BslStructureInsertCommentTypes.PropertySourceTarget literalTarget(StringLiteral literal, int from, int to)
+    {
+        var lines = NodeModelUtils.findNodesForFeature(literal,
+            com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES);
+        if (lines.isEmpty())
+            return null;
+        DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
+        var location = textProvider.getLocation(from);
+        var endLocation = textProvider.getLocation(to);
+        if (location == null)
+            return null;
+        int offset = lines.get(0).getOffset() + location.getSecond();
+        int length = endLocation == null ? 0 : endLocation.getSecond() - location.getSecond();
+        return new BslStructureInsertCommentTypes.PropertySourceTarget(EcoreUtil.getURI(literal), offset, length);
     }
 
     private static Variable variable(Expression expression)

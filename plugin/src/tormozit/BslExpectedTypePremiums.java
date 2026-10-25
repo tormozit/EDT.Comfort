@@ -37,12 +37,12 @@ import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.contentassist.ContentAssistEvent;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionListener;
 import org.eclipse.jface.text.contentassist.ICompletionListenerExtension2;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
-import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CellEditor;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -132,7 +132,8 @@ import com._1c.g5.v8.dt.platform.version.Version;
  * {@code Тип("…")}, {@code Метаданные.СвойстваОбъектов.…}), добавляет {@link AddedWords} — строками
  * {@link BslAddedWordProposal} ({@link #withAddedWords}).
  *
- * <p>Не перенесено: строковые и ссылочные литералы (в том числе имена событий {@code УстановитьДействие}).
+ * <p>Из строковых и ссылочных литералов перенесена премия имени типа в {@code ТипЗнч(Х) = Тип("…")}.
+ * Остальные премии литералов (в том числе имена событий {@code УстановитьДействие}) не перенесены.
  * Тип параметра запроса ({@code УстановитьПараметр}) не считается — только имя параметра.
  */
 final class BslExpectedTypePremiums
@@ -166,6 +167,10 @@ final class BslExpectedTypePremiums
         "(?iu)Для\\s+Каждого\\s+([\\p{L}_][\\p{L}\\p{N}_]*)\\s+Из\\s+[^\\r\\n]+\\s+Цикл$"); //$NON-NLS-1$
     private static final Pattern TYPE_OF = Pattern.compile(
         "(?iu)(?:^|[^\\p{L}\\p{N}_.])ТипЗнч\\s*\\(\\s*(" + SIMPLE_EXPRESSION + ")\\s*\\)\\s*(?:=|<>)$"); //$NON-NLS-1$ //$NON-NLS-2$
+    /** Сегмент имени типа в сравнении с ТипЗнч; группа 2 — уже пройденные уровни имени. */
+    private static final Pattern TYPE_LITERAL = Pattern.compile(
+        "(?iu)(?:^|[^\\p{L}\\p{N}_.])(?:ТипЗнч|TypeOf)\\s*\\(\\s*(" + SIMPLE_EXPRESSION //$NON-NLS-1$
+            + ")\\s*\\)\\s*(?:=|<>)\\s*(?:Тип|Type)\\s*\\(\\s*\"([\\p{L}\\p{N}_.]*)$"); //$NON-NLS-1$
     private static final Set<String> UNLIKE_FORBIDDEN_TYPES = Set.of("неопределено", "булево", "строка", "число", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "дата", "null", "массив", "списокзначений", "структура", "таблицазначений", "строкатаблицызначений", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
         "данныеформыструктура", "данныеформыколлекция", "данныеформыэлементколлекции"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -260,7 +265,7 @@ final class BslExpectedTypePremiums
      */
     private record Scene(Expectation expectation, String statisticsContext, boolean insideExpression,
         Map<String, Integer> frequencies, String receiverLine, String expectedTypeText, Map<String, String> predefinedTypes,
-        Facts facts)
+        Facts facts, List<String> literalTypes)
     {
         /** Типы приёмника без слишком широких ({@link #BROAD_TYPES}), в нижнем регистре. */
         Set<String> strongReceiverTypes()
@@ -394,12 +399,16 @@ final class BslExpectedTypePremiums
      *                             ({@code Построитель.Измерения} ИР); {@code null} — текст запроса не определён
      * @param betweenMethods       место вне метода ({@code ЛиМеждуМетодами})
      * @param moduleType           вид модуля; {@code null} — не определён
+     * @param commonModuleGroups   слова {@code База_} групп общих модулей глобального контекста
+     *                             ({@link CommonModuleAssistGroups}); после точки — пусто
+     * @param tempTableColumns     родитель — {@code Колонки} временной таблицы менеджера ({@code М.Таблицы["Вт"]}): её
+     *                             колонки (метаданные {@code ВременнаяТаблицаЗапроса} ИР); {@code null} — не определены
      */
     private record Facts(int bodyStartLine, List<String> parentTypes, boolean parentCollection, boolean parentIndexed,
         boolean parentSystemEnum, Set<String> constructorTypes, List<String> nestedTypes,
         Set<String> objectPropertyEnums, boolean formClient, boolean structureConstructor, List<Local> locals,
         List<Local> receiverProperties, List<String> selectionTypes, List<String> queryTotals, boolean betweenMethods,
-        ModuleType moduleType)
+        ModuleType moduleType, List<String> commonModuleGroups, List<String> tempTableColumns)
     {
     }
 
@@ -590,7 +599,7 @@ final class BslExpectedTypePremiums
      */
     static void ensure(IDocument document, int caret, ICompletionProposal[] list)
     {
-        if (!(document instanceof IXtextDocument) || caret < 0 || list == null || list.length == 0)
+        if (!(document instanceof IXtextDocument) || caret < 0 || list == null)
             return;
         Context context;
         try
@@ -607,6 +616,8 @@ final class BslExpectedTypePremiums
             active = null;
             return;
         }
+        if (list.length == 0 && context.selected().isEmpty())
+            return;
         requested = context;
         Snapshot snapshot = current;
         if (snapshot != null && snapshot.context().sameAs(context))
@@ -645,8 +656,6 @@ final class BslExpectedTypePremiums
 
     private static Context contextAt(IDocument document, int caret) throws Exception
     {
-        if (SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
-            return null;
         // Выделение, на котором открыт список: место — его начало
         String selected = ""; //$NON-NLS-1$
         Selection selection = assistSelection;
@@ -658,6 +667,26 @@ final class BslExpectedTypePremiums
             selected = selection.text();
             caret = selection.offset();
         }
+        if (selected.isEmpty() && SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
+        {
+            int quote = BslAssistSourceHeuristics.literalCallOpenQuote(document, caret);
+            int anchor = quote + 1;
+            if (quote >= 0)
+            {
+                for (int pos = quote + 1; pos < caret; pos++)
+                    if (document.getChar(pos) == '.')
+                        anchor = pos + 1;
+            }
+            int precedingStart = Math.max(0, anchor - PRECEDING_TEXT_LENGTH);
+            String preceding = quote >= 0 ? document.get(precedingStart, anchor - precedingStart) : ""; //$NON-NLS-1$
+            boolean supported = TYPE_LITERAL.matcher(preceding).find();
+            return supported ? new Context(document, anchor, anchor, "", preceding, precedingStart, caret, "") : null; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return contextAt(document, caret, selected);
+    }
+
+    private static Context contextAt(IDocument document, int caret, String selected) throws Exception
+    {
         int anchor = caret - SmartContentAssistProcessor.computeIdentifierFilter(document, caret).length();
         int start = anchor;
         while (start > 0 && document.getChar(start - 1) == '.')
@@ -678,10 +707,26 @@ final class BslExpectedTypePremiums
             precedingStart, caret, selected);
     }
 
-    /** {@code ВыделенныйТекст} на начало сессии автодополнения (UI-поток). */
-    private static void captureAssistSelection()
+    /** Подбор имени для штатного мастера; контекст берётся из его выделения, без кэша автодополнения. */
+    static String suggestExtractedVariableName(XtextResource resource, IDocument document,
+        org.eclipse.jface.text.ITextSelection selection) throws Exception
     {
-        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (selection.getLength() <= 0 || selection.getText() == null || selection.getText().isBlank())
+            return null;
+        Context context = contextAt(document, selection.getOffset(), selection.getText());
+        ICompletionProposal[] list = new ICompletionProposal[0];
+        Scene scene = scene(resource, context, list);
+        if (scene.facts() == null)
+            return null;
+        AddedWords adder = new AddedWords(Premiums.empty(), new HashMap<>(), new HashMap<>(), context,
+            scene, list, new ArrayList<>());
+        return adder.variableName(context.selected(), scene.expectation() != null
+            ? scene.expectation().types() : List.of());
+    }
+
+    /** {@code ВыделенныйТекст} на начало сессии автодополнения (UI-поток). */
+    private static void captureAssistSelection(ITextViewer viewer)
+    {
         IDocument document = viewer != null ? viewer.getDocument() : null;
         Point range = viewer != null ? viewer.getSelectedRange() : null;
         Selection selection = null;
@@ -697,6 +742,22 @@ final class BslExpectedTypePremiums
             }
         }
         assistSelection = selection;
+    }
+
+    /** Только перенесённые генераторы для выделения; штатный список EDT для их расчёта не нужен. */
+    static ICompletionProposal[] forSelection(ITextViewer viewer)
+    {
+        captureAssistSelection(viewer);
+        Selection selection = assistSelection;
+        if (selection == null)
+            return new ICompletionProposal[0];
+        ensure(selection.document(), selection.offset(), new ICompletionProposal[0]);
+        Snapshot snapshot = active;
+        ICompletionProposal[] result = snapshot != null && snapshot.context().sameAs(requested)
+            ? snapshot.added().toArray(new ICompletionProposal[0]) : new ICompletionProposal[0];
+        Global.tempLog("selection-completion", "offset=" + selection.offset() //$NON-NLS-1$ //$NON-NLS-2$
+            + " length=" + selection.text().length() + " proposals=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
+        return result;
     }
 
     /** Начало скобочной группы, закрытой в {@code close}; при несбалансированных скобках — {@code close + 1}. */
@@ -878,6 +939,26 @@ final class BslExpectedTypePremiums
 
     private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list)
     {
+        Matcher literal = TYPE_LITERAL.matcher(context.preceding());
+        if (literal.find())
+        {
+            // ИР: РассчитатьОжидаемыйТипВыражения — ветка мЭтоТекстовыйЛитерал / Тип(;
+            // РассчитатьИмяОжидаемогоТипа(ЛиВложенныйТип=Истина) → ИменаВложенныхТипов.
+            int start = context.precedingStart() + literal.start(1);
+            List<TypeItem> items = expressionTypeItems(resource, start, start + literal.group(1).length(), literal.group(1));
+            List<String> names = typeNames(items);
+            List<String> aliases = new ArrayList<>(names);
+            for (TypeItem item : items)
+            {
+                Type type = resolveType(resource, item);
+                if (type != null && type.getName() != null && !containsIgnoreCase(aliases, type.getName()))
+                    aliases.add(type.getName());
+            }
+            // Здесь строки списка — имена типов, а не значения/конструкции встроенного языка.
+            // ИменаВложенныхТипов не проходят фильтр Expectation: «Неопределено» тоже имя типа.
+            return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
+                Collections.emptyMap(), null, aliases);
+        }
         ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
         if (site != null && !site.contains(context.start()))
             site = null;
@@ -890,7 +971,7 @@ final class BslExpectedTypePremiums
             : memberFrequencies(resource, context);
         return new Scene(expectation, statisticsContext, insideExpression, frequencies,
             receiverTypeLine(expectation, resource), String.join(", ", receiverTypes(expectation)), //$NON-NLS-1$
-            predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes));
+            predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes), List.of());
     }
 
     /** Приставка ключа {@link Scene#predefinedTypes} для предопределённых значений ссылочного типа. */
@@ -1195,7 +1276,10 @@ final class BslExpectedTypePremiums
             {
                 List<TypeItem> owners = new ArrayList<>(sourceTypes);
                 owners.addAll(variableTypesAtMethodEnd(resource, source));
-                return new CallExpectation(propertyTypes(resource, owners, key), key, methodName);
+                List<TypeItem> keyTypes = propertyTypes(resource, owners, key);
+                if (keyTypes.isEmpty())
+                    keyTypes = new ArrayList<>(BslLiteralValues.structureKeyTypes(resource, invocation, args, key));
+                return new CallExpectation(keyTypes, key, methodName);
             }
         }
         // Массив.Добавить(Значение): тип элемента
@@ -1236,8 +1320,13 @@ final class BslExpectedTypePremiums
             {
                 String key = keys[index - 1].trim();
                 if (IDENTIFIER.matcher(key).matches())
-                    return new CallExpectation(propertyTypes(resource, constructedVariableTypes(resource, creator), key),
-                        key, typeName);
+                {
+                    List<TypeItem> keyTypes = propertyTypes(resource, constructedVariableTypes(resource, creator), key);
+                    // Тип ключа из места передачи структуры (колонка отбора и т. п.) — как в списке литерала ключей.
+                    if (keyTypes.isEmpty())
+                        keyTypes = new ArrayList<>(BslLiteralValues.structureKeyTypes(resource, creator, args, key));
+                    return new CallExpectation(keyTypes, key, typeName);
+                }
             }
         }
         List<List<Parameter>> variants = new ArrayList<>();
@@ -1811,9 +1900,8 @@ final class BslExpectedTypePremiums
         Type parentType = parentItems.isEmpty() ? null : resolveType(resource, parentItems.get(0));
         String parentName = parentType != null ? lower(typeName(parentType)) : ""; //$NON-NLS-1$
         TypeContainer elements = parentType != null ? parentType.getCollectionElementTypes() : null;
-        // Индекс по ключу (соответствие, структура) — не числовой
-        boolean parentIndexed = parentType != null && parentType.isIndexAccessible()
-            && !parentName.endsWith("соответствие") && !parentName.endsWith("структура"); //$NON-NLS-1$ //$NON-NLS-2$
+        // Единый с автопроверкой признак ЕстьЧисловойИндекс из ИР (#892).
+        boolean parentIndexed = Boolean.TRUE.equals(BslNumericIndexTypes.allows(parentType, resource));
         boolean parentSystemEnum = parentType != null && (parentType.isSysEnum()
             || parentName.startsWith("перечисление") && parentName.indexOf('.') < 0); //$NON-NLS-1$
         Set<String> constructorTypes = new HashSet<>();
@@ -1827,8 +1915,9 @@ final class BslExpectedTypePremiums
                 if (!Global.typeConstructors(platformType(resource, clean)).isEmpty())
                     constructorTypes.add(lower(clean));
             }
-            if (expectation.systemEnum())
-                objectPropertyEnums.addAll(objectPropertyEnums(resource));
+            // ИР проверяет таблицу перечислимых свойств МД независимо от isSysEnum:
+            // например, ВидИерархии у свойства справочника не помечен системным перечислением.
+            objectPropertyEnums.addAll(objectPropertyEnums(resource));
         }
         List<String> nestedTypes = new ArrayList<>();
         Matcher typeOf = TYPE_OF.matcher(preceding);
@@ -1872,10 +1961,16 @@ final class BslExpectedTypePremiums
         List<String> queryTotals = "РезультатЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
             ? BslQueryResultTypes.totalColumnsOf(findExpression(resource, context.start(), context.anchor() - 1))
             : null;
+        List<String> tempTableColumns = "КолонкиВременнойТаблицыЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
+            ? BslTempTableSessions.columnNames(findExpression(resource, context.start(), context.anchor() - 1),
+                org.eclipse.xtext.util.CancelIndicator.NullImpl)
+            : null;
         return new Facts(method != null ? bodyStartLine(document, method) : -1, typeNames(parentItems),
             elements != null && !elements.allTypes().isEmpty(), parentIndexed, parentSystemEnum, constructorTypes,
             nestedTypes, objectPropertyEnums, formClient, structureConstructor, locals, receiverProperties,
-            selectionTypes, queryTotals, method == null, module != null ? module.getModuleType() : null);
+            selectionTypes, queryTotals, method == null, module != null ? module.getModuleType() : null,
+            context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : List.of(),
+            tempTableColumns);
     }
 
     /** {@code мНомерПервойСтрокиТелаМетода}: строка после закрывающей скобки параметров (с 0); {@code -1} — нет. */
@@ -2186,12 +2281,37 @@ final class BslExpectedTypePremiums
         Map<String, List<String>> variableTypes, List<FuzzyCall> fuzzyCalls, Map<String, BslAddedWordProposal> added)
     {
         Premiums result = Premiums.empty();
+        Matcher literal = TYPE_LITERAL.matcher(context.preceding());
+        if (literal.find())
+        {
+            // ИР: ПрименитьОжидаемыйТипВТаблицеСлов, ТипЯзыка="ИмяТипа":
+            // ИменаВложенныхТипов, отрезание «(…» и стандартная премия 3.
+            String prefix = literal.group(2);
+            Set<String> expected = new HashSet<>();
+            for (String name : scene.literalTypes())
+            {
+                String type = firstFragment(name, '(');
+                if (startsWithIgnoreCase(type, prefix))
+                    expected.add(lower(firstFragment(type.substring(prefix.length()), '.')));
+            }
+            for (ICompletionProposal proposal : list)
+            {
+                String key = lower(SmartContentAssistProcessor.filterMatchName(proposal));
+                if (expected.contains(key))
+                {
+                    result.values().put(key, Integer.valueOf(3));
+                    result.autoOpen().add(key);
+                }
+            }
+            return result;
+        }
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
         AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list, fuzzyCalls)
             : null;
         if (adder != null)
         {
             adder.surroundingConstructions();
+            adder.commonModuleGroups();
             // Применяется редко, а по типу (возвращает Тип) поднимается высоко — штраф (решение пользователя)
             add(result, words, "изxmlтипа", -1, false); //$NON-NLS-1$
         }
@@ -2400,6 +2520,16 @@ final class BslExpectedTypePremiums
         }
     }
 
+    /** Типы ссылками EDT ({@link #edtTypesHtml}); без ссылок — текстом. {@code null} — типов нет. */
+    static String typeItemsHtml(XtextResource resource, List<TypeItem> items)
+    {
+        List<String> names = typeNames(items);
+        if (names.isEmpty())
+            return null;
+        String html = edtTypesHtml(resource, names);
+        return html != null ? html : escapeHtml(String.join(", ", names)); //$NON-NLS-1$
+    }
+
     /** Строка {@code line} первой в теле подсказки; уже есть или {@code line == null} — как было. */
     static String prependReceiverType(String html, String line)
     {
@@ -2486,11 +2616,12 @@ final class BslExpectedTypePremiums
                 add(result, words, lower(fragments.get(level)), 3, true);
             return;
         }
-        // Перечислимое свойство объектов метаданных: Метаданные.СвойстваОбъектов.<Тип>. Без списка
-        // перечислений из модели — по признаку системного перечисления.
+        // ИР: наличие имени в контексте ПеречислимыеСвойстваОбъектовМетаданных.
         Set<String> enumerations = adder != null ? adder.facts.objectPropertyEnums() : Set.of();
-        boolean enumerableProperty = enumerations.isEmpty() ? expectation.systemEnum()
-            : enumerations.contains(lower(dbTable));
+        boolean enumerableProperty = enumerations.contains(lower(dbTable));
+        Global.tempLog("expected-type-metadata-enum", "expected=" + mainType + " parent=" + parent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " systemEnum=" + expectation.systemEnum() + " properties=" + enumerations.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " enumerableProperty=" + enumerableProperty); //$NON-NLS-1$
         if (enumerableProperty && (!noParent || adder != null))
         {
             int level = countOf(parent, '.');
@@ -2564,15 +2695,17 @@ final class BslExpectedTypePremiums
                         if (word.hasType(typeName) && !(propertiesOnly && word.method()))
                             candidates.add(word);
                     }
-                    // Значение системного перечисления: в списке есть только его менеджер с типом «Перечисление<Тип>»
-                    if (candidates.isEmpty() && typeName.indexOf('.') < 0
-                        && !ENUM_RETRY_EXCLUDED.contains(lower(typeName)))
+                    // Менеджер перечисления премируется и при наличии предложенных EDT значений этого типа.
+                    List<Word> managers = new ArrayList<>();
+                    if (typeName.indexOf('.') < 0 && !ENUM_RETRY_EXCLUDED.contains(lower(typeName)))
                     {
                         for (Word word : words.values())
                         {
                             if (word.hasEnumManagerType(typeName))
-                                candidates.add(word);
+                                managers.add(word);
                         }
+                        markBestWord(result, words, managers, except, lastWord,
+                            UNLIKE_FORBIDDEN_TYPES.contains(lower(typeName)), noParent, fuzzyCalls);
                     }
                 }
                 markBestWord(result, words, candidates, except, lastWord,
@@ -2972,6 +3105,13 @@ final class BslExpectedTypePremiums
                 if (facts.parentCollection() && isMethod("найтистроки")) //$NON-NLS-1$
                     findOrAddRow(-1);
             }
+            // Виртуальный документирующий метод менеджера ИР — для закомментированного «//!…докДобавить(…)» (issue 889)
+            if (!parent.isEmpty() && "МенеджерВременныхТаблиц".equals(parentType)) //$NON-NLS-1$
+                rate("докДобавить", 0, BslAddedWordProposal.Kind.METHOD, false, false); //$NON-NLS-1$
+            // Колонки временной таблицы менеджера — метаданные ВременнаяТаблицаЗапроса ИР (issue 889)
+            if (facts.tempTableColumns() != null)
+                for (String column : facts.tempTableColumns())
+                    rate(column, 0, BslAddedWordProposal.Kind.PROPERTY, false, false);
             if (singleExpression && "Структура".equals(parentType) && hasProperty) //$NON-NLS-1$
                 createVariablesFromStructure(0);
             if (parent.isEmpty() && lastLower.contains("разделител")) //$NON-NLS-1$
@@ -3073,6 +3213,23 @@ final class BslExpectedTypePremiums
          * Конструкции в начале пустой строки и при выделении целых строк (окружающие конструкции):
          * {@code ЗаполнитьТаблицуСлов} ИР, блок «Если <?>  Тогда» … «Процедура КонецПроцедуры».
          */
+        /**
+         * Слова {@code База_} групп общих модулей глобального контекста ({@code СхемаКоллекции.Вставить(Ключ + "_")}
+         * ветки {@code ОбщиеМодули} ИР) — без премии.
+         */
+        void commonModuleGroups()
+        {
+            if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
+                return;
+            for (String name : facts.commonModuleGroups())
+            {
+                String key = lower(name);
+                if (!proposals.containsKey(key))
+                    added.putIfAbsent(key, new BslAddedWordProposal(name, BslAddedWordProposal.Kind.PROPERTY, name,
+                        BslAddedWordProposal.Absorb.WORD, -1, "", null, false, false, true)); //$NON-NLS-1$
+            }
+        }
+
         void surroundingConstructions()
         {
             if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
@@ -3412,33 +3569,18 @@ final class BslExpectedTypePremiums
 
         // ---- Слова-генераторы ------------------------------------------------------------------------
 
-        /** {@code <СоздатьПеременную>}: присваивание новой переменной перед текущей инструкцией ({@code СоздатьПеременнуюИзВыделенногоВыражения}). */
+        /** {@code <СоздатьПеременную>}: выделение — штатное извлечение EDT; без выделения — создание по ожидаемому типу. */
         private void createVariable(String selected, List<String> types)
         {
-            String base = lastFragment(receiver);
-            if (RETURN_VARIABLE.equals(base))
-                base = "Результат"; //$NON-NLS-1$
-            boolean fullArgument = expectation != null && expectation.parameterIndex() >= 0
-                && (selected.isEmpty() || isWholeArgument());
-            if (base.isEmpty() || fullArgument || IDENTIFIER.matcher(receiver).matches() && "=".equals(token)) //$NON-NLS-1$
+            if (!selected.isBlank())
             {
-                List<String> variants = new ArrayList<>();
-                if (fullArgument)
-                    nameVariantsFromTypes(variants, types);
-                if (variants.isEmpty())
-                    nameVariantsFromTypes(variants, facts.selectionTypes());
-                // ПоследнийФрагментЛкс(…, , Ложь): без точки — пусто
-                String lastName = selected.indexOf('.') >= 0 ? selected.substring(selected.lastIndexOf('.') + 1) : ""; //$NON-NLS-1$
-                if (!containsAny(selected, "-+*/><=")) //$NON-NLS-1$
-                    nameVariantsFromWord(variants, lastName);
-                if (!variants.isEmpty() && PRIMITIVE_TYPES.contains(lower(variants.get(0))))
-                    variants.remove(0);
-                if (!variants.isEmpty())
-                    base = variants.get(0);
+                String key = lower("<СоздатьПеременную>"); //$NON-NLS-1$
+                words.putIfAbsent(key, new Word(key, "<СоздатьПеременную>", List.of(), false, false)); //$NON-NLS-1$
+                added.put(key, BslAddedWordProposal.extractLocalVariable(context.caret(), selected));
+                add(result, words, key, context.caret() > lineOffset ? 2 : 0, false);
+                return;
             }
-            else
-                base = base.replace("(", "").replace(")", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            String name = newVariableName(base);
+            String name = variableName(selected, types);
             String assignment;
             if (selected.isEmpty() && !types.isEmpty())
             {
@@ -3483,6 +3625,38 @@ final class BslExpectedTypePremiums
                 BslAddedWordProposal.Absorb.FROM_OFFSET, from, false, true);
         }
 
+        private String variableName(String selected, List<String> types)
+        {
+            String base = lastFragment(receiver);
+            if (RETURN_VARIABLE.equals(base))
+                base = "Результат"; //$NON-NLS-1$
+            boolean fullArgument = expectation != null && expectation.parameterIndex() >= 0
+                && (selected.isEmpty() || isWholeArgument());
+            if (base.isEmpty() || fullArgument || IDENTIFIER.matcher(receiver).matches() && "=".equals(token)) //$NON-NLS-1$
+            {
+                List<String> variants = new ArrayList<>();
+                if (fullArgument)
+                    nameVariantsFromTypes(variants, types);
+                if (variants.isEmpty())
+                    nameVariantsFromTypes(variants, facts.selectionTypes());
+                // ПоследнийФрагментЛкс(…, , Ложь): без точки — пусто
+                String lastName = selected.indexOf('.') >= 0 ? selected.substring(selected.lastIndexOf('.') + 1) : ""; //$NON-NLS-1$
+                if (!containsAny(selected, "-+*/><=")) //$NON-NLS-1$
+                    nameVariantsFromWord(variants, lastName);
+                if (!variants.isEmpty() && PRIMITIVE_TYPES.contains(lower(variants.get(0))))
+                    variants.remove(0);
+                if (!variants.isEmpty())
+                    base = variants.get(0);
+            }
+            else
+                base = base.replace("(", "").replace(")", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            String name = newVariableName(base);
+            Global.tempLog("create-variable", "selected=" + selected + " receiver=" + receiver //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " fullArgument=" + fullArgument + " expectedTypes=" + types //$NON-NLS-1$ //$NON-NLS-2$
+                + " selectionTypes=" + facts.selectionTypes() + " base=" + base + " name=" + name); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return name;
+        }
+
         /** Выделение — весь аргумент вызова ({@code ВыделенныйТекст = мФактическиеПараметры[…]}). */
         private boolean isWholeArgument()
         {
@@ -3502,12 +3676,12 @@ final class BslExpectedTypePremiums
         }
 
         /**
-         * {@code ДобавитьВариантыИмениНовойПеременнойИзТипа}: варианты даёт только единственный тип метаданных
-         * (у платформенных типов детальность ниже 3).
+         * {@code ДобавитьВариантыИмениНовойПеременнойИзТипа}: варианты даёт единственный непримитивный тип,
+         * в том числе платформенный ({@code ТаблицаЗначений} → {@code Таблица}).
          */
         private void nameVariantsFromTypes(List<String> variants, List<String> types)
         {
-            if (types.size() != 1 || types.get(0).indexOf('.') < 0)
+            if (types.size() != 1 || PRIMITIVE_TYPES.contains(lower(types.get(0))))
                 return;
             String first = firstFragment(types.get(0), '.');
             if (endsWithIgnoreCase(first, "ТабличнаяЧастьСтрока")) //$NON-NLS-1$
@@ -4162,7 +4336,7 @@ final class BslExpectedTypePremiums
         @Override
         public void assistSessionStarted(ContentAssistEvent event)
         {
-            captureAssistSelection();
+            captureAssistSelection(ContentAssistSessionReloader.getActiveViewer());
         }
 
         @Override

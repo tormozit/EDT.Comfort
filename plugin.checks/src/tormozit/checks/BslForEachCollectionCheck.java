@@ -119,7 +119,7 @@ public final class BslForEachCollectionCheck extends BasicCheck<Object>
      * платформы, а у переменной метода — правые части всех её присваиваний. Иначе (метод модуля,
      * параметр, переменная модуля, свойство из комментария) {@code Неопределено} может значить «что угодно».
      */
-    private static boolean isPlatformOnly(Expression expression, Set<EObject> visiting)
+    static boolean isPlatformOnly(Expression expression, Set<EObject> visiting)
     {
         if (expression == null || !visiting.add(expression))
             return false;

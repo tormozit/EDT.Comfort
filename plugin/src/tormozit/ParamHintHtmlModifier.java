@@ -4627,6 +4627,180 @@ public final class ParamHintHtmlModifier
     }
 
     /**
+     * Источник берём из показанной страницы EDT, а не из записей обращения в AST:
+     * EDT может построить документацию и при пустых FeatureEntry.
+     * Формат ссылки и индекс одноимённых методов — из BslDocumentationProvider / Util (EDT 22).
+     */
+    static Map<String, String> methodDescriptionLinksForInput(Object input, URI documentUri,
+        java.util.function.Function<Runnable, String> register)
+    {
+        Object page = Global.invoke(input, "getViewPage"); //$NON-NLS-1$
+        String link = asString(Global.invoke(page, "getLink")); //$NON-NLS-1$
+        Global.tempLog("method-description-links", "page source link=" + link); //$NON-NLS-1$ //$NON-NLS-2$
+        if (link == null || link.isBlank())
+            return Map.of();
+        try
+        {
+            Object provider = BslSyntaxAssist.documentationProvider();
+            if (provider == null)
+                return Map.of();
+            Class<?> util = provider.getClass().getClassLoader().loadClass(
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationUtil"); //$NON-NLS-1$
+            Object parts = util.getMethod("splitLink", String.class).invoke(null, link); //$NON-NLS-1$
+            String external = asString(Global.invoke(parts, "getFirst")); //$NON-NLS-1$
+            String internal = asString(Global.invoke(parts, "getSecond")); //$NON-NLS-1$
+            if (external == null || internal == null || internal.isEmpty())
+                return Map.of();
+            URI uri = URI.createURI(java.net.URLDecoder.decode(external, java.nio.charset.StandardCharsets.UTF_8));
+            if (!uri.isPlatformResource())
+                return Map.of();
+            Object loaded = Global.invoke(provider, "loadBslResource", external); //$NON-NLS-1$
+            Object source = loaded instanceof Resource resource && !resource.getContents().isEmpty()
+                ? resource.getContents().get(0) : null;
+            Global.tempLog("method-description-links", "page module=" + DefaultValueDebug.identity(source)); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!(source instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                return Map.of();
+            var construct = util.getMethod("constructMethodLinkInternalPart", String.class, int.class); //$NON-NLS-1$
+            for (var method : module.allMethods())
+            {
+                Object index = Global.invoke(provider, "getMethodIndex", method); //$NON-NLS-1$
+                if (index instanceof Integer ordinal
+                    && internal.equals(construct.invoke(null, method.getName(), ordinal)))
+                    return methodDescriptionLinks(method, documentUri, register);
+            }
+            Global.tempLog("method-description-links", "page method missing internal=" + internal); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLogException("method-description-links", "page source failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return Map.of();
+    }
+
+    /** Ссылки из описания метода, разобранные штатным парсером комментария EDT. */
+    static Map<String, String> methodDescriptionLinks(EObject member, URI documentUri,
+        java.util.function.Function<Runnable, String> register)
+    {
+        Global.tempLog("method-description-links", "collect member=" + DefaultValueDebug.identity(member) //$NON-NLS-1$ //$NON-NLS-2$
+            + " document=" + documentUri); //$NON-NLS-1$
+        try
+        {
+            return collectMethodDescriptionLinks(member, documentUri, register);
+        }
+        catch (RuntimeException | LinkageError ex)
+        {
+            Global.tempLog("method-description-links", "collect failed=" + ex //$NON-NLS-1$ //$NON-NLS-2$
+                + " stack=" + java.util.Arrays.toString(ex.getStackTrace())); //$NON-NLS-1$
+            return Map.of();
+        }
+    }
+
+    private static Map<String, String> collectMethodDescriptionLinks(EObject member, URI documentUri,
+        java.util.function.Function<Runnable, String> register)
+    {
+        if (member instanceof ProposalElement proposal)
+        {
+            for (EObject candidate : proposal.getList())
+            {
+                Map<String, String> links = methodDescriptionLinks(candidate, documentUri, register);
+                if (!links.isEmpty())
+                    return links;
+            }
+            return Map.of();
+        }
+        var method = ParameterSeeLinks.sourceMethod(member);
+        Global.tempLog("method-description-links", "source=" + DefaultValueDebug.identity(method) //$NON-NLS-1$ //$NON-NLS-2$
+            + " container=" + (method == null ? null : DefaultValueDebug.identity(method.eContainer()))); //$NON-NLS-1$
+        var module = method == null ? null : org.eclipse.xtext.EcoreUtil2.getContainerOfType(method,
+            com._1c.g5.v8.dt.bsl.model.Module.class);
+        if (module == null)
+            return Map.of();
+        var comment = BslStructureInsertCommentTypes.parseMethodComment(method, module);
+        Global.tempLog("method-description-links", "parsed method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " comment=" + (comment != null) + " description=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (comment != null && comment.getDescription() != null));
+        if (comment == null || comment.getDescription() == null)
+            return Map.of();
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        for (var part : comment.getDescription().getParts())
+        {
+            Global.tempLog("method-description-links", "part=" + part.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " text=" + (part instanceof LinkPart linkPart ? linkPart.getLinkText() //$NON-NLS-1$
+                    + " initial=" + linkPart.getInitialContent() : part.toString())); //$NON-NLS-1$
+            if (!(part instanceof LinkPart link) || link.getLinkText().isBlank())
+                continue;
+            EObject target = ParameterSeeLinks.resolveTarget(link, method);
+            Global.tempLog("method-description-links", "resolve text=" + link.getLinkText() //$NON-NLS-1$ //$NON-NLS-2$
+                + " target=" + DefaultValueDebug.identity(target)); //$NON-NLS-1$
+            if (target == null || target.eIsProxy())
+                continue;
+            String text = link.getLinkText();
+            String call = ParameterSeeLinks.hoverCallText(target, documentUri);
+            result.put(escapeHtml(text), ParameterSeeLinks.memberLinkHtml(text, target, call, register));
+        }
+        Global.tempLog("method-description-links", "collected keys=" + result.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
+        return result;
+    }
+
+    /** Меняем только текст HTML: готовые ссылки, скрипты и стили остаются целыми. */
+    static String injectMethodDescriptionLinks(String html, Map<String, String> links)
+    {
+        Global.tempLog("method-description-links", "inject keys=" + (links == null ? null : links.keySet()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " html=" + html); //$NON-NLS-1$
+        if (html == null || links == null || links.isEmpty() || html.contains("<!--comfort-description-links-->")) //$NON-NLS-1$
+            return html;
+        String alternatives = links.keySet().stream()
+            .sorted(java.util.Comparator.comparingInt(String::length).reversed())
+            .map(java.util.regex.Pattern::quote).collect(java.util.stream.Collectors.joining("|")); //$NON-NLS-1$
+        var references = java.util.regex.Pattern.compile("(?<![\\p{L}\\p{N}_.])(?:" + alternatives //$NON-NLS-1$
+            + ")(?![\\p{L}\\p{N}_])"); //$NON-NLS-1$
+        var fragments = java.util.regex.Pattern.compile("<[^>]*>|[^<]+", java.util.regex.Pattern.DOTALL).matcher(html); //$NON-NLS-1$
+        StringBuilder result = new StringBuilder();
+        String protectedTag = null;
+        int menuDepth = 0;
+        boolean changed = false;
+        while (fragments.find())
+        {
+            String fragment = fragments.group();
+            if (fragment.startsWith("<")) //$NON-NLS-1$
+            {
+                String tag = fragment.toLowerCase(Locale.ROOT);
+                if (tag.matches("<span(?:\\s.*|>)")) //$NON-NLS-1$
+                {
+                    if (menuDepth > 0 || tag.contains(PARAM_ENTRY_CLASS))
+                        menuDepth++;
+                }
+                else if (menuDepth > 0 && tag.matches("</span\\s*>")) //$NON-NLS-1$
+                    menuDepth--;
+                if (protectedTag != null && tag.matches("</" + protectedTag + "\\s*>")) //$NON-NLS-1$ //$NON-NLS-2$
+                    protectedTag = null;
+                else if (protectedTag == null)
+                    for (String name : List.of("a", "script", "style", "head")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                        if (tag.matches("<" + name + "(?:\\s.*|>)")) //$NON-NLS-1$ //$NON-NLS-2$
+                            protectedTag = name;
+                result.append(fragment);
+            }
+            else if (protectedTag != null || menuDepth > 0)
+                result.append(fragment);
+            else
+            {
+                var reference = references.matcher(fragment);
+                StringBuilder replaced = new StringBuilder();
+                while (reference.find())
+                {
+                    reference.appendReplacement(replaced,
+                        java.util.regex.Matcher.quoteReplacement(links.get(reference.group())));
+                    changed = true;
+                }
+                reference.appendTail(replaced);
+                result.append(replaced);
+            }
+        }
+        Global.tempLog("method-description-links", "inject changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
+        return changed ? withLinkStyle(result + "<!--comfort-description-links-->") : html; //$NON-NLS-1$
+    }
+
+    /**
      * Вставляет блок {@link #memberSeeLinksBlock} в заголовок подсказки члена: внутрь «&lt;Тип&gt;»
      * сразу после типа, иначе в конец заголовка. Заголовок ищется так же, как в {@code BslEditorHoverHook}.
      *
@@ -5577,6 +5751,10 @@ public final class ParamHintHtmlModifier
             defaultDescription = null;
             isOut = null;
         }
+        // Слот значения ключа структуры: тип этого ключа вместо «Произвольный» (issue 888).
+        String keyType = structureKeyTypeHtml(ctx);
+        if (keyType != null)
+            typeBase = keyType;
 
         String directionPrefix = buildDirectionPrefix(isOut);
         boolean copy = Boolean.TRUE.equals(isOut) && ctx != null && ctx.serverCall;
@@ -5600,7 +5778,8 @@ public final class ParamHintHtmlModifier
             ? ParameterSeeLinks.html(ctx, paramName) : ""; //$NON-NLS-1$
         // Единый вид с подсказкой члена: «<Типы : Конструктор()>».
         String newTypeInner = directionPrefix
-            + (seeLinks.isEmpty() ? typeBase + suffix : "&lt;" + typeBase + seeLinks + "&gt;" + suffix); //$NON-NLS-1$ //$NON-NLS-2$
+            + (stripHtml(typeBase).isEmpty() && seeLinks.isEmpty() ? "" //$NON-NLS-1$
+                : "&lt;" + typeBase + seeLinks + "&gt;") + suffix; //$NON-NLS-1$ //$NON-NLS-2$
         if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
             return null;
         boolean hasEnrichment = virtualParam
@@ -5713,17 +5892,8 @@ public final class ParamHintHtmlModifier
                     String label = call != null ? call : seeLink.link().getLinkText();
                     if (call == null && target instanceof Function)
                         label += "()"; //$NON-NLS-1$
-                    html.append(linkIndex == 0 ? " : " : ", ").append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
-                        .append(" onmouseleave=\"comfortHideParamMenu(this)\">") //$NON-NLS-1$
-                        .append("<span class=\"").append(PARAM_LINK_CLASS).append("\">") //$NON-NLS-1$ //$NON-NLS-2$
-                        .append(escapeHtml(label)).append("</span><span class=\"") //$NON-NLS-1$
-                        .append(PARAM_MENU_CLASS).append("\">"); //$NON-NLS-1$
-                    if (target != null && !target.eIsProxy())
-                        appendMemberMenuItem(html, register.apply(() -> openTarget(target)), "Открыть"); //$NON-NLS-1$
-                    if (call != null)
-                        appendMemberMenuItem(html, register.apply(() -> copyText(call)), "Скопировать вызов"); //$NON-NLS-1$
-                    html.append("</span></span>"); //$NON-NLS-1$
+                    html.append(linkIndex == 0 ? " : " : ", ") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(memberLinkHtml(label, target, call, register));
                 }
                 catch (Exception | LinkageError ex)
                 {
@@ -5733,11 +5903,31 @@ public final class ParamHintHtmlModifier
             return html.toString();
         }
 
-        private static void appendMemberMenuItem(StringBuilder html, String token, String text)
+        /** Общее меню ссылки в типах и в тексте описания метода. */
+        private static String memberLinkHtml(String label, EObject target, String call,
+            java.util.function.Function<Runnable, String> register)
+        {
+            StringBuilder html = new StringBuilder();
+            html.append("<span class=\"").append(PARAM_ENTRY_CLASS) //$NON-NLS-1$
+                .append("\" onmouseenter=\"comfortShowParamMenu(this)\"") //$NON-NLS-1$
+                .append(" onmouseleave=\"comfortHideParamMenu(this)\">") //$NON-NLS-1$
+                .append("<span class=\"").append(PARAM_LINK_CLASS).append("\">") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(escapeHtml(label)).append("</span><span class=\"") //$NON-NLS-1$
+                .append(PARAM_MENU_CLASS).append("\">"); //$NON-NLS-1$
+            if (target != null && !target.eIsProxy())
+                appendMemberMenuItem(html, register.apply(() -> openTarget(target)), "Открыть", true); //$NON-NLS-1$
+            if (call != null)
+                appendMemberMenuItem(html, register.apply(() -> copyText(call)), "Скопировать вызов", false); //$NON-NLS-1$
+            html.append("</span></span>"); //$NON-NLS-1$
+            return html.toString();
+        }
+
+        private static void appendMemberMenuItem(StringBuilder html, String token, String text, boolean closeWindow)
         {
             html.append("<span class=\"").append(PARAM_MENU_ITEM_CLASS) //$NON-NLS-1$
                 .append("\" onclick=\"comfortOpenMethodDefinition('").append(token) //$NON-NLS-1$
-                .append("');return false;\">").append(escapeHtml(text)).append("</span>"); //$NON-NLS-1$ //$NON-NLS-2$
+                .append("',").append(closeWindow).append(");return false;\">") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(escapeHtml(text)).append("</span>"); //$NON-NLS-1$
         }
 
         private static void copyText(String text)
@@ -6708,8 +6898,14 @@ public final class ParamHintHtmlModifier
         if (idx >= 0 && idx < cut)
             cut = idx;
         s = s.substring(0, cut);
-        // «<Типы : Конструктор()>»: скобка открыта ради вида, к типам не относится.
-        return s.startsWith("&lt;") ? s.substring("&lt;".length()) : s; //$NON-NLS-1$ //$NON-NLS-2$
+        // Снимаем обрамление «<Типы>»; перед ссылками «См.» закрывающая скобка уже срезана.
+        if (s.startsWith("&lt;")) //$NON-NLS-1$
+        {
+            s = s.substring("&lt;".length()); //$NON-NLS-1$
+            if (s.endsWith("&gt;")) //$NON-NLS-1$
+                s = s.substring(0, s.length() - "&gt;".length()); //$NON-NLS-1$
+        }
+        return s;
     }
 
     /** HTML фрагмент типов (без подписи «Тип:»), со ссылками. */
@@ -6961,7 +7157,7 @@ public final class ParamHintHtmlModifier
         if (ctx.invocationFound)
         {
             browser.setData(STRUCTURE_KEYS_MARK, ctx.structureKeys == null ? null
-                : new StructureKeysOfHint(ctx.pages, ctx.structureKeys, ctx.constructorType));
+                : new StructureKeysOfHint(ctx.pages, ctx.structureKeys, ctx.constructorType, ctx.structureKeyTypes));
             // Та же модель без синхронизации: сразу после ввода «,» вызов в ней найден, но
             // запятой ещё нет — номер аргумента из AST на единицу меньше, и виртуальный
             // параметр не дорисовывается до следующего показа. Запятые EDT — уже в новых смещениях.
@@ -6974,6 +7170,7 @@ public final class ParamHintHtmlModifier
             || kept.pages != ctx.pages)
             return;
         ctx.structureKeys = kept.keys;
+        ctx.structureKeyTypes = kept.keyTypes;
         // Без типа сигнатура считается без хвоста с переменным числом параметров,
         // и за «Значения» дорисовывался бы «?» на каждый аргумент (extraUnknownParamCount).
         ctx.constructorType = kept.constructorType;
@@ -7061,12 +7258,14 @@ public final class ParamHintHtmlModifier
         final List<Object> pages;
         final List<String> keys;
         final Type constructorType;
+        final Map<String, String> keyTypes;
 
-        StructureKeysOfHint(List<Object> pages, List<String> keys, Type constructorType)
+        StructureKeysOfHint(List<Object> pages, List<String> keys, Type constructorType, Map<String, String> keyTypes)
         {
             this.pages = pages;
             this.keys = keys;
             this.constructorType = constructorType;
+            this.keyTypes = keyTypes;
         }
     }
 
@@ -7288,6 +7487,7 @@ public final class ParamHintHtmlModifier
             ctx.directive = snap.directive;
             ctx.currentArgIndex = snap.currentArgIndex;
             ctx.structureKeys = snap.structureKeys;
+            ctx.structureKeyTypes = snap.structureKeyTypes;
         }
         catch (Exception ignored)
         {
@@ -7323,6 +7523,17 @@ public final class ParamHintHtmlModifier
             snap.constructorType = ctor.getType();
             snap.structureKeys = structureConstructorKeys(snap.constructorType, params);
         }
+        // Структура.Вставить("Ключ", …): слот «Значение» подписывается ключом, как у конструктора.
+        if (snap.structureKeys == null && invocationLike instanceof Invocation insert
+            && isStructureInsert(insert, snap.method) && params != null && !params.isEmpty()
+            && params.get(0) instanceof StringLiteral)
+        {
+            String key = literalValue(params.get(0));
+            if (key != null && !key.isBlank())
+                snap.structureKeys = List.of(key.trim());
+        }
+        if (snap.structureKeys != null)
+            snap.structureKeyTypes = structureKeyTypesHtml(resource, invocationLike, params, snap.structureKeys);
         snap.actualArgCount = params != null ? params.size() : 0;
         snap.actualArgTexts = actualArgumentTexts(invocationLike);
         snap.currentArgIndex = resolveCurrentArgIndex(invocationLike, caret);
@@ -7923,6 +8134,65 @@ public final class ParamHintHtmlModifier
         return any ? keys : null;
     }
 
+    /** Тип ключа под кареткой (слот значения на странице «По ключам и значениям»); иначе {@code null}. */
+    private static String structureKeyTypeHtml(HoverContext ctx)
+    {
+        if (ctx == null || ctx.structureKeys == null || ctx.structureKeyTypes == null || ctx.pages == null
+            || ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size()
+            || !isStructureKeysPage(ctx, ctx.pages.get(ctx.pageIndex)))
+            return null;
+        int current = ctx.currentArgIndex >= 0 ? ctx.currentArgIndex : ctx.paramIndex;
+        if (current < 1 || current > ctx.structureKeys.size())
+            return null;
+        String html = ctx.structureKeyTypes.get(ctx.structureKeys.get(current - 1).trim().toLowerCase(Locale.ROOT));
+        if (html == null)
+            return null;
+        // Строка типа сама оборачивает типы в «<…>», а строка типов EDT уже несёт их у каждого типа.
+        return html.replace("&lt;", "").replace("&gt;", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /** {@code Вставить} у структуры: владелец метода платформы — тип {@code Структура}. */
+    private static boolean isStructureInsert(Invocation invocation, Method method)
+    {
+        if (invocation.getMethodAccess() == null
+            || !"вставить".equalsIgnoreCase(invocation.getMethodAccess().getName()) //$NON-NLS-1$
+                && !"insert".equalsIgnoreCase(invocation.getMethodAccess().getName())) //$NON-NLS-1$
+            return false;
+        Type owner = method != null ? EcoreUtil2.getContainerOfType(method, Type.class) : null;
+        return owner != null && "Structure".equals(owner.getName()); //$NON-NLS-1$
+    }
+
+    /** Значение строкового литерала (без кавычек, удвоенные кавычки — одна). */
+    private static String literalValue(Expression expression)
+    {
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(expression);
+        String text = node != null ? NodeModelUtils.getTokenText(node) : null;
+        if (text == null)
+            return null;
+        text = text.trim();
+        if (text.length() < 2 || text.charAt(0) != '"' || text.charAt(text.length() - 1) != '"')
+            return null;
+        return text.substring(1, text.length() - 1).replace("\"\"", "\""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Типы ключей ссылками EDT (расчёт значений литерала ключей, issue 888); ключ в нижнем регистре. */
+    private static Map<String, String> structureKeyTypesHtml(XtextResource resource, EObject call,
+        List<Expression> params, List<String> keys)
+    {
+        Map<String, List<TypeItem>> types = BslLiteralValues.structureKeysTypes(resource, call, params);
+        Map<String, String> result = new java.util.HashMap<>();
+        for (String key : keys)
+        {
+            String lowerKey = key.trim().toLowerCase(Locale.ROOT);
+            List<TypeItem> keyTypes = types.get(lowerKey);
+            String html = keyTypes != null && !keyTypes.isEmpty()
+                ? BslExpectedTypePremiums.typeItemsHtml(resource, keyTypes) : null;
+            if (html != null)
+                result.put(lowerKey, html);
+        }
+        return result;
+    }
+
     /**
      * Страница «По ключу и значениям»: ключи известны, у страницы есть параметр «Значения»
      * (не меньше двух формальных) и первый параметр — не {@code ФиксированнаяСтруктура}.
@@ -8475,6 +8745,8 @@ public final class ParamHintHtmlModifier
         String directive;
         /** Ключи из литерала {@code Новый Структура("а,б", …)}; {@code null} — не этот случай. */
         List<String> structureKeys;
+        /** Типы ключей ссылками (ключ в нижнем регистре → HTML) — тип слота значения ключа (issue 888). */
+        Map<String, String> structureKeyTypes;
         /** Вызов под кареткой найден в AST (поля выше заполнены из него). */
         boolean invocationFound;
     }
@@ -8545,6 +8817,7 @@ public final class ParamHintHtmlModifier
         Type constructorType;
         String directive;
         List<String> structureKeys;
+        Map<String, String> structureKeyTypes;
     }
 
     private static final class FindMissSupport

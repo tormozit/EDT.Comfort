@@ -4912,7 +4912,11 @@ boolean inLiteral = endCaret >= 0
                 + "\" removed=" + (event != null ? event.getLength() : -1) //$NON-NLS-1$
                 + " pending=" + pendingAutoOpen + " timerGen=" + completionAutoOpenScheduleGen.get()); //$NON-NLS-1$ //$NON-NLS-2$
         boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
+        if (skipText != null && skipText.indexOf('"') >= 0)
+            Global.tempLog("assist-literal-quote", "document.quote apply=" + proposalApply //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + event.getOffset() + " length=" + skipText.length()); //$NON-NLS-1$ //$NON-NLS-2$
         if (skipText != null && proposalApply && (skipText.endsWith(".") //$NON-NLS-1$
+            || skipText.indexOf('"') >= 0
             || (skipText.length() >= 4
                 && skipText.regionMatches(true, skipText.length() - 4, "см. ", 0, 4)))) //$NON-NLS-1$
             scheduleAutoOpenAfterProposalTrigger(event);
@@ -5066,7 +5070,7 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    /** Точка или «см. » из предложения проходят то же правило, что и набранные вручную. */
+    /** Точка, «см. » и каретка за кавычкой из предложения проходят правило ручного ввода. */
     private void scheduleAutoOpenAfterProposalTrigger(DocumentEvent event)
     {
         StyledText text = viewer != null ? viewer.getTextWidget() : null;
@@ -5075,17 +5079,19 @@ boolean inLiteral = endCaret >= 0
         IDocument doc = event.getDocument();
         int eventCaret = event.getOffset() + event.getText().length();
         boolean irApply = Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
+        Global.tempLog("assist-literal-quote", "proposal.schedule from=" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+            + " to=" + eventCaret + " ir=" + irApply); //$NON-NLS-1$ //$NON-NLS-2$
         // JFace устанавливает выделение через getSelection уже после apply. До этого
         // момента не открывать новый список и не менять состояние завершаемой сессии.
         text.getDisplay().asyncExec(() ->
         {
+            Global.tempLog("assist-literal-quote", "proposal.afterSelection disposed=" + text.isDisposed() //$NON-NLS-1$ //$NON-NLS-2$
+                + " sameDocument=" + (viewer.getDocument() == doc)); //$NON-NLS-1$
             if (text.isDisposed() || viewer.getDocument() != doc)
             {
                 return;
             }
             int caret = modelCaretOffset();
-            if (irApply && caret != eventCaret)
-                return;
             ContentAssistSettings settings = ContentAssistSettings.getInstance();
             if (!ComfortSettings.isReplaceListFiltersEnabled() || settings == null || !settings.isEnabled())
             {
@@ -5098,18 +5104,25 @@ boolean inLiteral = endCaret >= 0
                 char inserted = doc.getChar(caret - 1);
                 String branch = CompletionAutoOpenTrigger.diagnoseFetch(doc, inserted, caret - 1, caret,
                     ContentAssistPopupSync.isPopupVisible(assistant), 0);
-                if (!"dot".equals(branch) && !"commentLink".equals(branch)) //$NON-NLS-1$ //$NON-NLS-2$
+                boolean literalQuote = "quote".equals(branch) //$NON-NLS-1$
+                    && caret > event.getOffset() && caret <= eventCaret;
+                Global.tempLog("assist-literal-quote", "proposal.check caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + " branch=" + branch + " literalQuote=" + literalQuote); //$NON-NLS-1$ //$NON-NLS-2$
+                if (irApply && caret != eventCaret && !literalQuote)
+                    return;
+                if (!"dot".equals(branch) && !"commentLink".equals(branch) && !literalQuote) //$NON-NLS-1$ //$NON-NLS-2$
                 {
                     return;
                 }
                 pendingAutoOpen = false;
                 suppressDocumentAutoOpenAfterSession = false;
                 dotBeforeWordCaret = inserted != '.' || wordRightOfCaret(doc, caret).isEmpty() ? -1 : caret;
-                cancelPendingOrdinaryAssist("proposalDot"); //$NON-NLS-1$
+                cancelPendingOrdinaryAssist(literalQuote ? "proposalQuote" : "proposalDot"); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleCompletionAutoOpen(caret, completionAutoOpenSeq.incrementAndGet());
             }
             catch (org.eclipse.jface.text.BadLocationException e)
             {
+                Global.tempLog("assist-literal-quote", "proposal.error " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -5497,6 +5510,7 @@ boolean inLiteral = endCaret >= 0
         String prefix = doc != null && caret >= 0
             ? SmartContentAssistProcessor.computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
         boolean memberDot = false;
+        boolean literalQuote = false;
         try
         {
             // В запросе это тоже обращение через точку, хотя BSL member-access
@@ -5504,6 +5518,9 @@ boolean inLiteral = endCaret >= 0
             memberDot = doc != null && caret > 0 && caret <= doc.getLength()
                 && doc.getChar(caret - 1) == '.'
                 && "dot".equals(CompletionAutoOpenTrigger.diagnoseFetch(doc, '.', caret - 1, caret, false, 0)); //$NON-NLS-1$
+            literalQuote = doc != null && caret > 0 && caret <= doc.getLength()
+                && doc.getChar(caret - 1) == '"'
+                && "quote".equals(CompletionAutoOpenTrigger.diagnoseFetch(doc, '"', caret - 1, caret, false, 0)); //$NON-NLS-1$
         }
         catch (BadLocationException e)
         {
@@ -5518,6 +5535,17 @@ boolean inLiteral = endCaret >= 0
         }
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         contextPremiumAutoOpenCaret = session == null ? caret : -1;
+        if (session == null && processor != null && literalQuote)
+        {
+            boolean allowed = processor.allowsLiteralQuoteAutoOpen(viewer, caret);
+            // Большой список тоже открывается по премии. Пока она считается, сохраняем
+            // запрос для onContextPremiumsReady, как у остальных триггеров без префикса.
+            if (allowed)
+                contextPremiumAutoOpenCaret = -1;
+            else
+                completionAutoOpenPending = false;
+            return allowed;
+        }
         if (session == null && processor != null)
             processor.prepareAutoOpenPremiums(viewer, caret);
         boolean allowed = session != null
@@ -5542,9 +5570,10 @@ boolean inLiteral = endCaret >= 0
             if (caret < 0 || reloader.viewer.getDocument() != document)
                 continue;
             reloader.contextPremiumAutoOpenCaret = -1;
-            if (reloader.modelCaretOffset() != caret
-                || ContentAssistPopupSync.isPopupVisible(reloader.assistant)
-                || !BslExpectedTypePremiums.hasAutoOpenWord(document, caret))
+            int liveCaret = reloader.modelCaretOffset();
+            boolean visible = ContentAssistPopupSync.isPopupVisible(reloader.assistant);
+            boolean premium = BslExpectedTypePremiums.hasAutoOpenWord(document, caret);
+            if (liveCaret != caret || visible || !premium)
                 continue;
             int seq = reloader.completionAutoOpenSeq.get();
             reloader.showGate.request("contextPremium", () -> { //$NON-NLS-1$

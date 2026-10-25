@@ -389,12 +389,45 @@ public final class BslEditorHyperlinkHook implements IStartup
         if (link == null)
             link = fullNameLink(editor, page, viewer, offset, true, false);
         if (link == null)
+            link = tempTableLink(editor, page, viewer, offset);
+        if (link == null)
         {
             // Поля, псевдонимы, виртуальные таблицы в литерале-запросе — как в «Редакторе запроса».
             IHyperlink query = BslQueryLiteralSupport.queryLink(editor, viewer, offset);
             link = query == null ? null : new HistoryHyperlink(query, editor, page);
         }
         return link;
+    }
+
+    /**
+     * Имя временной таблицы или её колонки в литерале {@code М.Таблицы["Вт"]}, {@code М.Таблицы.Найти("Вт")},
+     * {@code ….Колонки.Найти("Поле")} — переход к {@code ПОМЕСТИТЬ} или полю пакета-источника (ИР: переходы
+     * {@code ВременныеТаблицыЗапроса}, issue 889).
+     */
+    private static IHyperlink tempTableLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer, int offset)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        try
+        {
+            return document.readOnly(resource ->
+            {
+                if (resource == null || resource.getParseResult() == null)
+                    return null;
+                EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
+                    .resolveContainedElementAt(resource, offset);
+                StringLiteral literal = org.eclipse.xtext.EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+                var target = literal == null ? null
+                    : BslTempTableSessions.literalNameTarget(literal, org.eclipse.xtext.util.CancelIndicator.NullImpl);
+                var node = target == null ? null : NodeModelUtils.findActualNodeFor(literal);
+                return node == null ? null
+                    : new PropertyHyperlink(new Region(node.getOffset(), node.getLength()), target, editor, page);
+            });
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return null;
+        }
     }
 
     /** Полное имя объекта метаданных в литерале или комментарии — ссылка на фрагмент под указателем. */

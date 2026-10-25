@@ -17,6 +17,7 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.layout.TreeColumnLayout;
 import org.eclipse.jface.viewers.ColumnPixelData;
@@ -137,6 +138,13 @@ public final class QueryWizardHook implements IStartup
         display.addFilter(SWT.Show, QueryWizardHook::handleShow);
         BatchQueryAtCaret.installListener();
     }
+
+    /**
+     * Сеанс менеджера временных таблиц окна конструктора (issue 889): таблицу, созданную конструктором позже
+     * открытия, заполняет колонка «Тип» перед чтением типа поля.
+     */
+    private static final Map<Object, BslTempTableSessions.Session> TEMP_TABLES =
+        Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final String ALIASES_TAB_CLASS = "com._1c.g5.v8.dt.qw.ui.tabs.AliasesTab"; //$NON-NLS-1$
     /** Метка колонки «Тип» плагина — её не считает переплетённый {@code AliasesTab.updateOperatorColumn}. */
@@ -322,6 +330,16 @@ public final class QueryWizardHook implements IStartup
             runIsolated("comments", () -> warnLostComments(shell, dialog)); //$NON-NLS-1$
         }
         runIsolated("batchQuery", () -> BatchQueryAtCaret.apply(qwc)); //$NON-NLS-1$
+        // Внешние временные таблицы менеджера и таблицы-параметры литерала (issue 889)
+        runIsolated("tempTables", () -> //$NON-NLS-1$
+        {
+            BslTempTableSessions.Session tempTables = BslTempTableSessions.takeWizardSession();
+            if (tempTables.isEmpty())
+                return;
+            TEMP_TABLES.put(qwc, tempTables);
+            if (Global.invoke(qwc, "getQuerySchemaSource") instanceof QueryWizardSource source) //$NON-NLS-1$
+                BslTempTableSessions.enrich(source.getQuerySchema(), tempTables);
+        });
         if (shell.getData(TYPE_COLUMNS_KEY) == null)
         {
             boolean[] installed = { false };
@@ -1341,6 +1359,8 @@ public final class QueryWizardHook implements IStartup
             DbViewElement view = dbView(element);
             if (!(view instanceof DbViewFieldDef field) || view instanceof Table)
                 return null;
+            if (field.eContainer() instanceof com._1c.g5.v8.dt.ql.model.DbViewDescriptionTempTable table)
+                BslTempTableSessions.enrichTable(table, TEMP_TABLES.get(control));
             TypeDescription type = field.getType();
             if (type != null && !type.getTypes().isEmpty())
                 return type;
@@ -1875,6 +1895,7 @@ public final class QueryWizardHook implements IStartup
                     if (!COMMANDS.contains(commandId))
                         return;
                     pendingIndex = caretQueryIndex(event);
+                    BslTempTableSessions.beginWizard(caretTempTables(event));
                     BslXtextEditor editor = GetRef.getActiveBslEditor(HandlerUtil.getActivePart(event));
                     pendingEditor = editor != null ? new java.lang.ref.WeakReference<>(editor) : null;
                 }
@@ -1943,6 +1964,24 @@ public final class QueryWizardHook implements IStartup
             {
                 Debug.problem("caretQueryIndex: " + e); //$NON-NLS-1$
                 return -1;
+            }
+        }
+
+        /** Готовый сеанс менеджера временных таблиц литерала под кареткой модуля (issue 889). */
+        private static BslTempTableSessions.Session caretTempTables(ExecutionEvent event)
+        {
+            BslXtextEditor editor = GetRef.getActiveBslEditor(HandlerUtil.getActivePart(event));
+            ISourceViewer viewer = editor == null ? null : editor.getInternalSourceViewer();
+            if (viewer == null || viewer.getDocument() == null)
+                return BslTempTableSessions.EMPTY;
+            try
+            {
+                IDocument doc = viewer.getDocument();
+                return BslQueryLiteralSupport.tempTablesForCommand(doc, textOffset(doc, viewer.getSelectedRange().x));
+            }
+            catch (RuntimeException | org.eclipse.jface.text.BadLocationException e)
+            {
+                return BslTempTableSessions.EMPTY;
             }
         }
 

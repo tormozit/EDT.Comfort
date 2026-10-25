@@ -1,26 +1,14 @@
 package tormozit;
 
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.lang.reflect.Array;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.time.LocalDateTime;
 import java.util.HashSet;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 
-import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferencePage;
-import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StructuredViewer;
@@ -34,8 +22,6 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
-import org.eclipse.ui.IWorkbench;
-import org.eclipse.ui.IWorkbenchListener;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
@@ -120,7 +106,6 @@ public final class AnnotationsPreferenceHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        OccurrencePrefsTrace.install();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -474,134 +459,6 @@ public final class AnnotationsPreferenceHook implements IStartup
         if (section == null)
             section = top.addNewSection(SETTINGS_SECTION);
         return section;
-    }
-
-    /**
-     * Временная диагностика: кто сбрасывает настройки аннотации «Вхождения» в тестовой среде.
-     * Пишет в {@code .tmp/annotations-occurrence-prefs.log} (не в {@code temp-logs} — тот
-     * очищается при старте, а сброс происходит между запусками): отметку запуска, строки
-     * {@code occurrence} из файла настроек и значения хранилища при старте и при закрытии
-     * EDT, каждое изменение ключа со словом «occurrence» в {@code org.eclipse.ui.editors} со стеком.
-     */
-    private static final class OccurrencePrefsTrace
-    {
-        private static final Path LOG_FILE = Paths.get("C:\\VC\\EDT.Comfort\\.tmp\\annotations-occurrence-prefs.log"); //$NON-NLS-1$
-
-        private OccurrencePrefsTrace()
-        {
-        }
-
-        static void install()
-        {
-            try
-            {
-                log("===== SESSION START pid=" + ProcessHandle.current().pid()); //$NON-NLS-1$
-                IPreferenceStore store = EditorsUI.getPreferenceStore();
-                dumpPrefsFile("INIT"); //$NON-NLS-1$
-                dumpInitial(store, "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation", "INIT"); //$NON-NLS-1$ //$NON-NLS-2$
-                dumpInitial(store, "org.eclipse.xtext.ui.editor.declarationAnnotation", "INIT"); //$NON-NLS-1$ //$NON-NLS-2$
-                store.addPropertyChangeListener(event ->
-                {
-                    String key = event.getProperty();
-                    if (key == null || !key.toLowerCase(Locale.ROOT).contains("occurrence")) //$NON-NLS-1$
-                        return;
-                    StringWriter stack = new StringWriter();
-                    new Throwable("stack").printStackTrace(new PrintWriter(stack)); //$NON-NLS-1$
-                    log("CHANGE " + key + ": " + event.getOldValue() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " -> " + event.getNewValue() + " (default=" + store.getDefaultString(key) //$NON-NLS-1$ //$NON-NLS-2$
-                        + ", isDefault=" + store.isDefault(key) + ", thread=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + Thread.currentThread().getName() + ")" + System.lineSeparator() + stack); //$NON-NLS-1$
-                });
-                PlatformUI.getWorkbench().addWorkbenchListener(new IWorkbenchListener()
-                {
-                    @Override
-                    public boolean preShutdown(IWorkbench workbench, boolean forced)
-                    {
-                        log("PRE-SHUTDOWN forced=" + forced); //$NON-NLS-1$
-                        dumpInitial(store, "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation", "PRE-SHUTDOWN"); //$NON-NLS-1$ //$NON-NLS-2$
-                        dumpPrefsFile("PRE-SHUTDOWN"); //$NON-NLS-1$
-                        return true;
-                    }
-
-                    @Override
-                    public void postShutdown(IWorkbench workbench)
-                    {
-                        dumpInitial(store, "org.eclipse.xtext.ui.editor.defaultOccurrenceAnnotation", "POST-SHUTDOWN"); //$NON-NLS-1$ //$NON-NLS-2$
-                        dumpPrefsFile("POST-SHUTDOWN"); //$NON-NLS-1$
-                    }
-                });
-                log("listener installed"); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                log("install failed: " + e); //$NON-NLS-1$
-            }
-        }
-
-        /** Строки {@code occurrence} файла настроек {@code org.eclipse.ui.editors.prefs} как они лежат на диске. */
-        private static void dumpPrefsFile(String phase)
-        {
-            try
-            {
-                Path prefs = Paths.get(Platform.getInstanceLocation().getURL().toURI()).resolve(
-                    ".metadata/.plugins/org.eclipse.core.runtime/.settings/org.eclipse.ui.editors.prefs"); //$NON-NLS-1$
-                if (!Files.exists(prefs))
-                {
-                    log(phase + " FILE " + prefs + ": not exists"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
-                }
-                StringBuilder line = new StringBuilder(phase).append(" FILE ").append(prefs) //$NON-NLS-1$
-                    .append(" mtime=").append(Files.getLastModifiedTime(prefs)).append(':'); //$NON-NLS-1$
-                for (String row : Files.readAllLines(prefs, StandardCharsets.ISO_8859_1))
-                {
-                    if (row.toLowerCase(Locale.ROOT).contains("occurrence")) //$NON-NLS-1$
-                        line.append(" [").append(row).append(']'); //$NON-NLS-1$
-                }
-                log(line.toString());
-            }
-            catch (Exception e)
-            {
-                log(phase + " FILE read failed: " + e); //$NON-NLS-1$
-            }
-        }
-
-        private static synchronized void log(String text)
-        {
-            try
-            {
-                Files.createDirectories(LOG_FILE.getParent());
-                Files.writeString(LOG_FILE, LocalDateTime.now() + " " + text + System.lineSeparator(), //$NON-NLS-1$
-                    StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            }
-            catch (IOException e)
-            {
-            }
-        }
-
-        private static void dumpInitial(IPreferenceStore store, String annotationType, String phase)
-        {
-            AnnotationPreference preference = EditorsUI.getAnnotationPreferenceLookup()
-                .getAnnotationPreference(annotationType);
-            if (preference == null)
-            {
-                log(phase + " " + annotationType + ": no AnnotationPreference"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            String[] keys = { preference.getVerticalRulerPreferenceKey(), preference.getOverviewRulerPreferenceKey(),
-                preference.getTextPreferenceKey(), preference.getHighlightPreferenceKey(),
-                preference.getTextStylePreferenceKey(), preference.getColorPreferenceKey(),
-                preference.getIsGoToNextNavigationTargetKey() };
-            StringBuilder line = new StringBuilder(phase).append(' ').append(annotationType);
-            for (String key : keys)
-            {
-                if (key == null)
-                    continue;
-                line.append("; ").append(key).append('=').append(store.getString(key)) //$NON-NLS-1$
-                    .append(" (default=").append(store.getDefaultString(key)) //$NON-NLS-1$
-                    .append(store.isDefault(key) ? ", isDefault)" : ")"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            log(line.toString());
-        }
     }
 
     private static final class Debug

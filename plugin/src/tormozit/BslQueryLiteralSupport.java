@@ -1601,8 +1601,8 @@ final class BslQueryLiteralSupport
             QlEditor editor = hiddenEditor(project);
             EmbeddedEditor embedded = editor.getEmbeddedQlEditor();
             XtextSourceViewer qlViewer = embedded.getViewer();
-            if (!query.equals(embedded.getDocument().get()))
-                editor.setFullText(query);
+            BslTempTableSessions.Session tempTables = tempTables(doc, lit);
+            prepareHidden(editor, query, tempTables);
             // Контекст автодополнения Xtext берёт выделение у viewer.
             qlViewer.setSelectedRange(lit.probeIndex, 0);
             ContentAssistant assistant = ContentAssistPatcher.getContentAssistant(qlViewer);
@@ -1642,7 +1642,7 @@ final class BslQueryLiteralSupport
                     && seen.add(cp.getDisplayString() + '\u0000' + cp.getReplacementString()))
                 {
                     result.add(new QueryLiteralProposal(cp, lit, lineBreak, sourceEditor, project, query,
-                        fieldHover.getHoverControlCreator(), expectedType));
+                        fieldHover.getHoverControlCreator(), expectedType, tempTables));
                 }
             }
             ICompletionProposal[] proposals = result.toArray(SmartContentAssistProcessor.EMPTY);
@@ -1666,6 +1666,81 @@ final class BslQueryLiteralSupport
         IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
         return project != null && project.isOpen() ? project : null;
+    }
+
+    /**
+     * Текст в скрытый редактор и колонки внешних временных таблиц и таблиц-параметров литерала (issue 889):
+     * их модель запроса заполняется заново после каждого разбора текста. Только UI.
+     */
+    private static void prepareHidden(QlEditor editor, String query, BslTempTableSessions.Session session)
+    {
+        EmbeddedEditor embedded = editor.getEmbeddedQlEditor();
+        if (!query.equals(embedded.getDocument().get()))
+            editor.setFullText(query);
+        embedded.getDocument().readOnly(resource ->
+        {
+            BslTempTableSessions.enrich(resource, session);
+            return null;
+        });
+    }
+
+    /** Готовый сеанс менеджера временных таблиц литерала; модель модуля не читается. */
+    private static BslTempTableSessions.Session tempTables(IDocument doc, Literal lit)
+    {
+        return BslTempTableSessions.sessionAt(doc, lit.openQuote);
+    }
+
+    /**
+     * Сеанс менеджера временных таблиц литерала под смещением модуля для команды пользователя (конструктор,
+     * редактор запроса): если метод ещё не считался — считается сейчас. UI.
+     */
+    static BslTempTableSessions.Session tempTablesForCommand(IDocument doc, int offset)
+    {
+        Literal lit = parse(doc, offset, false);
+        return lit == null ? BslTempTableSessions.EMPTY : BslTempTableSessions.sessionForCommand(doc, lit.openQuote);
+    }
+
+    /**
+     * Колонки внешних временных таблиц и таблиц-параметров в документе окна запроса — сразу и после каждого
+     * разбора его текста, пока окно открыто.
+     */
+    static void attachTempTables(Shell shell, IDocument queryDocument, BslTempTableSessions.Session tempTables)
+    {
+        if (tempTables == null || tempTables.isEmpty() || !(queryDocument instanceof XtextDocument xtext))
+            return;
+        org.eclipse.xtext.ui.editor.model.IXtextModelListener listener =
+            resource -> BslTempTableSessions.enrich(resource, tempTables);
+        xtext.addModelListener(listener);
+        xtext.readOnly(resource ->
+        {
+            BslTempTableSessions.enrich(resource, tempTables);
+            return null;
+        });
+        shell.addListener(SWT.Dispose, event -> xtext.removeModelListener(listener));
+    }
+
+    /** Сеанс менеджера временных таблиц изменился — живые маркеры литералов документа перепроверяются. UI. */
+    static void tempTablesChanged(IDocument document)
+    {
+        for (MarkerSession session : new ArrayList<>(MARKER_SESSIONS.values()))
+        {
+            if (session.document != document)
+                continue;
+            session.schedule(0);
+            // Список литерала мог открыться раньше публикации сеанса — пересчитать его с колонками
+            if (session.viewer instanceof org.eclipse.jface.text.source.SourceViewer sourceViewer)
+            {
+                ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(sourceViewer);
+                if (reloader != null && ContentAssistPopupSync.isPopupVisible(reloader.getAssistant())
+                    && segmentKeyAt(document, SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer)) >= 0)
+                {
+                    reloader.getProcessor().invalidateLiteralArgList(document);
+                    ContentAssistPopupSync.invalidateSyncSnapshot();
+                    ContentAssistPopupSync.recomputePopupList(reloader.getAssistant(), sourceViewer,
+                        reloader.getProcessor());
+                }
+            }
+        }
     }
 
     /** Скрытый редактор запроса проекта: окно никогда не открывается. */
@@ -1946,18 +2021,20 @@ final class BslQueryLiteralSupport
         private final int proposalOffset;
         private final IInformationControlCreator creator;
         private final QueryExpectedType expectedType;
+        private final BslTempTableSessions.Session tempTables;
         private volatile QueryHover sideHint;
         private Point selection;
 
         QueryLiteralProposal(ConfigurableCompletionProposal ql, Literal lit, String lineBreak,
             BslXtextEditor sourceEditor, IProject project, String query, IInformationControlCreator creator,
-            QueryExpectedType expectedType)
+            QueryExpectedType expectedType, BslTempTableSessions.Session tempTables)
         {
             this.ql = ql;
             this.project = project;
             this.sourceEditor = sourceEditor;
             this.creator = creator;
             this.expectedType = expectedType;
+            this.tempTables = tempTables;
             int offset = ql.getReplacementOffset();
             this.start = lit.docOffsetOfQuery(offset);
             this.end = Math.max(start, lit.docOffsetOfQuery(offset + ql.getReplacementLength()));
@@ -2054,7 +2131,7 @@ final class BslQueryLiteralSupport
                 if (description == null)
                 {
                     String query = sourceQuery.substring(0, queryStart) + replacement + sourceQuery.substring(queryEnd);
-                    description = queryDescription(sourceEditor, () -> project, query, proposalOffset);
+                    description = queryDescription(sourceEditor, () -> project, query, proposalOffset, tempTables);
                     sideHint = description;
                 }
                 return expectedType.decorate(description.info());
@@ -2246,8 +2323,7 @@ final class BslQueryLiteralSupport
             QlEditor ql = hiddenEditor(project);
             EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
             String query = lit.text.toString();
-            if (!query.equals(embedded.getDocument().get()))
-                ql.setFullText(query);
+            prepareHidden(ql, query, tempTables(viewer.getDocument(), lit));
             String keyword = embedded.getDocument().readOnly(resource -> {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
@@ -2418,12 +2494,13 @@ final class BslQueryLiteralSupport
         Literal lit = viewer == null ? null : parse(viewer.getDocument(), offset, true);
         if (lit == null || !lit.isQuery())
             return null;
-        return queryDescription(editor, () -> resolveProject(editor), lit.text.toString(), lit.probeIndex);
+        return queryDescription(editor, () -> resolveProject(editor), lit.text.toString(), lit.probeIndex,
+            tempTables(viewer.getDocument(), lit));
     }
 
     /** Одинаковый расчёт для существующего слова и выбранного предложения списка. */
     private static QueryHover queryDescription(BslXtextEditor sourceEditor, Supplier<IProject> projectSource,
-        String query, int offset)
+        String query, int offset, BslTempTableSessions.Session tempTables)
     {
         QueryHover[] result = { new QueryHover(null, null) };
         XtextDocument[] queryDocument = new XtextDocument[1];
@@ -2441,8 +2518,7 @@ final class BslQueryLiteralSupport
                 QlEditor ql = hiddenEditor(project);
                 EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
                 queryDocument[0] = embedded.getDocument();
-                if (!query.equals(embedded.getDocument().get()))
-                    ql.setFullText(query);
+                prepareHidden(ql, query, tempTables);
                 XtextSourceViewer qlViewer = embedded.getViewer();
                 QueryFieldHover description = new QueryFieldHover(embedded.getDocument(), sourceEditor);
                 result[0] = new QueryHover(null, description.getHoverControlCreator());
@@ -2513,12 +2589,32 @@ final class BslQueryLiteralSupport
         if (project == null)
             return null;
         String query = lit.text.toString();
+        BslTempTableSessions.Session tempTables = tempTables(viewer.getDocument(), lit);
         try
         {
             QlEditor ql = hiddenEditor(project);
             EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
-            if (!query.equals(embedded.getDocument().get()))
-                ql.setFullText(query);
+            prepareHidden(ql, query, tempTables);
+            // Внешняя временная таблица и её поле: переход к ПОМЕСТИТЬ пакета-источника (issue 889)
+            int[] word = new int[2];
+            var target = tempTables.isEmpty() ? null : embedded.getDocument().readOnly(resource ->
+            {
+                if (resource == null || resource.getParseResult() == null)
+                    return null;
+                var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), lit.probeIndex);
+                if (leaf == null || leaf.isHidden())
+                    return null;
+                word[0] = leaf.getOffset();
+                word[1] = leaf.getEndOffset();
+                return BslTempTableSessions.targetOf(resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class)
+                    .resolveElementAt(resource, lit.probeIndex), tempTables);
+            });
+            if (target != null)
+            {
+                int start = lit.docOffset(word[0]);
+                int end = Math.max(start, lit.docOffset(word[1]));
+                return new TempTableLink(new Region(start, end - start), target);
+            }
             XtextSourceViewer qlViewer = embedded.getViewer();
             IHyperlinkDetector[] detectors = embedded.getConfiguration().getHyperlinkDetectors(qlViewer);
             if (detectors == null && Global.getField(qlViewer, "fHyperlinkDetectors") instanceof IHyperlinkDetector[] own) //$NON-NLS-1$
@@ -2533,7 +2629,7 @@ final class BslQueryLiteralSupport
                 int start = lit.docOffset(region.getOffset());
                 int end = Math.max(start, lit.docOffset(region.getOffset() + region.getLength()));
                 return new QueryHyperlink(links[0], new Region(start, end - start), editor, project, query,
-                    lit.openQuote);
+                    lit.openQuote, tempTables);
             }
             return null;
         }
@@ -2557,9 +2653,10 @@ final class BslQueryLiteralSupport
         private final IProject project;
         private final String query;
         private final int openQuote;
+        private final BslTempTableSessions.Session tempTables;
 
         QueryHyperlink(IHyperlink delegate, IRegion region, BslXtextEditor editor, IProject project,
-                       String query, int openQuote)
+                       String query, int openQuote, BslTempTableSessions.Session tempTables)
         {
             this.delegate = delegate;
             this.region = region;
@@ -2567,6 +2664,7 @@ final class BslQueryLiteralSupport
             this.project = project;
             this.query = query;
             this.openQuote = openQuote;
+            this.tempTables = tempTables;
         }
 
         @Override public IRegion getHyperlinkRegion() { return region; }
@@ -2609,8 +2707,7 @@ final class BslQueryLiteralSupport
             QlEditor ql = hiddenEditor(project);
             EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
             // Скрытый редактор мог взять другой текст (автодополнение, маркеры) — вернуть свой.
-            if (!query.equals(embedded.getDocument().get()))
-                ql.setFullText(query);
+            prepareHidden(ql, query, tempTables);
             int[] found = embedded.getDocument().readOnly(resource ->
             {
                 if (resource == null || resource.getURI() == null
@@ -2632,6 +2729,29 @@ final class BslQueryLiteralSupport
             int end = Math.max(start, lit.docOffset(found[0] + found[1]));
             editor.selectAndReveal(start, end - start);
             return true;
+        }
+    }
+
+    /** Внешняя временная таблица литерала или её поле: переход к месту в пакете-источнике (issue 889). */
+    private static final class TempTableLink implements IHyperlink
+    {
+        private final IRegion region;
+        private final BslStructureInsertCommentTypes.PropertySourceTarget target;
+
+        TempTableLink(IRegion region, BslStructureInsertCommentTypes.PropertySourceTarget target)
+        {
+            this.region = region;
+            this.target = target;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Перейти к месту в пакете-источнике"; } //$NON-NLS-1$
+
+        @Override
+        public void open()
+        {
+            BslTempTableSessions.open(target);
         }
     }
 
@@ -2797,6 +2917,7 @@ final class BslQueryLiteralSupport
         // Окно открывается на любом литерале, не только начинающемся с ВЫБРАТЬ.
         if (start == null)
             return;
+        attachTempTables(shell, qlViewer.getDocument(), BslTempTableSessions.sessionForCommand(bslDocument, start.openQuote));
         String literalText = start.text.toString();
         int from = mapQueryIndex(literalText, start.probeIndex, dialogText);
         int to = end != null && end.openQuote == start.openQuote
@@ -3331,12 +3452,13 @@ final class BslQueryLiteralSupport
                 }
                 String query = lit.text.toString();
                 boolean skipValidation = concatenated.contains(start);
-                String cacheKey = project.getName() + '\n' + query;
+                BslTempTableSessions.Session tempTables = tempTables(document, lit);
+                String cacheKey = project.getName() + '\n' + tempTables.fingerprint() + '\n' + query;
                 QueryValidation validation = skipValidation
                     ? new QueryValidation(query, List.of(), List.of(), List.of()) : ISSUES_CACHE.get(cacheKey);
                 if (validation == null)
                 {
-                    validation = validate(project, query);
+                    validation = validate(project, query, tempTables);
                     if (validation == null)
                     {
                         // Сбой проверки: покрытие (если было) не трогаем.
@@ -3649,23 +3771,24 @@ final class BslQueryLiteralSupport
     }
 
     /** Проверка текста запроса штатным валидатором языка запросов; {@code null} — сбой. Только UI. */
-    private static QueryValidation validate(IProject project, String query)
+    private static QueryValidation validate(IProject project, String query, BslTempTableSessions.Session tempTables)
     {
         try
         {
             QlEditor editor = hiddenEditor(project);
             EmbeddedEditor embedded = editor.getEmbeddedQlEditor();
-            if (!query.equals(embedded.getDocument().get()))
-                editor.setFullText(query);
+            prepareHidden(editor, query, tempTables);
             return embedded.getDocument().readOnly(resource ->
             {
                 if (resource == null)
                     return null;
                 IResourceValidator validator = resource.getResourceServiceProvider().getResourceValidator();
-                List<Issue> issues = validator.validate(resource, CheckMode.NORMAL_AND_FAST, CancelIndicator.NullImpl);
+                List<Issue> nativeIssues = validator.validate(resource, CheckMode.NORMAL_AND_FAST, CancelIndicator.NullImpl);
+                List<Issue> issues = nativeIssues == null ? new ArrayList<>() : new ArrayList<>(nativeIssues);
+                issues.addAll(BslTempTableSessions.validateFields(resource));
                 var parsed = resource.getParseResult();
                 return new QueryValidation(parsed == null ? query : parsed.getRootNode().getText(),
-                    issues == null ? List.of() : List.copyOf(issues),
+                    List.copyOf(issues),
                     QueryBracketSupport.collect(parsed == null ? null : parsed.getRootNode()),
                     QueryBracketSupport.collectPairs(parsed == null ? null : parsed.getRootNode()));
             });

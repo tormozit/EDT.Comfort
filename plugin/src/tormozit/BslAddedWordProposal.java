@@ -78,6 +78,19 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     /** Слово метаданных проекта: статистика выбора — проектная. */
     private final boolean projectWord;
     private Point selection;
+    private int extractOffset = -1;
+    private String extractText;
+
+    /** Команда EDT вместо вставки: исходное выделение восстанавливается после закрытия списка. */
+    static BslAddedWordProposal extractLocalVariable(int offset, String selected)
+    {
+        BslAddedWordProposal proposal = new BslAddedWordProposal("<СоздатьПеременную>", Kind.CONSTRUCTION, //$NON-NLS-1$
+            "Извлечь локальную переменную…\nОткроется штатный диалог EDT с подобранным именем.", //$NON-NLS-1$
+            Absorb.WORD, -1, null, null, false, true, false);
+        proposal.extractOffset = offset;
+        proposal.extractText = selected;
+        return proposal;
+    }
 
     BslAddedWordProposal(String word, Kind kind, String template, Absorb absorb, int absorbOffset, String absorbText,
         String closing, boolean reopen, boolean statistical, boolean projectWord)
@@ -120,7 +133,16 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     {
         if (document == null)
             return;
+        if (extractOffset >= 0)
+        {
+            selection = new Point(extractOffset, extractText.length());
+            BslLocalVariableExtractorWizardHook.extract(viewer, document, extractOffset, extractText);
+            return;
+        }
         int caret = offset >= 0 ? Math.min(offset, document.getLength()) : document.getLength();
+        Boolean previousApply = SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get();
+        SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        Global.tempLog("assist-literal-quote", "added.apply caret=" + caret + " word=" + word); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         try
         {
             if (closing != null)
@@ -132,6 +154,13 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         {
             selection = new Point(caret, 0);
             Global.tempLog("expected-type", "added word apply error " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            if (previousApply == null)
+                SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.remove();
+            else
+                SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.set(previousApply);
         }
         if (reopen)
         {
@@ -180,7 +209,25 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         if (!closing.isEmpty() && (nextSameLevel || selected))
             result = result + "\n" + CENTER + "\n" + closing; //$NON-NLS-1$ //$NON-NLS-2$
         if (selected)
-            result = result.replace(CENTER, stripEnd(selectedText.substring(indent.length())));
+        {
+            // Внешний отступ ниже добавляется ко всему шаблону. Убираем его с каждой
+            // строки выделения и сдвигаем тело на один уровень, сохраняя вложенность.
+            String normalized = stripEnd(selectedText.replace("\r\n", "\n").replace('\r', '\n')); //$NON-NLS-1$ //$NON-NLS-2$
+            String[] bodyLines = normalized.split("\n", -1); //$NON-NLS-1$
+            StringBuilder body = new StringBuilder();
+            for (int i = 0; i < bodyLines.length; i++)
+            {
+                if (i > 0)
+                    body.append('\n');
+                String bodyLine = bodyLines[i];
+                if (bodyLine.startsWith(indent))
+                    bodyLine = bodyLine.substring(indent.length());
+                body.append('\t').append(bodyLine);
+            }
+            Global.tempLog("added-word-surround", "word=" + word + " lines=" + bodyLines.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " baseIndent=" + indent.length() + " addedIndent=TAB"); //$NON-NLS-1$ //$NON-NLS-2$
+            result = result.replace(CENTER, body.toString());
+        }
         else
             result = result.replace(CENTER, word.contains(CARET) ? "\t" : CARET); //$NON-NLS-1$
         StringBuilder indented = new StringBuilder(indent);
@@ -194,6 +241,10 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     private void insert(IDocument document, int from, int to, String text, String newLinePrefix)
         throws BadLocationException
     {
+        // Выделение содержит переносы документа (CRLF), а шаблон — LF. Нормализуем до
+        // разбора маркера: иначе оставшийся CR при сборке с CRLF даёт CRCRLF.
+        int sourceLength = text.length();
+        text = text.replace("\r\n", "\n").replace('\r', '\n'); //$NON-NLS-1$ //$NON-NLS-2$
         StringBuilder plain = new StringBuilder(text.length());
         int caretAt = -1;
         int index = 0;
@@ -229,6 +280,18 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         }
         if (caretOut < 0)
             caretOut = result.length();
+        // Пробел после «=» входит в ту же замену: запасной post-notification replace
+        // иначе сдвигает текст, когда selection уже рассчитан без этого символа.
+        boolean paddedAfterEquals = SmartCompletionProposal.needsSpaceAfterEquals(document, from, result.toString());
+        if (paddedAfterEquals)
+        {
+            result.insert(0, ' ');
+            caretOut++;
+        }
+        Global.tempLog("added-word-insert", "word=" + word + " from=" + from + " to=" + to //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + " sourceLength=" + sourceLength + " normalizedLength=" + text.length() //$NON-NLS-1$ //$NON-NLS-2$
+            + " lines=" + lines.length + " resultLength=" + result.length() + " caret=" + caretOut //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " paddedAfterEquals=" + paddedAfterEquals); //$NON-NLS-1$
         document.replace(from, to - from, result.toString());
         selection = new Point(from + caretOut, 0);
     }
