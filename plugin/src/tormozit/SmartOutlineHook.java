@@ -1897,7 +1897,7 @@ public class SmartOutlineHook implements IStartup {
     /**
      * Кнопка «Лучший тип» слева от «ОК» диалога «Редактирование типа данных» —
      * только если есть кому подбирать ({@link TypeByNameAdvisor#availableSource}: объект
-     * метаданных с именем реквизита, подключённое приложение ИР, иначе 1С:Напарник в сети). Подбирает тип по имени владельца свойства
+     * метаданных с именем реквизита, правила имён, иначе 1С:Напарник в сети). Подбирает тип по имени владельца свойства
      * ({@code ITypeDescriptionModel.getParent()}, обычно реквизит) тем же способом, что и
      * автоподбор типа в «Новый реквизит», и помечает его в дереве: без составного типа —
      * заменяет пометку, с составным — добавляет к помеченным.
@@ -1947,9 +1947,7 @@ public class SmartOutlineHook implements IStartup {
                 : !effectiveTypes.isEmpty() ? "Пометить вычисленный тип" //$NON-NLS-1$
                 : TypeByNameAdvisor.SOURCE_EXACT_NAME.equals(source)
                     ? "Пометить тип объекта метаданных, имя которого совпадает с именем реквизита" //$NON-NLS-1$
-                    : "Пометить тип, который " + source + " подбирает по имени реквизита") //$NON-NLS-1$ //$NON-NLS-2$
-                + (effectiveTypes.isEmpty() && (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
-                    ? ". Подключите ИР для улучшенного подбора типа." : "") //$NON-NLS-1$ //$NON-NLS-2$
+                    : "Пометить тип, подобранный по имени реквизита") //$NON-NLS-1$
                 + Global.pluginSignForTooltip()));
         // Помечается только по кнопке (mark); при открытии строка лучшего типа лишь становится текущей.
         java.util.function.Consumer<Boolean> suggest = mark ->

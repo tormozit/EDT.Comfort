@@ -806,11 +806,13 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastDirective;
         private volatile String lastMethodLink;
         private volatile String lastMethodName;
-        private volatile Map<String, String> lastDefinedTypeLinks = Map.of();
+        private volatile Map<String, DefinedTypeLinks.Link> lastDefinedTypeLinks = Map.of();
         private volatile String lastFormHandlersHtml;
         /** «: Конструктор()» с меню для свойства или параметра под указателем (issue 828). */
         private volatile String lastMemberSeeLinksHtml;
         private volatile String lastPlatformAvailabilityHtml;
+        /** «Приемник.Тип: …» места слова под указателем — как в боковой подсказке списка. */
+        private volatile String lastReceiverTypeLine;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
         private volatile BslQueryLiteralSupport.QueryHover lastQueryHover;
@@ -995,7 +997,10 @@ public final class BslEditorHoverHook implements IStartup
             }
             // #region temp timing #877: долгое первое открытие подсказки
             long t0 = System.nanoTime();
-            // Подсказка читает готовые типы; пересчёт цепочки зависимостей здесь не запускается.
+            // Подсказка читает готовые типы; пересчёт цепочки зависимостей здесь не запускается — только
+            // план результатов запросов метода (поля выборки), как перед списком.
+            refreshQueryTypesBeforeHover(textViewer, hoverRegion);
+            logQueryFieldHover(hoverRegion); // temp
             long t1 = System.nanoTime();
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
@@ -1060,6 +1065,10 @@ public final class BslEditorHoverHook implements IStartup
             lastFormHandlersHtml = resolveFormHandlersHtml(region);
             lastMemberSeeLinksHtml = resolveMemberSeeLinksHtml(textViewer, region);
             lastPlatformAvailabilityHtml = PlatformWordAvailability.hoverBlock(info, platformAvailabilityColor);
+            // При ИР описание слова строит ИР — как и в боковой подсказке списка.
+            lastReceiverTypeLine = IrBslExpressionHtmlSupport.resolveConnectedSession(editor) != null ? null
+                : BslExpectedTypePremiums.receiverTypeLineAt(textViewer.getDocument(),
+                    region.getOffset() + region.getLength());
         }
 
         /**
@@ -1402,6 +1411,7 @@ public final class BslEditorHoverHook implements IStartup
             String withSeeLinks = ParamHintHtmlModifier.injectMemberSeeLinks(result, lastMemberSeeLinksHtml);
             if (withSeeLinks != null)
                 result = withSeeLinks;
+            result = BslExpectedTypePremiums.prependReceiverType(result, lastReceiverTypeLine);
             return MetadataTypeMenu.decorate(
                 PlatformWordAvailability.injectHoverBlock(result, lastPlatformAvailabilityHtml),
                 editor.getInternalSourceViewer(), editor);
@@ -1423,12 +1433,12 @@ public final class BslEditorHoverHook implements IStartup
             }
         }
 
-        private Map<String, String> resolveDefinedTypeLinks(String html)
+        private Map<String, DefinedTypeLinks.Link> resolveDefinedTypeLinks(String html)
         {
             Set<String> names = DefinedTypeLinks.names(html);
             if (names.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                 return Map.of();
-            return document.readOnly((IUnitOfWork<Map<String, String>, XtextResource>) resource ->
+            return document.readOnly((IUnitOfWork<Map<String, DefinedTypeLinks.Link>, XtextResource>) resource ->
                 DefinedTypeLinks.resolve(names, resource));
         }
 
@@ -1463,6 +1473,75 @@ public final class BslEditorHoverHook implements IStartup
                     control.notifyDelayedInputChange(baseInput);
             });
         }
+
+        /** {@link BslStructureInsertCommentTypes#refreshQueryTypesForAssist} для места подсказки; в UI-потоке — нет. */
+        private static void refreshQueryTypesBeforeHover(ITextViewer textViewer, IRegion hoverRegion)
+        {
+            if (hoverRegion == null || org.eclipse.swt.widgets.Display.getCurrent() != null
+                || !(textViewer != null && textViewer.getDocument() instanceof IXtextDocument document))
+                return;
+            try
+            {
+                int offset = hoverRegion.getOffset();
+                document.readOnly(resource ->
+                {
+                    BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset, status -> {});
+                    return null;
+                });
+            }
+            catch (RuntimeException ignored)
+            {
+                // Досчёт не удался — подсказка покажет то, что есть в модели.
+            }
+        }
+
+        // #region temp — «Ничего не найдено» при наведении на поле выборки: что видит модель под курсором
+        private void logQueryFieldHover(IRegion region)
+        {
+            if (region == null || editor == null || !(editor.getDocument() instanceof IXtextDocument document))
+                return;
+            try
+            {
+                document.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
+                    EObject object = resource == null ? null
+                        : new EObjectAtOffsetHelper().resolveContainedElementAt(resource, region.getOffset());
+                    com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess access = object == null ? null
+                        : org.eclipse.xtext.EcoreUtil2.getContainerOfType(object,
+                            com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess.class);
+                    if (access == null)
+                        return null;
+                    org.eclipse.xtext.resource.IResourceServiceProvider provider =
+                        org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                            .getResourceServiceProvider(resource.getURI());
+                    com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer computer = provider == null
+                        ? null : provider.get(com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class);
+                    List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> stored = access.getFeatureEntries();
+                    List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> resolved = computer == null ? List.of()
+                        : com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access,
+                            computer);
+                    Global.tempLog("query-fields", "hover name=" + access.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " stored=" + describeEntries(stored) + " resolved=" + describeEntries(resolved) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " sourceTypes=" + (access.getSource() == null ? null //$NON-NLS-1$
+                            : access.getSource().getTypes().stream()
+                                .map(type -> type.getName() + "/" + type.eClass().getName() //$NON-NLS-1$
+                                    + "@" + System.identityHashCode(type)) //$NON-NLS-1$
+                                .toList()));
+                    return null;
+                });
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLog("query-fields", "hover log failed " + error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static String describeEntries(List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> entries)
+        {
+            return entries.stream().map(entry -> entry.getFeature() == null ? "null" //$NON-NLS-1$
+                : entry.getFeature().eClass().getName() + (entry.getFeature().eIsProxy() ? "(proxy)" : "")) //$NON-NLS-1$ //$NON-NLS-2$
+                .toList().toString();
+        }
+        // #endregion
 
         private String resolveMethodLink(IRegion region)
         {

@@ -56,7 +56,7 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
             String name = typeName(resolve(type.getTypes().get(0), element));
             String shortName = singleReferenceName(name);
             if (shortName != null)
-                return shortName;
+                return shortName + DefinedTypeDecorator.suffix(resolve(type.getTypes().get(0), element));
         }
         return fullText(element, type);
     }

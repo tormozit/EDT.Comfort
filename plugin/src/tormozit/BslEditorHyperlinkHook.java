@@ -79,6 +79,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
 import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
+import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
@@ -719,6 +720,9 @@ public final class BslEditorHyperlinkHook implements IStartup
                         if (dataPage != null)
                             result.add(new DataHyperlink(link.getHyperlinkRegion(), object, dataPage, source, page));
                     }
+                    if (object instanceof DefinedType definedType && definedType.getType() != null
+                        && !definedType.getType().getTypes().isEmpty())
+                        result.add(new CompositionHyperlink(link.getHyperlinkRegion(), definedType, source));
                     result.add(new NavigatorHyperlink(link.getHyperlinkRegion(), object));
                 }
                 return result.toArray(IHyperlink[]::new);
@@ -882,6 +886,26 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override public String getTypeLabel() { return null; }
         @Override public String getHyperlinkText() { return "В навигаторе"; }
         @Override public void open() { NavigatorReveal.revealAndActivateIfHidden(target); }
+    }
+
+    /** Состав определяемого типа — тот же просмотр, что «Открыть типы» в меню ячейки типа. */
+    private static final class CompositionHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final DefinedType target;
+        private final BslXtextEditor source;
+
+        CompositionHyperlink(IRegion region, DefinedType target, BslXtextEditor source)
+        {
+            this.region = region;
+            this.target = target;
+            this.source = source;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Состав"; }
+        @Override public void open() { SelectTypeDialogHook.openReadOnly(source.getSite().getShell(), target.getType(), target); }
     }
 
     private static final class FileHyperlink implements IHyperlink

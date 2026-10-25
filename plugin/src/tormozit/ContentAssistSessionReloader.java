@@ -187,6 +187,10 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean suppressDocumentAutoOpenAfterSession;
     /**
+     * Место запроса автооткрытия, ожидающего расчёта премии контекста.
+     */
+    private int contextPremiumAutoOpenCaret = -1;
+    /**
      * Закрытие окна из‑за устаревшего префикса: {@code assistSessionEnded} не должен
      * глушить автооткрытие на следующей букве (подавление нужно только после apply).
      */
@@ -4663,6 +4667,7 @@ boolean inLiteral = endCaret >= 0
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)
     {
         pendingAutoOpen = false;
+        contextPremiumAutoOpenCaret = -1;
         if (event.character != 0 && inputJumpProbe != null)
             inputJumpProbe.noteTyping();
         if (suppressDocumentAutoOpenAfterSession
@@ -4899,7 +4904,13 @@ boolean inLiteral = endCaret >= 0
 
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
+        contextPremiumAutoOpenCaret = -1;
         String skipText = event == null ? null : event.getText();
+        SmartContentAssistProcessor.autoOpenLog("document", event != null ? event.getDocument() : null, //$NON-NLS-1$
+            event != null ? event.getOffset() + (skipText != null ? skipText.length() : 0) : -1,
+            "text=\"" + ContentAssistDebug.jsonEscapeForLog(skipText == null ? "" : skipText) //$NON-NLS-1$ //$NON-NLS-2$
+                + "\" removed=" + (event != null ? event.getLength() : -1) //$NON-NLS-1$
+                + " pending=" + pendingAutoOpen + " timerGen=" + completionAutoOpenScheduleGen.get()); //$NON-NLS-1$ //$NON-NLS-2$
         boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
         if (skipText != null && proposalApply && (skipText.endsWith(".") //$NON-NLS-1$
             || (skipText.length() >= 4
@@ -5038,17 +5049,9 @@ boolean inLiteral = endCaret >= 0
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
             }
-            else if ("symbol".equals(branch)
-                && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
+            else if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
-                // Решать некому: без ИР ветка &~# молчала совсем — открываем список EDT
-                // (после # это слова препроцессора, после & — аннотации модуля или
-                // параметры запроса). Пробел не трогаем: без ИР popup после каждого
-                // пробела не нужен.
-                //
-                // После «&» окно ждёт фоновый список, посчитанный для офсета самой каретки
-                // (prepareWordListAutoOpen), а не кэш прошлого места: EDT отдаёт там только
-                // аннотации. В запросе список отбирается до параметров (queryParametersOnly).
+                // Любой триггер только готовит список; разрешение показа даёт премия контекста.
                 scheduleCompletionAutoOpen(caretAfter, seq);
             }
             else
@@ -5160,6 +5163,8 @@ boolean inLiteral = endCaret >= 0
     private void scheduleCompletionAutoOpen(int expectedCaretAfter, int autoOpenSeq)
     {
         int gen = completionAutoOpenScheduleGen.incrementAndGet();
+        SmartContentAssistProcessor.autoOpenLog("timer.schedule", viewer.getDocument(), expectedCaretAfter, //$NON-NLS-1$
+            "gen=" + gen + " seq=" + autoOpenSeq); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         int delay = settings != null ? settings.getTimeout() : 0;
         SmartContentAssistProcessor.uiBlockLog("autoOpen.schedule", //$NON-NLS-1$
@@ -5186,6 +5191,9 @@ boolean inLiteral = endCaret >= 0
         // expectedCaretAfter пришёл из DocumentEvent — модельный офсет, поэтому и live тоже модельный
         int liveCaret = text != null && !text.isDisposed() ? toModelOffset(text.getCaretOffset()) : -1;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
+        SmartContentAssistProcessor.autoOpenLog("timer.fire", viewer.getDocument(), liveCaret, //$NON-NLS-1$
+            "expected=" + expectedCaretAfter + " gen=" + gen + "/" + genGlobal //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " popup=" + popupVisible); //$NON-NLS-1$
         if (gen != genGlobal)
         {
             SmartContentAssistProcessor.uiBlockLog("autoOpen.timer.skip", //$NON-NLS-1$
@@ -5476,10 +5484,87 @@ boolean inLiteral = endCaret >= 0
         return true;
     }
 
+    /** Единое разрешение автооткрытия EDT-списка для любого триггера ввода. */
+    private boolean allowsContextWordAutoOpen(int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ContentAssistSettings settings = ContentAssistSettings.getInstance();
+        if (settings == null || !settings.isEnabled())
+        {
+            contextPremiumAutoOpenCaret = -1;
+            return false;
+        }
+        String prefix = doc != null && caret >= 0
+            ? SmartContentAssistProcessor.computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
+        boolean memberDot = false;
+        try
+        {
+            // В запросе это тоже обращение через точку, хотя BSL member-access
+            // намеренно не распознаёт выражения внутри строкового литерала.
+            memberDot = doc != null && caret > 0 && caret <= doc.getLength()
+                && doc.getChar(caret - 1) == '.'
+                && "dot".equals(CompletionAutoOpenTrigger.diagnoseFetch(doc, '.', caret - 1, caret, false, 0)); //$NON-NLS-1$
+        }
+        catch (BadLocationException e)
+        {
+            SmartContentAssistProcessor.autoOpenLog("contextWord.dotError", doc, caret, e.toString()); //$NON-NLS-1$
+        }
+        if (!prefix.isEmpty() || memberDot)
+        {
+            contextPremiumAutoOpenCaret = -1;
+            SmartContentAssistProcessor.autoOpenLog("contextWord.check", doc, caret, //$NON-NLS-1$
+                "reason=" + (memberDot ? "dot" : "prefix") + " allowed=true"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return true;
+        }
+        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
+        contextPremiumAutoOpenCaret = session == null ? caret : -1;
+        if (session == null && processor != null)
+            processor.prepareAutoOpenPremiums(viewer, caret);
+        boolean allowed = session != null
+            ? irCompletionSnapshot != null && irCompletionSnapshot.caret == caret
+                && shouldOpenFromIr(irCompletionSnapshot)
+            : BslExpectedTypePremiums.hasAutoOpenWord(doc, caret);
+        SmartContentAssistProcessor.autoOpenLog("contextWord.check", doc, caret, //$NON-NLS-1$
+            "ir=" + (session != null) + " allowed=" + allowed); //$NON-NLS-1$ //$NON-NLS-2$
+        if (allowed)
+            contextPremiumAutoOpenCaret = -1;
+        else
+            completionAutoOpenPending = false;
+        return allowed;
+    }
+
+    /** UI-уведомление о готовой премии: повторяется только ещё актуальный запрос показа. */
+    static void onContextPremiumsReady(IDocument document)
+    {
+        for (ContentAssistSessionReloader reloader : INSTALLED.values())
+        {
+            int caret = reloader.contextPremiumAutoOpenCaret;
+            if (caret < 0 || reloader.viewer.getDocument() != document)
+                continue;
+            reloader.contextPremiumAutoOpenCaret = -1;
+            if (reloader.modelCaretOffset() != caret
+                || ContentAssistPopupSync.isPopupVisible(reloader.assistant)
+                || !BslExpectedTypePremiums.hasAutoOpenWord(document, caret))
+                continue;
+            int seq = reloader.completionAutoOpenSeq.get();
+            reloader.showGate.request("contextPremium", () -> { //$NON-NLS-1$
+                if (reloader.viewer.getDocument() == document && reloader.modelCaretOffset() == caret
+                    && reloader.completionAutoOpenSeq.get() == seq)
+                    reloader.beginCompletionAutoOpen(caret, seq);
+            });
+        }
+    }
+
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq,
                                             boolean cachedListOnly)
     {
         if (!cachedListOnly && deferUntilModelSynced(expectedCaret, autoOpenSeq))
+            return;
+        // Первый UI-расчёт нужен и для списка кандидатов, и для последующего расчёта премии.
+        if (!cachedListOnly && processor != null)
+            withModelSyncHeld(viewer.getDocument(), null,
+                () -> processor.computeCompletionProposals(viewer, expectedCaret));
+        if (!allowsContextWordAutoOpen(expectedCaret))
             return;
         // Ветки «пробел / = / буква» открываются с пустым словом, а «&~#» — со уже набранным
         // символом. Обнулять фильтр там нельзя: попап собирался по кэшированному полному
@@ -5531,6 +5616,8 @@ boolean inLiteral = endCaret >= 0
     private void openCompletionAutoIrPopup(IrBslCompletionSupport.Snapshot snapshot, int caret,
                                            int autoOpenSeq)
     {
+        if (!shouldOpenFromIr(snapshot))
+            return;
         Control widget = (Control)viewer.getTextWidget();
         if (widget == null || widget.isDisposed())
             return;
@@ -7066,7 +7153,10 @@ processor.applyIrCompletion(snapshot);
         if (doc != null && caret >= 0
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
             return false;
+        if (!reloader.allowsContextWordAutoOpen(caret))
+            return false;
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
+        SmartContentAssistProcessor.autoOpenLog("word.show", doc, caret, "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
     }
 
@@ -7103,6 +7193,9 @@ processor.applyIrCompletion(snapshot);
             SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=false why=focus"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
+        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sv);
+        if (!reloader.allowsContextWordAutoOpen(caret))
+            return false;
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
         SmartContentAssistProcessor.uiBlockLog("openPopup.memberBg", "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;

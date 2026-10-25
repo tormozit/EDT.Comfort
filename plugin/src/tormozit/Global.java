@@ -9,6 +9,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.net.URL;
 import java.nio.file.Files;
+import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -47,6 +48,8 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.Ctor;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.wiring.IManagedService;
 
 /**
@@ -1498,6 +1501,27 @@ public final class Global
      * @param identifier исходный идентификатор
      * @return представление, или {@code null}/{@code ""} если на входе то же самое
      */
+    /**
+     * Конструкторы типа для оператора {@code Новый}. Единственная точка чтения {@code Type.getCtors()} в плагине —
+     * сам {@code getCtors()} напрямую не звать.
+     *
+     * <p>Зачем: в описаниях платформенных типов EDT ({@code platform_v8.x/resources/.../types/*.type}) у типов, которые
+     * оператором {@code Новый} не создаются, бывает пустой тег {@code <ctors/>}. EMF загружает его как один
+     * {@link Ctor} без параметров ({@code min=0}, {@code max=0}), и {@code getCtors()} возвращает непустой список.
+     * Пример — {@code ВыборкаИзРезультатаЗапроса} ({@code QueryResultSelection.type}: {@code createdByNewOperator="false"}
+     * и {@code <ctors/>}): по такому списку плагин предлагал «Новый ВыборкаИзРезультатаЗапроса». Создаётся ли тип
+     * оператором {@code Новый}, определяет только {@link Type#isCreatedByNewOperator()} — так проверяет и сама EDT
+     * ({@code BslJavaValidator.checkTypeInOperatorNew}).
+     *
+     * @return конструкторы типа, создаваемого оператором {@code Новый}; иначе (и для {@code null}/прокси) — пустой список
+     */
+    public static List<Ctor> typeConstructors(Type type)
+    {
+        if (type == null || type.eIsProxy() || !type.isCreatedByNewOperator() || type.getCtors() == null)
+            return List.of();
+        return type.getCtors();
+    }
+
     public static String representationFromIdentifier(String identifier)
     {
         if (identifier == null || identifier.isEmpty())

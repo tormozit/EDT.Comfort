@@ -57,24 +57,22 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * ({@link PropertyNameIdentifierHook}) и кнопка «Лучший тип» диалога выбора типа
  * ({@link SmartOutlineHook}).
  *
- * <p>Источник один на всех, см. {@link #availableSource}: подключено приложение ИР —
- * {@code ирОбщий.ИмяТипаИзИмениПеременнойЛкс(Имя)}; ИР не подключён, но 1С:Напарник в сети —
- * тот же вопрос задаётся ему ({@link Naparnik}). Нет ни того, ни другого — ничего не
- * происходит (тихо).
+ * <p>Источник один на всех, см. {@link #availableSource}: перенесённая из ИР
+ * {@code ирОбщий.ИмяТипаИзИмениПеременнойЛкс(Имя)} ({@link TypeNameFromVariableName}); она ничего
+ * не подобрала, а 1С:Напарник в сети — тот же вопрос задаётся ему ({@link Naparnik}).
  *
  * <p>{@code typeModel} везде — {@code ITypeDescriptionModel} (через рефлексию).
  */
 final class TypeByNameAdvisor
 {
-    static final String SOURCE_IR = "ИР"; //$NON-NLS-1$
+    /** Правила имён {@link TypeNameFromVariableName}, при неудаче — Напарник, если он в сети. */
+    static final String SOURCE_NAME_RULES = "правила имён"; //$NON-NLS-1$
     static final String SOURCE_NAPARNIK = "Напарник"; //$NON-NLS-1$
-    /** Тип объекта метаданных с именем, равным имени реквизита, — без ИР и Напарника. */
+    /** Тип объекта метаданных с именем, равным имени реквизита, — без правил имён и Напарника. */
     static final String SOURCE_EXACT_NAME = "совпадение имени"; //$NON-NLS-1$
 
     private static final String TAG = "TypeByNameAdvisor"; //$NON-NLS-1$
 
-    private static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
-    private static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
     private static final String DEFAULT_TYPE_NAME_RU = "Строка"; //$NON-NLS-1$
     private static final int DEFAULT_STRING_LENGTH = 10;
     private static final int NEW_FORM_ATTRIBUTE_STRING_LENGTH = 0;
@@ -87,22 +85,17 @@ final class TypeByNameAdvisor
     }
 
     /**
-     * Кто сейчас подберёт тип для {@code project}: {@link #SOURCE_IR}, {@link #SOURCE_NAPARNIK}
-     * или {@code null}, если подбирать некому. Дешёвая проверка, без обращения к сети и к COM.
+     * Кто сейчас подберёт тип для {@code project}: {@link #SOURCE_NAME_RULES} (правила имён есть
+     * всегда) или {@code null}, если проекта нет.
      */
     static String availableSource(IDtProject project)
     {
-        if (project == null)
-            return null;
-        if (IRApplication.hasConnectedSessionForKeys(project))
-            return SOURCE_IR;
-        return Naparnik.isOnline() ? SOURCE_NAPARNIK : null;
+        return project == null ? null : SOURCE_NAME_RULES;
     }
 
     /**
      * Как {@link #availableSource(IDtProject)}, но с учётом имени: тип объекта метаданных с таким
-     * же именем подставляется без ИР и Напарника — тогда источник {@link #SOURCE_EXACT_NAME},
-     * даже если ни ИР, ни Напарник не подключены.
+     * же именем подставляется без правил имён и Напарника — тогда источник {@link #SOURCE_EXACT_NAME}.
      */
     static String availableSource(IDtProject project, Object typeModel, String name)
     {
@@ -127,7 +120,7 @@ final class TypeByNameAdvisor
         String exact = Naparnik.exactNameType(project.getWorkspaceProject(), typeModel, name);
         if (exact != null)
         {
-            // Как и ответ ИР/Напарника — отдельным шагом очереди, а не изнутри обработчика ввода.
+            // Как и ответ Напарника — отдельным шагом очереди, а не изнутри обработчика ввода.
             Display.getCurrent().asyncExec(() ->
             {
                 if (Boolean.TRUE.equals(stillApplicable.get()))
@@ -135,11 +128,110 @@ final class TypeByNameAdvisor
             });
             return;
         }
-        if (IRApplication.hasConnectedSessionForKeys(project))
-            Global.callIrFunctionInBackground(project, IR_TYPE_MODULE, IR_TYPE_FUNCTION, new Object[] { name },
-                stillApplicable, onResult);
-        else
-            Naparnik.request(project.getWorkspaceProject(), typeModel, name, stillApplicable, onResult);
+        String byRules = TypeNameFromVariableName.resolve(name, nameCatalog(project.getWorkspaceProject(), typeModel));
+        if (byRules != null && findTypeItem(typeModel, byRules) != null)
+        {
+            Display.getCurrent().asyncExec(() ->
+            {
+                if (Boolean.TRUE.equals(stillApplicable.get()))
+                    onResult.accept(byRules);
+            });
+            return;
+        }
+        Naparnik.request(project.getWorkspaceProject(), typeModel, name, stillApplicable, onResult);
+    }
+
+    /**
+     * Метаданные для {@link TypeNameFromVariableName}: ссылочные и определяемые типы из доступных типов
+     * {@code typeModel} (определяемые с объектными типами в составе не годятся, как и для Напарника) и
+     * реквизиты объекта ссылочного типа.
+     */
+    private static TypeNameFromVariableName.Catalog nameCatalog(IProject project, Object typeModel)
+    {
+        return new TypeNameFromVariableName.Catalog(
+            references -> metaTypes(project, typeModel, references.booleanValue()),
+            (typeName, fieldName) -> attributeTypeName(project, typeName, fieldName),
+            null);
+    }
+
+    private static List<TypeNameFromVariableName.MetaType> metaTypes(IProject project, Object typeModel,
+        boolean references)
+    {
+        List<TypeNameFromVariableName.MetaType> result = new ArrayList<>();
+        if (!(typeItems(typeModel) instanceof List<?> types))
+            return result;
+        Naparnik.DefinedTypeClassifier classifier = new Naparnik.DefinedTypeClassifier(project);
+        for (Object item : types)
+        {
+            if (!(Global.invoke(item, "getNameRu") instanceof String typeName)) //$NON-NLS-1$
+                continue;
+            int dot = typeName.indexOf('.');
+            if (dot < 0)
+                continue;
+            String kind = typeName.substring(0, dot);
+            String objectName = typeName.substring(dot + 1);
+            if (Naparnik.DEFINED_TYPE_KIND.equals(kind))
+            {
+                if (!classifier.hasObjectTypes(objectName))
+                    result.add(new TypeNameFromVariableName.MetaType(objectName, typeName));
+            }
+            else if (references && kind.endsWith(Naparnik.REFERENCE_KIND_SUFFIX))
+                result.add(new TypeNameFromVariableName.MetaType(objectName, typeName));
+        }
+        return result;
+    }
+
+    /** Коллекция конфигурации объектов ссылочного вида ({@code СправочникСсылка} → {@code getCatalogs}). */
+    private static final Map<String, String> REFERENCE_KIND_COLLECTIONS = Map.of(
+        "СправочникСсылка", "getCatalogs", //$NON-NLS-1$ //$NON-NLS-2$
+        "ДокументСсылка", "getDocuments", //$NON-NLS-1$ //$NON-NLS-2$
+        "ПланВидовХарактеристикСсылка", "getChartsOfCharacteristicTypes", //$NON-NLS-1$ //$NON-NLS-2$
+        "ПланСчетовСсылка", "getChartsOfAccounts", //$NON-NLS-1$ //$NON-NLS-2$
+        "ПланВидовРасчетаСсылка", "getChartsOfCalculationTypes", //$NON-NLS-1$ //$NON-NLS-2$
+        "ПланОбменаСсылка", "getExchangePlans", //$NON-NLS-1$ //$NON-NLS-2$
+        "БизнесПроцессСсылка", "getBusinessProcesses", //$NON-NLS-1$ //$NON-NLS-2$
+        "ЗадачаСсылка", "getTasks"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * {@code ПоляТаблицыБДЛкс(...).Найти(Поле, "Имя")}: первый тип реквизита {@code fieldName} объекта
+     * ссылочного типа {@code typeName}; {@code null} — такого реквизита нет. Стандартные реквизиты не
+     * смотрятся.
+     */
+    private static String attributeTypeName(IProject project, String typeName, String fieldName)
+    {
+        int dot = typeName != null ? typeName.indexOf('.') : -1;
+        String collection = dot > 0 ? REFERENCE_KIND_COLLECTIONS.get(typeName.substring(0, dot)) : null;
+        if (collection == null || fieldName == null || fieldName.isEmpty())
+            return null;
+        try
+        {
+            IV8ProjectManager projectManager = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+            IV8Project v8Project = projectManager != null ? projectManager.getProject(project) : null;
+            Configuration configuration = v8Project instanceof IConfigurationAware aware
+                ? aware.getConfiguration() : null;
+            if (configuration == null || !(Global.invoke(configuration, collection) instanceof List<?> objects))
+                return null;
+            String objectName = typeName.substring(dot + 1);
+            for (Object object : objects)
+            {
+                if (!objectName.equalsIgnoreCase(String.valueOf(Global.invoke(object, "getName"))) //$NON-NLS-1$
+                    || !(Global.invoke(object, "getAttributes") instanceof List<?> attributes)) //$NON-NLS-1$
+                    continue;
+                for (Object attribute : attributes)
+                {
+                    if (fieldName.equalsIgnoreCase(String.valueOf(Global.invoke(attribute, "getName"))) //$NON-NLS-1$
+                        && Global.invoke(attribute, "getType") instanceof TypeDescription description //$NON-NLS-1$
+                        && !description.getTypes().isEmpty())
+                        return description.getTypes().get(0).getNameRu();
+                }
+                return null;
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Global.logError(TAG, "attributeTypeName", e); //$NON-NLS-1$
+        }
+        return null;
     }
 
     /**
@@ -155,7 +247,7 @@ final class TypeByNameAdvisor
      * Автоподбор в панели «Свойства»: ответ применяется, только когда введённое имя уже дошло
      * до модели, см. {@link #applyWhenNameCommitted}.
      *
-     * @param answerWanted     проверяется в UI-потоке при получении ответа (ИР или Напарника);
+     * @param answerWanted     проверяется в UI-потоке при получении ответа;
      *                         {@code false} — ответ отбрасывается
      * @param currentTypeModel модель типа, которую панель показывает сейчас: после записи имени
      *                         панель перестраивает строки, и прежняя модель становится
@@ -816,7 +908,7 @@ final class TypeByNameAdvisor
         /**
          * Полное имя типа объекта метаданных, имя которого без учёта регистра совпадает с именем
          * реквизита ({@code ОпределяемыйТип.Имя}, {@code СправочникСсылка.Имя} и т.п.), или
-         * {@code null}. Такой тип подставляется сразу, без ИР и Напарника: совпадение имён
+         * {@code null}. Такой тип подставляется сразу, без правил имён и Напарника: совпадение имён
          * однозначно, а Напарник на один и тот же запрос отвечал то одним типом, то другим.
          *
          * <p>Одно имя у нескольких объектов: определяемый тип важнее ссылочного, среди ссылочных

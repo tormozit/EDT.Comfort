@@ -23,6 +23,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * Суффикс вида первого типа в составе определяемого типа: «Объект» или «Менеджер»
  * (по окончанию имени типа, например «СправочникОбъект.Номенклатура» → «Объект»).
  * Для «Ссылка» суффикс не показывается: это самый частый случай и он не несёт информации.
+ * Если тип в составе единственный и не ссылочный, суффикс — имя типа без конкретного объекта
+ * и вида метаданных («Строка», «РегистрРасчетаНаборЗаписей.Начисления» → «НаборЗаписей»).
  * Показывается серым шрифтом везде, где EDT применяет декораторы к {@link DefinedType}
  * (навигатор, дерево категории «Определяемые типы» редактора объекта и т.п.).
  */
@@ -32,6 +34,7 @@ public final class DefinedTypeDecorator extends LabelProvider implements ILightw
     private static final String PREF_AUTO_ENABLED = "tormozit.definedTypeDecorator.autoEnabled"; //$NON-NLS-1$
     private static final String NONE = ""; //$NON-NLS-1$
     private static final String[] KINDS = { "Объект", "Менеджер" }; //$NON-NLS-1$ //$NON-NLS-2$
+    private static final String REFERENCE = "Ссылка"; //$NON-NLS-1$
 
     private static final ConcurrentHashMap<String, String> KIND_CACHE = new ConcurrentHashMap<>();
 
@@ -77,7 +80,17 @@ public final class DefinedTypeDecorator extends LabelProvider implements ILightw
             decoration.addSuffix(" (" + kind + ")");
     }
 
-    private static String kindFor(DefinedType definedType)
+    /** « (Вид)» для типа, порождённого определяемым типом; пусто для прочих. Для колонок и подсказок. */
+    static String suffix(TypeItem item)
+    {
+        if (item == null || !(BslEditorHyperlinkHook.typeProducer(item) instanceof DefinedType definedType))
+            return NONE;
+        String kind = kindFor(definedType);
+        return kind == null ? NONE : " (" + kind + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Текст суффикса без скобок; null — суффикса нет. */
+    static String kindFor(DefinedType definedType)
     {
         String key = cacheKey(definedType);
         if (key != null)
@@ -112,6 +125,7 @@ public final class DefinedTypeDecorator extends LabelProvider implements ILightw
             TypeDescription description = definedType.getTypeDescription();
             if (description == null)
                 return null;
+            boolean single = description.getTypes().size() == 1;
             for (TypeItem item : description.getTypes())
             {
                 if (item == null)
@@ -124,6 +138,9 @@ public final class DefinedTypeDecorator extends LabelProvider implements ILightw
                     continue;
                 int dot = name.indexOf('.');
                 String fragment = dot > 0 ? name.substring(0, dot) : name;
+                // Единственный нессылочный тип — имя типа без конкретного объекта и вида метаданных.
+                if (single)
+                    return fragment.endsWith(REFERENCE) ? null : dot > 0 ? withoutMdRootType(fragment) : fragment;
                 // Только первый тип: если он не «Объект/Ссылка/Менеджер», суффикса нет.
                 for (String kind : KINDS)
                     if (fragment.endsWith(kind))
@@ -136,5 +153,14 @@ public final class DefinedTypeDecorator extends LabelProvider implements ILightw
             return null;
         }
         return null;
+    }
+
+    /** «РегистрРасчетаНаборЗаписей» → «НаборЗаписей»: отрезает самый длинный префикс — корневой тип МД. */
+    private static String withoutMdRootType(String fragment)
+    {
+        for (int i = fragment.length() - 1; i > 0; i--)
+            if (MdTypeMapping.isKnownMdRootType(fragment.substring(0, i)))
+                return fragment.substring(i);
+        return fragment;
     }
 }

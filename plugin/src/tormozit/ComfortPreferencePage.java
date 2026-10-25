@@ -214,6 +214,7 @@ public class ComfortPreferencePage
             area.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
             createHeader(area, PROJECT_DESCRIPTION, 1);
             createProjectExtendedTypesSection(area);
+            createProjectChoiceStatisticsLink(area);
             createProjectDictionarySection(area);
             return area;
         }
@@ -398,6 +399,27 @@ public class ComfortPreferencePage
         hint.setLayoutData(hintGd);
         hint.setForeground(ThemeAwareColors.effectiveSystemColor(
             area.getDisplay(), SWT.COLOR_DARK_GRAY));
+    }
+
+    private void createProjectChoiceStatisticsLink(Composite parent)
+    {
+        Link link = new Link(parent, SWT.NONE);
+        link.setText("<a>Статистика выбора слов автодополнения</a>"); //$NON-NLS-1$
+        GridData linkGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        linkGd.verticalIndent = 8;
+        link.setLayoutData(linkGd);
+        IProject project = getProject();
+        link.setEnabled(project != null && project.isAccessible());
+        link.setToolTipText(TooltipText.wrap(link,
+            "Сколько раз какое слово метаданных этого проекта вставлено из списка автодополнения "
+            + "в каждом контексте. Часто выбираемые слова поднимаются в списке. Статистика слов "
+            + "платформы — в Параметрах → Комфорт → Редактор кода.")); //$NON-NLS-1$
+        link.addListener(SWT.Selection, e ->
+        {
+            IProject p = getProject();
+            if (p != null && p.isAccessible())
+                BslExpectedTypePremiums.openChoiceStatistics(link.getShell(), p);
+        });
     }
 
     private void createProjectDictionarySection(Composite parent)

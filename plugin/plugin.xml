@@ -1316,7 +1316,7 @@
               commandId="tormozit.RecentPlaces"
               label = "Последние"
               icon="icons/obj16/recent_places.png"
-              tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
+              tooltip="Последние посещённые места (методы и объекты метаданных) (Комфорт)"
               style="push">
             </command>
          </toolbar>

@@ -348,6 +348,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     static final String RECEIVER_TYPE_LOG = "receiver-type"; //$NON-NLS-1$
 
+    /** Временная безусловная диагностика причин открытия списка. */
+    static void autoOpenLog(String phase, IDocument doc, int caret, String detail)
+    {
+        Global.tempLog("assist-auto-open", phase + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " key=" + computeFullListContextKey(doc, caret) //$NON-NLS-1$
+            + " filter=\"" + (doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : "") //$NON-NLS-1$ //$NON-NLS-2$
+            + "\" around=\"" + uiBlockAround(doc, caret) + "\" " + detail); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     static void uiBlockLog(String where, String data)
     {
         if (uiBlockLogQuiet(where))
@@ -1115,7 +1124,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         Map<String, List<ICompletionProposal>> byKey = new LinkedHashMap<>();
         for (ICompletionProposal p : merged)
         {
-            if (unwrapProposal(p) instanceof IrCompletionProposal)
+            // Слова ИР и добавленные премиями — свои, не перегрузки
+            if (unwrapProposal(p) instanceof IrCompletionProposal || p instanceof BslAddedWordProposal)
                 continue;
             String key = dedupKey(p);
             if (key.isEmpty())
@@ -1140,7 +1150,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         List<ICompletionProposal> result = new ArrayList<>(merged.size());
         for (ICompletionProposal p : merged)
         {
-            if (unwrapProposal(p) instanceof IrCompletionProposal)
+            if (unwrapProposal(p) instanceof IrCompletionProposal || p instanceof BslAddedWordProposal)
             {
                 result.add(p);
                 continue;
@@ -1252,6 +1262,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (word != null && !word.isEmpty())
                 return word;
         }
+        // Слово целиком: «Если Х.Количество() Тогда», «Новый ОписаниеТипов("Строка")»
+        if (raw instanceof BslAddedWordProposal added)
+            return added.getWord();
         return parseProposalListName(displayString(raw));
     }
 
@@ -1884,6 +1897,16 @@ return;
             return;
         }
         scheduleMemberStockCapture(viewer, dot);
+    }
+
+    /** Подготовить премию по уже готовым кандидатам; на UI расчёт остаётся фоновым. */
+    void prepareAutoOpenPremiums(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        ICompletionProposal[] list = dot >= 0 && memberStockFullListDot == dot
+            ? memberStockFullList : isCacheValidForCaret(doc, caret) ? fullListCache : EMPTY;
+        BslExpectedTypePremiums.ensure(doc, caret, list);
     }
 
     /**
@@ -2889,6 +2912,8 @@ return;
     private boolean scheduleWordListInBackground(ITextViewer viewer, IDocument doc, int offset,
                                                  int caret, long delayMs)
     {
+        autoOpenLog("word.request", doc, caret, "offset=" + offset + " epoch=" + wordListEpoch //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " live=" + resolveWidgetCaret(viewer) + " caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
         if (memberStockAwaitInProgress || doc == null || caret < 0)
             return wordListSkip("state"); //$NON-NLS-1$
         // Ctrl+Space оставляем как был: там пользователь явно попросил список и ждёт его
@@ -3129,6 +3154,8 @@ return;
                     GHOST_CARET.set(Integer.valueOf(lastProbe));
                     try
                     {
+                        // Премии ожидаемого типа — здесь, в фоне: в UI-потоке они только читаются.
+                        BslExpectedTypePremiums.ensure(liveDoc, lastProbe, result);
                         long tFilter = System.nanoTime();
                         popup = popupFilter.isEmpty()
                             ? result : filterAndSort(result, popupFilter);
@@ -3611,6 +3638,9 @@ return;
         int liveCaret = resolveWidgetCaret(viewer);
         int liveKey = liveDoc != null && liveCaret >= 0
             ? computeFullListContextKey(liveDoc, liveCaret) : Integer.MIN_VALUE;
+        autoOpenLog("word.publish", liveDoc, liveCaret, "requestKey=" + key //$NON-NLS-1$ //$NON-NLS-2$
+            + " n=" + publishN + " epoch=" + epoch + "/" + wordListEpoch //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " gen=" + gen + "/" + memberStockContextGen); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistant thisCa = viewer instanceof SourceViewer sv
             ? ContentAssistPatcher.getContentAssistant(sv) : null;
         boolean thisPopup = thisCa != null && ContentAssistPopupSync.isPopupVisible(thisCa);
@@ -6590,9 +6620,7 @@ return stripEmptyPlaceholderProposals(result);
     private static List<CtorSignature> ctorSignatures(Type type)
     {
         List<CtorSignature> result = new ArrayList<>();
-        if (type == null || type.getCtors() == null)
-            return result;
-        for (Ctor ctor : type.getCtors())
+        for (Ctor ctor : Global.typeConstructors(type))
         {
             if (ctor == null || ctor.getParams() == null)
                 continue;
@@ -6610,12 +6638,7 @@ return stripEmptyPlaceholderProposals(result);
 
     private static boolean hasZeroMinParamsConstructor(Type type)
     {
-        if (type == null)
-            return false;
-        EList<Ctor> ctors = type.getCtors();
-        if (ctors == null)
-            return false;
-        for (Ctor ctor : ctors)
+        for (Ctor ctor : Global.typeConstructors(type))
         {
             if (ctor != null && ctor.getMinParams() == 0)
                 return true;
@@ -7149,7 +7172,7 @@ return stripEmptyPlaceholderProposals(result);
      * Предложение EDT, которое является ключевым словом: предложение Xtext (не шаблон), чей
      * текст — ключевое слово грамматики BSL.
      */
-    private static boolean isKeywordProposal(ICompletionProposal proposal)
+    static boolean isKeywordProposal(ICompletionProposal proposal)
     {
         Set<String> keywords = grammarKeywords;
         if (keywords == null)
@@ -7761,7 +7784,9 @@ return result;
                 return popupListWithIr(raw);
             // Без ИР: схлопывание на уже созданном EDT-списке. Не заменять на
             // повторный delegate.compute — см. javadoc ContentAssistPopupSync (DataEvent).
-            return collapseOptionalEdtOverlapsArray(raw);
+            // Обёртка — и без флажка «Фильтр»: подпись (типы, свёртка параметров, цвет типа)
+            // делает SmartCompletionProposal. Порядок штатный.
+            return buildDelegateOrderedList(collapseOptionalEdtOverlapsArray(unwrapProposals(raw)));
         }
         if (hasIrProposalsForCurrentContext())
             return popupListWithIr(raw);
@@ -9087,7 +9112,32 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (!onUi)
             resetDelegateAssistMode();
         KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
-        // Типы строк запрашиваются отдельно: текущая сразу, остальные видимые после паузы.
+        // Типы строк запрашиваются отдельно: текущая сразу, остальные видимые после паузы. Здесь — только
+        // план результатов запросов метода (поля выборки и выгрузки), без цепочки «см.». В UI-потоке — нет:
+        // там readOnly ждал бы задания разрешения ссылок.
+        if (!onUi && viewer != null && viewer.getDocument() instanceof IXtextDocument refreshDoc)
+        {
+            final int refreshOffset = off;
+            boolean[] shown = { false };
+            try
+            {
+                refreshDoc.readOnly(resource ->
+                {
+                    BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, refreshOffset, status ->
+                    {
+                        // Состояние — в нижней панели открытого списка вместо «Родитель: …».
+                        shown[0] = true;
+                        ContentAssistPopupUi.setRecomputeStatus(viewer, this, status);
+                    });
+                    return null;
+                });
+            }
+            finally
+            {
+                if (shown[0])
+                    ContentAssistPopupUi.setRecomputeStatus(viewer, this, null);
+            }
+        }
         boolean delegateCompleted = false;
         try
         {
@@ -9626,7 +9676,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * .tmp/bundles/lcore-ui-templates/TemplateProposal.javap.txt; имя проверяется точно,
      * без дополнительной зависимости основного бандла от lcore.ui.templates.
      */
-    private static boolean isTemplateProposal(ICompletionProposal proposal)
+    static boolean isTemplateProposal(ICompletionProposal proposal)
     {
         ICompletionProposal raw = unwrapProposal(proposal);
         if (raw instanceof org.eclipse.jface.text.templates.TemplateProposal)
@@ -10878,10 +10928,44 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (raw == null || raw.length == 0)
             return EMPTY;
 
-        ICompletionProposal[] result = new ICompletionProposal[raw.length];
-        for (int i = 0; i < raw.length; i++)
-            result[i] = wrapProposal(unwrapProposal(raw[i]), i);
+        // Пустой префикс: премия контекста впереди, внутри равной премии — порядок EDT. Номер
+        // строки EDT сохраняется — по нему досортировывает и штатный sorter окна.
+        ensureContextPremiums(raw);
+        // Слова, которых нет у EDT (генераторы, конструкции, копии строк выше), — в конец, дальше по премии
+        ICompletionProposal[] list = BslExpectedTypePremiums.withAddedWords(raw);
+        Integer[] order = new Integer[list.length];
+        for (int i = 0; i < list.length; i++)
+            order[i] = Integer.valueOf(i);
+        if ((BslExpectedTypePremiums.hasPremiums() || BslQueryLiteralSupport.hasPremiums(list))
+            && !irProposalsActiveForCurrentContext())
+            Arrays.sort(order, (a, b) -> comparePremiums(list[a.intValue()], list[b.intValue()]));
+        ICompletionProposal[] result = new ICompletionProposal[list.length];
+        for (int i = 0; i < list.length; i++)
+        {
+            int index = order[i].intValue();
+            result[i] = wrapProposal(unwrapProposal(list[index]), index);
+        }
         return result;
+    }
+
+    /**
+     * Снимок премий ожидаемого типа ({@link BslExpectedTypePremiums}) для сортируемого списка; документ и
+     * каретка — как у {@link #dropTypedIdentifierGhostInPlace}.
+     */
+    private static void ensureContextPremiums(ICompletionProposal[] list)
+    {
+        IDocument doc = GHOST_DOC.get();
+        Integer ghostCaret = GHOST_CARET.get();
+        int caret;
+        if (doc != null && ghostCaret != null)
+            caret = ghostCaret.intValue();
+        else
+        {
+            ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            doc = viewer != null ? viewer.getDocument() : null;
+            caret = resolveWidgetCaret(viewer);
+        }
+        BslExpectedTypePremiums.ensure(doc, caret, list);
     }
 
     /** Полный список при выключенном smart-фильтре: все элементы, алфавит (legacy). */
@@ -10983,7 +11067,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ICompletionProposal raw = unwrapProposal(proposal);
         if (raw == null)
             return proposal;
-        if (raw instanceof SmartCompletionProposal)
+        if (raw instanceof SmartCompletionProposal || raw instanceof BslAddedWordProposal)
             return raw;
         if (proposal instanceof SmartCompletionProposal wrapped
             && wrapped.getDelegate() == raw
@@ -11095,6 +11179,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ICompletionProposal[] result = EMPTY;
         try
         {
+        ensureContextPremiums(raw);
+        raw = BslExpectedTypePremiums.withAddedWords(raw);
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
         long tScore = System.nanoTime();
@@ -11592,6 +11678,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (n1 != n2)
             return Integer.compare(n2, n1);
 
+        // Премия контекста (ожидаемый тип) — сразу за рейтингом фильтра; при словах ИР ранжирует ИР.
+        if (!irProposalsActiveForCurrentContext())
+        {
+            int byPremium = comparePremiums(p1, p2);
+            if (byPremium != 0)
+                return byPremium;
+        }
+
         int o1 = delegateOrderOf(p1);
         int o2 = delegateOrderOf(p2);
         if (o1 >= 0 && o2 >= 0)
@@ -11605,6 +11699,22 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (matcher.isEmpty)
             return compareDelegateOrder(p1, p2);
         return compareDisplayStrings(p1, p2);
+    }
+
+    /**
+     * Порядок по премии контекста: больше — выше; при равной премии слово, добавленное под место
+     * ({@link BslAddedWordProposal}: генератор, конструкция, выражение под ожидаемый тип), — выше строки EDT:
+     * его добавляют именно потому, что здесь его выбор вероятнее.
+     */
+    private static int comparePremiums(ICompletionProposal p1, ICompletionProposal p2)
+    {
+        int c1 = BslExpectedTypePremiums.premiumOf(p1);
+        int c2 = BslExpectedTypePremiums.premiumOf(p2);
+        if (c1 != c2)
+            return Integer.compare(c2, c1);
+        boolean added1 = unwrapProposal(p1) instanceof BslAddedWordProposal;
+        boolean added2 = unwrapProposal(p2) instanceof BslAddedWordProposal;
+        return added1 == added2 ? 0 : added1 ? -1 : 1;
     }
 
     static int computeNameScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
@@ -13179,8 +13289,8 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 Type type = resolveType(fakeCtor.getTypeName());
                 if (type == null)
                     return -1;
-                EList<Ctor> ctors = type.getCtors();
-                if (ctors == null || ctors.isEmpty())
+                List<Ctor> ctors = Global.typeConstructors(type);
+                if (ctors.isEmpty())
                     return -1;
                 List<String> fakeNames = fakeParamNames(fakeCtor);
                 Ctor matched = null;

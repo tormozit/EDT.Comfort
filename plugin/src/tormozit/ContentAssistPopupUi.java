@@ -3,12 +3,16 @@ package tormozit;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
-import org.eclipse.swt.layout.RowLayout;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
 
 /**
  * Нижняя панель popup: переключатель фильтра и тип контекста списка.
@@ -20,6 +24,7 @@ public final class ContentAssistPopupUi
     private static final String BAR_DATA_KEY = FILTER_BAR_DATA_KEY;
     private static final String TOGGLE_DATA_KEY = "tormozit.filterToggleButton"; //$NON-NLS-1$
     private static final String CONTEXT_LABEL_DATA_KEY = "tormozit.contextTypeLabel"; //$NON-NLS-1$
+    private static final String EXPECTED_LABEL_DATA_KEY = "tormozit.expectedTypeLabel"; //$NON-NLS-1$
     /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */
     private static boolean suppressToggleSelection;
     private static final String PARENT_PLACEHOLDER = "Родитель: —"; //$NON-NLS-1$
@@ -47,6 +52,7 @@ public final class ContentAssistPopupUi
             if (shell == null || shell.isDisposed())
                 return;
 
+            SelectionStyleSupport.install(ContentAssistPopupSync.getProposalTable(popup));
             ContentAssistPopupSync.hideStatusLine(assistant, popup);
 
             Composite bar = (Composite) shell.getData(BAR_DATA_KEY);
@@ -159,7 +165,8 @@ public final class ContentAssistPopupUi
         else
             contextLabel.setToolTipText(TooltipText.wrap(contextLabel, text));
 
-        if (shown.equals(old))
+        boolean expectedChanged = applyExpectedTypeLabel(bar, viewer);
+        if (shown.equals(old) && !expectedChanged)
             return;
         if (bar == null || bar.isDisposed())
             return;
@@ -171,7 +178,34 @@ public final class ContentAssistPopupUi
 
     private static void copyContextTypeLabel(SourceViewer viewer)
     {
-        String text = resolveContextTypeLabel(viewer);
+        copyTypeLabel(viewer, resolveContextTypeLabel(viewer));
+    }
+
+    private static String resolveExpectedTypeLabel(SourceViewer viewer)
+    {
+        if (viewer == null || viewer.getDocument() == null)
+            return ""; //$NON-NLS-1$
+        String types = BslExpectedTypePremiums.expectedTypeTextAt(viewer.getDocument(), resolveViewerCaret(viewer));
+        return types == null || types.isEmpty() ? "" : "Ожидаем: " + types; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean applyExpectedTypeLabel(Composite bar, SourceViewer viewer)
+    {
+        Label label = bar != null && !bar.isDisposed() ? (Label) bar.getData(EXPECTED_LABEL_DATA_KEY) : null;
+        if (label == null || label.isDisposed())
+            return false;
+        String text = resolveExpectedTypeLabel(viewer);
+        String shown = truncateToPopupWidth(label, bar, text);
+        boolean changed = !shown.equals(label.getText()) || label.getVisible() != !text.isEmpty();
+        label.setText(shown);
+        label.setVisible(!text.isEmpty());
+        ((GridData)label.getLayoutData()).exclude = text.isEmpty();
+        label.setToolTipText(shown.equals(text) ? null : TooltipText.wrap(label, text));
+        return changed;
+    }
+
+    private static void copyTypeLabel(SourceViewer viewer, String text)
+    {
         if (text == null || text.isBlank())
             return;
         org.eclipse.swt.dnd.Clipboard clipboard =
@@ -202,7 +236,7 @@ public final class ContentAssistPopupUi
         int budget = shell.getClientArea().width - 12;
         for (org.eclipse.swt.widgets.Control c : bar.getChildren())
         {
-            if (c == contextLabel || c.isDisposed())
+            if (c == contextLabel || c instanceof Label || c.isDisposed())
                 continue;
             budget -= c.computeSize(SWT.DEFAULT, SWT.DEFAULT).x + 10;
         }
@@ -378,7 +412,9 @@ public final class ContentAssistPopupUi
         {
             ContentAssistSessionReloader reloader =
                 ContentAssistSessionReloader.getActiveReloader();
-            String ctx = reloader != null ? reloader.getIrAssistContextTypeLabel() : null;
+            String ctx = BslQueryLiteralSupport.parentTypeTextAt(viewer.getDocument(), caret);
+            if (ctx == null)
+                ctx = reloader != null ? reloader.getIrAssistContextTypeLabel() : null;
             cachedContextLabelDot = -1;
             cachedContextLabelReceiver = ""; //$NON-NLS-1$
             cachedContextLabelText = ctx != null && !ctx.isEmpty()
@@ -437,17 +473,21 @@ public final class ContentAssistPopupUi
                                              SmartContentAssistProcessor processor)
     {
         Composite bar = new Composite(shell, SWT.NONE);
-        RowLayout row = new RowLayout(SWT.HORIZONTAL);
+        GridLayout row = new GridLayout(2, false);
+        row.marginWidth = 0;
+        row.marginHeight = 0;
         row.marginLeft = 4;
         row.marginRight = 4;
         row.marginTop = 2;
         row.marginBottom = 2;
-        row.spacing = 10;
+        row.horizontalSpacing = 10;
+        row.verticalSpacing = 2;
         bar.setLayout(row);
         GridData barData = new GridData(SWT.FILL, SWT.CENTER, true, false);
         bar.setLayoutData(barData);
 
         Button toggle = new Button(bar, SWT.CHECK);
+        toggle.setLayoutData(new GridData(SWT.LEFT, SWT.TOP, false, false, 1, 2));
         toggle.setText("Фильтр"); //$NON-NLS-1$
         setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
         toggle.addListener(SWT.Selection, e -> {
@@ -459,12 +499,18 @@ public final class ContentAssistPopupUi
         });
 
         Label contextLabel = new Label(bar, SWT.NONE);
-        applyContextTypeLabel(contextLabel, viewer);
+        contextLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         contextLabel.addListener(SWT.MouseDoubleClick, e -> copyContextTypeLabel(viewer));
+
+        Label expectedLabel = new Label(bar, SWT.NONE);
+        expectedLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        expectedLabel.addListener(SWT.MouseDoubleClick, e -> copyTypeLabel(viewer, resolveExpectedTypeLabel(viewer)));
 
         bar.setData(TOGGLE_DATA_KEY, toggle);
         bar.setData(CONTEXT_LABEL_DATA_KEY, contextLabel);
+        bar.setData(EXPECTED_LABEL_DATA_KEY, expectedLabel);
         shell.setData(BAR_DATA_KEY, bar);
+        applyContextTypeLabel(contextLabel, viewer);
 
         shell.addListener(SWT.KeyDown, e -> {
             ContentAssistSessionReloader.CtrlSpaceFilter filter =
@@ -505,6 +551,68 @@ public final class ContentAssistPopupUi
         }
         toggle.setEnabled(true);
         toggle.setToolTipText(null);
+    }
+
+    /** Стили JFace сохраняются и на текущей строке; фон выделения рисуем сами. */
+    private static final class SelectionStyleSupport
+    {
+        private static final String DATA_KEY = "tormozit.assist.selectionStyles"; //$NON-NLS-1$
+        private Color selectionBackground;
+        private RGB baseBackground;
+        private boolean focused;
+
+        static void install(Table table)
+        {
+            if (table == null || table.isDisposed() || table.getData(DATA_KEY) != null)
+                return;
+            SelectionStyleSupport support = new SelectionStyleSupport();
+            table.setData(DATA_KEY, support);
+            // TableOwnerDrawSupport удаляет цвета StyleRange уже в MeasureItem.
+            // Наш слушатель должен отработать перед ним, а не только перед PaintItem.
+            Listener keepStyles = event -> event.detail &= ~(SWT.SELECTED | SWT.HOT);
+            for (int eventType : new int[] { SWT.MeasureItem, SWT.PaintItem })
+            {
+                Listener[] existing = table.getListeners(eventType);
+                for (Listener listener : existing)
+                    table.removeListener(eventType, listener);
+                table.addListener(eventType, keepStyles);
+                for (Listener listener : existing)
+                    table.addListener(eventType, listener);
+            }
+            table.addListener(SWT.EraseItem, event -> {
+                boolean selected = (event.detail & SWT.SELECTED) != 0;
+                event.detail &= ~(SWT.SELECTED | SWT.HOT);
+                if (!selected)
+                    return;
+                Color oldBackground = event.gc.getBackground();
+                event.gc.setBackground(support.selectionBackground(table));
+                event.gc.fillRectangle(0, event.y, table.getClientArea().width, event.height);
+                event.gc.setBackground(oldBackground);
+                event.detail &= ~SWT.BACKGROUND;
+            });
+            table.addListener(SWT.Dispose, event -> {
+                if (support.selectionBackground != null && !support.selectionBackground.isDisposed())
+                    support.selectionBackground.dispose();
+            });
+            table.redraw();
+        }
+
+        private Color selectionBackground(Table table)
+        {
+            RGB background = table.getBackground().getRGB();
+            boolean hasFocus = table.isFocusControl();
+            if (selectionBackground == null || selectionBackground.isDisposed()
+                || !background.equals(baseBackground) || hasFocus != focused)
+            {
+                if (selectionBackground != null && !selectionBackground.isDisposed())
+                    selectionBackground.dispose();
+                selectionBackground = ListSelectionPalette.rowSelectionBackground(table,
+                    ListSelectionPalette.Mode.OWN_SELECTION);
+                baseBackground = background;
+                focused = hasFocus;
+            }
+            return selectionBackground;
+        }
     }
 
     private static int resolveViewerCaret(SourceViewer viewer)

@@ -469,6 +469,49 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
+     * Перед автодополнением — только типы результатов запросов метода под кареткой ({@link BslQueryResultTypes}):
+     * план метода строится при смене его текста, и если в нём есть запросы, пересчитываются метод и его вызывающие.
+     * Цепочка «см.» ({@link #refreshTypesForAssist}) здесь не пересчитывается: при первом заполнении кэша она
+     * разворачивается в сотни методов (3,5 мин на модуле БСП, 23.10.2026). Вызывать в фоновом потоке под
+     * {@code readOnly} документа: блокировка перевязки ресурса берётся здесь.
+     */
+    static void refreshQueryTypesForAssist(Resource resource, int offset,
+        java.util.function.Consumer<String> onRecompute)
+    {
+        refreshQueryTypesForAssist(resource, offset, onRecompute, null);
+    }
+
+    /** @param onLocked вызывается, когда взята блокировка перевязки (временный замер); {@code null} — нет */
+    static void refreshQueryTypesForAssist(Resource resource, int offset,
+        java.util.function.Consumer<String> onRecompute, Runnable onLocked)
+    {
+        if (resource == null || org.eclipse.swt.widgets.Display.getCurrent() != null
+            || resource.getContents().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree))
+            return;
+        Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (queryLock != null)
+            ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
+            {
+                if (onLocked != null)
+                    onLocked.run();
+                BslQueryResultTypes.refresh(resource, offset, onRecompute,
+                    method ->
+                    {
+                        Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+                        if (!queryTree.recomputeDependent(module, method, CancelIndicator.NullImpl))
+                            return false;
+                        java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+                        if (!changed.isEmpty())
+                            ComfortTreeTypeSystem.StaleTypes.add(resource, changed);
+                        return true;
+                    });
+                return true;
+            });
+    }
+
+    /**
      * Перед автодополнением: если метод под кареткой ссылается «см.» на функцию, сменившую
      * версию после его последнего расчёта, — пересчитать только его (и его вызывающих) штатным
      * частичным расчётом; если расчёт модуля был отменён — модуль целиком. Вызывать в фоновом
@@ -477,29 +520,7 @@ public final class BslStructureInsertCommentTypes
     static void refreshTypesForAssist(Resource resource, int offset,
         java.util.function.Consumer<String> onRecompute)
     {
-        if (resource != null && org.eclipse.swt.widgets.Display.getCurrent() == null
-            && !resource.getContents().isEmpty()
-            && BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))
-            && peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree)
-        {
-            Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
-            if (queryLock != null)
-                ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
-                {
-                    BslQueryResultTypes.refresh(resource, offset, onRecompute,
-                        method ->
-                        {
-                            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-                            if (!queryTree.recomputeDependent(module, method, CancelIndicator.NullImpl))
-                                return false;
-                            java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
-                            if (!changed.isEmpty())
-                                ComfortTreeTypeSystem.StaleTypes.add(resource, changed);
-                            return true;
-                        });
-                    return true;
-                });
-        }
+        refreshQueryTypesForAssist(resource, offset, onRecompute);
         ComfortTreeTypeSystem.StaleTypes stale = resource == null ? null
             : ComfortTreeTypeSystem.StaleTypes.BY_RESOURCE.get(resource);
         if (stale == null || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)

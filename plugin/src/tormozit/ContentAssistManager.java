@@ -149,6 +149,8 @@ public final class ContentAssistManager
     {
         // Живые маркеры ошибок запросов в литералах (issue 837).
         BslQueryLiteralSupport.attachMarkers(editor);
+        // Типы результатов запросов — в модели после каждой правки, а не только перед списком.
+        BslQueryResultTypes.watchEditor(editor);
         if (!settings.isEnabled()) return;
 
         ISourceViewer viewer = editor.getInternalSourceViewer();

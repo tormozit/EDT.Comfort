@@ -988,8 +988,7 @@ public final class ParamHintHtmlModifier
             Type type = ctor.getType();
             if (type == null)
                 return false;
-            EList<Ctor> ctors = type.getCtors();
-            return ctors != null && ctors.size() > 1;
+            return Global.typeConstructors(type).size() > 1;
         }
         if (!(invocationLike instanceof Invocation invocation))
             return false;
@@ -1602,8 +1601,8 @@ public final class ParamHintHtmlModifier
             // Как штатный computeDocumentationInformation для feature типа Type:
             // страницы берутся у каждого Ctor типа, размеры — из его параметров.
             Type ctorType = ctorOwner.getType();
-            EList<Ctor> ctors = ctorType != null ? ctorType.getCtors() : null;
-            if (ctors == null || ctors.isEmpty())
+            List<Ctor> ctors = Global.typeConstructors(ctorType);
+            if (ctors.isEmpty())
             {
                 return null;
             }
@@ -3055,7 +3054,7 @@ public final class ParamHintHtmlModifier
      * Номер параметра у каретки для synthetic {@code ParameterInfo}: как EDT,
      * но по разделителям аргументов из узловой модели ({@link #argSeparatorOffsets}).
      */
-    private static int paramNumberLikeEdt(CallSiteInfo site, int caret)
+    static int paramNumberLikeEdt(CallSiteInfo site, int caret)
     {
         if (site == null || caret < site.methodAccessEnd || caret >= site.callEnd)
             return -1;
@@ -3073,7 +3072,7 @@ public final class ParamHintHtmlModifier
      * подсказка показывалась не для того метода. Первый найденный вызов остаётся
      * запасным ответом — на случай, когда границы посчитать не удалось.
      */
-    private static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
+    static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
     {
         EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
         EObject obj = helper.resolveContainedElementAt(resource, caret);
@@ -3175,7 +3174,7 @@ public final class ParamHintHtmlModifier
             ctorNode.getTotalOffset());
     }
 
-    private static final class CallSiteInfo
+    static final class CallSiteInfo
     {
         final int methodAccessEnd;
         final int callEnd;
@@ -4556,7 +4555,7 @@ public final class ParamHintHtmlModifier
             Set<String> definedTypes = DefinedTypeLinks.names(html);
             if (!definedTypes.isEmpty() && editor.getDocument() instanceof IXtextDocument document)
             {
-                Map<String, String> links = ContentAssistSessionReloader.readOnlyPeekAst(document,
+                Map<String, DefinedTypeLinks.Link> links = ContentAssistSessionReloader.readOnlyPeekAst(document,
                     resource -> DefinedTypeLinks.resolve(definedTypes, resource));
                 html = DefinedTypeLinks.inject(html, links);
             }
@@ -5121,8 +5120,8 @@ public final class ParamHintHtmlModifier
     {
         if (type == null || formalCount < 0)
             return false;
-        EList<Ctor> ctors = type.getCtors();
-        if (ctors == null || ctors.isEmpty())
+        List<Ctor> ctors = Global.typeConstructors(type);
+        if (ctors.isEmpty())
             return false;
         Ctor matched = null;
         for (Ctor ctor : ctors)

@@ -24,7 +24,9 @@ import org.eclipse.emf.common.notify.impl.AdapterImpl;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -44,6 +46,7 @@ import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.Tuples;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.ui.editor.model.IXtextModelListener;
 import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
 
@@ -77,6 +80,7 @@ import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.AbstractStringLiteral
 import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.IStringLiteralProposalProvider.IBslStringLiteralProposalImageProvider;
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.mcore.ContextDefWithRefItem;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.McorePackage;
@@ -97,6 +101,7 @@ import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaTotalControlPoint;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
@@ -123,6 +128,14 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
+        // #region temp — поля выборки пропали: что отдаёт расширение вызову результата запроса
+        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess logged
+            && RESULT_METHODS.contains(lower(logged.getName())))
+            Global.tempLog("query-fields", "getTypes call=" + logged.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + (method == null ? null : method.getName()) + " session=" + (session != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " plan=" + (plan != null) + " planTypes=" + (plan == null ? -1 : plan.types.size()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " planned=" + (planned == null ? null : planned.size())); //$NON-NLS-1$
+        // #endregion
         if (planned != null)
             return planned;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
@@ -239,6 +252,53 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     }
 
     /**
+     * Колонки итогов ({@code ИТОГИ ПО}) запроса, результат которого — {@code expression}: замена
+     * {@code ПостроительЗапроса.Измерения} ИР. Запрос — тот, чей результат возвращает {@code Выполнить()}
+     * (последний в пакете без {@code ПОМЕСТИТЬ}). {@code null} — текст запроса не определён.
+     * Вызывающий держит readOnly документа.
+     */
+    static List<String> totalColumnsOf(Expression expression)
+    {
+        Method method = expression == null ? null : EcoreUtil2.getContainerOfType(expression, Method.class);
+        if (method == null)
+            return null;
+        try
+        {
+            Plan plan = new Plan(method, ""); //$NON-NLS-1$
+            Shape shape = plan.shape(expression, Collections.newSetFromMap(new IdentityHashMap<>()));
+            List<String> totals = shape != null && shape.kind.equals("QueryResult") //$NON-NLS-1$
+                ? shape.results.get(0).totals : null;
+            Global.tempLog("expected-type", "query totals=" + totals //$NON-NLS-1$ //$NON-NLS-2$
+                + " shape=" + (shape == null ? null : shape.kind)); //$NON-NLS-1$
+            return totals;
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            Global.tempLog("expected-type", "query totals failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** Имя колонки точки итогов: {@code ИТОГИ ПО Поле КАК Колонка} — колонка, иначе псевдоним или поле. */
+    private static String totalColumnName(QuerySchemaTotalControlPoint point)
+    {
+        String name = point.getColumnName();
+        QuerySchemaExpression expression = point.getExpression();
+        if ((name == null || name.isBlank()) && expression != null)
+        {
+            name = expression.getAlias();
+            if (name == null || name.isBlank())
+            {
+                ICompositeNode node = expression.getExpression() != null
+                    ? NodeModelUtils.findActualNodeFor(expression.getExpression()) : null;
+                String text = node != null ? NodeModelUtils.getTokenText(node).trim() : ""; //$NON-NLS-1$
+                name = text.substring(text.lastIndexOf('.') + 1);
+            }
+        }
+        return name == null ? "" : name.trim(); //$NON-NLS-1$
+    }
+
+    /**
      * Общий результат для автопроверки отдельного бандла. Подготовка схемы выполняется
      * один раз для текущей версии метода; проверка не меняет состояния типов BSL.
      */
@@ -316,6 +376,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
+        // #region temp — поля выборки пропали: вызывается ли досчёт плана
+        Global.tempLog("query-fields", "refresh method=" + method.getName() + " previous=" + (previous != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " complete=" + (previous != null && previous.complete) + " current=" + current(previous, text)); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -334,10 +398,15 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             if (module != null)
                 session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
             session.plans.put(method, plan);
+            // #region temp — поля выборки пропали: итог плана
+            Global.tempLog("query-fields", "refresh planned method=" + method.getName() + " types=" + plan.types.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " queries=" + plan.queries.size()); //$NON-NLS-1$
+            // #endregion
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
+                Global.tempLog("query-fields", "refresh recomputed=" + recomputed); //$NON-NLS-1$ //$NON-NLS-2$ // temp
                 if (!recomputed)
                 {
                     return;
@@ -351,6 +420,130 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
             Global.tempLog("query-value-table", "prepare failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             session.plans.remove(method);
+        }
+    }
+
+    // ---- Досчёт плана после разбора правки открытого модуля ---------------------------------------
+
+    /** Пауза после разбора правки до досчёта: серия правок склеивается в один досчёт. */
+    private static final int EDIT_REFRESH_DELAY_MS = 500;
+    private static final Map<IXtextDocument, EditRefresh> WATCHED_DOCUMENTS =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
+    /**
+     * План запросов метода под кареткой досчитывается в фоне после каждого разбора правки открытого модуля:
+     * типы результатов запросов (поля выборки и выгрузки) оказываются в модели к любому чтению — списку из
+     * UI-потока, премиям, подсказкам, переходам, — а не только у тех, кто досчитывает сам перед чтением.
+     * Досчёт перед списком и наведением остаётся быстрым путём: при актуальном плане он возвращается сразу.
+     * UI-поток; слушатель ставится один раз на документ.
+     */
+    static void watchEditor(BslXtextEditor editor)
+    {
+        IXtextDocument document = editor == null ? null : editor.getDocument();
+        ISourceViewer viewer = editor == null ? null : editor.getInternalSourceViewer();
+        StyledText widget = viewer == null ? null : viewer.getTextWidget();
+        if (document == null || widget == null || widget.isDisposed() || WATCHED_DOCUMENTS.containsKey(document))
+            return;
+        EditRefresh refresh = new EditRefresh(editor, document);
+        WATCHED_DOCUMENTS.put(document, refresh);
+        document.addModelListener(refresh);
+        widget.addDisposeListener(event ->
+        {
+            document.removeModelListener(refresh);
+            WATCHED_DOCUMENTS.remove(document);
+        });
+        // Модуль только открыт: разбор уже прошёл, своего события до первой правки не будет
+        refresh.modelChanged(null);
+    }
+
+    /** Временный замер: миллисекунды между отметками; {@code -1} — отметки нет (шаг не дошёл). */
+    private static long millis(long from, long to)
+    {
+        return from < 0 || to < 0 ? -1L : (to - from) / 1_000_000L;
+    }
+
+    /** Слушатель разбора одного открытого модуля. */
+    private static final class EditRefresh implements IXtextModelListener
+    {
+        private final java.lang.ref.WeakReference<BslXtextEditor> editor;
+        private final IXtextDocument document;
+        private final Runnable fire = this::fire;
+
+        EditRefresh(BslXtextEditor editor, IXtextDocument document)
+        {
+            this.editor = new java.lang.ref.WeakReference<>(editor);
+            this.document = document;
+        }
+
+        /** Xtext зовёт после разбора; здесь только перевзвод таймера на UI-потоке. */
+        @Override
+        public void modelChanged(XtextResource resource)
+        {
+            Display display = PlatformUI.isWorkbenchRunning() ? PlatformUI.getWorkbench().getDisplay() : null;
+            if (display == null || display.isDisposed())
+                return;
+            if (Display.getCurrent() == display)
+                restart(display, EDIT_REFRESH_DELAY_MS);
+            else
+                display.asyncExec(() -> restart(display, EDIT_REFRESH_DELAY_MS));
+        }
+
+        private void restart(Display display, int delayMs)
+        {
+            display.timerExec(-1, fire);
+            display.timerExec(delayMs, fire);
+        }
+
+        /** UI: при открытом списке досчёт делает сам список — откладываем; каретка — модельное смещение. */
+        private void fire()
+        {
+            BslXtextEditor current = editor.get();
+            ISourceViewer viewer = current == null ? null : current.getInternalSourceViewer();
+            StyledText widget = viewer == null ? null : viewer.getTextWidget();
+            if (widget == null || widget.isDisposed())
+                return;
+            if (assistOpen(current))
+            {
+                restart(widget.getDisplay(), RELINK_ASSIST_RETRY_MS);
+                return;
+            }
+            int offset = viewer.getSelectedRange().x;
+            Job job = new Job("Комфорт: типы результатов запросов") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    // #region temp — цена досчёта после правки: ожидание блокировок, досчёт, пересчёт метода
+                    long started = System.nanoTime();
+                    long[] marks = { -1L, -1L, -1L };
+                    try
+                    {
+                        document.readOnly(resource ->
+                        {
+                            marks[0] = System.nanoTime();
+                            BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
+                                status -> marks[2] = System.nanoTime(), () -> marks[1] = System.nanoTime());
+                            return null;
+                        });
+                    }
+                    catch (RuntimeException | LinkageError failure)
+                    {
+                        Global.tempLog("query-fields", "edit refresh failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    long finished = System.nanoTime();
+                    Global.tempLog("query-fields", "edit refresh offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                        + " readOnlyWaitMs=" + millis(started, marks[0]) //$NON-NLS-1$
+                        + " linkLockWaitMs=" + millis(marks[0], marks[1]) //$NON-NLS-1$
+                        + " refreshMs=" + millis(marks[1], finished) //$NON-NLS-1$
+                        + " recompute=" + (marks[2] >= 0) //$NON-NLS-1$
+                        + " recomputeMs=" + millis(marks[2], finished) //$NON-NLS-1$
+                        + " totalMs=" + millis(started, finished)); //$NON-NLS-1$
+                    // #endregion
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.schedule();
         }
     }
 
@@ -834,7 +1027,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
     private record Field(String name, String nameRu, List<TypeItem> types,
         URI literalUri, int offset, int length) {}
-    private record Result(List<Field> fields, boolean ordinary, boolean dropped) {}
+    /** @param totals колонки итогов {@code ИТОГИ ПО} в порядке уровней */
+    private record Result(List<Field> fields, boolean ordinary, boolean dropped, List<String> totals) {}
     private record Shape(String kind, List<Result> results) {}
 
     private static final class Plan
@@ -970,7 +1164,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     if (literal == null)
                         return null;
                     List<Result> results = originsOnly
-                        ? List.of(new Result(List.of(), true, false)) : query(literal);
+                        ? List.of(new Result(List.of(), true, false, List.of())) : query(literal);
                     if (results.isEmpty())
                         return null;
                     if (name.equals("execute") || name.equals("выполнить")) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1178,6 +1372,17 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 throw new IllegalStateException("Query schema unavailable"); //$NON-NLS-1$
             // DependentModelProvider.createDependentModel уже вызывает
             // EcoreUtil2.resolveLazyCrossReferences перед возвратом схемы.
+            // #region temp — поля выборки пропали у запроса с ИТОГИ: ошибки схемы и состав пакета
+            Global.tempLog("query-fields", "method=" + method.getName() + " errors=" //$NON-NLS-1$ //$NON-NLS-2$
+                + schema.eResource().getErrors().stream().map(error -> error.getMessage()).toList()
+                + " queries=" + schema.getQueries().stream().map(query -> query.eClass().getName() //$NON-NLS-1$
+                    + (query instanceof QuerySchemaSelectQuery select
+                        ? "(placement=" + (select.getPlacementTable() != null) //$NON-NLS-1$
+                            + " view=" + (select.getDbViewByThis() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
+                                : select.getDbViewByThis().eIsProxy() ? "proxy" : "ok") //$NON-NLS-1$ //$NON-NLS-2$
+                            + " totals=" + select.getTotalControlPoints().size() + ")" //$NON-NLS-1$ //$NON-NLS-2$
+                        : "")).toList()); //$NON-NLS-1$
+            // #endregion
             if (!schema.eResource().getErrors().isEmpty())
             {
                 queries.put(literal, List.of());
@@ -1194,8 +1399,15 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             for (var query : schema.getQueries())
             {
                 List<Field> fields = new ArrayList<>();
+                List<String> totals = new ArrayList<>();
                 if (query instanceof QuerySchemaSelectQuery select && select.getPlacementTable() == null)
                 {
+                    for (QuerySchemaTotalControlPoint point : select.getTotalControlPoints())
+                    {
+                        String name = totalColumnName(point);
+                        if (!name.isEmpty())
+                            totals.add(name);
+                    }
                     var view = select.getDbViewByThis();
                     if (view == null || view.eIsProxy())
                         throw new IllegalStateException("Query result fields unavailable"); //$NON-NLS-1$
@@ -1219,9 +1431,15 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 // не равны колонкам SELECT: их здесь не подставляем.
                 results.add(new Result(List.copyOf(fields),
                     query instanceof QuerySchemaSelectQuery select && select.getPlacementTable() == null,
-                    query instanceof com._1c.g5.v8.dt.ql.model.QuerySchemaDropTableQuery));
+                    query instanceof com._1c.g5.v8.dt.ql.model.QuerySchemaDropTableQuery, List.copyOf(totals)));
             }
             cached = List.copyOf(results);
+            // #region temp — поля выборки пропали у запроса с ИТОГИ: итог разбора
+            Global.tempLog("query-fields", "method=" + method.getName() + " results=" + cached.stream() //$NON-NLS-1$ //$NON-NLS-2$
+                .map(result -> "fields=" + result.fields().stream().map(Field::name).toList() //$NON-NLS-1$
+                    + " ordinary=" + result.ordinary() + " totals=" + result.totals()) //$NON-NLS-1$ //$NON-NLS-2$
+                .toList());
+            // #endregion
             queries.put(literal, cached);
             return cached;
         }
@@ -1297,7 +1515,12 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 type.setCollectionElementTypes(elements);
             }
             else if (shape.kind.equals("QueryResultSelection")) //$NON-NLS-1$
+            {
                 fillFields(type, shape.results.get(0));
+                // Поля посчитаны — платформенное «ИмяПоля» (доступ к любому полю по имени) лишнее
+                if (!shape.results.get(0).fields.isEmpty() && type.getContextDef() instanceof ContextDefWithRefItem ref)
+                    ref.getRefProperties().removeIf(property -> "FieldName".equals(property.getName())); //$NON-NLS-1$
+            }
             return type;
         }
 

@@ -1485,6 +1485,17 @@ public final class BslModuleSpellCheckHook implements IStartup
         return false;
     }
 
+    /** Элемент описания платформы: не модуль и не метаданные проекта. */
+    static boolean isPlatformElement(EObject element)
+    {
+        if (isPlatformApiFeature(element))
+            return true;
+        if (element instanceof BslContextDefMethod || element instanceof BslContextDefProperty
+            || element instanceof com._1c.g5.v8.dt.bsl.model.Method)
+            return false;
+        return isPlatformPluginUri(eObjectUri(element));
+    }
+
     private static URI eObjectUri(EObject object)
     {
         if (object == null)
@@ -3734,7 +3745,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                 continue;
             if (name.equals(typed))
                 return new NameMatch(true, name);
-            int distance = editDistance(typed, name, max);
+            int distance = FuzzyStringSearch.editDistance(typed, name, max);
             if (distance <= max && distance < closeDistance)
             {
                 close = name;
@@ -3942,36 +3953,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             return null;
         IFile file = ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(platformString));
         return file != null ? file.getProject() : null;
-    }
-
-    /**
-     * Расстояние Левенштейна (вставка/удаление/замена символа) между a и b, не более max + 1 -
-     * при превышении max точное значение не считается, дальше нужно только "больше max".
-     */
-    private static int editDistance(String a, String b, int max)
-    {
-        int la = a.length();
-        int lb = b.length();
-        if (Math.abs(la - lb) > max)
-            return max + 1;
-        int[] prev = new int[lb + 1];
-        int[] curr = new int[lb + 1];
-        for (int j = 0; j <= lb; j++)
-            prev[j] = j;
-        for (int i = 1; i <= la; i++)
-        {
-            curr[0] = i;
-            char ca = a.charAt(i - 1);
-            for (int j = 1; j <= lb; j++)
-            {
-                int cost = ca == b.charAt(j - 1) ? 0 : 1;
-                curr[j] = Math.min(Math.min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
-            }
-            int[] tmp = prev;
-            prev = curr;
-            curr = tmp;
-        }
-        return prev[lb];
     }
 
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$

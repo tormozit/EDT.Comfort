@@ -18,12 +18,17 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension5;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.resource.ColorRegistry;
+import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.StyledString.Styler;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
@@ -105,6 +110,7 @@ public class SmartCompletionProposal implements
     private boolean variableTargetResolved;
     /** Временно #877: строка уже записана в лог. */
     private boolean rowLogged;
+    private boolean rowResultLogged;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
@@ -172,9 +178,17 @@ public class SmartCompletionProposal implements
         if (overlapDisplay == null)
             FunctionReturnTypes.rowShown(this);
         String collapsed = collapseParams(overlapDisplay != null
-            ? localized : decoratePropertyType(decorateVariableType(
-                decorateFunctionType(localized, functionTarget()), variableTarget())),
+            ? localized : decoratePredefinedValueType(decoratePropertyType(decorateVariableType(
+                decorateFunctionType(localized, functionTarget()), variableTarget()))),
             moduleParams(), hasSeveralSignatures(sourceDisplay) ? signatureFirstParam(sourceDisplay) : null);
+        // #region temp — переменная без «<?>» при первом открытии: итоговая подпись первого показа
+        if (!rowResultLogged && variableTarget() != null)
+        {
+            rowResultLogged = true;
+            Global.tempLog("assist-function-return-type", "row result=" + collapsed //$NON-NLS-1$ //$NON-NLS-2$
+                + " source=" + sourceDisplay); //$NON-NLS-1$
+        }
+        // #endregion
         StyledString result;
         if (collapsed != localized)
         {
@@ -189,6 +203,7 @@ public class SmartCompletionProposal implements
             result = ext6.getStyledDisplayString();
         else
             result = buildIrStyledDisplayString(localized != null ? localized : ""); //$NON-NLS-1$
+        applyTypeStyle(result, delegate);
         SmartCodeMatcher matcher = resolveHighlightMatcher();
         if (!matcher.isEmpty)
         {
@@ -490,6 +505,71 @@ public class SmartCompletionProposal implements
             FunctionReturnTypes.propertyState(Global.getField(configurable, "additionalProposalInfo"))); //$NON-NLS-1$
     }
 
+    /**
+     * Подпись значения системного перечисления или предопределённого значения с его типом:
+     * {@code Обычное : <СтатусСообщения>}. Такие строки EDT создаёт простыми предложениями — без
+     * описания-объекта, с текстом вставки {@code СтатусСообщения.Обычное} или
+     * {@code ПредопределенноеЗначение("…")}; тип берётся из него ({@link #predefinedValueType}).
+     */
+    private String decoratePredefinedValueType(String display)
+    {
+        if (display == null || display.isEmpty() || hasNameType(display))
+            return display;
+        // EDT кладёт в такие строки лишь имя значения — тип берётся из места ввода
+        String type = BslExpectedTypePremiums.predefinedValueTypeInContext(delegate);
+        if (type == null)
+            type = predefinedValueType(delegate);
+        return type == null ? display
+            : decorateNameType(display, new FunctionReturnTypes.State("<" + type + ">", true)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static final java.util.regex.Pattern PREDEFINED_VALUE_CALL = java.util.regex.Pattern.compile(
+        "(?iu)^(?:ПредопределенноеЗначение|PredefinedValue)\\s*\\(\\s*\"(.*)\"\\s*\\)$"); //$NON-NLS-1$
+
+    /** Ссылочный тип по корню предопределённого значения (менеджер или вид в {@code ПредопределенноеЗначение}). */
+    private static final java.util.Map<String, String> PREDEFINED_REF_TYPES = java.util.Map.of(
+        "перечисления", "ПеречислениеСсылка", "перечисление", "ПеречислениеСсылка", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "справочники", "СправочникСсылка", "справочник", "СправочникСсылка", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "планысчетов", "ПланСчетовСсылка", "плансчетов", "ПланСчетовСсылка", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        "планывидовхарактеристик", "ПланВидовХарактеристикСсылка", //$NON-NLS-1$ //$NON-NLS-2$
+        "планвидовхарактеристик", "ПланВидовХарактеристикСсылка", //$NON-NLS-1$ //$NON-NLS-2$
+        "планывидоврасчета", "ПланВидовРасчетаСсылка", "планвидоврасчета", "ПланВидовРасчетаСсылка"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+
+    /**
+     * Тип значения перечисления или предопределённого значения строки EDT без описания-объекта, по тексту
+     * вставки: {@code СтатусСообщения.Обычное} → {@code СтатусСообщения}, {@code Перечисления.Пол.Мужской} →
+     * {@code ПеречислениеСсылка.Пол}; последний фрагмент должен совпадать с именем строки. Иначе {@code null}.
+     */
+    static String predefinedValueType(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        if (!(raw instanceof ConfigurableCompletionProposal configurable)
+            || Global.getField(configurable, "additionalProposalInfo") != null) //$NON-NLS-1$
+            return null;
+        String text = configurable.getReplacementString();
+        if (text == null)
+            return null;
+        text = text.trim();
+        if (text.endsWith(";")) //$NON-NLS-1$
+            text = text.substring(0, text.length() - 1).trim();
+        java.util.regex.Matcher call = PREDEFINED_VALUE_CALL.matcher(text);
+        if (call.matches())
+            text = call.group(1).trim();
+        String[] parts = text.split("\\."); //$NON-NLS-1$
+        String name = SmartContentAssistProcessor.parseProposalListName(raw.getDisplayString());
+        if (parts.length < 2 || name == null || !parts[parts.length - 1].equalsIgnoreCase(name))
+            return null;
+        for (String part : parts)
+        {
+            if (part.isEmpty() || !Character.isLetter(part.charAt(0)) && part.charAt(0) != '_')
+                return null;
+        }
+        if (parts.length == 2)
+            return parts[0];
+        String refType = parts.length == 3 ? PREDEFINED_REF_TYPES.get(parts[0].toLowerCase(java.util.Locale.ROOT)) : null;
+        return refType != null ? refType + "." + parts[1] : null; //$NON-NLS-1$
+    }
+
     /** У имени строки уже есть тип ({@code имя : <Тип> ~ Родитель}). */
     private static boolean hasNameType(String display)
     {
@@ -557,6 +637,58 @@ public class SmartCompletionProposal implements
             ? "<" + FunctionReturnTypes.UNKNOWN + ">" //$NON-NLS-1$ //$NON-NLS-2$
             : "<" + FunctionReturnTypes.UNKNOWN + ", " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return head + " : " + type + tail; //$NON-NLS-1$
+    }
+
+    /** Цвет типа в светлой теме: чуть синее обычного шрифта; в тёмной — {@link ThemeAwareColors#toEffectiveRgb}. */
+    private static final RGB TYPE_LIGHT_RGB = new RGB(30, 60, 140);
+
+    private static final Styler TYPE_STYLER = new Styler()
+    {
+        @Override
+        public void applyStyles(TextStyle textStyle)
+        {
+            String key = "tormozit.assist.type." + (ThemeAwareColors.isDarkTheme() ? "dark" : "light"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ColorRegistry registry = JFaceResources.getColorRegistry();
+            if (!registry.hasValueFor(key))
+                registry.put(key, ThemeAwareColors.toEffectiveRgb(TYPE_LIGHT_RGB));
+            textStyle.foreground = registry.get(key);
+        }
+    };
+
+    /**
+     * Тип, сильно совместимый с типом приёмника места: в светлой теме — чуть зеленее обычного шрифта (лёгкий
+     * зелёный оттенок, той же силы, что синий {@link #TYPE_LIGHT_RGB}); в тёмной — {@link ThemeAwareColors#toEffectiveRgb}.
+     */
+    private static final RGB TYPE_MATCH_LIGHT_RGB = new RGB(30, 110, 60);
+
+    private static final Styler TYPE_MATCH_STYLER = new Styler()
+    {
+        @Override
+        public void applyStyles(TextStyle textStyle)
+        {
+            String key = "tormozit.assist.type.match." + (ThemeAwareColors.isDarkTheme() ? "dark" : "light"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ColorRegistry registry = JFaceResources.getColorRegistry();
+            if (!registry.hasValueFor(key))
+                registry.put(key, ThemeAwareColors.toEffectiveRgb(TYPE_MATCH_LIGHT_RGB));
+            textStyle.foreground = registry.get(key);
+        }
+    };
+
+    /**
+     * Тип {@code Имя(…) : Тип ~ Родитель} — между {@code " : "} после сигнатуры и {@code " ~ "}. Тип, сильно
+     * совместимый с типом приёмника ({@link BslExpectedTypePremiums#isStrongReceiverType}), — зелёным.
+     */
+    private static void applyTypeStyle(StyledString styled, ICompletionProposal proposal)
+    {
+        String display = styled.getString();
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        int headEnd = sep >= 0 ? sep : display.length();
+        int close = signatureClose(display, signatureOpen(display));
+        int colon = display.indexOf(" : ", close >= 0 ? close + 1 : 0); //$NON-NLS-1$
+        if (colon < 0 || colon + 3 >= headEnd)
+            return;
+        boolean match = BslExpectedTypePremiums.isStrongReceiverType(proposal, display.substring(colon + 3, headEnd));
+        styled.setStyle(colon + 3, headEnd - colon - 3, match ? TYPE_MATCH_STYLER : TYPE_STYLER);
     }
 
     /** Владелец после {@code ~} — как у штатного assist EDT ({@link StyledString#QUALIFIER_STYLER}). */
@@ -1333,7 +1465,7 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(new NullProgressMonitor());
-        return objectToSideHintString(resolveEdtAssistSideHint(baseInfo));
+        return objectToSideHintString(BslExpectedTypePremiums.withReceiverType(resolveEdtAssistSideHint(baseInfo)));
 
     }
 
@@ -1356,6 +1488,13 @@ public class SmartCompletionProposal implements
             return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate));
         if (isEdtIrOverlapRow())
+            return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+                assistant, delegate));
+        // Строка без описания EDT получает от нас HTML («Приемник.Тип») — панель браузерная, как у слов ИР;
+        // штатная текстовая показала бы разметку текстом.
+        if (delegate instanceof ConfigurableCompletionProposal configurable
+            && Global.getField(configurable, "additionalProposalInfo") == null //$NON-NLS-1$
+            && BslExpectedTypePremiums.hasReceiverLine())
             return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate));
         if (delegate instanceof ICompletionProposalExtension3 ext3)
@@ -1468,7 +1607,7 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
-        return resolveEdtAssistSideHint(baseInfo);
+        return BslExpectedTypePremiums.withReceiverType(resolveEdtAssistSideHint(baseInfo));
 
     }
 

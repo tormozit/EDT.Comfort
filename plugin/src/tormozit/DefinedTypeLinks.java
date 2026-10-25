@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.internal.text.html.HTMLPrinter;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.scoping.IScopeProvider;
@@ -33,6 +34,14 @@ final class DefinedTypeLinks
             + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*)", //$NON-NLS-1$
         Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
+    /** Имя определяемого типа в простом тексте (строка списка автодополнения, не HTML). */
+    static final Pattern NAME = Pattern.compile(
+        "(?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*", //$NON-NLS-1$
+        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    /** Закодированный URI определяемого типа и его суффикс как в навигаторе ({@link DefinedTypeDecorator}). */
+    record Link(String uri, String suffix) {}
+
     private DefinedTypeLinks()
     {
     }
@@ -50,8 +59,8 @@ final class DefinedTypeLinks
         return names;
     }
 
-    /** Имя → закодированный URI определяемого типа; только под чтением модели {@code resource}. */
-    static Map<String, String> resolve(Set<String> names, XtextResource resource)
+    /** Имя → ссылка на определяемый тип; только под чтением модели {@code resource}. */
+    static Map<String, Link> resolve(Set<String> names, XtextResource resource)
     {
         if (names == null || names.isEmpty() || resource == null || resource.getContents().isEmpty())
             return Map.of();
@@ -62,7 +71,7 @@ final class DefinedTypeLinks
             return Map.of();
         var scope = scopes.getScope(resource.getContents().get(0),
             McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
-        Map<String, String> links = new LinkedHashMap<>();
+        Map<String, Link> links = new LinkedHashMap<>();
         for (String name : names)
         {
             var description = scope.getSingleElement(converter.toQualifiedName(name));
@@ -75,13 +84,14 @@ final class DefinedTypeLinks
             if (!(producer instanceof DefinedType))
                 continue;
             var uri = resource.getResourceSet().getURIConverter().normalize(EcoreUtil.getURI(producer));
-            links.put(name, URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8));
+            links.put(name, new Link(URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8),
+                DefinedTypeDecorator.suffix(type)));
         }
         return Map.copyOf(links);
     }
 
     /** Подставляет ссылки по готовой карте; уже существующие ссылки не трогает. */
-    static String inject(String html, Map<String, String> links)
+    static String inject(String html, Map<String, Link> links)
     {
         if (html == null || links == null || links.isEmpty())
             return html;
@@ -90,10 +100,11 @@ final class DefinedTypeLinks
         while (text.find())
         {
             String name = text.group(2);
-            String uri = name == null ? null : links.get(name);
-            String replacement = uri == null ? text.group()
+            Link link = name == null ? null : links.get(name);
+            String replacement = link == null ? text.group()
                 : "<a class=\"comfort-defined-type\" href=\"#\" onclick=\"" //$NON-NLS-1$
-                    + "comfortOpenMethodDefinition('" + uri + "');return false;\">" + name + "</a>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + "comfortOpenMethodDefinition('" + link.uri() + "');return false;\">" + name + "</a>" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + HTMLPrinter.convertToHTMLContent(link.suffix());
             text.appendReplacement(result, Matcher.quoteReplacement(replacement));
         }
         text.appendTail(result);

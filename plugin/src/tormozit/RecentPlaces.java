@@ -42,7 +42,7 @@ public final class RecentPlaces
     // =========================================================================
 
     /** Максимальное число хранимых мест. */
-    public static final int MAX_SIZE = 50;
+    public static final int MAX_SIZE = 100;
 
     private static final String PREF_KEY = "recentPlaces.entries"; //$NON-NLS-1$
     private static final char   SEP      = '\t';

@@ -86,6 +86,18 @@ public final class CodeEditorPreferencePage extends ComfortPreferencePage
         sideHintDelayTextData.horizontalAlignment = SWT.LEFT;
         sideHintDelayText.setLayoutData(sideHintDelayTextData);
 
+        Link choiceStatisticsLink = new Link(parent, SWT.NONE);
+        choiceStatisticsLink.setText("<a>Статистика выбора слов автодополнения</a>"); //$NON-NLS-1$
+        GridData choiceStatisticsLinkData = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        choiceStatisticsLinkData.horizontalSpan = 2;
+        choiceStatisticsLink.setLayoutData(choiceStatisticsLinkData);
+        choiceStatisticsLink.setToolTipText(TooltipText.wrap(choiceStatisticsLink,
+            "Сколько раз какое слово платформы вставлено из списка автодополнения в каждом контексте. "
+            + "Часто выбираемые слова поднимаются в списке. Статистика слов метаданных — "
+            + "в Свойствах проекта → Комфорт.")); //$NON-NLS-1$
+        choiceStatisticsLink.addListener(SWT.Selection,
+            event -> BslExpectedTypePremiums.openChoiceStatistics(choiceStatisticsLink.getShell(), null));
+
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
             ComfortVisibleSettings.label(ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED),

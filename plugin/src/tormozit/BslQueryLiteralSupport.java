@@ -1,5 +1,8 @@
 package tormozit;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -16,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -61,8 +65,10 @@ import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
@@ -78,10 +84,16 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.ui.editor.XtextSourceViewer;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext;
+import org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor;
+import org.eclipse.xtext.ui.editor.contentassist.IContentProposalProvider;
+import org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor;
 import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHoverProvider;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
@@ -114,12 +126,15 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.QlUtil;
 import com._1c.g5.v8.dt.ql.model.DbViewFromQuery;
 import com._1c.g5.v8.dt.ql.model.FunctionInvocationExpression;
+import com._1c.g5.v8.dt.ql.model.LogicalCompareOperatorExpression;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
+import com._1c.g5.v8.dt.ql.typesystem.IExpressionTypeChecker;
 import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
 import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
@@ -144,6 +159,108 @@ final class BslQueryLiteralSupport
 
     private static final Map<IDocument, QueryGroupIndices> QUERY_GROUP_INDICES =
         Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final Map<IDocument, QueryExpectedType> QUERY_TYPES =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
+    /** Проект + имя определяемого типа → суффикс строки списка (как в навигаторе); пусто — без суффикса. */
+    private static final Map<String, String> DEFINED_TYPE_SUFFIXES = new ConcurrentHashMap<>();
+
+    private static String suffixKey(String projectName, String definedTypeName)
+    {
+        return projectName + '\u0000' + definedTypeName;
+    }
+
+    private static QueryExpectedType queryTypesAt(IDocument document, int caret)
+    {
+        QueryExpectedType state = QUERY_TYPES.get(document);
+        try
+        {
+            return state != null && segmentKeyAt(document, caret) == state.sourceKey
+                && document.get(0, state.sourcePrefix.length()).equals(state.sourcePrefix) ? state : null;
+        }
+        catch (Exception error)
+        {
+            return null;
+        }
+    }
+
+    static String parentTypeTextAt(IDocument document, int caret)
+    {
+        QueryExpectedType state = queryTypesAt(document, caret);
+        return state != null ? state.parentNames : null;
+    }
+
+    static String expectedTypeTextAt(IDocument document, int caret)
+    {
+        QueryExpectedType state = queryTypesAt(document, caret);
+        return state != null ? String.join(", ", state.expectedNames) : null; //$NON-NLS-1$
+    }
+
+    static Boolean autoOpenAt(IDocument document, int caret)
+    {
+        QueryExpectedType state = queryTypesAt(document, caret);
+        return state != null ? !state.premiums.autoOpen().isEmpty() : null;
+    }
+
+    static Integer premiumOf(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        return raw instanceof QueryLiteralProposal query
+            ? query.expectedType.premiums.values().getOrDefault(
+                SmartContentAssistProcessor.filterMatchName(raw).toLowerCase(java.util.Locale.ROOT), 0) : null;
+    }
+
+    /** Ожидаемые типы места строки запроса; {@code null} — строка не из литерала запроса. */
+    static List<String> expectedTypesOf(ICompletionProposal proposal)
+    {
+        return SmartContentAssistProcessor.unwrapProposal(proposal) instanceof QueryLiteralProposal query
+            ? query.expectedType.expectedNames : null;
+    }
+
+    /**
+     * Выбор строки запроса для статистики выбора слов: контекст ({@code ТипКонтекстаСтатистики} ИР), описано
+     * ли слово в платформе, проект.
+     */
+    record QueryChoice(String context, boolean platformWord, IProject project) {}
+
+    /**
+     * {@code null} — строка не из литерала запроса. Слово платформы — без родителя: ключевое слово или функция
+     * языка запросов (EDT пишет их прописными) и корневой тип ({@code Справочник}); остальное (таблицы, поля,
+     * псевдонимы, параметры) — слово проекта.
+     */
+    static QueryChoice choiceOf(ICompletionProposal proposal)
+    {
+        if (!(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof QueryLiteralProposal query))
+            return null;
+        String parent = query.expectedType.parent();
+        String word = SmartContentAssistProcessor.filterMatchName(query);
+        boolean platformWord = parent.isEmpty() && !word.startsWith("&") //$NON-NLS-1$
+            && (isUpperCaseWord(word) || MdTypeMapping.isKnownMdRootType(word));
+        return new QueryChoice(BslExpectedTypePremiums.queryStatisticsContext(parent, query.expectedType.parentNames),
+            platformWord, query.project);
+    }
+
+    private static boolean isUpperCaseWord(String word)
+    {
+        boolean letter = false;
+        for (int i = 0; i < word.length(); i++)
+        {
+            char c = word.charAt(i);
+            if (Character.isLowerCase(c))
+                return false;
+            letter |= Character.isLetter(c);
+        }
+        return letter;
+    }
+
+    static boolean hasPremiums(ICompletionProposal[] proposals)
+    {
+        for (ICompletionProposal proposal : proposals)
+            if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof QueryLiteralProposal query)
+                return !query.expectedType.premiums.values().isEmpty();
+        return false;
+    }
 
     private record QueryGroupIndices(long stamp, Map<Integer, String> byLine) {}
 
@@ -307,7 +424,62 @@ final class BslQueryLiteralSupport
     /** Хаб EDT не должен проверять отдельные фрагменты составного текста запроса (issue 373). */
     static void installCheckWeavingHook()
     {
-        QueryCheckWeaving.install();
+        QueryLiteralWeaving.install();
+    }
+
+    /** Область одного штатного расчёта полного списка; не переносится в другие потоки. */
+    private static final ThreadLocal<NativeCompletionScope> NATIVE_COMPLETION_SCOPE = new ThreadLocal<>();
+
+    private static final class NativeCompletionScope
+    {
+        /** Каретка не после точки: литеральные функции нужны в любом выражении. */
+        private boolean rootLevel;
+        private boolean literalsAdded;
+    }
+
+    /**
+     * ЗНАЧЕНИЕ(…), ДАТАВРЕМЯ(…), ТИП(…), ВЫРАЗИТЬ(…) EDT строит только в
+     * {@code completeTopSelector_SelectFields} и {@code complete_AbstractExpression}; правый
+     * операнд сравнения и прочие выражения их не получают. Тот же штатный
+     * {@code createLiteralProposals} — один раз на корневом уровне, в контексте без префикса.
+     */
+    private static void addRootLiterals(Object[] args)
+    {
+        NativeCompletionScope scope = NATIVE_COMPLETION_SCOPE.get();
+        if (scope == null || !scope.rootLevel || scope.literalsAdded
+            || !(args[1] instanceof ContentAssistContext context) || !context.getPrefix().isEmpty())
+            return;
+        scope.literalsAdded = true;
+        Object provider = args[0];
+        try
+        {
+            Class<?> baseType = provider.getClass();
+            while (!QueryLiteralWeaving.COMPLETION_TARGET.equals(baseType.getName()))
+                baseType = baseType.getSuperclass();
+            var allowed = baseType.getDeclaredField("allowedAnotherRule"); //$NON-NLS-1$
+            allowed.setAccessible(true);
+            boolean previous = allowed.getBoolean(provider);
+            allowed.setBoolean(provider, true);
+            try
+            {
+                baseType.getMethod("createLiteralProposals", ContentAssistContext.class, //$NON-NLS-1$
+                    ICompletionProposalAcceptor.class).invoke(provider, context, args[2]);
+            }
+            finally
+            {
+                allowed.setBoolean(provider, previous);
+            }
+        }
+        catch (ReflectiveOperationException | RuntimeException error)
+        {
+            // другая версия EDT — список без литеральных функций, как у штатного
+        }
+    }
+
+    /** Эквивалент Strings.isNullOrEmpty вне нашего расчёта полного списка. */
+    private static boolean applyNativeEmptyPrefixRestriction(Object prefix)
+    {
+        return (prefix == null || ((String)prefix).isEmpty()) && NATIVE_COMPLETION_SCOPE.get() == null;
     }
 
     private static boolean isConcatenatedLiteral(Object object)
@@ -318,39 +490,416 @@ final class BslQueryLiteralSupport
     }
 
     /** Мост через JDK Predicate: бандлу EDT не нужна зависимость от Комфорт. */
-    private static final class QueryCheckWeaving implements WeavingHook
+    private static final class QueryLiteralWeaving implements WeavingHook
     {
         private static final String TARGET = "com.e1c.g5.v8.dt.internal.bsl.check.BslQlDelegatingCheck"; //$NON-NLS-1$
+        private static final String COMPLETION_TARGET = "com._1c.g5.v8.dt.ql.ui.contentassist.QlProposalProvider"; //$NON-NLS-1$
+        private static final String DCS_COMPLETION_TARGET = "com._1c.g5.v8.dt.ql.dcs.ui.contentassist.QlDcsProposalProvider"; //$NON-NLS-1$
         private static final String CALLBACK = "tormozit.queryLiteral.skipConcatenation"; //$NON-NLS-1$
+        private static final String COMPLETION_CALLBACK = "tormozit.queryLiteral.emptyPrefixRestriction"; //$NON-NLS-1$
+        private static final String LITERALS_CALLBACK = "tormozit.queryLiteral.rootLiterals"; //$NON-NLS-1$
         private static final String CHECK_DESC = "(Ljava/lang/Object;"
             + "Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;"
             + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
         private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+        private static final Map<Class<?>, Class<?>> COMPLETION_TYPES = new HashMap<>();
 
         static void install()
         {
             if (!INSTALLED.compareAndSet(false, true))
                 return;
             System.getProperties().put(CALLBACK, (Predicate<Object>) BslQueryLiteralSupport::isConcatenatedLiteral);
+            System.getProperties().put(COMPLETION_CALLBACK,
+                (Predicate<Object>) BslQueryLiteralSupport::applyNativeEmptyPrefixRestriction);
+            System.getProperties().put(LITERALS_CALLBACK,
+                (java.util.function.Consumer<Object[]>) BslQueryLiteralSupport::addRootLiterals);
             Bundle bundle = FrameworkUtil.getBundle(BslQueryLiteralSupport.class);
             if (bundle != null && bundle.getBundleContext() != null)
-                bundle.getBundleContext().registerService(WeavingHook.class, new QueryCheckWeaving(), null);
+                bundle.getBundleContext().registerService(WeavingHook.class, new QueryLiteralWeaving(), null);
         }
 
         @Override
         public void weave(WovenClass woven)
         {
-            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+            boolean completion = COMPLETION_TARGET.equals(woven.getClassName());
+            if (woven.getState() != WovenClass.TRANSFORMING || !completion && !TARGET.equals(woven.getClassName()))
                 return;
             try
             {
-                byte[] transformed = transform(woven.getBytes());
+                byte[] transformed = completion ? transformCompletion(woven.getBytes()) : transform(woven.getBytes());
                 if (transformed != null)
                     woven.setBytes(transformed);
             }
             catch (RuntimeException | LinkageError error)
             {
+                // класс остаётся штатным
             }
+        }
+
+        /**
+         * QlProposalProvider (com._1c.g5.v8.dt.ql.ui 7.0.100.v202605050943): две проверки пустого префикса запрещают ключевые слова
+         * (completeKeyword) и остальные правила (createProposals). В полном списке сегмента
+         * префикс намеренно пуст: его фильтрация выполняется уже в видимом редакторе.
+         * Меняем только эти вызовы; стек и переходы штатных методов остаются прежними.
+         */
+        private static byte[] transformCompletion(byte[] original)
+        {
+            ClassReader reader = new ClassReader(original);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] checks = new int[2];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    int slot = "createProposals".equals(name) && descriptor.equals( //$NON-NLS-1$
+                        "(Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;Lorg/eclipse/xtext/ui/editor/contentassist/ICompletionProposalAcceptor;)V") //$NON-NLS-1$
+                        ? 0 : "completeKeyword".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lorg/eclipse/xtext/Keyword;Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;Lorg/eclipse/xtext/ui/editor/contentassist/ICompletionProposalAcceptor;)V") ? 1 : -1; //$NON-NLS-1$
+                    if (slot < 0)
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String called, String desc, boolean isInterface)
+                        {
+                            if (opcode != Opcodes.INVOKESTATIC || !"com/google/common/base/Strings".equals(owner) //$NON-NLS-1$
+                                || !"isNullOrEmpty".equals(called) || !"(Ljava/lang/String;)Z".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                                return;
+                            }
+                            checks[slot]++;
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(COMPLETION_CALLBACK);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                        }
+                    };
+                }
+            }, 0);
+            return checks[0] == 1 && checks[1] == 1 ? writer.toByteArray() : null;
+        }
+
+        /** Подключение к уже созданному процессору: не зависит от ранней загрузки класса EDT. */
+        static void installCompletionProvider(IContentAssistProcessor processor)
+        {
+            if (!(processor instanceof XtextContentAssistProcessor xtext))
+                return;
+            IContentProposalProvider original = xtext.getContentProposalProvider();
+            String providerName = original == null ? "null" : original.getClass().getName(); //$NON-NLS-1$
+            if (!COMPLETION_TARGET.equals(providerName) && !DCS_COMPLETION_TARGET.equals(providerName))
+                return;
+            try
+            {
+                Class<?> nativeType = original.getClass();
+                Class<?> patchedType = completionType(nativeType);
+                Object patched;
+                if (DCS_COMPLETION_TARGET.equals(providerName))
+                {
+                    var grammar = nativeType.getDeclaredField("grammarAccess"); //$NON-NLS-1$
+                    grammar.setAccessible(true);
+                    patched = patchedType.getDeclaredConstructor(grammar.getType()).newInstance(grammar.get(original));
+                }
+                else
+                    patched = patchedType.getDeclaredConstructor().newInstance();
+                // Как BslStructureInsertCommentTypes.copyFields: тот же набор сервисов и
+                // кэшей EDT, без нового injector и без второго документа запроса.
+                for (Class<?> type = nativeType; type != Object.class; type = type.getSuperclass())
+                    for (var field : type.getDeclaredFields())
+                    {
+                        if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers()))
+                            continue;
+                        field.setAccessible(true);
+                        field.set(patched, field.get(original));
+                    }
+                xtext.setContentProposalProvider((IContentProposalProvider)patched);
+            }
+            catch (Exception | LinkageError error)
+            {
+                // остаётся штатный поставщик
+            }
+        }
+
+        private static synchronized Class<?> completionType(Class<?> nativeType) throws Exception
+        {
+            Class<?> cached = COMPLETION_TYPES.get(nativeType);
+            if (cached != null)
+                return cached;
+            String name = nativeType.getName() + "$ComfortLiteralKeywordsV5"; //$NON-NLS-1$
+            String substituteKey = name + ".substitute"; //$NON-NLS-1$
+            var lookup = MethodHandles.privateLookupIn(nativeType, MethodHandles.lookup());
+            // Метод private; доступ — через тот же подтверждённый в репо Lookup API,
+            // который EditorTabIconDiagHook использует для штатного метода предка.
+            Class<?> baseType = nativeType;
+            while (!COMPLETION_TARGET.equals(baseType.getName()))
+                baseType = baseType.getSuperclass();
+            var baseLookup = MethodHandles.privateLookupIn(baseType, MethodHandles.lookup());
+            System.getProperties().put(substituteKey, baseLookup.findVirtual(baseType, "substituteKeyWord", //$NON-NLS-1$
+                MethodType.methodType(void.class, Keyword.class, ContentAssistContext.class,
+                    ICompletionProposalAcceptor.class)));
+            // Константы предка private static final (FILTER_PUNCTUATION): копия метода в чужом
+            // пакете их не видит (IllegalAccessError), подставляется тот же объект.
+            Map<String, String> constants = new LinkedHashMap<>();
+            for (var field : baseType.getDeclaredFields())
+            {
+                int modifiers = field.getModifiers();
+                if (!Modifier.isPrivate(modifiers) || !Modifier.isStatic(modifiers) || !Modifier.isFinal(modifiers)
+                    || field.getType().isPrimitive())
+                    continue;
+                field.setAccessible(true);
+                Object value = field.get(null);
+                if (value == null)
+                    continue;
+                String constantKey = name + "." + field.getName(); //$NON-NLS-1$
+                System.getProperties().put(constantKey, value);
+                constants.put(field.getName(), constantKey);
+            }
+            // createProposals предка: при пустом префиксе сбрасывает allowedAnotherRule, и все
+            // правила, кроме ключевых слов (функции, поля, таблицы), выходят. Копия того же
+            // метода с проверкой через callback; его private-поля и super-вызов — через мосты.
+            Map<String, String> fields = new LinkedHashMap<>();
+            for (var field : baseType.getDeclaredFields())
+            {
+                int modifiers = field.getModifiers();
+                if (!Modifier.isPrivate(modifiers) || Modifier.isStatic(modifiers))
+                    continue;
+                String fieldKey = name + ".field." + field.getName(); //$NON-NLS-1$
+                System.getProperties().put(fieldKey + ".get", baseLookup.findGetter(baseType, field.getName(), field.getType())); //$NON-NLS-1$
+                if (!Modifier.isFinal(modifiers))
+                    System.getProperties().put(fieldKey + ".set", baseLookup.findSetter(baseType, field.getName(), field.getType())); //$NON-NLS-1$
+                fields.put(field.getName(), fieldKey);
+            }
+            String superKey = name + ".super.createProposals"; //$NON-NLS-1$
+            System.getProperties().put(superKey, baseLookup.findSpecial(baseType.getSuperclass(), "createProposals", //$NON-NLS-1$
+                MethodType.methodType(void.class, ContentAssistContext.class, ICompletionProposalAcceptor.class), baseType));
+            Map<String, String> bridges = new LinkedHashMap<>();
+            byte[] dcsBytes = null;
+            String constructor = "()V"; //$NON-NLS-1$
+            if (nativeType != baseType)
+            {
+                // QlDcsProposalProvider 7.0.100.v202605050943: сохраняем оба фильтра
+                // ключевых слов, isDcsMode и обработку SelectFieldsCompositionData.
+                for (String field : List.of("oldCharacteristicsKeywords", "notAllowedKeywords")) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    String key = name + "." + field; //$NON-NLS-1$
+                    System.getProperties().put(key, lookup.findGetter(nativeType, field, Set.class));
+                    bridges.put(field, key);
+                }
+                for (String method : List.of("isDcsMode", "createProposalsForSelectFieldsCompositionData")) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    MethodType signature = method.equals("isDcsMode") //$NON-NLS-1$
+                        ? MethodType.methodType(boolean.class, ContentAssistContext.class)
+                        : MethodType.methodType(void.class, EObject.class, ContentAssistContext.class,
+                            ICompletionProposalAcceptor.class);
+                    String key = name + "." + method; //$NON-NLS-1$
+                    System.getProperties().put(key, lookup.findVirtual(nativeType, method, signature));
+                    bridges.put(method, key);
+                }
+                dcsBytes = classBytes(nativeType);
+                var grammar = nativeType.getDeclaredField("grammarAccess"); //$NON-NLS-1$
+                constructor = org.objectweb.asm.Type.getConstructorDescriptor(nativeType.getDeclaredConstructor(grammar.getType()));
+            }
+            Class<?> result;
+            try
+            {
+                result = Class.forName(name, false, nativeType.getClassLoader());
+            }
+            catch (ClassNotFoundException absent)
+            {
+                byte[] original = classBytes(baseType);
+                byte[] patched = transformCompletion(original);
+                if (patched == null)
+                    throw new IllegalStateException("Не совпали проверки QL"); //$NON-NLS-1$
+                result = lookup.defineClass(keywordSubclass(patched, name.replace('.', '/'), substituteKey,
+                    dcsBytes, constructor, bridges, constants, fields, superKey));
+            }
+            COMPLETION_TYPES.put(nativeType, result);
+            return result;
+        }
+
+        private static byte[] classBytes(Class<?> type) throws Exception
+        {
+            try (var stream = type.getResourceAsStream(type.getSimpleName() + ".class")) //$NON-NLS-1$
+            {
+                if (stream == null)
+                    throw new IllegalStateException("Нет байткода " + type.getName()); //$NON-NLS-1$
+                return stream.readAllBytes();
+            }
+        }
+
+        /** Копируются штатные completeKeyword обоих уровней и createProposals предка; остальное наследуется у EDT. */
+        private static byte[] keywordSubclass(byte[] patched, String name, String substituteKey,
+            byte[] dcsBytes, String constructor, Map<String, String> bridges, Map<String, String> constants,
+            Map<String, String> fields, String superKey)
+        {
+            ClassReader reader = new ClassReader(patched);
+            String base = reader.getClassName();
+            String parent = dcsBytes == null ? base : new ClassReader(dcsBytes).getClassName();
+            String keywordDesc = "(Lorg/eclipse/xtext/Keyword;Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;Lorg/eclipse/xtext/ui/editor/contentassist/ICompletionProposalAcceptor;)V"; //$NON-NLS-1$
+            String proposalsDesc = "(Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;Lorg/eclipse/xtext/ui/editor/contentassist/ICompletionProposalAcceptor;)V"; //$NON-NLS-1$
+            Map<String, String> fieldDescs = new LinkedHashMap<>();
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SUPER,
+                name, null, parent, null);
+            MethodVisitor ctor = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", constructor, null, null); //$NON-NLS-1$
+            ctor.visitCode();
+            ctor.visitVarInsn(Opcodes.ALOAD, 0);
+            if (dcsBytes != null)
+                ctor.visitVarInsn(Opcodes.ALOAD, 1);
+            ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "<init>", constructor, false); //$NON-NLS-1$
+            ctor.visitInsn(Opcodes.RETURN);
+            ctor.visitMaxs(0, 0);
+            ctor.visitEnd();
+            for (ClassReader source : dcsBytes == null ? List.of(reader) : List.of(reader, new ClassReader(dcsBytes)))
+            source.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String method, String desc,
+                    String signature, String[] exceptions)
+                {
+                    boolean proposals = source == reader && "createProposals".equals(method) && proposalsDesc.equals(desc); //$NON-NLS-1$
+                    if (!proposals && (!"completeKeyword".equals(method) || !keywordDesc.equals(desc))) //$NON-NLS-1$
+                        return null;
+                    boolean baseCopy = !proposals && dcsBytes != null && source == reader;
+                    return new MethodVisitor(Opcodes.ASM9, writer.visitMethod(baseCopy ? Opcodes.ACC_PRIVATE : access,
+                        baseCopy ? "comfortBaseKeyword" : method, desc, signature, exceptions)) //$NON-NLS-1$
+                    {
+                        @Override
+                        public void visitFrame(int type, int numLocal, Object[] local, int numStack, Object[] stack)
+                        {
+                            Object[] locals = local == null ? null : local.clone();
+                            if (numLocal > 0 && (base.equals(locals[0]) || parent.equals(locals[0])))
+                                locals[0] = name;
+                            super.visitFrame(type, numLocal, locals, numStack, stack);
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (proposals && opcode == Opcodes.RETURN)
+                            {
+                                // addRootLiterals(new Object[] { this, context, acceptor })
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(LITERALS_CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.ICONST_3);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                for (int arg = 0; arg < 3; arg++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitInsn(Opcodes.ICONST_0 + arg);
+                                    super.visitVarInsn(Opcodes.ALOAD, arg);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                            }
+                            super.visitInsn(opcode);
+                        }
+
+                        @Override
+                        public void visitFieldInsn(int opcode, String owner, String field, String fieldDesc)
+                        {
+                            if (opcode == Opcodes.GETFIELD && parent.equals(owner) && bridges.containsKey(field))
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, name, "comfortGet" + field, "()" + fieldDesc, false); //$NON-NLS-1$ //$NON-NLS-2$
+                            else if (opcode == Opcodes.GETSTATIC && base.equals(owner) && constants.containsKey(field))
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(constants.get(field));
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, org.objectweb.asm.Type.getType(fieldDesc).getInternalName());
+                            }
+                            else if ((opcode == Opcodes.GETFIELD || opcode == Opcodes.PUTFIELD) && source == reader
+                                && base.equals(owner) && fields.containsKey(field))
+                            {
+                                fieldDescs.put(field, fieldDesc);
+                                boolean get = opcode == Opcodes.GETFIELD;
+                                if (!get && !System.getProperties().containsKey(fields.get(field) + ".set")) //$NON-NLS-1$
+                                    throw new IllegalStateException("Запись final-поля " + field); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, name, (get ? "comfortBaseGet" : "comfortBaseSet") + field, //$NON-NLS-1$ //$NON-NLS-2$
+                                    get ? "()" + fieldDesc : "(" + fieldDesc + ")V", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            }
+                            else
+                                super.visitFieldInsn(opcode, owner, field, fieldDesc);
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String called, String callDesc, boolean isInterface)
+                        {
+                            if (!baseCopy && dcsBytes != null && opcode == Opcodes.INVOKESPECIAL
+                                && "completeKeyword".equals(called)) //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, name, "comfortBaseKeyword", callDesc, false); //$NON-NLS-1$
+                            else if (source == reader && opcode == Opcodes.INVOKESPECIAL && !"<init>".equals(called)) //$NON-NLS-1$
+                            {
+                                // Из подкласса invokespecial предка ушёл бы в штатный createProposals.
+                                if (!"createProposals".equals(called) || !proposalsDesc.equals(callDesc)) //$NON-NLS-1$
+                                    throw new IllegalStateException("super-вызов " + owner + "." + called); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, name, "comfortSuperCreateProposals", callDesc, false); //$NON-NLS-1$
+                            }
+                            else
+                            {
+                                boolean bridge = base.equals(owner) && "substituteKeyWord".equals(called) //$NON-NLS-1$
+                                    || parent.equals(owner) && bridges.containsKey(called);
+                                super.visitMethodInsn(opcode, bridge ? name : owner, called, callDesc, isInterface);
+                            }
+                        }
+                    };
+                }
+            }, 0);
+            emitKeywordBridge(writer, base, "substituteKeyWord", keywordDesc, substituteKey); //$NON-NLS-1$
+            emitKeywordBridge(writer, base, "comfortSuperCreateProposals", proposalsDesc, superKey); //$NON-NLS-1$
+            fieldDescs.forEach((field, fieldDesc) -> {
+                emitKeywordBridge(writer, base, "comfortBaseGet" + field, "()" + fieldDesc, fields.get(field) + ".get"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (System.getProperties().containsKey(fields.get(field) + ".set")) //$NON-NLS-1$
+                    emitKeywordBridge(writer, base, "comfortBaseSet" + field, "(" + fieldDesc + ")V", fields.get(field) + ".set"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            });
+            if (dcsBytes != null)
+            {
+                for (String field : List.of("oldCharacteristicsKeywords", "notAllowedKeywords")) //$NON-NLS-1$ //$NON-NLS-2$
+                    emitKeywordBridge(writer, parent, "comfortGet" + field, "()Ljava/util/Set;", bridges.get(field)); //$NON-NLS-1$ //$NON-NLS-2$
+                emitKeywordBridge(writer, parent, "isDcsMode", //$NON-NLS-1$
+                    "(Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;)Z", bridges.get("isDcsMode")); //$NON-NLS-1$ //$NON-NLS-2$
+                emitKeywordBridge(writer, parent, "createProposalsForSelectFieldsCompositionData", //$NON-NLS-1$
+                    "(Lorg/eclipse/emf/ecore/EObject;" + keywordDesc.substring(keywordDesc.indexOf(';') + 1), //$NON-NLS-1$
+                    bridges.get("createProposalsForSelectFieldsCompositionData")); //$NON-NLS-1$
+            }
+            writer.visitEnd();
+            return writer.toByteArray();
+        }
+
+        private static void emitKeywordBridge(ClassWriter writer, String parent, String method, String desc, String key)
+        {
+            MethodVisitor bridge = writer.visitMethod(Opcodes.ACC_PRIVATE, method, desc, null, null);
+            bridge.visitCode();
+            bridge.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            bridge.visitLdcInsn(key);
+            bridge.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            bridge.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/invoke/MethodHandle"); //$NON-NLS-1$
+            bridge.visitVarInsn(Opcodes.ALOAD, 0);
+            int slot = 1;
+            for (org.objectweb.asm.Type arg : org.objectweb.asm.Type.getArgumentTypes(desc))
+            {
+                bridge.visitVarInsn(arg.getOpcode(Opcodes.ILOAD), slot);
+                slot += arg.getSize();
+            }
+            bridge.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MethodHandle", "invokeExact", //$NON-NLS-1$ //$NON-NLS-2$
+                "(L" + parent + ";" + desc.substring(1), false); //$NON-NLS-1$ //$NON-NLS-2$
+            bridge.visitInsn(org.objectweb.asm.Type.getReturnType(desc).getOpcode(Opcodes.IRETURN));
+            bridge.visitMaxs(0, 0);
+            bridge.visitEnd();
         }
 
         private static byte[] transform(byte[] original)
@@ -1061,22 +1610,44 @@ final class BslQueryLiteralSupport
                 ? assistant.getContentAssistProcessor(IDocument.DEFAULT_CONTENT_TYPE) : null;
             while (processor instanceof SmartContentAssistProcessor smart)
                 processor = smart.getDelegate();
-            ICompletionProposal[] raw = processor != null
-                ? processor.computeCompletionProposals(qlViewer, lit.probeIndex) : null;
+            QueryLiteralWeaving.installCompletionProvider(processor);
+            NativeCompletionScope scope = new NativeCompletionScope();
+            scope.rootLevel = lit.probeIndex == 0 || query.charAt(lit.probeIndex - 1) != '.';
+            NativeCompletionScope previousScope = NATIVE_COMPLETION_SCOPE.get();
+            ICompletionProposal[] raw;
+            try
+            {
+                NATIVE_COMPLETION_SCOPE.set(scope);
+                raw = processor != null ? processor.computeCompletionProposals(qlViewer, lit.probeIndex) : null;
+            }
+            finally
+            {
+                if (previousScope == null)
+                    NATIVE_COMPLETION_SCOPE.remove();
+                else
+                    NATIVE_COMPLETION_SCOPE.set(previousScope);
+            }
             String lineBreak = TextUtilities.getDefaultLineDelimiter(doc) + lit.indent + "|"; //$NON-NLS-1$
             List<ICompletionProposal> result = new ArrayList<>(raw != null ? raw.length : 0);
             BslXtextEditor sourceEditor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer);
             QueryFieldHover fieldHover = new QueryFieldHover(embedded.getDocument(), sourceEditor);
-            // Шаблоны (не ConfigurableCompletionProposal) в литерал не перенести.
+            QueryExpectedType expectedType = new QueryExpectedType(embedded.getDocument(), query,
+                lit.probeIndex, sourceEditor);
+            // Шаблоны (не ConfigurableCompletionProposal) в литерал не перенести. Повторы — от
+            // литеральных функций: в ВЫБРАТЬ их добавляет и EDT, и addRootLiterals.
+            Set<String> seen = new java.util.HashSet<>();
             for (int i = 0; raw != null && i < raw.length; i++)
             {
-                if (raw[i] instanceof ConfigurableCompletionProposal cp)
+                if (raw[i] instanceof ConfigurableCompletionProposal cp
+                    && seen.add(cp.getDisplayString() + '\u0000' + cp.getReplacementString()))
                 {
                     result.add(new QueryLiteralProposal(cp, lit, lineBreak, sourceEditor, project, query,
-                        fieldHover.getHoverControlCreator()));
+                        fieldHover.getHoverControlCreator(), expectedType));
                 }
             }
-            return result.toArray(SmartContentAssistProcessor.EMPTY);
+            ICompletionProposal[] proposals = result.toArray(SmartContentAssistProcessor.EMPTY);
+            expectedType.start(viewer, doc, key, proposals);
+            return proposals;
         }
         catch (Exception | LinkageError e)
         {
@@ -1116,6 +1687,246 @@ final class BslQueryLiteralSupport
         return editor;
     }
 
+    /** Тип слева от сравнения QL; читается из существующего документа только вне UI. */
+    private static final class QueryExpectedType
+    {
+        private final XtextDocument document;
+        private final String prefix;
+        private final int offset;
+        private final BslXtextEditor editor;
+        private volatile String line;
+        private volatile List<String> expectedNames = List.of();
+        private volatile String parentNames = ""; //$NON-NLS-1$
+        private volatile String receiverText = ""; //$NON-NLS-1$
+        private volatile BslExpectedTypePremiums.Premiums premiums =
+            new BslExpectedTypePremiums.Premiums(Map.of(), Set.of());
+        private int sourceKey = -1;
+        private String sourcePrefix = ""; //$NON-NLS-1$
+
+        QueryExpectedType(XtextDocument document, String query, int offset, BslXtextEditor editor)
+        {
+            this.document = document;
+            this.offset = Math.max(0, Math.min(offset, query.length()));
+            this.prefix = query.substring(0, this.offset);
+            this.editor = editor;
+        }
+
+        /** Родитель места до последней точки ({@code Т.Поле.} → {@code Т.Поле}); без точки — пусто. */
+        String parent()
+        {
+            if (!prefix.endsWith(".")) //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
+            int parentStart = prefix.length() - 1;
+            while (parentStart > 0 && (isIdentifierChar(prefix.charAt(parentStart - 1))
+                || prefix.charAt(parentStart - 1) == '.'))
+                parentStart--;
+            return prefix.substring(parentStart, prefix.length() - 1);
+        }
+
+        void start(ITextViewer viewer, IDocument source, int key, ICompletionProposal[] proposals) throws Exception
+        {
+            sourceKey = key;
+            sourcePrefix = source.get(0, key + 1);
+            QUERY_TYPES.put(source, this);
+            Job job = new Job("Комфорт: типы и премии запроса") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    try
+                    {
+                        decorate(null);
+                        resolveDefinedTypeSuffixes(proposals);
+                        if (QUERY_TYPES.get(source) != QueryExpectedType.this)
+                            return Status.OK_STATUS;
+                        premiums = BslExpectedTypePremiums.queryPremiums(source, key + 1, expectedNames,
+                            receiverText, parent(), parentNames, resolveProject(editor), proposals);
+                        ContentAssistSessionReloader.requestGatedShow(viewer, "queryPremiums", () -> { //$NON-NLS-1$
+                            if (viewer.getDocument() != source || queryTypesAt(source,
+                                SmartContentAssistProcessor.resolveWidgetCaret(viewer)) != QueryExpectedType.this)
+                                return;
+                            if (viewer instanceof org.eclipse.jface.text.source.SourceViewer sourceViewer)
+                            {
+                                ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(sourceViewer);
+                                if (reloader != null && ContentAssistPopupSync.isPopupVisible(reloader.getAssistant()))
+                                {
+                                    ContentAssistPopupSync.invalidateSyncSnapshot();
+                                    ContentAssistPopupSync.recomputePopupList(reloader.getAssistant(), sourceViewer,
+                                        reloader.getProcessor());
+                                    ContentAssistPopupSync.refreshAdditionalInfo(reloader.getAssistant());
+                                }
+                                ContentAssistPopupUi.updateContextTypeLabel(sourceViewer);
+                            }
+                            ContentAssistSessionReloader.onContextPremiumsReady(source);
+                        });
+                        return Status.OK_STATUS;
+                    }
+                    catch (Exception | LinkageError error)
+                    {
+                        // без типов и премий список остаётся штатным
+                        return Status.OK_STATUS;
+                    }
+                }
+            };
+            job.setSystem(true);
+            job.setPriority(Job.INTERACTIVE);
+            job.schedule();
+        }
+
+        /**
+         * Суффиксы определяемых типов из строк списка — в {@link #DEFINED_TYPE_SUFFIXES}. Строку
+         * EDT строит без модели, поэтому разрешаем имена здесь, вне UI; список перерисует
+         * последующий пересчёт по готовности премий.
+         */
+        private void resolveDefinedTypeSuffixes(ICompletionProposal[] proposals)
+        {
+            if (editor == null || !(editor.getDocument() instanceof IXtextDocument bsl))
+                return;
+            Set<String> names = new HashSet<>();
+            String projectName = null;
+            for (ICompletionProposal proposal : proposals)
+            {
+                if (!(proposal instanceof QueryLiteralProposal query) || query.project == null
+                    || query.ql.getDisplayString() == null)
+                    continue;
+                projectName = query.project.getName();
+                Matcher name = DefinedTypeLinks.NAME.matcher(query.ql.getDisplayString());
+                while (name.find())
+                    if (!DEFINED_TYPE_SUFFIXES.containsKey(suffixKey(projectName, name.group())))
+                        names.add(name.group());
+            }
+            if (names.isEmpty())
+                return;
+            Map<String, DefinedTypeLinks.Link> links = ContentAssistSessionReloader.readOnlyPeekAst(bsl,
+                resource -> DefinedTypeLinks.resolve(names, resource));
+            if (links == null)
+                return;
+            for (var link : links.entrySet())
+                DEFINED_TYPE_SUFFIXES.put(suffixKey(projectName, link.getKey()), link.getValue().suffix());
+        }
+
+        private List<String> typeNames(Iterable<TypeItem> items, List<String> links)
+        {
+            List<String> names = new ArrayList<>();
+            for (TypeItem item : items)
+            {
+                String name = item.getNameRu();
+                if (name == null || name.isBlank())
+                    name = item.getName();
+                if (name != null && !name.isBlank() && !names.contains(name))
+                {
+                    names.add(name);
+                    if (links != null)
+                        links.add(MetadataTypeMenu.link(item, name, editor));
+                }
+            }
+            return List.copyOf(names);
+        }
+
+        Object decorate(Object info)
+        {
+            boolean browserInput = info != null && IrBslHoverHtml.isBslBrowserInput(info);
+            String html = browserInput ? IrBslHoverHtml.readDisplayHtml(info)
+                : info instanceof XtextBrowserInformationControlInput input ? input.getHtml()
+                : info instanceof String text ? text : null;
+            if (html != null && html.contains("comfort-receiver-type")) //$NON-NLS-1$
+                return info;
+            String expected = line;
+            if (expected == null && Display.getCurrent() == null)
+            {
+                try
+                {
+                    expected = document.tryReadOnly(resource -> {
+                        if (resource == null || resource.getParseResult() == null)
+                            return null;
+                        var root = resource.getParseResult().getRootNode();
+                        if (!root.getText().startsWith(prefix))
+                            return null;
+                        // Точка относится к обращению к полям. Разрешаем имя перед ней
+                        // тем же QL-сервисом, которым строится подсказка поля запроса.
+                        if (offset > 1 && prefix.endsWith(".")) //$NON-NLS-1$
+                        {
+                            var resolver = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+                            EObject parent = resolver.resolveElementAt(resource, offset - 2);
+                            if (parent instanceof DbViewFieldDef field && !field.eIsProxy())
+                            {
+                                var computer = resource.getResourceServiceProvider().get(DerivedTypeComputerForDbViewQuery.class);
+                                var parentType = computer.getFieldType(field).getFirst();
+                                if (parentType != null)
+                                    parentNames = String.join(", ", typeNames(parentType.getTypes(), null)); //$NON-NLS-1$
+                            }
+                            // Псевдоним источника из ИЗ и табличная часть — таблица: её полное имя.
+                            if (parentNames.isEmpty() && parent instanceof com._1c.g5.v8.dt.metadata.dbview.Table
+                                && !parent.eIsProxy())
+                                parentNames = QueryFieldHover.tablePath(parent, resource).name();
+                        }
+                        var leaf = NodeModelUtils.findLeafNodeAtOffset(root,
+                            Math.min(offset, Math.max(0, root.getLength() - 1)));
+                        LogicalCompareOperatorExpression comparison = null;
+                        for (org.eclipse.xtext.nodemodel.INode node = leaf; node != null; node = node.getParent())
+                        {
+                            if (node.getSemanticElement() instanceof LogicalCompareOperatorExpression candidate)
+                            {
+                                var left = candidate.getLeft() != null
+                                    ? NodeModelUtils.findActualNodeFor(candidate.getLeft()) : null;
+                                if (left != null && left.getEndOffset() <= offset)
+                                {
+                                    comparison = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                        if (comparison == null)
+                            return null;
+                        IExpressionTypeChecker checker = resource.getResourceServiceProvider().get(IExpressionTypeChecker.class);
+                        receiverText = NodeModelUtils.getTokenText(NodeModelUtils.findActualNodeFor(comparison.getLeft()));
+                        var checked = checker != null ? checker.checkType(comparison.getLeft()) : null;
+                        var types = checked != null ? checked.expressionTypeResult : null;
+                        List<String> links = new ArrayList<>();
+                        List<String> names = types != null ? typeNames(types.getTypes(), links) : List.of();
+                        expectedNames = names;
+                        if (links.isEmpty())
+                            return null;
+                        return "<div class=\"comfort-receiver-type\"><b>Приемник.Тип</b>: &lt;" //$NON-NLS-1$
+                            + String.join(", ", links) + "&gt;</div>"; //$NON-NLS-1$ //$NON-NLS-2$
+                    });
+                    line = expected;
+                }
+                catch (Exception | LinkageError error)
+                {
+                    // без строки «Приемник.Тип»
+                }
+            }
+            if (expected == null)
+                return info;
+            if (info == null)
+                return IrBslHoverHtml.mergeHtml("", expected); //$NON-NLS-1$
+            if (html == null)
+                return info;
+            String decorated = BslExpectedTypePremiums.prependReceiverType(html, expected);
+            if (!browserInput && info instanceof XtextBrowserInformationControlInput input)
+            {
+                // Для QL возвращаем объект того же API: сохраняются объект модели,
+                // имя и ширина значка. BSL-оформитель хранит HTML только для своего подкласса.
+                return new XtextBrowserInformationControlInput(null, input.getElement(), decorated, new LabelProvider())
+                {
+                    @Override
+                    public String getInputName()
+                    {
+                        return input.getInputName();
+                    }
+
+                    @Override
+                    public int getLeadingImageWidth()
+                    {
+                        return input.getLeadingImageWidth();
+                    }
+                };
+            }
+            return browserInput ? IrBslHoverHtml.withHtml(info, decorated) : decorated;
+        }
+    }
+
     /** Предложение языка запросов, перенесённое в литерал BSL. */
     private static final class QueryLiteralProposal implements ICompletionProposal,
         ICompletionProposalExtension2, ICompletionProposalExtension3,
@@ -1134,16 +1945,19 @@ final class BslQueryLiteralSupport
         private final int queryEnd;
         private final int proposalOffset;
         private final IInformationControlCreator creator;
+        private final QueryExpectedType expectedType;
         private volatile QueryHover sideHint;
         private Point selection;
 
         QueryLiteralProposal(ConfigurableCompletionProposal ql, Literal lit, String lineBreak,
-            BslXtextEditor sourceEditor, IProject project, String query, IInformationControlCreator creator)
+            BslXtextEditor sourceEditor, IProject project, String query, IInformationControlCreator creator,
+            QueryExpectedType expectedType)
         {
             this.ql = ql;
             this.project = project;
             this.sourceEditor = sourceEditor;
             this.creator = creator;
+            this.expectedType = expectedType;
             int offset = ql.getReplacementOffset();
             this.start = lit.docOffsetOfQuery(offset);
             this.end = Math.max(start, lit.docOffsetOfQuery(offset + ql.getReplacementLength()));
@@ -1243,22 +2057,102 @@ final class BslQueryLiteralSupport
                     description = queryDescription(sourceEditor, () -> project, query, proposalOffset);
                     sideHint = description;
                 }
-                return description.info();
+                return expectedType.decorate(description.info());
             }
-            return ql.getAdditionalProposalInfo(monitor == null
-                ? new org.eclipse.core.runtime.NullProgressMonitor() : monitor);
+            return expectedType.decorate(ql.getAdditionalProposalInfo(monitor == null
+                ? new org.eclipse.core.runtime.NullProgressMonitor() : monitor));
         }
 
         @Override
         public String getDisplayString()
         {
-            return ql.getDisplayString();
+            String display = ql.getDisplayString();
+            if (display == null || project == null)
+                return display;
+            StringBuilder result = new StringBuilder(display);
+            Matcher name = DefinedTypeLinks.NAME.matcher(display);
+            int shift = 0;
+            while (name.find())
+            {
+                String suffix = DEFINED_TYPE_SUFFIXES.get(suffixKey(project.getName(), name.group()));
+                if (suffix == null || suffix.isEmpty())
+                    continue;
+                result.insert(name.end() + shift, suffix);
+                shift += suffix.length();
+            }
+            return result.toString();
         }
 
+        /** Суффикс определяемого типа — серым, как декорация в навигаторе. */
         @Override
         public StyledString getStyledDisplayString()
         {
-            return ql.getStyledDisplayString();
+            StyledString styled = ql.getStyledDisplayString();
+            if (styled == null || project == null)
+                return styled;
+            String text = styled.getString();
+            Matcher name = DefinedTypeLinks.NAME.matcher(text);
+            List<Integer> inserts = new ArrayList<>();
+            List<String> suffixes = new ArrayList<>();
+            while (name.find())
+            {
+                String suffix = DEFINED_TYPE_SUFFIXES.get(suffixKey(project.getName(), name.group()));
+                if (suffix != null && !suffix.isEmpty())
+                {
+                    inserts.add(name.end());
+                    suffixes.add(suffix);
+                }
+            }
+            if (inserts.isEmpty())
+                return styled;
+            StringBuilder plain = new StringBuilder(text);
+            for (int i = inserts.size() - 1; i >= 0; i--)
+                plain.insert(inserts.get(i), suffixes.get(i));
+            StyledString result = new StyledString(plain.toString());
+            for (StyleRange range : styled.getStyleRanges())
+            {
+                int start = range.start;
+                int end = range.start + range.length;
+                for (int i = 0; i < inserts.size(); i++)
+                {
+                    int at = inserts.get(i);
+                    int length = suffixes.get(i).length();
+                    if (range.start >= at)
+                        start += length;
+                    if (range.start + range.length > at)
+                        end += length;
+                }
+                result.setStyle(start, end - start, copyStyler(range));
+            }
+            int shift = 0;
+            for (int i = 0; i < inserts.size(); i++)
+            {
+                result.setStyle(inserts.get(i) + shift, suffixes.get(i).length(), StyledString.DECORATIONS_STYLER);
+                shift += suffixes.get(i).length();
+            }
+            return result;
+        }
+
+        private static StyledString.Styler copyStyler(TextStyle source)
+        {
+            return new StyledString.Styler()
+            {
+                @Override
+                public void applyStyles(TextStyle target)
+                {
+                    target.font = source.font;
+                    target.foreground = source.foreground;
+                    target.background = source.background;
+                    target.underline = source.underline;
+                    target.underlineStyle = source.underlineStyle;
+                    target.underlineColor = source.underlineColor;
+                    target.strikeout = source.strikeout;
+                    target.strikeoutColor = source.strikeoutColor;
+                    target.borderStyle = source.borderStyle;
+                    target.borderColor = source.borderColor;
+                    target.rise = source.rise;
+                }
+            };
         }
 
         @Override
@@ -1434,42 +2328,17 @@ final class BslQueryLiteralSupport
                             if (typeName != null && !typeName.isBlank() && !typeNames.contains(typeName))
                             {
                                 typeNames.add(typeName);
-                                typeLinks.add(MetadataTypeMenu.link(item, typeName, sourceEditor));
+                                typeLinks.add(MetadataTypeMenu.link(item, typeName, sourceEditor)
+                                    + HTMLPrinter.convertToHTMLContent(DefinedTypeDecorator.suffix(item)));
                             }
                         }
                     type = typeNames.isEmpty() ? QlUtil.getTypeName(valueType, true) : String.join(", ", typeNames); //$NON-NLS-1$
                     typeHtml = typeLinks.isEmpty() ? HTMLPrinter.convertToHTMLContent(type) : String.join(", ", typeLinks); //$NON-NLS-1$
                 }
-                List<String> path = new ArrayList<>();
-                MdObject tableObject = null;
-                Set<EObject> visited = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-                EObject current = element instanceof DbViewFieldDef ? element.eContainer() : element;
-                while (current instanceof DbViewElement owner && visited.add(current))
-                {
-                    // DbViewFromQuery носит псевдоним источника из ИЗ. Оригинал
-                    // содержит полное имя таблицы метаданных и виртуальной таблицы.
-                    if (owner instanceof DbViewFromQuery source)
-                    {
-                        // Оригинал источника ИЗ заполняется лениво при расчёте полей.
-                        // getFieldsFromOriginalDbView вычисляет его по mdObject и
-                        // записывает originalDbView (штатный механизм QlUtil).
-                        if (source.getOriginalDbView() == null)
-                            QlUtil.getFieldsFromOriginalDbView(source,
-                                resource.getResourceServiceProvider().get(IDynamicDbViewFieldComputer.class));
-                        if (source.getOriginalDbView() != null)
-                        {
-                            current = source.getOriginalDbView();
-                            continue;
-                        }
-                    }
-                    String name = elementName(owner);
-                    if (tableObject == null && owner.getMdObject() instanceof MdObject metadata)
-                        tableObject = metadata;
-                    if (!name.isBlank())
-                        path.add(0, name);
-                    current = owner.eContainer();
-                }
-                String table = String.join(".", path); //$NON-NLS-1$
+                TablePath tablePath = tablePath(element instanceof DbViewFieldDef ? element.eContainer() : element,
+                    resource);
+                String table = tablePath.name();
+                MdObject tableObject = tablePath.mdObject();
                 StringBuilder html = new StringBuilder();
                 if (element instanceof DbViewFieldDef)
                     html.append("<p>Тип значения: &lt;").append(typeHtml).append("&gt;</p>"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1488,6 +2357,43 @@ final class BslQueryLiteralSupport
                     }
                 });
             });
+        }
+
+        record TablePath(String name, MdObject mdObject) {}
+
+        /** Полное имя таблицы запроса от {@code start} вверх по владельцам: {@code РегистрСведений.КурсыВалют.СрезПоследних}. */
+        static TablePath tablePath(EObject start, XtextResource resource)
+        {
+            List<String> path = new ArrayList<>();
+            MdObject tableObject = null;
+            Set<EObject> visited = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            EObject current = start;
+            while (current instanceof DbViewElement owner && visited.add(current))
+            {
+                // DbViewFromQuery носит псевдоним источника из ИЗ. Оригинал
+                // содержит полное имя таблицы метаданных и виртуальной таблицы.
+                if (owner instanceof DbViewFromQuery source)
+                {
+                    // Оригинал источника ИЗ заполняется лениво при расчёте полей.
+                    // getFieldsFromOriginalDbView вычисляет его по mdObject и
+                    // записывает originalDbView (штатный механизм QlUtil).
+                    if (source.getOriginalDbView() == null)
+                        QlUtil.getFieldsFromOriginalDbView(source,
+                            resource.getResourceServiceProvider().get(IDynamicDbViewFieldComputer.class));
+                    if (source.getOriginalDbView() != null)
+                    {
+                        current = source.getOriginalDbView();
+                        continue;
+                    }
+                }
+                String name = elementName(owner);
+                if (tableObject == null && owner.getMdObject() instanceof MdObject metadata)
+                    tableObject = metadata;
+                if (!name.isBlank())
+                    path.add(0, name);
+                current = owner.eContainer();
+            }
+            return new TablePath(String.join(".", path), tableObject); //$NON-NLS-1$
         }
 
         private static String elementName(DbViewElement element)
@@ -1520,6 +2426,7 @@ final class BslQueryLiteralSupport
         String query, int offset)
     {
         QueryHover[] result = { new QueryHover(null, null) };
+        XtextDocument[] queryDocument = new XtextDocument[1];
         Display display = Display.getDefault();
         if (display.isDisposed())
             return result[0];
@@ -1533,9 +2440,12 @@ final class BslQueryLiteralSupport
                 }
                 QlEditor ql = hiddenEditor(project);
                 EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
+                queryDocument[0] = embedded.getDocument();
                 if (!query.equals(embedded.getDocument().get()))
                     ql.setFullText(query);
                 XtextSourceViewer qlViewer = embedded.getViewer();
+                QueryFieldHover description = new QueryFieldHover(embedded.getDocument(), sourceEditor);
+                result[0] = new QueryHover(null, description.getHoverControlCreator());
                 // readOnly синхронизирует модель после setFullText. Цепочка наведения
                 // использует tryReadOnly и фильтры включённых подсказок; для скрытого
                 // редактора она может не дойти до провайдера описания QL вообще.
@@ -1564,7 +2474,6 @@ final class BslQueryLiteralSupport
                     EObject field = resolver.resolveElementAt(resource, offset);
                     if (field == null || field.eIsProxy())
                         return null;
-                    QueryFieldHover description = new QueryFieldHover(embedded.getDocument(), sourceEditor);
                     result[0] = new QueryHover(description.getHoverInfo(field, qlViewer,
                         new Region(leaf.getOffset(), leaf.getLength())), description.getHoverControlCreator());
                     return null;
@@ -1578,6 +2487,11 @@ final class BslQueryLiteralSupport
             calculate.run();
         else
             display.syncExec(calculate);
+        if (queryDocument[0] != null)
+        {
+            Object info = new QueryExpectedType(queryDocument[0], query, offset, sourceEditor).decorate(result[0].info());
+            result[0] = new QueryHover(info, result[0].creator());
+        }
         return result[0];
     }
 
