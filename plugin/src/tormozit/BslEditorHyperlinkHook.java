@@ -1123,11 +1123,13 @@ public final class BslEditorHyperlinkHook implements IStartup
                 compactVariableLinks(viewer, result);
             for (int i = 0; i < result.length; i++)
             {
-                // Ссылки на строки BSL оставляем штатными. Для реквизита
-                // BslHyperlinkHelper создаёт XtextHyperlink с URI объекта модели.
-                if (result[i] instanceof XtextHyperlink link && link.getURI() != null
-                    && !"bsl".equalsIgnoreCase(link.getURI().fileExtension()))
+                // Исходную позицию сохраняем и для BSL: при открытии другого модуля
+                // selectAndReveal отмечает уже его, а не редактор, из которого ушли.
+                if (result[i] instanceof XtextHyperlink link)
                     result[i] = new HistoryHyperlink(link, source, page);
+                else if (result[i] instanceof VariableHyperlink variable)
+                    result[i] = new VariableHyperlink(
+                        new HistoryHyperlink(variable.delegate, source, page), variable.text);
             }
             return result;
         }
@@ -1383,6 +1385,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override
         public void open()
         {
+            Global.tempLog("bsl-hyperlink-history", "open delegate=" + delegate.getClass().getName()
+                + " target=" + (delegate instanceof XtextHyperlink link ? link.getURI() : delegate.getHyperlinkText()));
             try (HistoryScope scope = new HistoryScope(page, source))
             {
                 delegate.open();
@@ -1402,6 +1406,7 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             this.page = page;
             history = page.getNavigationHistory();
+            Global.tempLog("bsl-hyperlink-history", "begin source=" + describeEditor(source));
             if (history == null)
                 return;
             try
@@ -1413,6 +1418,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     return;
                 Field field = history.getClass().getDeclaredField("ignoreEntries");
                 field.setAccessible(true);
+                Global.tempLog("bsl-hyperlink-history", "mark source ignoreEntries=" + field.getInt(history));
                 history.markLocation(source);
                 int previous = field.getInt(history);
                 field.setInt(history, previous + 1);
@@ -1420,6 +1426,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             }
             catch (ReflectiveOperationException | RuntimeException e)
             {
+                Global.tempLog("bsl-hyperlink-history", "begin failed: " + e);
                 // При несовместимости платформы оставляем штатную историю переходов.
             }
         }
@@ -1433,13 +1440,38 @@ public final class BslEditorHyperlinkHook implements IStartup
                 {
                     ignoreEntries.setInt(history, ignoreEntries.getInt(history) - 1);
                     IEditorPart destination = page.getActiveEditor();
+                    // У редактора объекта отметка хранит страницу, у вложенного BSL — каретку.
+                    BslXtextEditor bsl = GetRef.getActiveBslEditor(destination);
+                    if (bsl != null)
+                        destination = bsl;
+                    Global.tempLog("bsl-hyperlink-history", "finish opened=" + opened
+                        + " ignoreEntries=" + ignoreEntries.getInt(history)
+                        + " destination=" + describeEditor(destination));
                     if (opened && destination != null)
                         history.markLocation(destination);
                 }
                 catch (ReflectiveOperationException | RuntimeException e)
                 {
+                    Global.tempLog("bsl-hyperlink-history", "finish failed: " + e);
                     // Не прерываем штатное открытие ссылки из-за ошибки истории.
                 }
+            }
+        }
+
+        private static String describeEditor(IEditorPart editor)
+        {
+            if (editor == null)
+                return "null";
+            try
+            {
+                String description = editor.getClass().getName() + " input=" + editor.getEditorInput().getName();
+                if (editor instanceof BslXtextEditor bsl && bsl.getInternalSourceViewer() != null)
+                    description += " modelSelection=" + bsl.getInternalSourceViewer().getSelectedRange();
+                return description;
+            }
+            catch (RuntimeException e)
+            {
+                return editor.getClass().getName() + " unavailable: " + e;
             }
         }
     }

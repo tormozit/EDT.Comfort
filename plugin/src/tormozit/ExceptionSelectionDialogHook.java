@@ -5,11 +5,13 @@ import java.lang.reflect.Field;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.layout.GridDataFactory;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.ModifyListener;
+import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
@@ -154,7 +156,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
         // Штатный okPressed() делает ((Text) getPatternControl()).getText() — SearchBox/
         // StyledText туда ставить нельзя (ClassCastException → OK «ничего не делает», #255).
         // Оставляем скрытый Text как pattern и синхронизируем его с полем фильтра.
-        Text shadowPattern = installShadowPatternText(shell, filterInput.getText());
+        Text shadowPattern = installShadowPatternText(filterInput.widget().getParent(), filterInput.getText());
         updatePatternControlReference(dialog, shadowPattern);
 
         Button pasteButton = installPasteButton(buttonBarComposite, filterInput, shadowPattern);
@@ -165,6 +167,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
         FilterInputBoxListNavigation.installTableNavigation(filterControl, table, null);
 
         renameCatchAllCheckbox(shell);
+        installOkValidation(buttonBarComposite, filterInput, shadowPattern, findCatchAllCheckbox(shell));
 
         shell.setText(DIALOG_TITLE + TITLE_SUFFIX);
         shell.setData(PATCHED_KEY, Boolean.TRUE);
@@ -214,14 +217,53 @@ public final class ExceptionSelectionDialogHook implements IStartup
      * Скрытый {@link Text}, который остаётся в {@code dialog.pattern}: штатный
      * {@code BslExceptionSelectionDialog.okPressed} читает текст только через каст к Text.
      */
-    private static Text installShadowPatternText(Shell shell, String initial)
+    private static Text installShadowPatternText(Composite parent, String initial)
     {
-        Text shadow = new Text(shell, SWT.NONE);
+        // TrayDialog добавляет справку в пятиколоночную сетку Shell: лишний ребёнок
+        // сдвигает разделители и саму справку. Служебное поле живёт внутри области диалога.
+        Text shadow = new Text(parent, SWT.NONE);
+        GridData data = new GridData();
+        data.exclude = true;
+        shadow.setLayoutData(data);
         shadow.setVisible(false);
         shadow.setBounds(0, 0, 0, 0);
         shadow.setText(initial != null ? initial : ""); //$NON-NLS-1$
-        shell.setData(SHADOW_PATTERN_KEY, shadow);
+        parent.getShell().setData(SHADOW_PATTERN_KEY, shadow);
+        Global.tempLog("exception-selection-dialog", "shadowPattern: parent=" + parent.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         return shadow;
+    }
+
+    private static void installOkValidation(Composite buttonBar, FilterInputBox filterInput,
+            Text shadowPattern, Button catchAll)
+    {
+        for (Control child : buttonBar.getChildren())
+        {
+            if (!(child instanceof Button ok) || !Integer.valueOf(IDialogConstants.OK_ID).equals(ok.getData()))
+                continue;
+            // EDT переопределяет updateStatus пустым методом, поэтому штатная валидация
+            // FilteredItemsSelectionDialog не управляет доступностью OK.
+            Runnable update = () ->
+            {
+                if (ok.isDisposed() || shadowPattern.isDisposed())
+                    return;
+                boolean withoutFilter = catchAll != null && !catchAll.isDisposed() && catchAll.getSelection();
+                boolean hasFilter = !shadowPattern.getText().isBlank();
+                ok.setEnabled(withoutFilter || hasFilter);
+                Global.tempLog("exception-selection-dialog", "validate: withoutFilter=" + withoutFilter //$NON-NLS-1$ //$NON-NLS-2$
+                        + ", hasFilter=" + hasFilter + ", okEnabled=" + ok.getEnabled()); //$NON-NLS-1$ //$NON-NLS-2$
+            };
+            shadowPattern.addModifyListener(e -> update.run());
+            if (catchAll != null)
+                catchAll.addListener(SWT.Selection, e ->
+                {
+                    // Штатный слушатель очищает и отключает только скрытый Text.
+                    filterInput.setText(shadowPattern.getText());
+                    filterInput.widget().setEnabled(!catchAll.getSelection());
+                    update.run();
+                });
+            update.run();
+            return;
+        }
     }
 
     /** Доверенная причина ({@link #setPendingReason}), иначе — как обычная кнопка, из буфера. */
@@ -250,7 +292,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
 
         Button button = new Button(buttonBarComposite, SWT.PUSH);
         button.setText(PASTE_BUTTON_LABEL);
-        button.setToolTipText(PASTE_BUTTON_TOOLTIP + Global.pluginSignForTooltip());
+        button.setToolTipText(TooltipText.wrap(button, PASTE_BUTTON_TOOLTIP + Global.pluginSignForTooltip()));
         GridDataFactory.swtDefaults().applyTo(button);
         layout.numColumns++;
 

@@ -473,11 +473,6 @@ public class SmartCompletionProposal implements
             variableTarget = delegate instanceof ConfigurableCompletionProposal configurable
                 ? FunctionReturnTypes.variableTargetOf(Global.getField(configurable, "additionalProposalInfo")) //$NON-NLS-1$
                 : null;
-            Object info = delegate instanceof ConfigurableCompletionProposal configurable
-                ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
-            Global.tempLog("assist-variable-target", "row proposal=" + System.identityHashCode(this)
-                + " display=" + delegate.getDisplayString() + " info=" + System.identityHashCode(info)
-                + " target=" + variableTarget);
         }
         return variableTarget;
     }

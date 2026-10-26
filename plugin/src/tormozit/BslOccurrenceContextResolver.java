@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -493,8 +494,8 @@ public final class BslOccurrenceContextResolver
         IRSession session = irSession(file);
         if (session == null)
             return null;
-        return dropUnknownIrTypes(IrBslExpressionHtmlSupport.fetchCurrentExpressionTypes(
-            session, content, GetRef.resolveSetTextModuleName(file), parentEndOffset));
+        return uniqueParentTypes(dropUnknownIrTypes(IrBslExpressionHtmlSupport.fetchCurrentExpressionTypes(
+            session, content, GetRef.resolveSetTextModuleName(file), parentEndOffset)));
     }
 
     /**
@@ -567,8 +568,24 @@ public final class BslOccurrenceContextResolver
             // Разбор модуля моделью BSL — не гарантированная операция: в колонке остаётся «?».
             resolved = ""; //$NON-NLS-1$
         }
+        resolved = uniqueParentTypes(resolved);
         putBounded(TYPE_CACHE, key, resolved);
         return resolved;
+    }
+
+    /** Одинаковые имена из разных окружений показываем один раз, в исходном порядке. */
+    private static String uniqueParentTypes(String types)
+    {
+        if (types == null || types.isEmpty())
+            return types;
+        Set<String> unique = new LinkedHashSet<>();
+        for (String type : types.split(",")) //$NON-NLS-1$
+        {
+            String name = type.trim();
+            if (!name.isEmpty())
+                unique.add(name);
+        }
+        return String.join(", ", unique); //$NON-NLS-1$
     }
 
     /**
@@ -866,6 +883,9 @@ public final class BslOccurrenceContextResolver
         XtextResource xtextResource = loadLinkedResource(file);
         if (xtextResource == null)
             return ""; //$NON-NLS-1$
+        String kind = syntaxKind(content, offset, 1);
+        if (KIND_LITERAL.equals(kind))
+            return BslQueryLiteralSupport.occurrenceParentType(xtextResource, content, offset);
         // Точки перед вхождением нет: родителем может быть сам объект модуля — так выглядит прямое
         // обращение к его реквизиту (ДатаОтгрузки = 123 в модуле объекта).
         if (dotOffset < 0)
@@ -893,6 +913,7 @@ public final class BslOccurrenceContextResolver
         String formType = formContextReceiverType(xtextResource, content, offset);
         return formType.isEmpty() ? computed : formType;
     }
+
 
     /**
      * Отсекает из строки типов нерезолвнутые прокси-объекты вида
@@ -1332,6 +1353,53 @@ public final class BslOccurrenceContextResolver
         }
         // Тип вычислен, совпадения нет: примитив/чужой объект — точно не ссылка на искомое.
         return SUITABLE_NO;
+    }
+    /** Точное имя объекта с правильным классом/производным типом и границами идентификаторов. */
+    static String suitabilityByQualifiedName(Sought sought, String content, int offset, int length)
+    {
+        if (sought == null || sought.kind != SoughtKind.OBJECT)
+            return null;
+        Set<String> classes = new LinkedHashSet<>();
+        classes.add(sought.baseRu);
+        classes.add(MdTypeMapping.ruToRuPlural(sought.baseRu));
+        classes.add(MdTypeMapping.ruToEnSing(sought.baseRu));
+        classes.add(MdTypeMapping.ruToFolder(sought.baseRu));
+        for (Map.Entry<String, String> entry : GoToDefinition.TYPE_SUFFIX_MAP.entrySet())
+        {
+            if (sought.baseRu.equals(entry.getValue()))
+                classes.add(entry.getKey());
+        }
+        for (String suffix : SUIT_FAMILIES)
+            classes.add(sought.baseRu + suffix);
+        classes.add(sought.baseRu + "ТабличнаяЧасть"); //$NON-NLS-1$
+        classes.add(sought.baseRu + "СтрокаТабличнойЧасти"); //$NON-NLS-1$
+        classes.add(sought.baseRu + "ТабличнаяЧастьСтрока"); //$NON-NLS-1$
+        return qualifiedObjectNameMatches(content, offset, length, sought.objectName, classes)
+            ? SUITABLE_YES : SUITABLE_UNKNOWN;
+    }
+
+    private static boolean qualifiedObjectNameMatches(String content, int offset, int length,
+        String objectName, Iterable<String> classes)
+    {
+        if (content == null || objectName == null || offset <= 0 || length != objectName.length()
+            || length <= 0 || offset > content.length() - length || content.charAt(offset - 1) != '.'
+            || !content.regionMatches(true, offset, objectName, 0, length))
+            return false;
+        int end = offset + length;
+        if (end < content.length() && (Character.isLetterOrDigit(content.charAt(end))
+            || content.charAt(end) == '_'))
+            return false;
+        for (String className : classes)
+        {
+            if (className == null || className.isEmpty())
+                continue;
+            int start = offset - 1 - className.length();
+            if (start >= 0 && content.regionMatches(true, start, className, 0, className.length())
+                && (start == 0 || !Character.isLetterOrDigit(content.charAt(start - 1))
+                    && content.charAt(start - 1) != '_'))
+                return true;
+        }
+        return false;
     }
 
     /**

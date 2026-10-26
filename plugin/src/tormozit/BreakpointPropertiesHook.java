@@ -59,6 +59,9 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IPostSelectionProvider;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.jface.viewers.Viewer;
@@ -74,6 +77,8 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.part.FileEditorInput;
+import org.eclipse.ui.forms.events.ExpansionAdapter;
+import org.eclipse.ui.forms.events.ExpansionEvent;
 import org.eclipse.ui.forms.widgets.ExpandableComposite;
 import org.eclipse.ui.texteditor.ITextEditor;
 
@@ -187,9 +192,9 @@ public final class BreakpointPropertiesHook implements IStartup
     }
 
     /**
-     * Панель «Точки останова»: её панель деталей ({@code BslLineBreakpointDetailPane}) строит тот же
-     * редактор «Действия», что и диалог, — общий флажок вывода ставим и туда. Редактор один на
-     * панель, при выборе другой точки EDT зовёт его {@code setInput}, поэтому сверяемся после
+     * Панель «Точки останова»: её панель деталей ({@code BslLineBreakpointDetailPane}) строит те же
+     * редакторы условия и действий, что и диалог: подключаем автодополнение и общий флажок вывода.
+     * Редактор один на панель, при выборе другой точки EDT зовёт его {@code setInput}, поэтому сверяемся после
      * каждой смены выделения.
      */
     private static void installBreakpointsView()
@@ -258,26 +263,45 @@ public final class BreakpointPropertiesHook implements IStartup
         if (!Boolean.TRUE.equals(control.getData(BREAKPOINTS_VIEW_HOOKED_KEY)))
         {
             control.setData(BREAKPOINTS_VIEW_HOOKED_KEY, Boolean.TRUE);
-            // Панель деталей обновляется слушателем выделения самой панели — сверяемся после него.
-            viewer.addSelectionChangedListener(e -> control.getDisplay().asyncExec(() ->
+            // VariablesView обновляет детали по postSelection. Обычное событие приходит
+            // раньше setInput: даже asyncExec тогда видит поля предыдущей точки.
+            ISelectionChangedListener listener = e -> control.getDisplay().asyncExec(() ->
             {
                 if (!control.isDisposed())
                     patchBreakpointsViewDetailPane(view);
-            }));
+            });
+            if (viewer instanceof IPostSelectionProvider postSelectionProvider)
+                postSelectionProvider.addPostSelectionChangedListener(listener);
+            else
+                viewer.addSelectionChangedListener(listener);
         }
         patchBreakpointsViewDetailPane(view);
     }
 
-    /** {@code VariablesView.fDetailPane} → {@code DetailPaneProxy.fCurrentPane} → редактор «Действия». */
+    /** {@code VariablesView.fDetailPane} → {@code DetailPaneProxy.fCurrentPane} → редакторы точки останова. */
     private static void patchBreakpointsViewDetailPane(AbstractDebugView view)
     {
         Object proxy = Global.getField(view, "fDetailPane"); //$NON-NLS-1$
         Object pane = proxy != null ? Global.getField(proxy, "fCurrentPane") : null; //$NON-NLS-1$
         if (pane == null || !BSL_LINE_BREAKPOINT_DETAIL_PANE.equals(pane.getClass().getName()))
             return;
-        Object actionsEditor = findSubEditor(Global.getField(pane, "breakpointEditor"), ACTIONS_EDITOR); //$NON-NLS-1$
+        Object breakpointEditor = Global.getField(pane, "breakpointEditor"); //$NON-NLS-1$
+        Object conditionEditor = findSubEditor(breakpointEditor, CONDITION_EDITOR);
+        Object actionsEditor = findSubEditor(breakpointEditor, ACTIONS_EDITOR);
+        ISelection selection = view.getViewer().getSelection();
+        Object selected = selection instanceof IStructuredSelection structured && structured.size() == 1
+            ? structured.getFirstElement() : null;
+        Object current = Global.getField(pane, "current"); //$NON-NLS-1$
+        Object conditionInput = conditionEditor != null ? Global.getField(conditionEditor, "breakpoint") : null; //$NON-NLS-1$
+        Object actionsInput = actionsEditor != null ? Global.getField(actionsEditor, "breakpoint") : null; //$NON-NLS-1$
+        boolean inputMatches = selected instanceof IBslLineBreakpoint && current == selected
+            && conditionInput == selected && actionsInput == selected;
+        if (!inputMatches)
+            return;
         if (actionsEditor != null)
             installConsoleMasterCheckbox(actionsEditor, true);
+        expandGroupsWithContent(conditionEditor, actionsEditor);
+        tryPatchContentAssist(conditionEditor, actionsEditor);
     }
 
     static void install(Display display)
@@ -373,15 +397,20 @@ public final class BreakpointPropertiesHook implements IStartup
 
     private static boolean tryPatchContentAssist(Shell shell)
     {
+        return tryPatchContentAssist(resolveBreakpointSubEditor(shell, CONDITION_EDITOR),
+            resolveActionsEditor(shell));
+    }
+
+    /** Одинаковое подключение полей в диалоге свойств и панели «Точки останова». */
+    private static boolean tryPatchContentAssist(Object conditionEditor, Object actionsEditor)
+    {
         ContentAssistManager mgr = ContentAssistManager.getInstance();
+        ContentAssistSettings cas = ContentAssistSettings.getInstance();
         if (mgr == null)
             return true;
-        ContentAssistSettings cas = ContentAssistSettings.getInstance();
         if (cas == null || !cas.isEnabled())
             return true;
 
-        Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
-        Object actionsEditor = resolveActionsEditor(shell);
         SourceViewer conditionViewer = resolveEmbeddedViewer(
             conditionEditor == null ? null : Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
         SourceViewer expressionViewer = resolveEmbeddedViewer(
@@ -1497,15 +1526,20 @@ public final class BreakpointPropertiesHook implements IStartup
     }
 
     /**
-     * Группы «Условия» и «Действия» — автоматическое разворачивание при открытии диалога,
+     * Группы «Условия» и «Действия» — автоматическое разворачивание в диалоге и панели,
      * если внутри группы включена хотя бы одна пометка.
      */
     private static void expandGroupsWithContent(Shell shell, Object actionsEditor)
     {
-        Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
+        expandGroupsWithContent(resolveBreakpointSubEditor(shell, CONDITION_EDITOR), actionsEditor);
+    }
+
+    private static void expandGroupsWithContent(Object conditionEditor, Object actionsEditor)
+    {
         if (conditionEditor != null)
             expandGroupIfHasContent(Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
-        expandGroupIfHasContent(Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
+        if (actionsEditor != null)
+            expandGroupIfHasContent(Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
     }
 
     /**
@@ -1524,6 +1558,8 @@ public final class BreakpointPropertiesHook implements IStartup
             return;
 
         group.setExpanded(true);
+        if (Boolean.TRUE.equals(group.getData(RESIZE_KEY)))
+            applyStretchGridData(group, 0, 0, true);
         relayoutPaneHierarchy(group);
     }
 
@@ -1768,8 +1804,29 @@ public final class BreakpointPropertiesHook implements IStartup
                 relayoutScrolledComposite(scrolled);
                 continue;
             }
-            applyVerticalStretchGridData(parent, 0, 0);
+            if (parent instanceof ExpandableComposite group)
+                installGroupVerticalStretch(group);
+            else
+                applyVerticalStretchGridData(parent, 0, 0);
         }
+    }
+
+    /** Свёрнутая группа занимает только заголовок и не забирает свободную высоту. */
+    private static void installGroupVerticalStretch(ExpandableComposite group)
+    {
+        applyStretchGridData(group, 0, 0, group.isExpanded());
+        if (Boolean.TRUE.equals(group.getData(RESIZE_KEY)))
+            return;
+        group.setData(RESIZE_KEY, Boolean.TRUE);
+        group.addExpansionListener(new ExpansionAdapter()
+        {
+            @Override
+            public void expansionStateChanged(ExpansionEvent event)
+            {
+                applyStretchGridData(group, 0, 0, group.isExpanded());
+                relayoutPaneHierarchy(group);
+            }
+        });
     }
 
     private static void relayoutPaneHierarchy(Control pane)
@@ -2586,6 +2643,7 @@ public final class BreakpointPropertiesHook implements IStartup
             @Override
             public void print(ILaunch launch, String text)
             {
+                ensureLaunchConsole(launch);
                 try
                 {
                     if (handle(launch, text))
@@ -2597,6 +2655,41 @@ public final class BreakpointPropertiesHook implements IStartup
                     BreakpointPropertiesDebug.problem("вывод в консоль: " + e); //$NON-NLS-1$
                 }
                 delegate.print(launch, text);
+            }
+
+            /**
+             * EDT debug.ui 9.3.400.v202605050943 создаёт консоль в launchChanged только при
+             * ATTR_SERVER_LAUNCH=true. Прямое подключение этого признака не имеет, хотя цель
+             * отправляет сообщения точек останова тому же writer. Создаём штатную консоль
+             * его же методом: регистрация, закрытие и удаление остаются у EDT.
+             * В цель внедрён peaberry-прокси: внутренности доступны только у настоящей службы.
+             * <p>
+             * Здесь исправлено только отсутствие консоли. Разница ATTR_SERVER_LAUNCH может
+             * иметь и другие, пока не выявленные и не исправленные штатные побочные эффекты:
+             * признак также участвует в завершении отладки, очистке связанных запусков и учёте
+             * событий EDT. Сам признак не меняем, чтобы не менять жизненный цикл подключения.
+             */
+            private void ensureLaunchConsole(ILaunch launch)
+            {
+                if (launch == null)
+                    return;
+                try
+                {
+                    Object consoleWriter = Global.unwrapServiceProxy(delegate);
+                    synchronized (consoleWriter)
+                    {
+                        Object consoles = Global.getField(consoleWriter, "launchToConsole"); //$NON-NLS-1$
+                        if (!(consoles instanceof Map<?, ?> map))
+                            return;
+                        if (map.containsKey(launch) || launch.isTerminated() || launch.getDebugTarget() == null)
+                            return;
+                        Global.invokeVoid(consoleWriter, "createAndRegisterLaunchConsole", launch); //$NON-NLS-1$
+                    }
+                }
+                catch (RuntimeException e)
+                {
+                    BreakpointPropertiesDebug.problem("создание консоли отладки: " + e); //$NON-NLS-1$
+                }
             }
 
             /** {@code true} — текст обработан здесь, штатно печатать не нужно. */

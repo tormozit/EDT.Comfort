@@ -572,7 +572,7 @@ final class OccurrenceContextResolveJob
         String syntaxKind = bsl ? BslOccurrenceContextResolver.syntaxKind(content, offset, length) : ""; //$NON-NLS-1$
         String method = bsl ? BslModuleMethodResolver.methodAtLine(target.file(), line) : ""; //$NON-NLS-1$
         boolean wantsType = bsl && !BslOccurrenceContextResolver.KIND_COMMENT.equals(syntaxKind)
-            && !BslOccurrenceContextResolver.KIND_LITERAL.equals(syntaxKind);
+            && (!BslOccurrenceContextResolver.KIND_LITERAL.equals(syntaxKind) || !parent.isEmpty());
         FastContext fc = new FastContext(offset, length, line, lineText, hlStart, hlLen, parent,
             syntaxKind, method != null ? method : "", wantsType); //$NON-NLS-1$
         target.applyFast(fc);

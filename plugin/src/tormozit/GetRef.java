@@ -415,6 +415,12 @@ public class GetRef extends AbstractHandler implements IElementUpdater
             return null;
 
         String[] p = relative.split("/", -1); //$NON-NLS-1$
+        if (p.length == 2 && "Configuration".equals(p[0])) //$NON-NLS-1$
+        {
+            String moduleTypeRu = MdTypeMapping.bslFilenameToModuleRu(p[1]);
+            return MdTypeMapping.isConfigurationModule(moduleTypeRu)
+                    ? new ModuleRef(extensionName, moduleTypeRu) : null;
+        }
         if (p.length < 3) return null;
 
         String rootTypeRu = MdTypeMapping.folderToRu(p[0]);

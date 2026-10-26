@@ -34,6 +34,7 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
             .complexity(CheckComplexity.NORMAL)
             .severity(IssueSeverity.MAJOR)
             .issueType(IssueType.WARNING)
+            .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", "Только в открытых модулях") //$NON-NLS-1$
             .module()
             .checkedObjectType(BslPackage.Literals.MODULE);
     }
@@ -43,6 +44,8 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
         IProgressMonitor monitor)
     {
         if (!(object instanceof Module module) || monitor.isCanceled())
+            return;
+        if (OpenModulesOnly.skip(module, parameters))
             return;
         for (var access : BslQueryResultTypes.unknownFields(module, monitor::isCanceled))
         {

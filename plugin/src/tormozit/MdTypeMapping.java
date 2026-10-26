@@ -680,6 +680,19 @@ public final class MdTypeMapping
         return BSL_FILENAME_TO_MODULE_RU.get(filename);
     }
 
+    /** Модуль самой конфигурации: имя ссылки не содержит типа и имени объекта МД. */
+    public static boolean isConfigurationModule(String moduleTypeRu)
+    {
+        if (moduleTypeRu == null)
+            return false;
+        return switch (moduleTypeRu)
+        {
+            case "МодульУправляемогоПриложения", "МодульОбычногоПриложения", //$NON-NLS-1$ //$NON-NLS-2$
+                    "МодульВнешнегоСоединения", "МодульСеанса" -> true; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> false;
+        };
+    }
+
     /**
      * Является ли строка суффиксом-типом модуля (или формы) в полном пути МД.
      * Например {@code "МодульМенеджера"}, {@code "Форма"} — {@code true}.

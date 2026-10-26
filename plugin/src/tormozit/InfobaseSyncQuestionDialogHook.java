@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.math.BigDecimal;
+import java.util.UUID;
 import java.util.ArrayList;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -14,6 +16,7 @@ import java.util.function.Consumer;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Status;
@@ -47,6 +50,9 @@ import org.osgi.framework.ServiceReference;
 
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.ServerConnectionString;
+import com._1c.g5.v8.dt.debug.core.model.IDebugSession;
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
+import com.e1c.g5.dt.applications.ApplicationException;
 import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
 import com.e1c.g5.dt.applications.IApplicationManager;
@@ -216,6 +222,9 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
             boolean updated = false;
             try
             {
+                if (application instanceof IInfobaseApplication infobaseApplication
+                    && "update".equals(method.getName())) //$NON-NLS-1$
+                    terminateDebugSessionsBeforeUpdate(infobaseApplication, (IProgressMonitor)arguments[3]);
                 Object result = method.invoke(delegate, arguments);
                 updated = result == ApplicationUpdateState.UPDATED;
                 return result;
@@ -242,6 +251,87 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
                         background.display.asyncExec(background::restore);
                 }
             }
+        }
+    }
+
+    /** Завершаем только сеансы обновляемой серверной базы с подключёнными предметами отладки. */
+    private static void terminateDebugSessionsBeforeUpdate(IInfobaseApplication application, IProgressMonitor monitor)
+    {
+        if (!(application.getInfobase().getConnectionString() instanceof ServerConnectionString))
+            return;
+        RacSessionClient client = null;
+        try
+        {
+            Map<UUID, BigDecimal> sessions = new LinkedHashMap<>();
+            for (var launch : DebugPlugin.getDefault().getLaunchManager().getLaunches())
+                for (var debugTarget : launch.getDebugTargets())
+                {
+                    if (!(debugTarget instanceof IRuntimeDebugClientTarget target)
+                        || target.isTerminated() || target.isDisconnected())
+                        continue;
+                    IApplication debugApplication = target.getApplication().orElse(null);
+                    if (!(debugApplication instanceof IInfobaseApplication debugInfobase)
+                        || !application.getProject().equals(debugApplication.getProject())
+                        || !application.getInfobase().getUuid().equals(debugInfobase.getInfobase().getUuid()))
+                        continue;
+                    for (var group : target.getThreadGroups())
+                    {
+                        if (!(group instanceof IDebugSession session))
+                            continue;
+                        for (var thread : session.getThreads())
+                        {
+                            if (thread.isTerminated() || thread.isDisconnected())
+                                continue;
+                            if (session.getSessionUuid() == null || session.getSessionId() == null)
+                                throw new ApplicationException("EDT не передала UUID и номер отлаживаемого сеанса.");
+                            sessions.put(session.getSessionUuid(), session.getSessionId());
+                            break;
+                        }
+                    }
+                }
+            Global.tempLog("debug-session-rac", "before update application=" + application.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " debugSessions=" + sessions.size()); //$NON-NLS-1$
+            if (sessions.isEmpty())
+                return;
+            if (monitor.isCanceled())
+                throw new OperationCanceledException();
+            AtomicReference<RasConfiguration> selected = new AtomicReference<>();
+            AtomicReference<CoreException> selectionFailure = new AtomicReference<>();
+            Display.getDefault().syncExec(() ->
+            {
+                try
+                {
+                    selected.set(chooseRasConfiguration(Display.getDefault().getActiveShell(), application));
+                }
+                catch (CoreException e)
+                {
+                    selectionFailure.set(e);
+                }
+            });
+            if (selectionFailure.get() != null)
+                throw selectionFailure.get();
+            RasConfiguration configuration = selected.get();
+            if (configuration == null)
+                throw new OperationCanceledException();
+            String problem = DebugSessionRasTab.validationProblem(configuration.configuration());
+            if (problem != null)
+                throw new ApplicationException("Завершение отлаживаемых сеансов перед обновлением: " + problem);
+            client = new RacSessionClient(configuration.project(), configuration.infobase(),
+                DebugSessionRasTab.normalizedAddress(configuration.configuration().getAttribute(DebugSessionRasTab.ADDRESS, "")), //$NON-NLS-1$
+                configuration.configuration().getAttribute(DebugSessionRasTab.USER, "").trim(), //$NON-NLS-1$
+                configuration.configuration().getAttribute(DebugSessionRasTab.PASSWORD, "")); //$NON-NLS-1$
+            for (var session : sessions.entrySet())
+                client.delete(session.getKey(), session.getValue(), monitor);
+        }
+        catch (OperationCanceledException e)
+        {
+            throw e;
+        }
+        catch (Exception e)
+        {
+            String message = client != null ? client.redact(e.getLocalizedMessage()) : e.getLocalizedMessage();
+            Global.tempLog("debug-session-rac", "before update failed: " + message); //$NON-NLS-1$ //$NON-NLS-2$
+            throw new ApplicationException("Обновление базы отменено: не удалось завершить отлаживаемые сеансы. " + message);
         }
     }
 

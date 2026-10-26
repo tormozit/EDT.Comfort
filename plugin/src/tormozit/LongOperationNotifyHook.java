@@ -479,6 +479,8 @@ public final class LongOperationNotifyHook implements IStartup
     {
         if (!jobListenerInstalled.compareAndSet(false, true))
             return;
+        Global.tempLog("long-operation-notify", "install job listener bundle=" //$NON-NLS-1$ //$NON-NLS-2$
+            + org.osgi.framework.FrameworkUtil.getBundle(LongOperationNotifyHook.class).getVersion());
         // Job уже RUNNING/WAITING до установки listener — scheduled/aboutToRun не придут.
         for (Job existing : Job.getJobManager().find(null))
         {
@@ -537,6 +539,10 @@ public final class LongOperationNotifyHook implements IStartup
                 // Имя проекта у DeployConfigurationJob есть только в имени самого Job.
                 String projectNames = update != null ? String.join(", ", update.applicationNames) //$NON-NLS-1$
                     : tracked.isEmpty() ? projectFromJobName(job) : tracked;
+                Global.tempLog("long-operation-notify", "done class=" + job.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " name=" + job.getName() + " operation=" + operation + " result=" + result //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " tracked=" + (track != null) + " projects=" + projectNames //$NON-NLS-1$ //$NON-NLS-2$
+                    + " updateSuccessful=" + (update == null || update.successful)); //$NON-NLS-1$
                 scheduleCompletion(operation, projectNames, track,
                     ok && (update == null || update.successful), jobFailed);
             }
@@ -587,9 +593,12 @@ public final class LongOperationNotifyHook implements IStartup
     {
         long doneMs = System.currentTimeMillis();
         long durationMs = finished != null ? Math.max(0L, doneMs - finished.startMs) : -1L;
+        Global.tempLog("long-operation-notify", "completion operation=" + operation + " projects=" + projectNames //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " durationMs=" + durationMs + " ok=" + ok + " jobFailed=" + jobFailed); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
         {
+            Global.tempLog("long-operation-notify", "skip: display unavailable operation=" + operation); //$NON-NLS-1$ //$NON-NLS-2$
             unbindJobThreads(finished);
             return;
         }
@@ -600,7 +609,10 @@ public final class LongOperationNotifyHook implements IStartup
             ErrorRef firstError = finished != null ? finished.firstError.get() : null;
             unbindJobThreads(finished);
             if (errorCount == 0 && !ok && !jobFailed)
+            {
+                Global.tempLog("long-operation-notify", "skip: unsuccessful operation=" + operation); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             boolean startedInBackground = finished != null && !finished.edtForegroundAtStart;
             notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError,
                 startedInBackground, jobFailed);
@@ -619,6 +631,9 @@ public final class LongOperationNotifyHook implements IStartup
         String operation = matchOperation(job);
         if (operation == null)
             return;
+        Global.tempLog("long-operation-notify", "start class=" + job.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " name=" + job.getName() + " operation=" + operation //$NON-NLS-1$ //$NON-NLS-2$
+            + " foregroundNow=" + isEdtProcessForeground()); //$NON-NLS-1$
         if (!TITLE_PROJECT_CONTEXT.equals(operation))
             return;
         String projects = snapshotContextActivatorProjects(job);
@@ -792,17 +807,25 @@ public final class LongOperationNotifyHook implements IStartup
     {
         boolean hasLogErrors = errorCount > 0;
         boolean pushDialogOpen = TITLE_PUSH.equals(operation) && isPushResultDialogOpen();
+        Global.tempLog("long-operation-notify", "notify operation=" + operation + " projects=" + projectNames //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " durationMs=" + durationMs + " errors=" + errorCount + " startedInBackground=" + startedInBackground //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " jobFailed=" + jobFailed + " pushDialogOpen=" + pushDialogOpen); //$NON-NLS-1$ //$NON-NLS-2$
         // Диалог результата уже перед пользователем — отдельный тост не нужен.
         if (pushDialogOpen && isEdtProcessForeground())
+        {
+            Global.tempLog("long-operation-notify", "skip: push result dialog operation=" + operation); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
         boolean forceNotify = hasLogErrors || (jobFailed && !pushDialogOpen);
         // durationMs < 0 — старт не видели (не путать с коротким Job).
         if (!forceNotify && startedInBackground && durationMs >= 0L && durationMs < MIN_DURATION_MS)
         {
+            Global.tempLog("long-operation-notify", "skip: short background operation=" + operation); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (!forceNotify && !shouldNotifyUser())
         {
+            Global.tempLog("long-operation-notify", "skip: EDT active and recent input operation=" + operation); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         long now = System.currentTimeMillis();
@@ -814,6 +837,7 @@ public final class LongOperationNotifyHook implements IStartup
         Long prev = lastNotifyByTitle.get(dedupKey);
         if (prev != null && now - prev < DEDUP_MS)
         {
+            Global.tempLog("long-operation-notify", "skip: duplicate key=" + dedupKey + " ageMs=" + (now - prev)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         lastNotifyByTitle.put(dedupKey, now);
@@ -838,6 +862,7 @@ public final class LongOperationNotifyHook implements IStartup
             message.append(" за ").append(formatDuration(durationMs)); //$NON-NLS-1$
 
         evictJobToastsBeyondLimit();
+        Global.tempLog("long-operation-notify", "show toast message=" + message); //$NON-NLS-1$ //$NON-NLS-2$
         // Журнал ошибок — ссылка на него (она же активирует окно),
         // иначе — ссылка активации окна EDT.
         Shell toast;

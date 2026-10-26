@@ -43,8 +43,16 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
                 + "для строковых литералов» (<a href=\"#\" onclick=\"comfortOpenBslPreferences();return false;\">"
                 + "Параметры → V8 → Встроенный язык</a>). Если флажок снят, "
                 + "проверка не выполняется. Анализ может переходить в вызываемые методы и заметно "
-                + "повышать нагрузку на процессор при массовой проверке проекта.")
-            .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING).disable()
+                + "повышать нагрузку на процессор при массовой проверке проекта."
+                + "<br><br>Отличие от штатной bsl-legacy-check-string-literal («Возможно, строковый литерал "
+                + "содержит ошибку»). Штатная проверяет литерал-аргумент вызова по встроенным спискам EDT "
+                + "(имена метаданных, типов и т. п.) и молчит, если значение принял хотя бы один из них. "
+                + "Эта проверка берёт значения из анализа кода и модели: колонки таблиц, ключи структур, "
+                + "параметры форм вместе с параметрами расширения, реквизиты, значения из вызываемых методов; "
+                + "проверяет и литералы вне вызова (Вид = \"…\"), элементы списка через запятую, пути через "
+                + "точку и имена сортировки. Друг друга проверки не заменяют и не глушат.")
+            .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
+            .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
             .module().checkedObjectType(BslPackage.Literals.MODULE);
     }
 
@@ -54,7 +62,7 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
     {
         if (TEMPORARILY_DISABLED_FOR_CPU_COMPARISON)
         {
-            Global.tempLog("unknown-literal", "check disabled for CPU comparison version=1.0.21"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("unknown-literal", "check disabled for CPU comparison version=1.0.11"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         Global.tempLog("unknown-literal", "check enter object=" //$NON-NLS-1$ //$NON-NLS-2$
@@ -70,6 +78,11 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
             || monitor.isCanceled())
         {
             Global.tempLog("unknown-literal", "check skipped: module/resource/cancellation guard"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (OpenModulesOnly.skip(module, parameters))
+        {
+            Global.tempLog("unknown-literal", "check skipped: not open uri=" + module.eResource().getURI()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         int literals = 0;
@@ -111,4 +124,5 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
                     : (threadTimes.getCurrentThreadCpuTime() - startedCpu) / 1_000_000.0));
         }
     }
+
 }

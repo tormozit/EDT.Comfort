@@ -493,14 +493,37 @@ public final class BslEditorHighlighting
                 if (qlId == null)
                     continue;
                 if (tokenOffset > position)
-                    acceptor.addPosition(position, tokenOffset - position,
-                        BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
+                    acceptQueryText(text, position, tokenOffset, acceptor);
                 acceptor.addPosition(tokenOffset, tokenEnd - tokenOffset,
                     BslServerCallHighlightingConfiguration.queryTokenId(qlId));
                 position = tokenEnd;
             }
             if (end > position)
-                acceptor.addPosition(position, end - position, BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
+                acceptQueryText(text, position, end, acceptor);
+        }
+
+        /** Фон промежутка без отступа перед «|» в начале строки продолжения. */
+        private static void acceptQueryText(String text, int from, int to,
+            IHighlightedPositionAcceptor acceptor)
+        {
+            int position = from;
+            for (int i = from; i < to; i++)
+            {
+                if (i == 0 || text.charAt(i - 1) != '\n' && text.charAt(i - 1) != '\r')
+                    continue;
+                int bar = i;
+                while (bar < to && (text.charAt(bar) == '\t' || text.charAt(bar) == ' '))
+                    bar++;
+                if (bar == i || bar >= to || text.charAt(bar) != '|')
+                    continue;
+                if (i > position)
+                    acceptor.addPosition(position, i - position,
+                        BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
+                position = bar;
+                i = bar;
+            }
+            if (to > position)
+                acceptor.addPosition(position, to - position, BslServerCallHighlightingConfiguration.QUERY_TEXT_ID);
         }
 
         /**

@@ -104,6 +104,7 @@ import com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaTotalControlPoint;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
+import com._1c.g5.v8.dt.ql.resource.QlParametersFinder;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
 
 /**
@@ -129,14 +130,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
-        // #region temp — поля выборки пропали: что отдаёт расширение вызову результата запроса
-        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess logged
-            && RESULT_METHODS.contains(lower(logged.getName())))
-            Global.tempLog("query-fields", "getTypes call=" + logged.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + (method == null ? null : method.getName()) + " session=" + (session != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " plan=" + (plan != null) + " planTypes=" + (plan == null ? -1 : plan.types.size()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " planned=" + (planned == null ? null : planned.size())); //$NON-NLS-1$
-        // #endregion
         if (planned != null)
             return planned;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
@@ -232,24 +225,27 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      * {@code null} — расширенный расчёт типов выключен; пусто — смысл литерала не определён.
      * Вызывающий держит readOnly документа.
      */
-    static List<String> queryParameterNamesAt(XtextResource resource, int offset)
+    static Map<String, com._1c.g5.v8.dt.mcore.Property> queryParametersAt(XtextResource resource, int offset)
     {
         if (resource.getContents().isEmpty()
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+        {
             return null;
+        }
         EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
         StringLiteral argument = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
         if (argument == null || !(argument.eContainer() instanceof Invocation invocation)
             || invocation.getParams().indexOf(argument) != 0
             || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
             || !SET_PARAMETER_METHODS.contains(lower(access.getName())))
-            return List.of();
+            return Map.of();
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         if (method == null)
-            return List.of();
+            return Map.of();
         Plan plan = new Plan(method, ""); //$NON-NLS-1$
         StringLiteral query = plan.queryLiteral(access.getSource(), invocation);
-        return query == null ? List.of() : plan.parameters(query);
+        Map<String, com._1c.g5.v8.dt.mcore.Property> names = query == null ? Map.of() : plan.parameters(query);
+        return names;
     }
 
     /**
@@ -353,39 +349,47 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
                 if (node == null)
                     continue;
-                Plan plan = session.plans.get(method);
-                String text = node.getText();
-                if (!current(plan, text))
+                try
                 {
-                    session.plans.remove(method);
-                    plan = new Plan(method, text);
-                    plan.originsOnly = true;
-                    try
+                    Plan plan = session.plans.get(method);
+                    String text = node.getText();
+                    if (!current(plan, text))
                     {
-                        // Без обращений к полям схемы для автопроверки не нужны.
-                        if (!plan.hasQueryFieldAccess(cancellation))
+                        session.plans.remove(method);
+                        plan = new Plan(method, text);
+                        plan.originsOnly = true;
+                        try
                         {
-                            continue;
+                            // Без обращений к полям схемы для автопроверки не нужны.
+                            if (!plan.hasQueryFieldAccess(cancellation))
+                            {
+                                continue;
+                            }
                         }
+                        finally
+                        {
+                            plan.originsOnly = false;
+                        }
+                        plan.cancellation = cancellation;
+                        try
+                        {
+                            plan.prepare();
+                        }
+                        finally
+                        {
+                            plan.cancellation = CancelIndicator.NullImpl;
+                        }
+                        if (!plan.queries.isEmpty())
+                            session.hasQueries = true;
+                        session.plans.put(method, plan);
                     }
-                    finally
-                    {
-                        plan.originsOnly = false;
-                    }
-                    plan.cancellation = cancellation;
-                    try
-                    {
-                        plan.prepare();
-                    }
-                    finally
-                    {
-                        plan.cancellation = CancelIndicator.NullImpl;
-                    }
-                    if (!plan.queries.isEmpty())
-                        session.hasQueries = true;
-                    session.plans.put(method, plan);
+                    problems.addAll(plan.unknownFields(cancellation));
                 }
-                problems.addAll(plan.unknownFields(cancellation));
+                catch (QuerySchemaUnavailableException failure)
+                {
+                    // Не кэшируем недоступность: следующий расчёт повторит получение схемы.
+                    session.plans.remove(method);
+                }
             }
         }
         return problems;
@@ -407,10 +411,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
-        // #region temp — поля выборки пропали: вызывается ли досчёт плана
-        Global.tempLog("query-fields", "refresh method=" + method.getName() + " previous=" + (previous != null) //$NON-NLS-1$ //$NON-NLS-2$
-            + " complete=" + (previous != null && previous.complete) + " current=" + current(previous, text)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -429,15 +429,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             if (module != null)
                 session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
             session.plans.put(method, plan);
-            // #region temp — поля выборки пропали: итог плана
-            Global.tempLog("query-fields", "refresh planned method=" + method.getName() + " types=" + plan.types.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " queries=" + plan.queries.size()); //$NON-NLS-1$
-            // #endregion
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
-                Global.tempLog("query-fields", "refresh recomputed=" + recomputed); //$NON-NLS-1$ //$NON-NLS-2$ // temp
                 if (!recomputed)
                 {
                     return;
@@ -485,12 +480,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         });
         // Модуль только открыт: разбор уже прошёл, своего события до первой правки не будет
         refresh.modelChanged(null);
-    }
-
-    /** Временный замер: миллисекунды между отметками; {@code -1} — отметки нет (шаг не дошёл). */
-    private static long millis(long from, long to)
-    {
-        return from < 0 || to < 0 ? -1L : (to - from) / 1_000_000L;
     }
 
     /** Слушатель разбора одного открытого модуля. */
@@ -544,16 +533,12 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    // #region temp — цена досчёта после правки: ожидание блокировок, досчёт, пересчёт метода
-                    long started = System.nanoTime();
-                    long[] marks = { -1L, -1L, -1L };
                     try
                     {
                         document.readOnly(resource ->
                         {
-                            marks[0] = System.nanoTime();
                             BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
-                                status -> marks[2] = System.nanoTime(), () -> marks[1] = System.nanoTime());
+                                status -> {});
                             // Сеансы менеджера временных таблиц для литералов модуля (issue 889, решение 1А)
                             BslTempTableSessions.refreshDocument(document, resource, offset);
                             return null;
@@ -561,17 +546,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     }
                     catch (RuntimeException | LinkageError failure)
                     {
-                        Global.tempLog("query-fields", "edit refresh failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Досчёт не удался — следующая попытка обновления повторит расчёт.
                     }
-                    long finished = System.nanoTime();
-                    Global.tempLog("query-fields", "edit refresh offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                        + " readOnlyWaitMs=" + millis(started, marks[0]) //$NON-NLS-1$
-                        + " linkLockWaitMs=" + millis(marks[0], marks[1]) //$NON-NLS-1$
-                        + " refreshMs=" + millis(marks[1], finished) //$NON-NLS-1$
-                        + " recompute=" + (marks[2] >= 0) //$NON-NLS-1$
-                        + " recomputeMs=" + millis(marks[2], finished) //$NON-NLS-1$
-                        + " totalMs=" + millis(started, finished)); //$NON-NLS-1$
-                    // #endregion
                     return Status.OK_STATUS;
                 }
             };
@@ -1064,6 +1040,16 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     private record Result(List<Field> fields, boolean ordinary, boolean dropped, List<String> totals) {}
     private record Shape(String kind, List<Result> results) {}
 
+    private static final class QuerySchemaUnavailableException extends IllegalStateException
+    {
+        private static final long serialVersionUID = 1L;
+
+        QuerySchemaUnavailableException()
+        {
+            super("Query schema unavailable"); //$NON-NLS-1$
+        }
+    }
+
     private static final class Plan
     {
         final Method method;
@@ -1429,22 +1415,13 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
             QuerySchema schema = literalSchema(literal, cancellation);
             if (schema == null || schema.eResource() == null)
-                throw new IllegalStateException("Query schema unavailable"); //$NON-NLS-1$
+            {
+                throw new QuerySchemaUnavailableException();
+            }
             // Временные таблицы других пакетов менеджера и таблицы-параметры (issue 889)
             BslTempTableSessions.enrich(schema.eResource(), BslTempTableSessions.compute(literal, cancellation));
             // DependentModelProvider.createDependentModel уже вызывает
             // EcoreUtil2.resolveLazyCrossReferences перед возвратом схемы.
-            // #region temp — поля выборки пропали у запроса с ИТОГИ: ошибки схемы и состав пакета
-            Global.tempLog("query-fields", "method=" + method.getName() + " errors=" //$NON-NLS-1$ //$NON-NLS-2$
-                + schema.eResource().getErrors().stream().map(error -> error.getMessage()).toList()
-                + " queries=" + schema.getQueries().stream().map(query -> query.eClass().getName() //$NON-NLS-1$
-                    + (query instanceof QuerySchemaSelectQuery select
-                        ? "(placement=" + (select.getPlacementTable() != null) //$NON-NLS-1$
-                            + " view=" + (select.getDbViewByThis() == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                                : select.getDbViewByThis().eIsProxy() ? "proxy" : "ok") //$NON-NLS-1$ //$NON-NLS-2$
-                            + " totals=" + select.getTotalControlPoints().size() + ")" //$NON-NLS-1$ //$NON-NLS-2$
-                        : "")).toList()); //$NON-NLS-1$
-            // #endregion
             if (!schema.eResource().getErrors().isEmpty())
             {
                 queries.put(literal, List.of());
@@ -1496,28 +1473,22 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     query instanceof com._1c.g5.v8.dt.ql.model.QuerySchemaDropTableQuery, List.copyOf(totals)));
             }
             cached = List.copyOf(results);
-            // #region temp — поля выборки пропали у запроса с ИТОГИ: итог разбора
-            Global.tempLog("query-fields", "method=" + method.getName() + " results=" + cached.stream() //$NON-NLS-1$ //$NON-NLS-2$
-                .map(result -> "fields=" + result.fields().stream().map(Field::name).toList() //$NON-NLS-1$
-                    + " ordinary=" + result.ordinary() + " totals=" + result.totals()) //$NON-NLS-1$ //$NON-NLS-2$
-                .toList());
-            // #endregion
             queries.put(literal, cached);
             return cached;
         }
 
-        /** Параметры схемы запроса в порядке первого упоминания, без повторов. */
-        private List<String> parameters(StringLiteral literal)
+        /** Параметры схемы запроса в порядке первого упоминания и их ожидаемые типы EDT. */
+        private Map<String, com._1c.g5.v8.dt.mcore.Property> parameters(StringLiteral literal)
         {
             IDependentQuerySchemaProvider provider = Global.getOsgiService(IDependentQuerySchemaProvider.class);
             if (provider == null)
-                return List.of();
+                return Map.of();
             DefaultStringLiteralTextProvider textProvider = new DefaultStringLiteralTextProvider(literal);
             QuerySchema schema = provider.getQuerySchema(literal,
                 com._1c.g5.v8.dt.bsl.model.BslPackage.Literals.STRING_LITERAL__LINES,
                 (object, feature) -> textProvider.getText(), cancellation);
             if (schema == null)
-                return List.of();
+                return Map.of();
             Map<String, String> names = new java.util.LinkedHashMap<>();
             for (ParameterExpression parameter : EcoreUtil2.getAllContentsOfType(schema, ParameterExpression.class))
             {
@@ -1527,7 +1498,40 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 if (name != null && !name.isBlank())
                     names.putIfAbsent(lower(name), name);
             }
-            return List.copyOf(names.values());
+            Map<String, java.util.Set<TypeItem>> types = new java.util.HashMap<>();
+            try
+            {
+                if (schema.eResource() instanceof XtextResource queryResource)
+                {
+                    QlParametersFinder finder = queryResource.getResourceServiceProvider().get(QlParametersFinder.class);
+                    var parameterTypes = finder.find(schema).getParametersAsExpressionWithTypes();
+                    for (var entry : parameterTypes.entrySet())
+                    {
+                        java.util.Set<TypeItem> labels = types.computeIfAbsent(lower(entry.getKey().getString()),
+                            key -> new java.util.LinkedHashSet<>());
+                        for (var occurrence : entry.getValue())
+                        {
+                            var expected = occurrence.getSecond();
+                            if (expected == null)
+                                continue;
+                            for (TypeItem item : expected.getTypes())
+                            {
+                                if (item != null)
+                                    labels.add(item);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                // Ошибка расчёта типов не должна убирать найденные имена параметров.
+            }
+            Map<String, com._1c.g5.v8.dt.mcore.Property> result = new java.util.LinkedHashMap<>();
+            for (var entry : names.entrySet())
+                result.put(entry.getValue(), BslLiteralValues.valueDescription(entry.getValue(),
+                    types.getOrDefault(entry.getKey(), Set.of())));
+            return result;
         }
 
         /** Псевдоним SELECT; без псевдонима — имя поля, иначе само выражение (в том числе *). */

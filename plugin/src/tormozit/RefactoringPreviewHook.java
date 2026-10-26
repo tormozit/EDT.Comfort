@@ -319,6 +319,8 @@ public final class RefactoringPreviewHook
          * анализом «Родителя», внутри кода — после «Типа родителя».
          */
         String suitable;
+        /** Для объекта МД решение по точному имени имеет приоритет над вычисленным типом. */
+        String qualifiedNameSuitability;
         /** Искомый элемент (переименовываемый объект); {@code null} — колонка «Подходит» скрыта. */
         BslOccurrenceContextResolver.Sought sought;
         /** Вхождение найдено полнотекстовым поиском (не разрешённая моделью ссылка). */
@@ -368,7 +370,11 @@ public final class RefactoringPreviewHook
             lineText = context.lineText;
             highlightStart = context.highlightStart;
             highlightLength = context.highlightLength;
-            if (sought != null && fullText
+            qualifiedNameSuitability = fullText ? BslOccurrenceContextResolver.suitabilityByQualifiedName(
+                sought, lineText, highlightStart, highlightLength) : null;
+            if (qualifiedNameSuitability != null)
+                suitable = qualifiedNameSuitability;
+            else if (sought != null && fullText
                 && (BslOccurrenceContextResolver.KIND_LITERAL.equals(syntaxKind)
                     || BslOccurrenceContextResolver.KIND_COMMENT.equals(syntaxKind)))
             {
@@ -384,7 +390,16 @@ public final class RefactoringPreviewHook
         public void applyParentType(String type)
         {
             parentType = type;
-            if (sought != null && fullText && suitable == null)
+            if (qualifiedNameSuitability != null)
+            {
+                suitable = qualifiedNameSuitability;
+                return;
+            }
+            // Пространство имён QL («Справочник») не содержит имя объекта:
+            // оценка по полной цепочке из applyFast точнее, чем сравнение такого «типа».
+            if (sought != null && fullText && (suitable == null
+                || BslOccurrenceContextResolver.KIND_LITERAL.equals(syntaxKind) && type != null && !type.isBlank()
+                    && !MdTypeMapping.isKnownMdRootType(type)))
                 suitable = BslOccurrenceContextResolver.suitabilityByType(sought, type);
         }
 
@@ -399,6 +414,11 @@ public final class RefactoringPreviewHook
             if (type == null)
                 return;
             parentType = type;
+            if (qualifiedNameSuitability != null)
+            {
+                suitable = qualifiedNameSuitability;
+                return;
+            }
             if (sought != null && fullText && !type.isBlank())
             {
                 String verdict = BslOccurrenceContextResolver.suitabilityByType(sought, type);
@@ -692,9 +712,7 @@ public final class RefactoringPreviewHook
             // «Тип родителя» всегда считается автоматически системным проходом, как и раньше.
             contextResolver = new OccurrenceContextResolveJob(table, viewer, parentTypeColumn,
                 PARENT_TYPE_TITLE, Integer.MAX_VALUE, null);
-            // Литеральные вхождения: «Тип родителя» модель BSL не даёт (точки перед литералом нет) —
-            // спрашиваем подключённое приложение ИР, но только для строк в поле зрения (ИР медленный
-            // и однопоточный).
+            // Если модели BSL/QL не дали тип, спрашиваем ИР для строк в поле зрения.
             contextResolver.setIrParentTypeResolver(BslOccurrenceContextResolver::parentTypeViaIr);
             contextResolver.setRowsPublishedCallback(this::enableMarksBySuitability);
             contextResolver.trackViewportScrolling();
@@ -1809,6 +1827,9 @@ public final class RefactoringPreviewHook
                 return isFullNameOccurrence(content, offset, length);
             if (content == null || length <= 0 || offset < 0 || offset + length > content.length())
                 return false;
+            String qualified = BslOccurrenceContextResolver.suitabilityByQualifiedName(sought, content, offset, length);
+            if (qualified != null)
+                return BslOccurrenceContextResolver.SUITABLE_YES.equals(qualified);
             String occurrence = content.substring(offset, offset + length);
             String parent = BslOccurrenceContextResolver.parentText(content, offset);
             return BslOccurrenceContextResolver.SUITABLE_YES.equals(

@@ -5227,7 +5227,7 @@ return EMPTY;
      * Литерал — имя параметра в {@code Запрос.УстановитьПараметр("…")}. Смысла этого литерала EDT
      * не знает, а список, который она в нём даёт, к параметрам отношения не имеет. Поэтому
      * автооткрытие — только со списком параметров текста запроса из его модели (расширенный
-     * расчёт типов), иначе окна нет. Ctrl+Space сюда не попадает — там штатный список EDT.
+     * расчёт типов), иначе окна нет. Ctrl+Space использует тот же источник имён на UI.
      */
     private boolean scheduleQueryParameterList(ITextViewer viewer, IDocument doc, int quote, int caret,
                                                Runnable onReady)
@@ -5260,16 +5260,18 @@ return EMPTY;
                 try
                 {
                     if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, Integer.MAX_VALUE, abort))
+                    {
                         return Status.CANCEL_STATUS;
-                    List<String> names = xtext.readOnly(
-                        resource -> BslQueryResultTypes.queryParameterNamesAt(resource, quote + 1));
+                    }
+                    Map<String, com._1c.g5.v8.dt.mcore.Property> names = xtext.readOnly(
+                        resource -> BslQueryResultTypes.queryParametersAt(resource, quote + 1));
                     if (abort.getAsBoolean())
                         return Status.CANCEL_STATUS;
                     handedToUi = ContentAssistSessionReloader.requestGatedShow(viewer, "queryParameters", () -> //$NON-NLS-1$
                     {
                         if (names != null && !names.isEmpty())
                         {
-                            publishLiteralArgList(viewer, epoch, quote, doc, queryParameterProposals(names, quote + 1),
+                            publishLiteralArgList(viewer, epoch, quote, doc, queryParameterProposals(viewer, names, quote + 1),
                                 Collections.emptyMap(), tSchedule);
                             return;
                         }
@@ -5340,15 +5342,19 @@ return EMPTY;
     }
 
     /** UI: предложения параметров запроса; длину замены Xtext берёт при вставке от {@code offset}. */
-    private static ICompletionProposal[] queryParameterProposals(List<String> names, int offset)
+    private static ICompletionProposal[] queryParameterProposals(ITextViewer viewer,
+        Map<String, com._1c.g5.v8.dt.mcore.Property> names, int offset)
     {
         Image image = queryParameterIcon();
         ICompletionProposal[] proposals = new ICompletionProposal[names.size()];
-        for (int i = 0; i < proposals.length; i++)
+        int i = 0;
+        for (var entry : names.entrySet())
         {
-            String name = names.get(i);
-            proposals[i] = new ConfigurableCompletionProposal(name, offset, 0, name.length(), image,
-                new StyledString(name), null, null);
+            String name = entry.getKey();
+            ConfigurableCompletionProposal proposal = new ConfigurableCompletionProposal(name,
+                offset, 0, name.length(), image, new StyledString(name), null, null);
+            BslLiteralValues.describeProposal(proposal, entry.getValue(), viewer);
+            proposals[i++] = proposal;
         }
         return proposals;
     }
@@ -5437,6 +5443,32 @@ return EMPTY;
         ensureFullListForContext(viewer, doc, caret, false);
         rebindIrSnapshotContext();
         String filter = literalArgFilter(doc, caret, SmartFilterTracker.getCurrentFilter());
+        // Явный вызов тоже получает параметры запроса: штатный BSL-список
+        // не знает смысла первого аргумента УстановитьПараметр.
+        int parameterQuote = BslAssistSourceHeuristics.literalCallOpenQuote(doc, caret);
+        if (ManualInvocationDetect.isActive() && doc instanceof IXtextDocument xtext
+            && parameterQuote >= 0 && parameterQuote == literalArgKeyAt(doc, caret)
+            && isQuerySetParameterCall(BslAssistSourceHeuristics.literalCallMethodName(doc, caret)))
+        {
+            try
+            {
+                Map<String, com._1c.g5.v8.dt.mcore.Property> names = xtext.readOnly(
+                    resource -> BslQueryResultTypes.queryParametersAt(resource, parameterQuote + 1));
+                if (names != null && !names.isEmpty())
+                {
+                    storeLiteralArgList(doc, caret, queryParameterProposals(viewer, names, parameterQuote + 1));
+                    // Общий кэш EDT не должен вытеснить имена более длинным списком.
+                    clearDelegateSyncProbe();
+                    // Имена собраны целиком, без ограничения текущим префиксом.
+                    literalArgTyped = ""; //$NON-NLS-1$
+                    filter = literalArgFilter(doc, caret, filter);
+                }
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                // Не удалось определить параметры — остаётся штатный список EDT.
+            }
+        }
         ICompletionProposal[] edtClean = resolveStockLiteralProposalSource(viewer, caret);
         // В литерале с запросом список EDT не подставляем (issue 837): он про строку BSL.
         if (edtClean.length == 0 && delegateListCache.length > 0

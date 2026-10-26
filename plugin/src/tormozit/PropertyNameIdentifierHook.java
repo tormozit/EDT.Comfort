@@ -1,13 +1,21 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.databinding.DataBindingContext;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -74,7 +82,221 @@ public class PropertyNameIdentifierHook implements IStartup
         // момент до начала ввода, когда строку можно найти заново.
         Display display = Display.getCurrent();
         if (display != null)
+        {
             display.addFilter(SWT.FocusIn, PropertyNameIdentifierHook::onFocusIn);
+            display.addFilter(SWT.Show, RenameCancelSync::onShow);
+        }
+    }
+
+    /** После отмены обновляет только поле имени в палитре и редакторе объекта. */
+    private static final class RenameCancelSync
+    {
+        private static final String SHELL_KEY = "tormozit.propertyNameCancelSync"; //$NON-NLS-1$
+        private static final String MODEL_CLASS =
+            "com._1c.g5.v8.dt.md.ui.aef.models.BmMdObjectNameModel"; //$NON-NLS-1$
+        private static final String LOG_TOPIC = "property-name-refactoring-cancel"; //$NON-NLS-1$
+
+        private static void onShow(Event event)
+        {
+            if (!(event.widget instanceof Shell shell) || shell.isDisposed()
+                || !RefactoringPreviewHook.isRefactoringWizardDialog(shell)
+                || shell.getData(SHELL_KEY) != null || !(shell.getData() instanceof Window dialog))
+                return;
+            Object wizard = Global.invoke(dialog, "getWizard"); //$NON-NLS-1$
+            if (wizard == null || !"com._1c.g5.v8.dt.refactoring.ui.DtRefactoringRenameWizard" //$NON-NLS-1$
+                .equals(wizard.getClass().getName()))
+                return;
+            shell.setData(SHELL_KEY, Boolean.TRUE);
+            List<Runnable> updates = new ArrayList<>();
+            ScanSummary scan = new ScanSummary();
+            scan.context.append("parent=").append(identity(shell.getParent())); //$NON-NLS-1$
+            IWorkbench workbench = PlatformUI.getWorkbench();
+            IWorkbenchWindow[] windows = workbench.getWorkbenchWindows();
+            IWorkbenchWindow unparentedWindow = null;
+            // EDT может открыть мастер без родительского Shell. Тогда связь по дереву
+            // контролов отсутствует: используем контекст рабочего окна Eclipse.
+            if (shell.getParent() == null)
+            {
+                unparentedWindow = workbench.getActiveWorkbenchWindow();
+                if (unparentedWindow == null && windows.length == 1)
+                    unparentedWindow = windows[0];
+                scan.context.append(", contextWindow=").append(identity( //$NON-NLS-1$
+                    unparentedWindow != null ? unparentedWindow.getShell() : null));
+            }
+            for (IWorkbenchWindow window : windows)
+            {
+                boolean owner = window == unparentedWindow;
+                for (Control parent = shell.getParent(); parent != null; parent = parent.getParent())
+                    if (parent == window.getShell())
+                        owner = true;
+                scan.context.append("; window=").append(identity(window.getShell())) //$NON-NLS-1$
+                    .append(", owner=").append(owner); //$NON-NLS-1$
+                if (!owner)
+                    continue;
+                for (IWorkbenchPage page : window.getPages())
+                {
+                    if (page != window.getActivePage())
+                        continue;
+                    for (IViewReference ref : page.getViewReferences())
+                    {
+                        IViewPart view = ref.getView(false);
+                        if (isPropertySheetView(view))
+                            scan.context.append("; properties visible=").append(page.isPartVisible(view)); //$NON-NLS-1$
+                        if (!isPropertySheetView(view) || !page.isPartVisible(view))
+                            continue;
+                        Object sheetPage = resolvePropertySheetPage(view);
+                        Object scene = Global.invoke(sheetPage, "getScene"); //$NON-NLS-1$
+                        collectScene(scene, updates, scan);
+                    }
+                    for (IEditorReference ref : page.getEditorReferences())
+                    {
+                        Object editor = ref.getEditor(false);
+                        if (editor == null)
+                            continue;
+                        Object editorPage = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+                        scan.context.append("; editor=").append(editor.getClass().getSimpleName()) //$NON-NLS-1$
+                            .append(", page=").append(identity(editorPage)); //$NON-NLS-1$
+                        collectScene(Global.invoke(editorPage, "getScene"), updates, scan); //$NON-NLS-1$
+                    }
+                }
+            }
+            Display display = shell.getDisplay();
+            shell.addDisposeListener(e -> display.asyncExec(() -> {
+                if (dialog.getReturnCode() != Window.CANCEL)
+                    return;
+                Global.tempLog(LOG_TOPIC, "cancel, fields=" + updates.size() //$NON-NLS-1$
+                    + ", components=" + scan.components + ", nameModels=" + scan.nameModels //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", " + scan.context); //$NON-NLS-1$
+                // UI закрывает мастер раньше, чем AEF завершит IChange.apply().
+                // Перечитывание ставится в ту же очередь AEF, что и применение поля.
+                for (Runnable update : updates)
+                    update.run();
+            }));
+        }
+
+        private static void collectScene(Object scene, List<Runnable> updates, ScanSummary scan)
+        {
+            Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
+            scan.context.append(", root=").append(identity(root)); //$NON-NLS-1$
+            collect(root, updates, 0, scan);
+        }
+
+        private static void collect(Object component, List<Runnable> updates, int depth, ScanSummary scan)
+        {
+            if (component == null || depth > 24)
+                return;
+            scan.components++;
+            Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
+            if (model != null && model.getClass().getName().contains("Name")) //$NON-NLS-1$
+                scan.nameModels.add(model.getClass().getName());
+            if (model != null && MODEL_CLASS.equals(model.getClass().getName()))
+            {
+                updates.add(() -> queueRefresh(component, model));
+            }
+            for (Object child : AefFieldFocus.existingComponents(component))
+                collect(child, updates, depth + 1, scan);
+        }
+
+        /** Компактная диагностика поиска: одна строка на отмену, без чтения значений полей. */
+        private static final class ScanSummary
+        {
+            private final StringBuilder context = new StringBuilder();
+            private final Set<String> nameModels = new java.util.LinkedHashSet<>();
+            private int components;
+        }
+
+        private static String identity(Object object)
+        {
+            return object == null ? "null" : object.getClass().getSimpleName() + '@' //$NON-NLS-1$
+                + System.identityHashCode(object);
+        }
+
+        private static void queueRefresh(Object component, Object model)
+        {
+            try
+            {
+                Object queue = Global.invoke(model, "getRunnableQueue"); //$NON-NLS-1$
+                Display display = Display.getCurrent();
+                if (!Global.invokeVoid(queue, "queueRunnable", (Runnable) () -> refresh(component, model, display))) //$NON-NLS-1$
+                    throw new IllegalStateException("Нет очереди AEF для поля имени"); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG_TOPIC, "queue reload failed", e); //$NON-NLS-1$
+                Global.logError(LOG_TAG, "RenameCancelSync.queueRefresh", e); //$NON-NLS-1$
+            }
+        }
+
+        private static void refresh(Object component, Object model, Display display)
+        {
+            try
+            {
+                // За время работы мастера палитра могла сменить объект или закрыться.
+                if (!Boolean.FALSE.equals(Global.invoke(component, "isDisposed")) //$NON-NLS-1$
+                    || Global.invoke(component, "getModel") != model //$NON-NLS-1$
+                    || !Boolean.TRUE.equals(Global.invoke(model, "isOnline"))) //$NON-NLS-1$
+                {
+                    return;
+                }
+                if (!(Global.invoke(model, "getObject") instanceof EObject object) //$NON-NLS-1$
+                    || !(Global.invoke(model, "getProperty") instanceof EStructuralFeature feature)) //$NON-NLS-1$
+                {
+                    return;
+                }
+                Object name = object.eGet(feature);
+                // Value.setValue обновляет обе копии значения, но не извещает поле.
+                // External извещает AEF без нового commit/запуска переименования.
+                Object external = model.getClass().getClassLoader()
+                    .loadClass("com._1c.g5.aef2.models.ChangeOrigin").getField("External").get(null); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!Global.invokeVoid(model, "setValue", name) //$NON-NLS-1$
+                    || !Global.invokeVoid(model, "notifyValueChanged", external)) //$NON-NLS-1$
+                    throw new IllegalStateException("Не удалось обновить поле имени"); //$NON-NLS-1$
+                // DtValueActionBarComponent привязан к ActionBarViewModel.value, не text.
+                for (Object viewModel : AefFieldFocus.existingViewModels(component))
+                    if (!Global.invokeVoid(viewModel, "setValue", name)) //$NON-NLS-1$
+                        throw new IllegalStateException("Не удалось обновить представление имени"); //$NON-NLS-1$
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> refreshNameBinding(component, model));
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                Global.tempLogException(LOG_TOPIC, "reload failed", e); //$NON-NLS-1$
+                Global.logError(LOG_TAG, "RenameCancelSync.refresh", e); //$NON-NLS-1$
+            }
+        }
+
+        private static void refreshNameBinding(Object component, Object model)
+        {
+            try
+            {
+                if (!Boolean.FALSE.equals(Global.invoke(component, "isDisposed")) //$NON-NLS-1$
+                    || Global.invoke(component, "getModel") != model) //$NON-NLS-1$
+                {
+                    return;
+                }
+                Object scene = Global.invoke(component, "getScene"); //$NON-NLS-1$
+                Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+                Object views = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
+                if (!(views instanceof java.util.Map<?, ?> map))
+                    throw new IllegalStateException("Нет представлений поля имени"); //$NON-NLS-1$
+                for (Object viewModel : AefFieldFocus.existingViewModels(component))
+                {
+                    Object view = map.get(viewModel);
+                    Object context = Global.getField(view, "dataBindingContext"); //$NON-NLS-1$
+                    if (!(context instanceof DataBindingContext binding))
+                        throw new IllegalStateException("Нет привязки поля имени"); //$NON-NLS-1$
+                    // View.bindValue передаёт нативный контрол как target. updateTargets
+                    // повторно передаёт value в LightText, даже если value уже не меняется.
+                    binding.updateTargets();
+                }
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLogException(LOG_TOPIC, "binding refresh failed", e); //$NON-NLS-1$
+                Global.logError(LOG_TAG, "RenameCancelSync.refreshNameBinding", e); //$NON-NLS-1$
+            }
+        }
+
     }
 
     private static void onFocusIn(Event event)

@@ -49,7 +49,7 @@ public final class BslNumericIndexTypes
         IRuntimeVersionSupport versions = resource.getResourceServiceProvider().get(IRuntimeVersionSupport.class);
         Version version = versions.getRuntimeVersionOrDefault(resource.getContents().get(0), Version.LATEST);
         int code = type.getCode();
-        if (code <= 0)
+        if (code <= 0 || code >= 100_000)
         {
             // Штатный резолвер возвращает платформенный объект с кодом, если у копии из AST кода нет.
             Object provider = BslSyntaxAssist.documentationProvider();
@@ -57,7 +57,8 @@ public final class BslNumericIndexTypes
             if (canonical instanceof Type platformType)
                 code = platformType.getCode();
         }
-        if (code <= 0)
+        // PlatformDocTreeNodeShortId допускает только пятизначный код платформенного типа.
+        if (code <= 0 || code >= 100_000)
             return null;
         Object injected = BslSyntaxAssist.injected(PlatformDocProvider.class.getName());
         if (!(injected instanceof PlatformDocProvider provider))

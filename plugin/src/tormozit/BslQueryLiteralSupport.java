@@ -125,6 +125,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewSelectDef;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
@@ -132,7 +133,12 @@ import com._1c.g5.v8.dt.ql.QlUtil;
 import com._1c.g5.v8.dt.ql.model.DbViewFromQuery;
 import com._1c.g5.v8.dt.ql.model.FunctionInvocationExpression;
 import com._1c.g5.v8.dt.ql.model.LogicalCompareOperatorExpression;
+import com._1c.g5.v8.dt.ql.model.MultiPartCommonExpression;
+import com._1c.g5.v8.dt.ql.model.MultiPartQuerySchemaTable;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaTableParameter;
+import com._1c.g5.v8.dt.ql.model.SinglePartCommonExpression;
+import com._1c.g5.v8.dt.ql.model.SinglePartQuerySchemaTable;
 import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
 import com._1c.g5.v8.dt.ql.typesystem.IExpressionTypeChecker;
 import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
@@ -618,13 +624,53 @@ final class BslQueryLiteralSupport
                         if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers()))
                             continue;
                         field.setAccessible(true);
-                        field.set(patched, field.get(original));
+                        Object value = field.get(original);
+                        // QlProposalProvider.dynamicComputer (7.0.100.v202605050943):
+                        // фильтруем модель полей до построения подписей и вариантов EDT.
+                        if (field.getType() == IDynamicDbViewFieldComputer.class
+                            && value instanceof IDynamicDbViewFieldComputer computer)
+                            value = new CompletionFieldComputer(computer);
+                        field.set(patched, value);
                     }
                 xtext.setContentProposalProvider((IContentProposalProvider)patched);
             }
             catch (Exception | LinkageError error)
             {
                 // остаётся штатный поставщик
+            }
+        }
+
+        /** Схема ограничивает только дополнение; разрешение ошибочных обращений нужно проверке. */
+        private static final class CompletionFieldComputer implements IDynamicDbViewFieldComputer
+        {
+            private final IDynamicDbViewFieldComputer delegate;
+
+            CompletionFieldComputer(IDynamicDbViewFieldComputer delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public DbViewElement computeDbView(EObject object)
+            {
+                return delegate.computeDbView(object);
+            }
+
+            @Override
+            public List<DbViewElement> computeFieldsBySemanticObject(EObject object)
+            {
+                List<DbViewElement> fields = delegate.computeFieldsBySemanticObject(object);
+                List<DbViewElement> result = new ArrayList<>(fields.size());
+                for (DbViewElement field : fields)
+                    if (!BslTempTableSessions.isUnknownField(field))
+                        result.add(field);
+                return result;
+            }
+
+            @Override
+            public List<DbViewElement> getVirtualFields(DbViewSelectDef view, List<QuerySchemaTableParameter> parameters)
+            {
+                return delegate.getVirtualFields(view, parameters);
             }
         }
 
@@ -1062,6 +1108,86 @@ final class BslQueryLiteralSupport
     {
         Literal literal = parse(doc, offset, false);
         return literal != null ? literal.text.substring(0, literal.probeIndex) : null;
+    }
+
+    /** Тип родителя в запросе сохранённого модуля; не требует редактора и подключения ИР. */
+    static String occurrenceParentType(XtextResource module, String content, int offset)
+    {
+        Literal parsed = parse(new org.eclipse.jface.text.Document(content), offset, true);
+        if (parsed == null || !parsed.isQuery() || module.getParseResult() == null)
+            return ""; //$NON-NLS-1$
+        var helper = module.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+        StringLiteral literal = EcoreUtil2.getContainerOfType(helper.resolveContainedElementAt(module, offset),
+            StringLiteral.class);
+        if (literal == null)
+            return ""; //$NON-NLS-1$
+        var schema = BslQueryResultTypes.literalSchema(literal, CancelIndicator.NullImpl);
+        if (schema == null || !(schema.eResource() instanceof XtextResource resource)
+            || resource.getParseResult() == null)
+            return ""; //$NON-NLS-1$
+        var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
+        if (lines.isEmpty())
+            return ""; //$NON-NLS-1$
+        DefaultStringLiteralTextProvider text = new DefaultStringLiteralTextProvider(literal);
+        String query = text.getText();
+        int queryOffset = QueryBrackets.queryOffset(text, literal, lines.get(0).getOffset(),
+            offset, query.length());
+        if (queryOffset < 0)
+            return ""; //$NON-NLS-1$
+        queryOffset = QueryBrackets.lineEndingOffset(query, queryOffset,
+            resource.getParseResult().getRootNode().getText());
+        String modelText = resource.getParseResult().getRootNode().getText();
+        int dot = queryOffset - 1;
+        while (dot >= 0 && Character.isWhitespace(modelText.charAt(dot)))
+            dot--;
+        if (dot < 1 || modelText.charAt(dot) != '.')
+            return ""; //$NON-NLS-1$
+        int receiver = dot - 1;
+        while (receiver >= 0 && Character.isWhitespace(modelText.charAt(receiver)))
+            receiver--;
+        return receiver >= 0 ? queryParentType(resource, receiver) : ""; //$NON-NLS-1$
+    }
+
+    /** Один расчёт для колонки рефакторинга и строки «Родитель» подсказок модуля. */
+    private static String queryParentType(XtextResource resource, int receiverOffset)
+    {
+        var resolver = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+        EObject parent = resolver.resolveElementAt(resource, receiverOffset);
+        if (parent == null || parent.eIsProxy())
+            return ""; //$NON-NLS-1$
+        // У пространства имён «Справочник» в «Справочник.Валюты» нет DbView и типа BSL.
+        // Модель QL хранит его отдельным первым сегментом: показываем имя пространства.
+        String namespace = null;
+        if (parent instanceof SinglePartQuerySchemaTable table
+            && table.eContainer() instanceof MultiPartQuerySchemaTable path && path.getParentTable() == table)
+            namespace = table.getTableName();
+        else if (parent instanceof SinglePartCommonExpression expression
+            && expression.eContainer() instanceof MultiPartCommonExpression path
+            && path.getSourceTable() == expression)
+            namespace = expression.getContent();
+        String namespaceRu = namespace == null ? null : MdTypeMapping.anyToRu(namespace);
+        if (namespaceRu != null && MdTypeMapping.isKnownMdRootType(namespaceRu))
+            return namespaceRu;
+        if (parent instanceof DbViewFieldDef field)
+        {
+            var computer = resource.getResourceServiceProvider().get(DerivedTypeComputerForDbViewQuery.class);
+            var type = computer.getFieldType(field).getFirst();
+            if (type != null)
+            {
+                List<String> names = new ArrayList<>();
+                for (TypeItem item : type.getTypes())
+                {
+                    String name = item.getNameRu();
+                    if (name == null || name.isBlank())
+                        name = item.getName();
+                    if (name != null && !name.isBlank() && !names.contains(name))
+                        names.add(name);
+                }
+                return String.join(", ", names); //$NON-NLS-1$
+            }
+        }
+        return parent instanceof com._1c.g5.v8.dt.metadata.dbview.Table
+            ? QueryFieldHover.tablePath(parent, resource).name() : ""; //$NON-NLS-1$
     }
 
     /**
@@ -1921,19 +2047,7 @@ final class BslQueryLiteralSupport
                         // тем же QL-сервисом, которым строится подсказка поля запроса.
                         if (offset > 1 && prefix.endsWith(".")) //$NON-NLS-1$
                         {
-                            var resolver = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
-                            EObject parent = resolver.resolveElementAt(resource, offset - 2);
-                            if (parent instanceof DbViewFieldDef field && !field.eIsProxy())
-                            {
-                                var computer = resource.getResourceServiceProvider().get(DerivedTypeComputerForDbViewQuery.class);
-                                var parentType = computer.getFieldType(field).getFirst();
-                                if (parentType != null)
-                                    parentNames = String.join(", ", typeNames(parentType.getTypes(), null)); //$NON-NLS-1$
-                            }
-                            // Псевдоним источника из ИЗ и табличная часть — таблица: её полное имя.
-                            if (parentNames.isEmpty() && parent instanceof com._1c.g5.v8.dt.metadata.dbview.Table
-                                && !parent.eIsProxy())
-                                parentNames = QueryFieldHover.tablePath(parent, resource).name();
+                            parentNames = queryParentType(resource, offset - 2);
                         }
                         var leaf = NodeModelUtils.findLeafNodeAtOffset(root,
                             Math.min(offset, Math.max(0, root.getLength() - 1)));
@@ -3032,10 +3146,10 @@ final class BslQueryLiteralSupport
 
     // --- Живые маркеры ошибок запроса в видимой области редактора (issue 837) ---
 
-    // Стандартные типы: их рисует любой текстовый редактор (подчёркивание, полоса, обзор).
-    private static final String ERROR_TYPE = "org.eclipse.ui.workbench.texteditor.error"; //$NON-NLS-1$
-    private static final String WARNING_TYPE = "org.eclipse.ui.workbench.texteditor.warning"; //$NON-NLS-1$
-    private static final String INFO_TYPE = "org.eclipse.ui.workbench.texteditor.info"; //$NON-NLS-1$
+    // Типы XtextEditor.installProjectionSupport: попадают и в сводный маркер свёрнутой группы.
+    private static final String ERROR_TYPE = "org.eclipse.xtext.ui.editor.error"; //$NON-NLS-1$
+    private static final String WARNING_TYPE = "org.eclipse.xtext.ui.editor.warning"; //$NON-NLS-1$
+    private static final String INFO_TYPE = "org.eclipse.xtext.ui.editor.info"; //$NON-NLS-1$
     private static final int MARKERS_DELAY_MS = 600;
     /** Сколько литералов видимой области проверяется за проход. */
     private static final int MARKERS_MAX_LITERALS = 20;
@@ -3765,7 +3879,13 @@ final class BslQueryLiteralSupport
                     return null;
                 if (isConcatenatedLiteral(model))
                     result.add(openQuote);
+                else
+                    // Проверяются все видимые запросы, а не только метод под кареткой.
+                    // Их схемы должны быть готовы до запуска проверки в UI.
+                    BslTempTableSessions.compute(model, CancelIndicator.NullImpl);
             }
+            // Публикует рассчитанные схемы из кэша; -1 не запускает расчёт других методов.
+            BslTempTableSessions.refreshDocument(document, resource, -1);
             return result;
         });
     }

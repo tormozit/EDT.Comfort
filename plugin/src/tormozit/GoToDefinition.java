@@ -1492,6 +1492,12 @@ public class GoToDefinition extends AbstractHandler
             return null;
 
         String[] p = modulePath.split("\\.");
+        if (p.length == 1 && MdTypeMapping.isConfigurationModule(p[0]))
+        {
+            String prefix = extension != null && !extension.isBlank()
+                    ? "src/ext/" + extension + "/" : "src/"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return prefix + "Configuration/" + MdTypeMapping.ruToEnSingRequired(p[0]) + ".bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
         if (p.length < 2)
             return null;
 

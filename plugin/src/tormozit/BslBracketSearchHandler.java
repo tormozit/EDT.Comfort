@@ -1,19 +1,30 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.Region;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.xtext.RuleCall;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.ui.menu.AbstractBslBracketSearchHandler;
 import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.IfPreprocessor;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorConditional;
+import com._1c.g5.v8.dt.bsl.model.RegionPreprocessor;
 
 /**
  * Команды «Перейти по операторным скобкам вперёд/назад» (Ctrl+] / Ctrl+[, с выделением —
@@ -33,9 +44,9 @@ import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
  * многострочного текста (запрос, макет, текст сообщения) полезнее сначала дойти до его края.
  *
  * <p>Обработчик один на все четыре команды: направление и режим выделения определяются по
- * идентификатору команды. Вне многострочного литерала работа передаётся штатной реализации
- * (наш класс наследует {@code AbstractBslBracketSearchHandler}), поэтому обычное поведение
- * команд не меняется.
+ * идентификатору команды. Дополнительно обрабатывается {@code IfPreprocessor} между методами:
+ * этот тип отсутствует в таблицах скобок EDT. Остальные конструкции передаются штатной
+ * реализации ({@code AbstractBslBracketSearchHandler}).
  *
  * <p>{@code activeWhen} в {@code plugin.xml} обязателен и обязан быть «сильнее» штатного:
  * у обработчиков EDT условие построено на переменной {@code activeEditor}
@@ -56,12 +67,150 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
             return null;
         if (jumpToStringLiteralBound(event, forward, withSelection))
             return null;
+        if (jumpToMethodPreprocessor(event, forward, withSelection))
+            return null;
 
         if (withSelection)
             executeBracketSearchWithSelection(event, forward);
         else
             executeBracketSearch(event, forward);
         return null;
+    }
+
+    /**
+     * PreprocessorMethodStatementIf создаёт базовый IfPreprocessor, которого нет в
+     * OPEN/MIDDLE/CLOSE_BRACKETS EDT. Границы берём по терминалам грамматики и их владельцу,
+     * как штатный isTheSameObject: вложенные директивы и itemAfter не принадлежат нашей паре.
+     */
+    private static boolean jumpToMethodPreprocessor(ExecutionEvent event, boolean forward,
+        boolean withSelection)
+    {
+        IWorkbenchPart part = HandlerUtil.getActivePart(event);
+        XtextEditor editor = part == null ? null : BslHandlerUtil.extractXtextEditor(part);
+        ITextViewer viewer = editor == null ? null : BslHandlerUtil.getTextViewer(editor);
+        IXtextDocument document = editor == null ? null : editor.getDocument();
+        if (viewer == null || document == null)
+            return false;
+        Point selection = viewer.getSelectedRange();
+        IRegion target = document.readOnly(resource ->
+        {
+            if (resource == null || resource.getParseResult() == null)
+                return null;
+            var root = resource.getParseResult().getRootNode();
+            var leaf = NodeModelUtils.findLeafNodeAtOffset(root, selection.x);
+            if (leaf == null)
+                return null;
+            // Круглые/квадратные скобки штатный обработчик проверяет раньше логических.
+            String text = leaf.getText();
+            int relative = selection.x - leaf.getOffset();
+            if (relative >= 0 && relative < text.length() && "()[]".indexOf(text.charAt(relative)) >= 0) //$NON-NLS-1$
+                return null;
+            EObject object = NodeModelUtils.findActualSemanticObjectFor(leaf);
+            while (object != null && !(object instanceof IfPreprocessor)
+                && !(object instanceof RegionPreprocessor) && !OPEN_BRACKETS.containsKey(object.eClass()))
+                object = object.eContainer();
+            if (object == null || object.eClass() != BslPackage.Literals.IF_PREPROCESSOR)
+                return null;
+            var node = NodeModelUtils.findActualNodeFor(object);
+            if (node == null)
+                return null;
+            List<IRegion> brackets = new ArrayList<>();
+            for (var candidate : node.getLeafNodes())
+            {
+                if (candidate.isHidden() || !(candidate.getGrammarElement() instanceof RuleCall call))
+                    continue;
+                String rule = call.getRule().getName();
+                if (!"BEGIN_IFPREPROCESSOR".equals(rule) && !"END_IFPREPROCESSOR".equals(rule) //$NON-NLS-1$ //$NON-NLS-2$
+                    && !"ELSEIF_PREPROCESSOR".equals(rule) && !"ELSE_PREPROCESSOR".equals(rule)) //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                EObject owner = NodeModelUtils.findActualSemanticObjectFor(candidate);
+                if (owner instanceof PreprocessorConditional)
+                    owner = owner.eContainer();
+                if (owner == object)
+                    brackets.add(new Region(candidate.getOffset(), candidate.getLength()));
+            }
+            return methodPreprocessorRange(brackets, selection, forward, withSelection);
+        });
+        if (target == null)
+            return false;
+        if (viewer instanceof ITextViewerExtension5 extension)
+            extension.exposeModelRange(target);
+        else
+            viewer.resetVisibleRegion();
+        viewer.setSelectedRange(target.getOffset(), target.getLength());
+        viewer.revealRange(target.getOffset(), target.getLength());
+        return true;
+    }
+
+    /** Направление, циклический обход и расширение выделения как в getNextProcedureBracket EDT. */
+    private static IRegion methodPreprocessorRange(List<IRegion> brackets, Point selection,
+        boolean forward, boolean withSelection)
+    {
+        IRegion next = nextMethodPreprocessorBracket(brackets, selection.x, forward);
+        if (next == null || !withSelection)
+            return next;
+        IRegion first = brackets.get(0);
+        IRegion last = brackets.get(brackets.size() - 1);
+        boolean wasLast = next == last;
+        IRegion other;
+        if (forward)
+        {
+            int initialOffset = next.getOffset();
+            int count = 0;
+            while (next != null && count < brackets.size() && next.getOffset() >= selection.x
+                && next.getOffset() + next.getLength() <= selection.x + selection.y)
+            {
+                count++;
+                next = nextMethodPreprocessorBracket(brackets, next.getOffset() + 1, true);
+            }
+            if (wasLast && next != last)
+            {
+                next = first;
+                other = last;
+            }
+            else
+                other = nextMethodPreprocessorBracket(brackets, initialOffset, false);
+        }
+        else if (wasLast)
+        {
+            next = first;
+            other = last;
+        }
+        else
+        {
+            int initialEnd = next.getOffset() + next.getLength();
+            other = nextMethodPreprocessorBracket(brackets, initialEnd, true);
+            IRegion previous = null;
+            int count = 0;
+            while (other != null && count < brackets.size() && other.getOffset() >= selection.x
+                && other.getOffset() + other.getLength() <= selection.x + selection.y)
+            {
+                count++;
+                previous = other;
+                other = nextMethodPreprocessorBracket(brackets, other.getOffset() + other.getLength(), true);
+            }
+            if (previous != null)
+                other = previous;
+        }
+        if (next == null || other == null)
+            return null;
+        int start = Math.min(next.getOffset(), other.getOffset());
+        int end = Math.max(next.getOffset() + next.getLength(), other.getOffset() + other.getLength());
+        return new Region(start, end - start);
+    }
+
+    private static IRegion nextMethodPreprocessorBracket(List<IRegion> brackets, int offset, boolean forward)
+    {
+        if (brackets.size() < 2)
+            return null;
+        for (int i = forward ? 0 : brackets.size() - 1; i >= 0 && i < brackets.size(); i += forward ? 1 : -1)
+        {
+            IRegion bracket = brackets.get(i);
+            if (forward ? offset < bracket.getOffset()
+                : offset > bracket.getOffset() + bracket.getLength())
+                return bracket;
+        }
+        return brackets.get(forward ? 0 : brackets.size() - 1);
     }
 
     /**

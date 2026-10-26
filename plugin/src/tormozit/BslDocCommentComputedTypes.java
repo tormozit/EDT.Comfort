@@ -43,12 +43,25 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.Return
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Block;
+import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService;
 import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeState;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeStateWithSubStates;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
+import com._1c.g5.v8.dt.bsl.resource.BslResource;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
+import com._1c.g5.v8.dt.bsl.typesystem.InvocationTypesComputerExtensionRegistry;
+import com._1c.g5.v8.dt.bsl.typesystem.util.CreatorTreeState;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.util.Environment;
+import com._1c.g5.v8.dt.mcore.util.Environments;
 
 /**
  * Влитие рассчитанного по коду типа в документирующий комментарий (issue 509).
@@ -1952,6 +1965,170 @@ public final class BslDocCommentComputedTypes
         }
     }
 
+    /** Вход из графа EDT: зависимости параметров обработчиков ОписаниеОповещения. */
+    public static void afterNotificationTreeStates(Object creator)
+    {
+        try
+        {
+            NotificationParameters.link(creator);
+        }
+        catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+    }
+
+    /**
+     * ИР: ОбработкаОбъект.ирКлсПолеТекстаПрограммы.ВычислитьТипПараметраМетодаМодуля,
+     * ветка Оповещения: третий аргумент — последний параметр клиентского обработчика.
+     * Зависимость добавляется после построения состояний вызывающего блока, до расчёта графа.
+     * Штатный processDependState (bsl 28.0.1.v202605050943, CreatorTreeState) сохраняет
+     * выражение, связи с переменными/возвратами и очередь расчёта, как для прямого вызова.
+     */
+    private static final class NotificationParameters
+    {
+        static void link(Object creator)
+        {
+            Object rawBlock = Global.getField(creator, "block"); //$NON-NLS-1$
+            if (!(rawBlock instanceof Block block) || !isExtendedTypesEnabled(block)
+                || Global.getField(creator, "mode") != TypeSystemMode.NORMAL) //$NON-NLS-1$
+                return;
+            var cancel = Global.getField(creator, "cancelIndicator"); //$NON-NLS-1$
+            if (cancel instanceof org.eclipse.xtext.util.CancelIndicator indicator && indicator.isCanceled())
+                return;
+            Module module = org.eclipse.xtext.EcoreUtil2.getContainerOfType(block, Module.class);
+            if (module == null)
+                return;
+            if (block instanceof Method handler && module.eResource() instanceof BslResource resource
+                && resource.isOnlyMethodReparse() && resource.getReparseMethod() == handler
+                && handler.isExport() && !handler.getFormalParams().isEmpty() && isClient(handler.environments()))
+                restoreIncoming(creator, module, handler);
+            for (OperatorStyleCreator notification : org.eclipse.xtext.EcoreUtil2.getAllContentsOfType(
+                block, OperatorStyleCreator.class))
+            {
+                // При проходе тела модуля не дублируем вызовы из отдельных проходов методов.
+                Method caller = org.eclipse.xtext.EcoreUtil2.getContainerOfType(notification, Method.class);
+                if (caller != (block instanceof Method method ? method : null))
+                    continue;
+                String name = handlerName(notification);
+                if (name == null)
+                    continue;
+                List<Expression> args = notification.getParams();
+                for (Method handler : module.allMethods())
+                {
+                    if (!name.equalsIgnoreCase(handler.getName()) || !handler.isExport()
+                        || handler.getFormalParams().isEmpty() || !isClient(handler.environments()))
+                        continue;
+                    linkArgument(creator, notification, args.get(2), handler, false);
+                }
+            }
+        }
+
+        private static String handlerName(OperatorStyleCreator notification)
+        {
+            var type = notification.getType();
+            if (type == null || !isNotificationType(type.getName(), type.getNameRu()))
+                return null;
+            List<Expression> args = notification.getParams();
+            if (args.size() < 3 || !(args.get(0) instanceof StringLiteral literal)
+                || literal.getLines().size() != 1 || !(args.get(1) instanceof StaticFeatureAccess receiver)
+                || !isSelf(receiver.getName()))
+                return null;
+            String line = literal.getLines().get(0);
+            return line == null || line.length() < 2 ? null
+                : line.substring(1, line.length() - 1).replace("\"\"", "\""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * После правки обработчика EDT создаёт его входные состояния заново, не обходя вызывающие
+         * методы. Их состояния NORMAL остались рассчитанными: восстанавливаем связь с новым
+         * входом и переносим текущие типы, чтобы запустить распространение по новому графу.
+         */
+        private static void restoreIncoming(Object creator, Module module, Method handler)
+        {
+            for (OperatorStyleCreator notification : org.eclipse.xtext.EcoreUtil2.getAllContentsOfType(
+                module, OperatorStyleCreator.class))
+            {
+                if (!handler.getName().equalsIgnoreCase(handlerName(notification))
+                    || org.eclipse.xtext.EcoreUtil2.getContainerOfType(notification, Method.class) == handler)
+                    continue; // Собственные вызовы ниже обрабатываются обычным исходящим проходом.
+                linkArgument(creator, notification, notification.getParams().get(2), handler, true);
+            }
+        }
+
+        /** Имена из platform-v8: NotifyDescription — старое, CallbackDescription — с 8.3.22. */
+        private static boolean isNotificationType(String name, String nameRu)
+        {
+            return "NotifyDescription".equalsIgnoreCase(name) || "CallbackDescription".equalsIgnoreCase(name) //$NON-NLS-1$ //$NON-NLS-2$
+                || "ОписаниеОповещения".equalsIgnoreCase(nameRu); //$NON-NLS-1$
+        }
+
+        private static boolean isSelf(String name)
+        {
+            return "ЭтотОбъект".equalsIgnoreCase(name) || "ЭтаФорма".equalsIgnoreCase(name) //$NON-NLS-1$ //$NON-NLS-2$
+                || "ThisObject".equalsIgnoreCase(name) || "ThisForm".equalsIgnoreCase(name); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static boolean isClient(Environments environments)
+        {
+            return environments != null && (environments.containsAny(Environments.MNG_CLIENTS)
+                || environments.contains(Environment.CLIENT));
+        }
+
+        private static void linkArgument(Object creator, OperatorStyleCreator notification,
+            Expression argument, Method handler, boolean restore)
+        {
+            try
+            {
+                var owner = (IBslOwnerComputerService)Global.getField(creator, "ownerComputerService"); //$NON-NLS-1$
+                var environments = TypeSystemUtil.getActualEnvironments(notification, owner);
+                if (!isClient(environments))
+                    return;
+                int index = handler.getFormalParams().size() - 1;
+                if (index >= handler.getFinalInParamState().size())
+                    return;
+                var provider = handler.getFinalInParamState().get(index).get(TypeSystemMode.NORMAL);
+                var last = provider == null ? null : provider.getLastState(environments);
+                if (!(last instanceof VariableTreeTypeStateWithSubStates states))
+                    return;
+                VariableTreeTypeState target = states.getConcreteState(environments);
+                var dynamic = (DynamicFeatureAccessComputer)Global.getField(creator, "dynamicComputer"); //$NON-NLS-1$
+                var extensions = (InvocationTypesComputerExtensionRegistry)Global.getField(creator,
+                    "invTypesComputerExtension"); //$NON-NLS-1$
+                List<VariableTreeTypeState> dependencies = CreatorTreeState.getAllDependState(argument,
+                    dynamic, owner, extensions, TypeSystemMode.NORMAL, environments);
+                boolean search = Boolean.TRUE.equals(Global.invoke(creator,
+                    "needSearchFeatureDependencies", argument)); //$NON-NLS-1$
+                if (!Global.invokeVoid(creator, "processDependState", target, argument, dependencies, //$NON-NLS-1$
+                    search, environments))
+                    throw new IllegalStateException("processDependState unavailable"); //$NON-NLS-1$
+                if (restore)
+                {
+                    var computer = (TypesComputer)Global.getField(creator, "computerTypes"); //$NON-NLS-1$
+                    List<TypeItem> types = computer.computeTypes(argument, environments);
+                    target.addTypes(types);
+                    // Старый источник уже обработан и не стоит в очереди. Распространяем новый вход
+                    // сами: одного добавления рёбер недостаточно, hasNewTypes источника уже false.
+                    target.setHasNewTypes(true);
+                    @SuppressWarnings("unchecked")
+                    Deque<VariableTreeTypeState> queue =
+                        (Deque<VariableTreeTypeState>)Global.getField(creator, "allComputedState"); //$NON-NLS-1$
+                    queue.add(target);
+                }
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                throw canceled;
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+    }
+
     /**
      * Инструментализация {@code CreatorTreeState}: начальные состояния неявных переменных; в хвост
      * {@code isReplaceTypesByDocumentationComment} добавляется наш ответ, который умеет
@@ -1972,6 +2149,23 @@ public final class BslDocCommentComputedTypes
                 String signature, String[] exceptions)
             {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (mv != null && "doProcess".equals(name) //$NON-NLS-1$
+                    && "(Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)V".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "afterNotificationTreeStates", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
                 if (mv != null && "setInitialStateForExplicitMethodVariable".equals(name) //$NON-NLS-1$
                     && "()V".equals(descriptor)) //$NON-NLS-1$
                     return new MethodVisitor(Opcodes.ASM9, mv)

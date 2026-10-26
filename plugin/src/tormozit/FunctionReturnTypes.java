@@ -830,34 +830,22 @@ final class FunctionReturnTypes
         Object value = element.eGet(BslPackage.PROPOSAL_ELEMENT__LIST, false, false);
         if (!(value instanceof InternalEList<?> list))
         {
-            Global.tempLog("assist-variable-target", "reject list info=" + System.identityHashCode(info)
-                + " valueClass=" + (value == null ? null : value.getClass().getName()));
             return null;
         }
-        StringBuilder entriesTrace = new StringBuilder();
         var entries = list.basicIterator();
         while (entries.hasNext())
         {
             Object entry = entries.next();
-            entriesTrace.append(entry == null ? null : entry.getClass().getName()).append(';');
             if (!(entry instanceof com._1c.g5.v8.dt.bsl.model.FantomVariableOccurrence occurrence))
                 continue;
             com._1c.g5.v8.dt.bsl.model.Variable variable = occurrence.getVariable();
             if (variable == null || variable.eIsProxy() || variable.getName() == null)
             {
-                Global.tempLog("assist-variable-target", "reject variable info=" + System.identityHashCode(info)
-                    + " offset=" + occurrence.getOffset() + " variableClass="
-                    + (variable == null ? null : variable.getClass().getName())
-                    + " proxy=" + (variable != null && variable.eIsProxy()) + " proxyUri="
-                    + (variable instanceof InternalEObject internal ? internal.eProxyURI() : null));
                 return null;
             }
             Resource resource = variable.eResource();
             if (resource == null || resource.getURI() == null)
             {
-                Global.tempLog("assist-variable-target", "reject resource info=" + System.identityHashCode(info)
-                    + " name=" + variable.getName() + " offset=" + occurrence.getOffset()
-                    + " variable=" + System.identityHashCode(variable) + " resource=" + resource);
                 return null;
             }
             com._1c.g5.v8.dt.bsl.model.Method method =
@@ -867,12 +855,8 @@ final class FunctionReturnTypes
             VariableTarget target = new VariableTarget(resource.getURI().trimFragment(), methodName, variable.getName(),
                 occurrence.getOffset(), resource.getURIFragment(variable));
             VARIABLE_TARGETS.put((ProposalElement)info, target);
-            Global.tempLog("assist-variable-target", "resolved info=" + System.identityHashCode(info)
-                + " variable=" + System.identityHashCode(variable) + " target=" + target);
             return target;
         }
-        Global.tempLog("assist-variable-target", "reject entries info=" + System.identityHashCode(info)
-            + " size=" + list.size() + " classes=" + entriesTrace);
         return null;
     }
 

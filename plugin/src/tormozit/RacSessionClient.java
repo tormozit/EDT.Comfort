@@ -23,7 +23,10 @@ import java.util.regex.Pattern;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
+import org.eclipse.debug.core.DebugPlugin;
 
+import com._1c.g5.v8.dt.debug.core.model.IDebugSession;
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.ServerConnectionString;
 
@@ -156,6 +159,7 @@ record RacSessionClient(IProject project, InfobaseReference infobase, String add
     private void terminateAndVerify(String executable, String foundCluster, UUID session,
         BigDecimal number, IProgressMonitor monitor) throws Exception
     {
+        disconnectSession(session, number, monitor);
         List<String> terminate = sessionArguments("terminate", foundCluster); //$NON-NLS-1$
         terminate.add("--session=" + session); //$NON-NLS-1$
         long verificationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
@@ -208,6 +212,43 @@ record RacSessionClient(IProject project, InfobaseReference infobase, String add
                 throw new OperationCanceledException();
             Thread.sleep(500);
         }
+    }
+
+    /** Штатное отключение всех предметов выбранного сеанса до завершения через RAS. */
+    private static void disconnectSession(UUID uuid, BigDecimal number, IProgressMonitor monitor) throws Exception
+    {
+        Global.tempLog("debug-session-rac", "disconnect requested session=" + uuid); //$NON-NLS-1$ //$NON-NLS-2$
+        DebugPlugin debug = DebugPlugin.getDefault();
+        if (debug == null)
+            throw new IOException("Не удалось получить модель отладки для отключения сеанса.");
+        int disconnected = 0;
+        for (var launch : debug.getLaunchManager().getLaunches())
+            for (var debugTarget : launch.getDebugTargets())
+            {
+                if (!(debugTarget instanceof IRuntimeDebugClientTarget target)
+                    || target.isTerminated() || target.isDisconnected())
+                    continue;
+                for (var group : target.getThreadGroups())
+                {
+                    if (!(group instanceof IDebugSession session) || !uuid.equals(session.getSessionUuid())
+                        || number.compareTo(session.getSessionId()) != 0)
+                        continue;
+                    // Перебираем снимок предметов: модель может обновляться при отключении.
+                    for (var thread : session.getThreads())
+                    {
+                        if (monitor.isCanceled())
+                            throw new OperationCanceledException();
+                        if (thread.isTerminated() || thread.isDisconnected())
+                            continue;
+                        Global.tempLog("debug-session-rac", "disconnect target session=" + uuid //$NON-NLS-1$ //$NON-NLS-2$
+                            + " target=" + thread.getRuntimeDebugTarget()); //$NON-NLS-1$
+                        thread.disconnect();
+                        disconnected++;
+                    }
+                }
+            }
+        Global.tempLog("debug-session-rac", "disconnect completed session=" + uuid //$NON-NLS-1$ //$NON-NLS-2$
+            + " targets=" + disconnected); //$NON-NLS-1$
     }
 
     /** Та же установка конфигуратора приложения, что используется при подключении ИР. */

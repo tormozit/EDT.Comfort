@@ -4908,8 +4908,10 @@ boolean inLiteral = endCaret >= 0
         String skipText = event == null ? null : event.getText();
         SmartContentAssistProcessor.autoOpenLog("document", event != null ? event.getDocument() : null, //$NON-NLS-1$
             event != null ? event.getOffset() + (skipText != null ? skipText.length() : 0) : -1,
-            "text=\"" + ContentAssistDebug.jsonEscapeForLog(skipText == null ? "" : skipText) //$NON-NLS-1$ //$NON-NLS-2$
-                + "\" removed=" + (event != null ? event.getLength() : -1) //$NON-NLS-1$
+            "insertedLength=" + (skipText == null ? 0 : skipText.length()) //$NON-NLS-1$
+                + (skipText != null && skipText.length() <= 100
+                    ? " text=\"" + ContentAssistDebug.jsonEscapeForLog(skipText) + "\"" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " removed=" + (event != null ? event.getLength() : -1) //$NON-NLS-1$
                 + " pending=" + pendingAutoOpen + " timerGen=" + completionAutoOpenScheduleGen.get()); //$NON-NLS-1$ //$NON-NLS-2$
         boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
         if (skipText != null && skipText.indexOf('"') >= 0)

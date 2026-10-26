@@ -348,6 +348,17 @@ public final class BslTempTableSessions
         return issues;
     }
 
+    /** Поле создано EDT по обращению, но отсутствует в известной схеме источника. */
+    static boolean isUnknownField(EObject object)
+    {
+        if (!(object instanceof DbViewFieldDef field)
+            || !(field.eContainer() instanceof DbViewDescriptionTempTable table))
+            return false;
+        Applied applied = (Applied)EcoreUtil.getExistingAdapter(table, Applied.class);
+        return applied != null && applied.source.columns().stream().noneMatch(column ->
+            column.name().equalsIgnoreCase(field.getName()) || column.name().equalsIgnoreCase(field.getNameRu()));
+    }
+
     /**
      * Куда ведёт переход с элемента модели запроса: внешняя временная таблица — на её {@code ПОМЕСТИТЬ} в другом
      * литерале, её поле — на поле того запроса. {@code null} — элемент не из сеанса.
@@ -382,14 +393,54 @@ public final class BslTempTableSessions
     /** Готовый сеанс литерала: действителен, пока не изменились методы, которые читал расчёт. */
     private record Cached(Map<Method, Integer> dependencies, long generation, Session session) {}
 
-    private static final Map<StringLiteral, Cached> SESSIONS = Collections.synchronizedMap(new WeakHashMap<>());
+    /**
+     * Кэш принадлежит самому литералу, без статического корня. Cached.dependencies держит методы
+     * и через их AST — литерал: значение глобального WeakHashMap удерживало бы собственный слабый ключ.
+     * Адаптер освобождается вместе с этим разбором, в том числе после переразбора открытого модуля.
+     */
+    private static final class LiteralSessionCache extends AdapterImpl
+    {
+        Cached value;
+    }
+
+    private static LiteralSessionCache sessionCache(StringLiteral literal, boolean create)
+    {
+        for (var adapter : literal.eAdapters())
+            if (adapter instanceof LiteralSessionCache cache)
+                return cache;
+        if (!create)
+            return null;
+        LiteralSessionCache cache = new LiteralSessionCache();
+        literal.eAdapters().add(cache);
+        return cache;
+    }
+
+    private static Cached cachedSession(StringLiteral literal)
+    {
+        LiteralSessionCache cache = sessionCache(literal, false);
+        return cache == null ? null : cache.value;
+    }
+
+    /** Временная безусловная диагностика памяти при массовом расчёте запросов. */
+    private static void logSessionCache(String phase, StringLiteral literal, Cached cached)
+    {
+        Runtime runtime = Runtime.getRuntime();
+        Global.tempLog("temp-table-session-cache", "phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
+            + " literal=" + System.identityHashCode(literal) //$NON-NLS-1$
+            + " uri=" + (literal.eResource() == null ? null : literal.eResource().getURI()) //$NON-NLS-1$
+            + " dependencies=" + (cached == null ? 0 : cached.dependencies.size()) //$NON-NLS-1$
+            + " usedBytes=" + (runtime.totalMemory() - runtime.freeMemory()) //$NON-NLS-1$
+            + " maxBytes=" + runtime.maxMemory() //$NON-NLS-1$
+            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+    }
 
     /** Сеанс литерала-текста запроса. Вызывающий держит readOnly документа модуля. */
     static Session compute(StringLiteral literal, CancelIndicator cancellation)
     {
         if (literal == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(literal))
             return EMPTY;
-        Cached cached = SESSIONS.get(literal);
+        Cached cached = cachedSession(literal);
+        logSessionCache("lookup", literal, cached); //$NON-NLS-1$
         long generation = BslQueryResultTypes.metadataGeneration();
         if (cached != null && cached.generation == generation && current(cached.dependencies))
             return cached.session;
@@ -408,7 +459,9 @@ public final class BslTempTableSessions
             // сбой анализа — литерал без внешних таблиц
             result = EMPTY;
         }
-        SESSIONS.put(literal, new Cached(Map.copyOf(analysis.dependencies), generation, result));
+        Cached computed = new Cached(Map.copyOf(analysis.dependencies), generation, result);
+        sessionCache(literal, true).value = computed;
+        logSessionCache("stored", literal, computed); //$NON-NLS-1$
         return result;
     }
 
@@ -1107,7 +1160,7 @@ public final class BslTempTableSessions
             boolean caretMethod = offset >= node.getOffset() && offset <= node.getEndOffset();
             for (StringLiteral literal : EcoreUtil2.getAllContentsOfType(method, StringLiteral.class))
             {
-                Cached cached = SESSIONS.get(literal);
+                Cached cached = cachedSession(literal);
                 if (!caretMethod && (cached == null || !current(cached.dependencies))
                     || caretMethod && Analysis.queryOf(literal, probe) == null)
                     continue;

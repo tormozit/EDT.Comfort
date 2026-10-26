@@ -138,6 +138,13 @@ public final class BslForEachCollectionCheck extends BasicCheck<Object>
             : EcoreUtil2.getContainerOfType(variable, Method.class);
         if (method == null)
             return false;
+        // Выходной параметр тоже присваивает значение: прежние правые части уже
+        // не доказывают, что Undefined означает именно Неопределено.
+        for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+            for (int i = 0; i < invocation.getParams().size(); i++)
+                if (invocation.getParams().get(i) instanceof StaticFeatureAccess argument
+                    && refersTo(argument, variable) && isOutputArgument(invocation, i))
+                    return false;
         boolean assigned = false;
         for (SimpleStatement assignment : EcoreUtil2.getAllContentsOfType(method, SimpleStatement.class))
         {
@@ -148,6 +155,31 @@ public final class BslForEachCollectionCheck extends BasicCheck<Object>
             assigned = true;
         }
         return assigned;
+    }
+
+    /** Направление параметра берём из сигнатуры, включая передачу без Знач в BSL. */
+    static boolean isOutputArgument(Invocation invocation, int index)
+    {
+        FeatureAccess access = invocation.getMethodAccess();
+        List<FeatureEntry> entries = access instanceof StaticFeatureAccess stat ? stat.getFeatureEntries()
+            : access instanceof DynamicFeatureAccess dyn ? dyn.getFeatureEntries() : List.of();
+        for (FeatureEntry entry : entries)
+        {
+            if (entry.getFeature() instanceof Method method)
+            {
+                if (index < method.getFormalParams().size() && !method.getFormalParams().get(index).isByValue())
+                    return true;
+            }
+            else if (entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Method method)
+                for (var set : method.getParamSet())
+                {
+                    int count = invocation.getParams().size();
+                    if (count >= set.getMinParams() && (set.getMaxParams() == -1 || count <= set.getMaxParams())
+                        && index < set.getParams().size() && set.getParams().get(index).isOut())
+                        return true;
+                }
+        }
+        return false;
     }
 
     private static Variable variable(StaticFeatureAccess access)

@@ -2,19 +2,23 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResourceChangeEvent;
 import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorReference;
@@ -25,6 +29,8 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 
 /**
@@ -87,6 +93,12 @@ public class MassiveChecksExemptionHook
     /** Пути модулей, открытых в редакторах; обновляется в потоке UI. */
     private static final Set<String> openModules = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Папки объектов, открытых в редакторе объекта (общий модуль, справочник и т. п.), с завершающим «/»:
+     * его модули, модули форм и команд открыты вместе с ним. Обновляется в потоке UI.
+     */
+    private static final Set<String> openObjectFolders = ConcurrentHashMap.newKeySet();
+
     @Override
     public void earlyStartup()
     {
@@ -139,6 +151,8 @@ public class MassiveChecksExemptionHook
     private static void refreshOpenModules()
     {
         Set<String> paths = new HashSet<>();
+        Set<String> folders = new HashSet<>();
+        List<String> inputs = new ArrayList<>();
         for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
         {
             for (IWorkbenchPage page : window.getPages())
@@ -146,13 +160,20 @@ public class MassiveChecksExemptionHook
                 for (IEditorReference reference : page.getEditorReferences())
                 {
                     IEditorInput input = editorInput(reference);
+                    inputs.add(reference.getId() + ":" + (input == null ? "null" : input.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                     if (input instanceof IFileEditorInput fileInput)
                         addPathForms(paths, fileInput.getFile());
+                    else if (input instanceof IDtEditorInput<?> dtInput)
+                        addObjectFolderForms(folders, dtInput.getModel());
                 }
             }
         }
         openModules.clear();
         openModules.addAll(paths);
+        openObjectFolders.clear();
+        openObjectFolders.addAll(folders);
+        // Временная диагностика «Только открытые модули».
+        Global.tempLog("open-modules", "refresh inputs=" + inputs + " paths=" + paths + " folders=" + folders); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static IEditorInput editorInput(IEditorReference reference)
@@ -176,6 +197,28 @@ public class MassiveChecksExemptionHook
         URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
         target.add(uri.toPlatformString(false));
         target.add(uri.toPlatformString(true));
+    }
+
+    /** Папка объекта редактора объекта в обеих формах, с «/» на конце (как {@code ComfortCheckRecompute}). */
+    private static void addObjectFolderForms(Collection<String> target, EObject model)
+    {
+        IResourceLookup lookup = model != null ? Global.getOsgiService(IResourceLookup.class) : null;
+        if (lookup == null)
+            return;
+        try
+        {
+            IFile objectFile = lookup.getPlatformResource(model);
+            IContainer folder = objectFile != null ? objectFile.getParent() : null;
+            if (folder == null)
+                return;
+            URI uri = URI.createPlatformResourceURI(folder.getFullPath().toString(), true);
+            target.add(uri.toPlatformString(false) + "/"); //$NON-NLS-1$
+            target.add(uri.toPlatformString(true) + "/"); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            Debug.log("папка объекта редактора: " + e); //$NON-NLS-1$
+        }
     }
 
     private static void onWorkspaceChange(IResourceChangeEvent event)
@@ -278,7 +321,41 @@ public class MassiveChecksExemptionHook
             : objectId instanceof String text ? text : null;
         if (path == null)
             return false;
-        return openModules.contains(path) || isActive(touchedModules.get(path), now);
+        return openModules.contains(path) || inOpenObject(path) || isActive(touchedModules.get(path), now);
+    }
+
+    /** Модуль лежит в папке объекта, открытого в редакторе объекта. */
+    private static boolean inOpenObject(String path)
+    {
+        for (String folder : openObjectFolders)
+            if (path.startsWith(folder))
+                return true;
+        return false;
+    }
+
+    /**
+     * Модуль открыт в редакторе или идёт ручной запуск проверки его проекта — для параметра
+     * «Только открытые модули» тяжёлых проверок. Недавнее изменение файла не учитывается: после
+     * получения изменений из Git изменёнными оказываются сотни модулей.
+     *
+     * @param uri URI ресурса модуля ({@code platform:/resource/Проект/...})
+     */
+    public static boolean isOpenOrManual(URI uri)
+    {
+        if (uri == null || !uri.isPlatformResource())
+            return false;
+        long now = System.currentTimeMillis();
+        if (uri.segmentCount() > 1 && isActive(manualProjects.get(URI.decode(uri.segment(1))), now))
+            return true;
+        String raw = uri.toPlatformString(false);
+        String decoded = uri.toPlatformString(true);
+        boolean open = openModules.contains(raw) || openModules.contains(decoded) || inOpenObject(raw)
+            || inOpenObject(decoded);
+        if (!open)
+            // Временная диагностика «Только открытые модули».
+            Global.tempLog("open-modules", "not open raw=" + raw + " decoded=" + decoded //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " known=" + openModules.size() + " folders=" + openObjectFolders.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        return open;
     }
 
     private static boolean isActive(Long until, long now)

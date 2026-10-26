@@ -344,6 +344,129 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         REQUEST.remove();
     }
 
+    /** Общее описание значения литерала для строки списка и обеих подсказок. */
+    static Property valueDescription(String name, Collection<? extends TypeItem> types)
+    {
+        var property = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createDerivedProperty();
+        property.setName(name);
+        property.setNameRu(name);
+        property.setReadable(true);
+        property.setEnvironments(Environments.ALL);
+        var container = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeContainerRef();
+        container.getTypes().addAll(types);
+        property.setTypeContainer(container);
+        return property;
+    }
+
+    /** Поздно созданные предложения используют тот же штатный hover, что строки провайдера. */
+    static void describeProposal(ConfigurableCompletionProposal proposal, Property info, ITextViewer viewer)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+            return;
+        XtextResource resource = document.readOnly(r -> r);
+        var services = resource.getResourceServiceProvider();
+        describeProposal(proposal, info, viewer, resource, services.get(IEObjectHover.class));
+    }
+
+    private static void describeProposal(ConfigurableCompletionProposal proposal, Object info,
+        ITextViewer viewer, XtextResource resource, IEObjectHover hover)
+    {
+        if (Global.getField(proposal, "additionalProposalInfo") == null) //$NON-NLS-1$
+            proposal.setAdditionalProposalInfo(info);
+        if (Global.getField(proposal, "hover") == null && hover != null) //$NON-NLS-1$
+        {
+            proposal.setHover(hover);
+            proposal.setProposalContextResource(resource);
+            Global.setField(proposal, "viewer", viewer); //$NON-NLS-1$
+        }
+    }
+
+    /** Только границы слова: получение региона не запускает расчёт типов. */
+    static org.eclipse.jface.text.IRegion valueHoverRegion(ITextViewer viewer, int offset)
+    {
+        IDocument document = viewer.getDocument();
+        try
+        {
+            var partition = document.getPartition(offset);
+            if (!org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION
+                .equals(partition.getType()))
+                return null;
+            int start = offset;
+            int end = offset;
+            while (start > partition.getOffset() && Character.isJavaIdentifierPart(document.getChar(start - 1)))
+                start--;
+            while (end < partition.getOffset() + partition.getLength()
+                && Character.isJavaIdentifierPart(document.getChar(end)))
+                end++;
+            return end > start ? new org.eclipse.jface.text.Region(start, end - start) : null;
+        }
+        catch (org.eclipse.jface.text.BadLocationException failure)
+        {
+            return null;
+        }
+    }
+
+    /** Наведение берёт то же описание значения, которое используется в списке литерала. */
+    static BslEditorHoverHook.ContentHover valueHover(ITextViewer viewer, int offset)
+    {
+        var region = valueHoverRegion(viewer, offset);
+        if (region == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        try
+        {
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
+                    .resolveContainedElementAt(resource, offset);
+                StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+                if (literal == null)
+                    return null;
+                String name = literalText(literal);
+                Property property;
+                EObject target = literal.eContainer();
+                List<Expression> args = argumentsOf(target);
+                int index = args.indexOf(literal);
+                if (target instanceof Invocation invocation && index == 0
+                    && invocation.getMethodAccess() != null
+                    && Set.of("установитьпараметр", "setparameter").contains(lower(invocation.getMethodAccess().getName()))) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    var parameters = BslQueryResultTypes.queryParametersAt(resource, offsetOf(literal) + 1);
+                    property = parameters == null ? null : parameters.entrySet().stream()
+                        .filter(entry -> entry.getKey().equalsIgnoreCase(name)).map(Map.Entry::getValue)
+                        .findFirst().orElse(null);
+                }
+                else
+                {
+                    Segment segment = Segment.of(name);
+                    Analysis analysis = new Analysis(resource, true, isRussian(resource),
+                        name.substring(0, segment.start), offsetOf(literal));
+                    if (target instanceof IndexAccess access && access.getIndex() == literal)
+                        analysis.indexAccess(access);
+                    else if (index >= 0)
+                        analysis.call(target, args, index, ""); //$NON-NLS-1$
+                    else
+                        analysis.outside(literal);
+                    analysis.finish();
+                    property = analysis.info(name.substring(segment.start));
+                }
+                if (property == null)
+                    return null;
+                IEObjectHover hover = resource.getResourceServiceProvider().get(IEObjectHover.class);
+                if (hover == null)
+                    return null;
+                Object info = hover.getHoverInfo(property, viewer, region);
+                info = BslEditorHoverHook.decorateSideHint(info, property, viewer);
+                var creator = hover instanceof org.eclipse.jface.text.ITextHoverExtension extension
+                    ? extension.getHoverControlCreator() : null;
+                return info == null ? null : new BslEditorHoverHook.ContentHover(info, creator);
+            });
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------------------------------
     // Точка расширения: литерал-аргумент вызова и индекс
     // ------------------------------------------------------------------------------------------
@@ -492,15 +615,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
             if (info == null)
                 continue;
-            if (Global.getField(configurable, "additionalProposalInfo") == null) //$NON-NLS-1$
-                configurable.setAdditionalProposalInfo(info);
-            if (Global.getField(configurable, "hover") == null && hover != null) //$NON-NLS-1$
-            {
-                configurable.setHover(hover);
-                if (resource != null)
-                    configurable.setProposalContextResource(resource);
-                Global.setField(configurable, "viewer", viewer); //$NON-NLS-1$
-            }
+            describeProposal(configurable, info, viewer, resource, hover);
         }
         int quote = literalQuote(doc, offset);
         return quote >= 0 ? dedupe(result, request, doc, quote) : result.toArray(ICompletionProposal[]::new);
@@ -783,16 +898,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (types == null || types.isEmpty())
                 return property;
             // Копия с разрешёнными типами (ссылками, без переноса из модели).
-            com._1c.g5.v8.dt.mcore.DerivedProperty derived =
-                com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createDerivedProperty();
+            Property derived = valueDescription(name, types);
             derived.setName(property != null && property.getName() != null ? property.getName() : name);
             derived.setNameRu(property != null && property.getNameRu() != null ? property.getNameRu() : name);
-            derived.setReadable(true);
-            derived.setEnvironments(Environments.ALL);
-            com._1c.g5.v8.dt.mcore.TypeContainerRef container =
-                com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeContainerRef();
-            container.getTypes().addAll(types);
-            derived.setTypeContainer(container);
             return derived;
         }
 
@@ -918,8 +1026,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
 
         /**
-         * Исходный метод модуля экспортного метода. Запоминается в проходе по набору ресурсов, где разрешался
-         * ({@link EcoreUtil#resolve(EObject, EObject)} грузит модель в набор контекста), и полному URI.
+         * Исходный метод модуля экспортного метода: сначала из общей модели общего модуля
+         * ({@link #sharedSourceMethod}), иначе {@link EcoreUtil#resolve(EObject, EObject)} в наборе контекста.
+         * Запоминается в проходе по набору ресурсов контекста и полному URI.
          */
         EObject sourceMethod(com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported)
         {
@@ -942,7 +1051,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$
                 return cached;
             }
-            logCommonModuleModel(sourceResourceUri, contextResource);
+            Method shared = sharedSourceMethod(sourceResourceUri, exported.getName());
+            if (shared != null)
+            {
+                if (known != null)
+                    known.put(sourceUri, shared);
+                return shared;
+            }
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
             ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(exported.getSourceUri());
             var existingResource = contextResource != null && contextResource.getResourceSet() != null
@@ -962,44 +1077,39 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return sourceMethod;
         }
 
-        /** Временная диагностика: что отдаёт {@code CommonModule.getModule()}; в анализе не используется. */
-        void logCommonModuleModel(URI sourceResourceUri, org.eclipse.emf.ecore.resource.Resource contextResource)
+        /**
+         * Метод общего модуля из его модели, которую отдаёт {@code CommonModule.getModule()}: EDT держит её общей
+         * для всех проверок. Разрешение {@code getSourceUri} в наборе ресурсов проверяемого модуля заново грузило
+         * и разбирало общий модуль для каждого вызывающего модуля. {@code null} — не общий модуль или метод не
+         * найден: тогда прежний путь.
+         */
+        Method sharedSourceMethod(URI sourceResourceUri, String methodName)
         {
-            try
-            {
-                List<String> segments = sourceResourceUri.segmentsList();
-                int src = segments.indexOf("src"); //$NON-NLS-1$
-                if (src < 0 || src + 2 >= segments.size() || !"CommonModules".equals(segments.get(src + 1)) //$NON-NLS-1$
-                    || configuration() == null)
-                    return;
-                String name = URI.decode(segments.get(src + 2));
-                CommonModule common = null;
-                for (CommonModule candidate : configuration().getCommonModules())
-                    if (name.equalsIgnoreCase(candidate.getName()))
-                        common = candidate;
-                long started = System.nanoTime();
-                Module model = common != null ? common.getModule() : null;
-                double ms = (System.nanoTime() - started) / 1_000_000.0;
-                var modelResource = model != null ? model.eResource() : null;
-                var modelSet = modelResource != null ? modelResource.getResourceSet() : null;
-                var contextSet = contextResource != null ? contextResource.getResourceSet() : null;
-                Global.tempLog("literal-common-module", "source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                    + " md=" + (common != null ? System.identityHashCode(common) : 0) //$NON-NLS-1$
-                    + " model=" + (model != null ? System.identityHashCode(model) : 0) //$NON-NLS-1$
-                    + " proxy=" + (model != null && model.eIsProxy()) //$NON-NLS-1$
-                    + " resource=" + (modelResource != null ? System.identityHashCode(modelResource) : 0) //$NON-NLS-1$
-                    + " loaded=" + (modelResource != null && modelResource.isLoaded()) //$NON-NLS-1$
-                    + " set=" + (modelSet != null ? modelSet.getClass().getSimpleName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
-                        + System.identityHashCode(modelSet) : "null") //$NON-NLS-1$
-                    + " contextSet=" + (contextSet != null ? contextSet.getClass().getSimpleName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
-                        + System.identityHashCode(contextSet) : "null") //$NON-NLS-1$
-                    + " ms=" + ms + " caller=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                Global.tempLogException("literal-common-module", "getModule failed source=" + sourceResourceUri, e); //$NON-NLS-1$ //$NON-NLS-2$
-            }
+            List<String> segments = sourceResourceUri.segmentsList();
+            int src = segments.indexOf("src"); //$NON-NLS-1$
+            if (methodName == null || src < 0 || src + 2 >= segments.size()
+                || !"CommonModules".equals(segments.get(src + 1)) || configuration() == null) //$NON-NLS-1$
+                return null;
+            String name = URI.decode(segments.get(src + 2));
+            CommonModule common = null;
+            for (CommonModule candidate : configuration().getCommonModules())
+                if (name.equalsIgnoreCase(candidate.getName()))
+                    common = candidate;
+            long started = System.nanoTime();
+            Module model = common != null ? common.getModule() : null;
+            Method found = null;
+            if (model != null && !model.eIsProxy())
+                for (Method method : model.allMethods())
+                    if (methodName.equalsIgnoreCase(method.getName()))
+                    {
+                        found = method;
+                        break;
+                    }
+            Global.tempLog("literal-model-load", "shared source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
+                + " found=" + (found != null) + " model=" + (model != null ? System.identityHashCode(model) : 0) //$NON-NLS-1$ //$NON-NLS-2$
+                + " wallMs=" + (System.nanoTime() - started) / 1_000_000.0 + " caller=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " validation=" + validation + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$ //$NON-NLS-2$
+            return found;
         }
 
         /** {@code ПодобратьВариантСинтаксисаМетодаПоТипамПараметров}, как в {@link BslExpectedTypePremiums}. */
@@ -1793,8 +1903,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (form != null)
                 {
                     if (creator != null || !fromForm.isEmpty())
-                        for (FormParameter parameter : form.getParameters())
-                            add(nameOf(parameter), parameter.getValueType());
+                        addFormParameters(form);
                     else if (mdOfForm(form) != null)
                         addAll(mdFields(mdOfForm(form)));
                 }
@@ -2253,6 +2362,64 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             String feature = STANDARD_FORMS.get(lower(parts[2]));
             return feature != null ? defaultForm(md, feature) : null;
+        }
+
+        /**
+         * {@code СхемаКоллекцииПараметровФормы} из {@code ирПлатформа}: системные параметры формы, затем ожидаемые
+         * в её коде. Системные — свойства {@code Параметры} контекста формы: туда EDT кладёт параметры формы вместе с
+         * параметрами расширения ({@code Отбор}, {@code ТекущаяСтрока} у формы списка и т. п.).
+         */
+        void addFormParameters(Form form)
+        {
+            boolean fromContext = false;
+            ContextDef context = form.getFormContext();
+            if (context != null)
+                for (Property property : context.getProperties())
+                {
+                    if (!"Parameters".equals(property.getName())) //$NON-NLS-1$
+                        continue;
+                    for (TypeItem item : property.getTypes())
+                    {
+                        Type type = resolve(item);
+                        if (type != null && type.getContextDef() != null)
+                            for (Property parameter : type.getContextDef().getProperties())
+                            {
+                                fromContext = true;
+                                // Только типы, без самого свойства: это не свойство платформы, и подсказка
+                                // по нему искала бы несуществующую страницу документации.
+                                add(dualName(parameter), parameter.getTypes());
+                            }
+                    }
+                }
+            // Контекст формы ещё не выведен — собственные параметры из модели формы.
+            if (!fromContext)
+                for (FormParameter parameter : form.getParameters())
+                    add(nameOf(parameter), parameter.getValueType());
+            // Ожидаемые в коде формы параметры: ПриСозданииНаСервере читает Параметры.Имя и Параметры.Свойство("Имя").
+            Module formModule = form.getModule();
+            if (formModule == null || formModule.eIsProxy())
+                return;
+            for (Method method : formModule.allMethods())
+            {
+                if (!in(method.getName(), "ПриСозданииНаСервере", "OnCreateAtServer")) //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                for (EObject object : contents(method))
+                {
+                    if (object instanceof Invocation invocation
+                        && invocation.getMethodAccess() instanceof DynamicFeatureAccess access
+                        && in(access.getName(), "Свойство", "Property") && isFormParameters(access.getSource()) //$NON-NLS-1$ //$NON-NLS-2$
+                        && !invocation.getParams().isEmpty())
+                        add(literalText(invocation.getParams().get(0)));
+                    else if (object instanceof DynamicFeatureAccess access && isFormParameters(access.getSource())
+                        && !(access.eContainer() instanceof Invocation invocation && invocation.getMethodAccess() == access))
+                        add(access.getName());
+                }
+            }
+        }
+
+        boolean isFormParameters(Expression expression)
+        {
+            return expression instanceof StaticFeatureAccess && in(text(expression), "Параметры", "Parameters"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         Form defaultForm(MdObject md, String feature)

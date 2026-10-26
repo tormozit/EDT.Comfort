@@ -16,6 +16,8 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.resource.XtextResource;
 
 import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
+import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
+import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefProperty;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
@@ -26,9 +28,9 @@ import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
-import com._1c.g5.v8.dt.bsl.model.SourceObjectLinkProvider;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.UndefinedLiteral;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
@@ -54,8 +56,8 @@ import tormozit.ComfortCheckIds;
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
  * Штатные ветки выполняются через TypesChecker; дополнены аргументы функций платформы
- * и присваивания свойствам платформы. В ожидаемых типах платформы Undefined означает значение,
- * а не неизвестный тип (тот же принцип, что в BslForEachCollectionCheck).
+ * и присваивания свойствам платформы. Единственный ожидаемый Undefined допускает любой тип;
+ * в наборе с конкретными типами он означает допустимое значение Неопределено.
  */
 public final class BslValueTypeCheck extends BasicCheck<Object>
 {
@@ -72,7 +74,10 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
     {
         configurer.title("Несовместимость типа значения")
             .description("Проверяет типы выражений, аргументов вызова и значений, присваиваемых свойствам платформы. "
-                + "Неопределено среди допустимых типов платформы означает конкретное значение."
+                + "Единственный ожидаемый тип Неопределено допускает любое значение; "
+                + "вместе с конкретными типами он разрешает также значение Неопределено. "
+                + "Ожидаемый тип Строка допускает значение любого типа. "
+                + "Значение Неопределено можно присваивать и передавать параметрам любого типа."
                 + "<br><br>Заменяет штатную bsl-legacy-check-expression-type, её включить нельзя.")
             .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
             .module().checkedObjectType(BslPackage.Literals.MODULE);
@@ -120,9 +125,24 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 Environments envs = environments(next);
                 if (envs.isEmpty())
                     continue;
-                for (var error : legacy.checkTypes(next, envs))
-                    issue(error.message, error.source, error.feature,
-                        error.errorCode == null ? WRONG_TYPE : error.errorCode, envs);
+                for (Environment environment : envs.toArray())
+                {
+                    Environments current = new Environments(environment);
+                    for (var error : legacy.checkTypes(next, current))
+                    {
+                        boolean typeError = error.errorCode == null || WRONG_TYPE.equals(error.errorCode);
+                        // EDT проверяет каждый метод родительского типа отдельно. Аргументы
+                        // перепроверяем ниже по объединению всех подходящих сигнатур.
+                        boolean recheckArgument = typeError && error.source instanceof Expression value
+                            && value.eContainer() instanceof Invocation call && call.getParams().contains(value);
+                        boolean compatibleUndefined = typeError
+                            && isUndefinedAssignment(error.source, current);
+                        boolean stringConcatenation = typeError && isStringConcatenation(error.source, current);
+                        if (!compatibleUndefined && !recheckArgument && !stringConcatenation)
+                            issue(error.message, error.source, error.feature,
+                                error.errorCode == null ? WRONG_TYPE : error.errorCode, current);
+                    }
+                }
             }
             all = module.eAllContents();
             while (all.hasNext() && !monitor.isCanceled())
@@ -141,6 +161,45 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         checkAssignment(access, assignment.getRight(), envs);
                 }
             }
+        }
+
+        /** При сложении со строкой другой операнд преобразуется в строковое представление. */
+        private boolean isStringConcatenation(EObject source, Environments envs)
+        {
+            if (!(source instanceof Expression value)
+                || !(value.eContainer() instanceof BinaryExpression binary)
+                || binary.getOperation() != BinaryOperation.PLUS)
+                return false;
+            boolean compatible = canBeString(binary.getLeft(), envs) || canBeString(binary.getRight(), envs);
+            return compatible;
+        }
+
+        /** EDT вычисляет тип сложения только по левой части и может потерять строку справа. */
+        private boolean canBeString(Expression expression, Environments envs)
+        {
+            if (expression == null)
+                return false;
+            if (expression instanceof StringLiteral)
+                return true;
+            if (expression instanceof BinaryExpression binary && binary.getOperation() == BinaryOperation.PLUS
+                && (canBeString(binary.getLeft(), envs) || canBeString(binary.getRight(), envs)))
+                return true;
+            List<TypeItem> computed = resolve(types.computeTypes(expression, envs), expression);
+            return computed != null && hasType(computed, "String"); //$NON-NLS-1$
+        }
+
+        /** Неопределено допустимо как значение присваивания и фактического параметра. */
+        private boolean isUndefinedAssignment(EObject source, Environments envs)
+        {
+            if (!(source instanceof Expression value))
+                return false;
+            EObject parent = value.eContainer();
+            if (!(parent instanceof SimpleStatement assignment && assignment.getRight() == value)
+                && !(parent instanceof Invocation invocation && invocation.getParams().contains(value)))
+                return false;
+            List<TypeItem> actual = resolve(types.computeTypes(value, envs), value);
+            return actual != null && !actual.isEmpty()
+                && actual.stream().allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
         }
 
         private Environments environments(EObject object)
@@ -167,14 +226,17 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             List<List<TypeItem>> expected = new ArrayList<>();
             for (int i = 0; i < invocation.getParams().size(); i++)
                 expected.add(new ArrayList<>());
+            // Параметр необязателен хотя бы в одной подходящей сигнатуре: Неопределено — его пропуск.
+            boolean[] optional = new boolean[invocation.getParams().size()];
+            boolean[] unrestricted = new boolean[invocation.getParams().size()];
             boolean platform = false;
             for (FeatureEntry entry : entries(access, envs))
             {
                 if (!envs.containsAny(entry.getEnvironments()))
                     continue;
-                // BSL-сигнатуры уже обрабатывает TypesChecker. Их Undefined может быть неизвестным типом.
-                if (!(entry.getFeature() instanceof Method method) || method.eIsProxy()
-                    || method instanceof SourceObjectLinkProvider)
+                // Все варианты родительского типа участвуют в одной проверке аргумента,
+                // включая методы модулей: несовместимость одного варианта недостаточна.
+                if (!(entry.getFeature() instanceof Method method) || method.eIsProxy())
                     return;
                 platform = true;
                 boolean matching = false;
@@ -185,7 +247,17 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         continue;
                     matching = true;
                     for (int i = 0; i < Math.min(count, set.getParams().size()); i++)
-                        expected.get(i).addAll(set.getParams().get(i).getType());
+                    {
+                        var parameter = set.getParams().get(i);
+                        List<TypeItem> parameterTypes = resolve(parameter.getType(), invocation);
+                        unrestricted[i] |= parameter.isOut() || parameterTypes == null || parameterTypes.isEmpty()
+                            || parameterTypes.stream()
+                                .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
+                        expected.get(i).addAll(parameter.getType());
+                        optional[i] |= i >= set.getMinParams();
+                    }
+                    for (int i = set.getParams().size(); i < count; i++)
+                        unrestricted[i] = true;
                 }
                 // Неверное число параметров проверяется отдельно; не угадываем сигнатуру.
                 if (!matching)
@@ -194,7 +266,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             if (!platform)
                 return;
             for (int i = 0; i < expected.size(); i++)
-                checkValue(invocation.getParams().get(i), expected.get(i), envs, true);
+                if (!unrestricted[i] && !BslForEachCollectionCheck.isOutputArgument(invocation, i))
+                    checkValue(invocation.getParams().get(i), expected.get(i), envs, true, optional[i]);
         }
 
         private void checkAssignment(FeatureAccess access, Expression value, Environments envs)
@@ -209,15 +282,22 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     return;
                 expected.addAll(property.getTypes());
             }
-            checkValue(value, expected, envs, false);
+            checkValue(value, expected, envs, false, false);
         }
 
-        private void checkValue(Expression value, List<TypeItem> expected, Environments envs, boolean argument)
+        /** @param optional необязательный параметр метода платформы: Неопределено совместимо с ним */
+        private void checkValue(Expression value, List<TypeItem> expected, Environments envs, boolean argument,
+            boolean optional)
         {
             if (value == null || value instanceof EmptyExpression || expected.isEmpty()
                 || typeIssues.getOrDefault(value, Environments.EMPTY).containsAny(envs))
                 return;
             List<TypeItem> resolvedExpected = resolve(expected, value);
+            // Голый Undefined в сигнатуре — неизвестный (произвольный) ожидаемый тип.
+            // Повторения при объединении сигнатур не добавляют конкретного ограничения.
+            if (resolvedExpected != null && resolvedExpected.stream()
+                .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item)))) //$NON-NLS-1$
+                return;
             List<TypeItem> actual = resolve(types.computeTypes(value, envs), value);
             if (resolvedExpected == null || actual == null || actual.isEmpty())
                 return;
@@ -231,13 +311,16 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     || hasType(resolvedExpected, "Undefined")) //$NON-NLS-1$
                     return;
                 concreteActual.removeIf(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
+                // Единственный фактический тип Неопределено совместим с любым приёмником.
+                if (concreteActual.isEmpty())
+                    return;
             }
             List<TypeItem> concreteExpected = new ArrayList<>();
             for (TypeItem item : resolvedExpected)
                 if (!"Undefined".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$
                     concreteExpected.add(item);
-            // EDT разрешает передавать любое значение строковому параметру (неявное представление).
-            if (argument && hasType(concreteExpected, "String")) //$NON-NLS-1$
+            // Строковый параметр или свойство допускает любое значение (неявное представление).
+            if (hasType(concreteExpected, "String")) //$NON-NLS-1$
                 return;
             if (hasType(concreteExpected, "Arbitrary")) //$NON-NLS-1$
                 return;
