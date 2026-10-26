@@ -421,26 +421,12 @@ public final class BslTempTableSessions
         return cache == null ? null : cache.value;
     }
 
-    /** Временная безусловная диагностика памяти при массовом расчёте запросов. */
-    private static void logSessionCache(String phase, StringLiteral literal, Cached cached)
-    {
-        Runtime runtime = Runtime.getRuntime();
-        Global.tempLog("temp-table-session-cache", "phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
-            + " literal=" + System.identityHashCode(literal) //$NON-NLS-1$
-            + " uri=" + (literal.eResource() == null ? null : literal.eResource().getURI()) //$NON-NLS-1$
-            + " dependencies=" + (cached == null ? 0 : cached.dependencies.size()) //$NON-NLS-1$
-            + " usedBytes=" + (runtime.totalMemory() - runtime.freeMemory()) //$NON-NLS-1$
-            + " maxBytes=" + runtime.maxMemory() //$NON-NLS-1$
-            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-    }
-
     /** Сеанс литерала-текста запроса. Вызывающий держит readOnly документа модуля. */
     static Session compute(StringLiteral literal, CancelIndicator cancellation)
     {
         if (literal == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(literal))
             return EMPTY;
         Cached cached = cachedSession(literal);
-        logSessionCache("lookup", literal, cached); //$NON-NLS-1$
         long generation = BslQueryResultTypes.metadataGeneration();
         if (cached != null && cached.generation == generation && current(cached.dependencies))
             return cached.session;
@@ -461,7 +447,6 @@ public final class BslTempTableSessions
         }
         Cached computed = new Cached(Map.copyOf(analysis.dependencies), generation, result);
         sessionCache(literal, true).value = computed;
-        logSessionCache("stored", literal, computed); //$NON-NLS-1$
         return result;
     }
 

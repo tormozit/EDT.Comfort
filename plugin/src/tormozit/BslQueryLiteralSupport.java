@@ -3147,9 +3147,10 @@ final class BslQueryLiteralSupport
     // --- Живые маркеры ошибок запроса в видимой области редактора (issue 837) ---
 
     // Типы XtextEditor.installProjectionSupport: попадают и в сводный маркер свёрнутой группы.
-    private static final String ERROR_TYPE = "org.eclipse.xtext.ui.editor.error"; //$NON-NLS-1$
-    private static final String WARNING_TYPE = "org.eclipse.xtext.ui.editor.warning"; //$NON-NLS-1$
-    private static final String INFO_TYPE = "org.eclipse.xtext.ui.editor.info"; //$NON-NLS-1$
+    // Отдельные подтипы сохраняют оформление и сводки Xtext, но не удаляются его проверкой модуля.
+    private static final String ERROR_TYPE = "tormozit.queryLiteral.error"; //$NON-NLS-1$
+    private static final String WARNING_TYPE = "tormozit.queryLiteral.warning"; //$NON-NLS-1$
+    private static final String INFO_TYPE = "tormozit.queryLiteral.info"; //$NON-NLS-1$
     private static final int MARKERS_DELAY_MS = 600;
     /** Сколько литералов видимой области проверяется за проход. */
     private static final int MARKERS_MAX_LITERALS = 20;

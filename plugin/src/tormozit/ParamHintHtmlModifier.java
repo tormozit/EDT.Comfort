@@ -1415,7 +1415,7 @@ public final class ParamHintHtmlModifier
         return input;
     }
 
-    /** Только потерявшая код копия платформенного типа; исходную модель не меняем. */
+    /** Копии платформенных свойств и вычисленные колонки; исходную модель не меняем. */
     private static List<Object> recoverPropertyDocumentation(Object provider,
         com._1c.g5.v8.dt.mcore.Property property, Resource contextResource, String language)
     {
@@ -1424,6 +1424,21 @@ public final class ParamHintHtmlModifier
             + " code=" + property.getCode() + " owner=" + (owner == null ? null : owner.getName()) //$NON-NLS-1$ //$NON-NLS-2$
             + " ownerCode=" + (owner == null ? null : owner.getCode()) //$NON-NLS-1$
             + " context=" + (contextResource == null ? null : contextResource.getURI())); //$NON-NLS-1$
+        ProposalElement column = documentationColumn(property, contextResource);
+        if (column != null)
+        {
+            List<Object> pages = new ArrayList<>();
+            Object group = Global.invoke(provider, "getHoverDocumentationPages", column, language); //$NON-NLS-1$
+            for (Object page : BslSyntaxAssist.pagesOf(group))
+            {
+                Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
+                if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
+                    || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
+                    return List.of();
+                pages.add(page);
+            }
+            return pages;
+        }
         if (owner == null || owner.getCode() != -1 || contextResource == null
             || property instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)
             return List.of();
@@ -1470,6 +1485,34 @@ public final class ParamHintHtmlModifier
             Global.tempLogException("property-documentation", "recovery failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return List.of();
+    }
+
+    /**
+     * UnloadRecordSetInvocationTypesComputer (BSL 28.0.1.v202605050943) копирует свойства записи
+     * в ValueTableRow вместе с платформенными кодами. Страницы «ValueTableRow + код поля записи»
+     * нет: колонку документируем штатным путём DerivedProperty, сохранив тип и контекст модуля.
+     */
+    private static ProposalElement documentationColumn(com._1c.g5.v8.dt.mcore.Property property,
+        Resource contextResource)
+    {
+        Type owner = EcoreUtil2.getContainerOfType(property, Type.class);
+        if (owner == null || !"ValueTableRow".equals(owner.getName()) || owner.eResource() != null //$NON-NLS-1$
+            || property instanceof com._1c.g5.v8.dt.mcore.DerivedProperty || property.isDependsOnMetadata()
+            || contextResource == null || contextResource.getContents().isEmpty())
+            return null;
+        var column = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createDerivedProperty();
+        column.setName(property.getName());
+        column.setNameRu(property.getNameRu());
+        column.setReadable(property.isReadable());
+        column.setWritable(property.isWritable());
+        column.setEnvironments(property.environments());
+        var types = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeContainerRef();
+        types.getTypes().addAll(property.getTypes());
+        column.setTypeContainer(types);
+        var proposal = com._1c.g5.v8.dt.bsl.model.BslFactory.eINSTANCE.createProposalElement();
+        proposal.setModel(contextResource.getContents().get(0));
+        proposal.getList().add(column);
+        return proposal;
     }
 
     private static void collectDocumentationMembers(EObject source, List<EObject> members)

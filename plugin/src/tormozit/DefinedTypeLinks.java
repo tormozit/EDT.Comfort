@@ -18,11 +18,12 @@ import org.eclipse.xtext.scoping.IScopeProvider;
 
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeSet;
+import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCharacteristicTypes;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 
 /**
- * Ссылки на определяемые типы в подсказках: штатная документация EDT выводит
- * {@code ОпределяемыйТип.Имя} простым текстом. Клик — {@code comfortOpenMethodDefinition}
+ * Ссылки на определяемые типы и типы значений характеристик в подсказках: EDT выводит
+ * {@code ОпределяемыйТип.Имя} и {@code Характеристика.Имя} простым текстом. Клик — {@code comfortOpenMethodDefinition}
  * с URI объекта метаданных, меню «Объект» добавляет {@link MetadataTypeMenu}.
  */
 final class DefinedTypeLinks
@@ -31,7 +32,7 @@ final class DefinedTypeLinks
     private static final Pattern DEFINED_TYPE_TEXT = Pattern.compile(
         "(<a\\b[^>]*>[\\s\\S]*?</a\\s*>|<script\\b[^>]*>[\\s\\S]*?</script\\s*>" //$NON-NLS-1$
             + "|<style\\b[^>]*>[\\s\\S]*?</style\\s*>|<[^>]*>)" //$NON-NLS-1$
-            + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*)", //$NON-NLS-1$
+            + "|((?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType|Характеристика|Characteristic)\\.[\\p{L}_][\\p{L}\\p{N}_]*)", //$NON-NLS-1$
         Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     /** Имя определяемого типа в простом тексте (строка списка автодополнения, не HTML). */
@@ -39,14 +40,14 @@ final class DefinedTypeLinks
         "(?<![\\p{L}\\p{N}_])(?:ОпределяемыйТип|DefinedType)\\.[\\p{L}_][\\p{L}\\p{N}_]*", //$NON-NLS-1$
         Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
-    /** Закодированный URI определяемого типа и его суффикс как в навигаторе ({@link DefinedTypeDecorator}). */
+    /** Закодированный URI объекта МД и суффикс определяемого типа ({@link DefinedTypeDecorator}). */
     record Link(String uri, String suffix) {}
 
     private DefinedTypeLinks()
     {
     }
 
-    /** Имена определяемых типов в тексте HTML вне ссылок. */
+    /** Имена определяемых типов и типов значений характеристик в HTML вне ссылок. */
     static Set<String> names(String html)
     {
         Set<String> names = new LinkedHashSet<>();
@@ -59,7 +60,7 @@ final class DefinedTypeLinks
         return names;
     }
 
-    /** Имя → ссылка на определяемый тип; только под чтением модели {@code resource}. */
+    /** Имя → ссылка на объект МД; только под чтением модели {@code resource}. */
     static Map<String, Link> resolve(Set<String> names, XtextResource resource)
     {
         if (names == null || names.isEmpty() || resource == null || resource.getContents().isEmpty())
@@ -81,7 +82,7 @@ final class DefinedTypeLinks
             if (!(object instanceof TypeSet type))
                 continue;
             var producer = BslEditorHyperlinkHook.typeProducer(type);
-            if (!(producer instanceof DefinedType))
+            if (!(producer instanceof DefinedType) && !(producer instanceof ChartOfCharacteristicTypes))
                 continue;
             var uri = resource.getResourceSet().getURIConverter().normalize(EcoreUtil.getURI(producer));
             links.put(name, new Link(URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8),

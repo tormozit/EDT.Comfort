@@ -178,7 +178,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     {
         if (!(literal.eResource() instanceof XtextResource resource))
             return List.of();
-        Global.tempLog("unknown-literal", "begin offset=" + offsetOf(literal)); //$NON-NLS-1$ //$NON-NLS-2$
         String source = text(literal);
         if (source.indexOf('\n') >= 0 || source.indexOf('\r') >= 0)
             return List.of();
@@ -187,61 +186,52 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         Map<String, Analysis> byParent = new HashMap<>();
         byParent.put("", analysis); //$NON-NLS-1$
         List<String> unknown = new ArrayList<>();
-        try
-        {
-            if (!analysis.full || analysis.values.isEmpty())
-                return unknown;
-            String value = literalText(literal);
-            String[] parts = value.split(",", -1); //$NON-NLS-1$
-            for (String part : parts)
-            {
-                String candidate = part.trim();
-                if (analysis.sortDirection)
-                    candidate = candidate.split("\\s+", 2)[0]; //$NON-NLS-1$
-                if (candidate.isEmpty())
-                    continue;
-                String[] path = analysis.pathAware ? candidate.split("\\.", -1) : new String[] {candidate}; //$NON-NLS-1$
-                String parent = ""; //$NON-NLS-1$
-                int segmentOffset = 0;
-                for (String segment : path)
-                {
-                    analysis.checkCanceled();
-                    Analysis current = byParent.get(parent);
-                    if (current == null)
-                    {
-                        current = analyzeLiteral(resource, literal, parent, canceled, pass);
-                        byParent.put(parent, current);
-                    }
-                    if (!current.full || current.values.isEmpty())
-                        break;
-                    String name = segment.trim();
-                    if (!current.values.containsKey(lower(name)))
-                    {
-                        unknown.add(part.trim());
-                        if (corrections != null)
-                        {
-                            String original = part.trim();
-                            int from = segmentOffset + segment.indexOf(name);
-                            List<String> legal = new ArrayList<>();
-                            for (String allowed : current.values.values())
-                                legal.add(original.substring(0, from) + allowed
-                                    + original.substring(from + name.length()));
-                            corrections.put(original, legal);
-                        }
-                        break;
-                    }
-                    parent += name + "."; //$NON-NLS-1$
-                    segmentOffset += segment.length() + 1;
-                }
-            }
+        if (!analysis.full || analysis.values.isEmpty())
             return unknown;
-        }
-        finally
+        String value = literalText(literal);
+        String[] parts = value.split(",", -1); //$NON-NLS-1$
+        for (String part : parts)
         {
-            Global.tempLog("unknown-literal", "offset=" + offsetOf(literal) + " full=" + analysis.full //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " values=" + analysis.values.size() + " branches=" + analysis.branches + " unknown=" + unknown //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " parents=" + byParent.size()); //$NON-NLS-1$
+            String candidate = part.trim();
+            if (analysis.sortDirection)
+                candidate = candidate.split("\\s+", 2)[0]; //$NON-NLS-1$
+            if (candidate.isEmpty())
+                continue;
+            String[] path = analysis.pathAware ? candidate.split("\\.", -1) : new String[] {candidate}; //$NON-NLS-1$
+            String parent = ""; //$NON-NLS-1$
+            int segmentOffset = 0;
+            for (String segment : path)
+            {
+                analysis.checkCanceled();
+                Analysis current = byParent.get(parent);
+                if (current == null)
+                {
+                    current = analyzeLiteral(resource, literal, parent, canceled, pass);
+                    byParent.put(parent, current);
+                }
+                if (!current.full || current.values.isEmpty())
+                    break;
+                String name = segment.trim();
+                if (!current.values.containsKey(lower(name)))
+                {
+                    unknown.add(part.trim());
+                    if (corrections != null)
+                    {
+                        String original = part.trim();
+                        int from = segmentOffset + segment.indexOf(name);
+                        List<String> legal = new ArrayList<>();
+                        for (String allowed : current.values.values())
+                            legal.add(original.substring(0, from) + allowed
+                                + original.substring(from + name.length()));
+                        corrections.put(original, legal);
+                    }
+                    break;
+                }
+                parent += name + "."; //$NON-NLS-1$
+                segmentOffset += segment.length() + 1;
+            }
         }
+        return unknown;
     }
 
     private static Analysis analyzeLiteral(XtextResource resource, StringLiteral literal, String prefix,
@@ -1046,9 +1036,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             EObject cached = known != null ? known.get(sourceUri) : null;
             if (cached != null)
             {
-                Global.tempLog("literal-model-load", "cached source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                    + " resolved=" + !cached.eIsProxy() + " validation=" + validation //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$
                 return cached;
             }
             Method shared = sharedSourceMethod(sourceResourceUri, exported.getName());
@@ -1060,18 +1047,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
             ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(exported.getSourceUri());
-            var existingResource = contextResource != null && contextResource.getResourceSet() != null
-                ? contextResource.getResourceSet().getResource(sourceResourceUri, false) : null;
-            boolean loadedBefore = existingResource != null && existingResource.isLoaded();
-            long resolveStarted = System.nanoTime();
-            Global.tempLog("literal-model-load", "begin source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                + " caller=" + resource.getURI() + " loadedBefore=" + loadedBefore //$NON-NLS-1$ //$NON-NLS-2$
-                + " validation=" + validation + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$ //$NON-NLS-2$
             EObject sourceMethod = EcoreUtil.resolve(proxy, context);
-            Global.tempLog("literal-model-load", "end source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                + " loadedBefore=" + loadedBefore + " resolved=" + !sourceMethod.eIsProxy() //$NON-NLS-1$ //$NON-NLS-2$
-                + " wallMs=" + (System.nanoTime() - resolveStarted) / 1_000_000.0 //$NON-NLS-1$
-                + " validation=" + validation + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$ //$NON-NLS-2$
             if (known != null)
                 known.put(sourceUri, sourceMethod);
             return sourceMethod;
@@ -1095,7 +1071,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             for (CommonModule candidate : configuration().getCommonModules())
                 if (name.equalsIgnoreCase(candidate.getName()))
                     common = candidate;
-            long started = System.nanoTime();
             Module model = common != null ? common.getModule() : null;
             Method found = null;
             if (model != null && !model.eIsProxy())
@@ -1105,10 +1080,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         found = method;
                         break;
                     }
-            Global.tempLog("literal-model-load", "shared source=" + sourceResourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                + " found=" + (found != null) + " model=" + (model != null ? System.identityHashCode(model) : 0) //$NON-NLS-1$ //$NON-NLS-2$
-                + " wallMs=" + (System.nanoTime() - started) / 1_000_000.0 + " caller=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " validation=" + validation + " thread=" + Thread.currentThread().getId()); //$NON-NLS-1$ //$NON-NLS-2$
             return found;
         }
 

@@ -42,6 +42,7 @@ import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.Environment;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
@@ -52,6 +53,7 @@ import com.e1c.g5.v8.dt.check.settings.IssueSeverity;
 import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 import tormozit.ComfortCheckIds;
+import tormozit.Global;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -135,10 +137,11 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         // перепроверяем ниже по объединению всех подходящих сигнатур.
                         boolean recheckArgument = typeError && error.source instanceof Expression value
                             && value.eContainer() instanceof Invocation call && call.getParams().contains(value);
+                        boolean recheckAssignment = typeError && canRecheckAssignment(error.source, current);
                         boolean compatibleUndefined = typeError
                             && isUndefinedAssignment(error.source, current);
                         boolean stringConcatenation = typeError && isStringConcatenation(error.source, current);
-                        if (!compatibleUndefined && !recheckArgument && !stringConcatenation)
+                        if (!compatibleUndefined && !recheckArgument && !recheckAssignment && !stringConcatenation)
                             issue(error.message, error.source, error.feature,
                                 error.errorCode == null ? WRONG_TYPE : error.errorCode, current);
                     }
@@ -205,8 +208,9 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private Environments environments(EObject object)
         {
             Environmental owner = EcoreUtil2.getContainerOfType(object, Environmental.class);
-            return owner == null ? Environments.EMPTY
+            Environments result = owner == null ? Environments.EMPTY
                 : preferences.getLoadEnvs(object).intersect(owner.environments());
+            return result;
         }
 
         private List<FeatureEntry> entries(FeatureAccess access, Environments envs)
@@ -272,6 +276,25 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
 
         private void checkAssignment(FeatureAccess access, Expression value, Environments envs)
         {
+            List<TypeItem> expected = assignmentTypes(access, envs);
+            if (expected != null)
+                checkValue(value, expected, envs, false, false);
+        }
+
+        private boolean canRecheckAssignment(EObject source, Environments envs)
+        {
+            if (!(source instanceof Expression value)
+                || !(value.eContainer() instanceof SimpleStatement assignment)
+                || assignment.getRight() != value
+                || !(assignment.getLeft() instanceof FeatureAccess access))
+                return false;
+            List<TypeItem> expected = assignmentTypes(access, envs);
+            return expected != null && !expected.isEmpty();
+        }
+
+        /** null — присваивание остаётся в ведении штатной проверки EDT. */
+        private List<TypeItem> assignmentTypes(FeatureAccess access, Environments envs)
+        {
             List<TypeItem> expected = new ArrayList<>();
             for (FeatureEntry entry : entries(access, envs))
             {
@@ -279,10 +302,10 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     continue;
                 if (!(entry.getFeature() instanceof Property property) || property.eIsProxy()
                     || property instanceof BslContextDefProperty)
-                    return;
+                    return null;
                 expected.addAll(property.getTypes());
             }
-            checkValue(value, expected, envs, false, false);
+            return expected;
         }
 
         /** @param optional необязательный параметр метода платформы: Неопределено совместимо с ним */
@@ -324,14 +347,46 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 return;
             if (hasType(concreteExpected, "Arbitrary")) //$NON-NLS-1$
                 return;
-            if (!concreteExpected.isEmpty() && !concreteActual.isEmpty()
-                && BslUtil.intersectTypeItem(concreteExpected, concreteActual, value))
-                return;
+            if (!concreteExpected.isEmpty() && !concreteActual.isEmpty())
+            {
+                boolean compatible = compatibleTypes(concreteExpected, concreteActual, value);
+                if (compatible)
+                    return;
+            }
             if (hasType(actual, "Arbitrary")) //$NON-NLS-1$
                 return;
             String message = IMessages.INSTANCE.no_intersection_between_expected_types__and_expression_types(
                 BslUtil.createTypesLineStr(resolvedExpected, true), BslUtil.createTypesLineStr(actual, true));
             issue(message, value, null, WRONG_TYPE, envs);
+        }
+
+        /**
+         * BslUtil.intersectTypeItem через getCastingType допускает Date вместо Number/Boolean
+         * и наоборот. Исключаем только эти четыре направления. Составные типы сравниваем
+         * попарно: запрещённое преобразование не должно скрыть другую, допустимую пару.
+         */
+        private static boolean compatibleTypes(List<TypeItem> expected, List<TypeItem> actual, EObject context)
+        {
+            boolean dateConversion = hasType(expected, "Date") //$NON-NLS-1$
+                && (hasType(actual, "Number") || hasType(actual, "Boolean")) //$NON-NLS-1$ //$NON-NLS-2$
+                || hasType(actual, "Date") //$NON-NLS-1$
+                && (hasType(expected, "Number") || hasType(expected, "Boolean")); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!dateConversion)
+                return BslUtil.intersectTypeItem(expected, actual, context);
+            Set<String> strict = Set.of("Date", "Number", "Boolean"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            for (TypeItem target : expected)
+                for (TypeItem value : actual)
+                {
+                    String targetName = McoreUtil.getTypeName(target);
+                    String valueName = McoreUtil.getTypeName(value);
+                    if (targetName != null && valueName != null && strict.contains(targetName)
+                        && strict.contains(valueName) && !targetName.equals(valueName)
+                        && ("Date".equals(targetName) || "Date".equals(valueName))) //$NON-NLS-1$ //$NON-NLS-2$
+                        continue;
+                    if (BslUtil.intersectTypeItem(List.of(target), List.of(value), context))
+                        return true;
+                }
+            return false;
         }
 
         /** Неразрешённая ссылка — неполное знание, а не доказанная несовместимость. */
@@ -342,7 +397,24 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             {
                 if (!(EcoreUtil.resolve(item, context) instanceof TypeItem resolved) || resolved.eIsProxy())
                     return null;
-                result.add(resolved);
+                // У порождённого TypeSet getTypes() не отражает состав в контексте проекта.
+                // Именно этот геттер читает BslUtil.intersectTypeItem, поэтому раскрываем заранее.
+                if (resolved instanceof TypeSet
+                    && Set.of("DefinedType", "Characteristic").contains(McoreUtil.getTypeCategory(resolved))) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    List<TypeItem> expanded = McoreUtil.flatTypes(List.of(resolved), context);
+                    Global.tempLog("bsl-value-type", "expand context=" + EcoreUtil.getURI(context) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " type=" + McoreUtil.getTypeName(resolved) + " types=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + BslUtil.createTypesLineStr(expanded, true));
+                    for (TypeItem member : expanded)
+                    {
+                        if (!(EcoreUtil.resolve(member, context) instanceof TypeItem concrete) || concrete.eIsProxy())
+                            return null;
+                        result.add(concrete);
+                    }
+                }
+                else
+                    result.add(resolved);
             }
             return result;
         }

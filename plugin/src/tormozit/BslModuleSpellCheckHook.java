@@ -3563,7 +3563,6 @@ public final class BslModuleSpellCheckHook implements IStartup
     /** Общий поиск по Левенштейну, ограниченный допустимыми значениями текущего литерала. */
     private static ICompletionProposal similarLiteralProposal(IXtextDocument document, int offset, Image icon)
     {
-        Global.tempLog("unknown-literal", "quickfix enter offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
         return document.readOnly((IUnitOfWork<ICompletionProposal, XtextResource>) resource -> {
             if (resource.getParseResult() == null)
                 return null;
@@ -3586,12 +3585,9 @@ public final class BslModuleSpellCheckHook implements IStartup
                 if (at < 0)
                     continue;
                 String replacement = match.name.replace("\"", "\"\""); //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog("unknown-literal", "quickfix typed=" + entry.getKey() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " replacement=" + match.name + " candidates=" + entry.getValue().size()); //$NON-NLS-1$ //$NON-NLS-2$
                 return new CompletionProposal(replacement, node.getOffset() + at, typed.length(),
                     replacement.length(), icon, ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
             }
-            Global.tempLog("unknown-literal", "quickfix no close legal name offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         });
     }

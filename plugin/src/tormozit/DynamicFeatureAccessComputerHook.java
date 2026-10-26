@@ -6,7 +6,10 @@ import java.util.Collection;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.ui.IStartup;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -21,15 +24,18 @@ import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.mcore.Method;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
+import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
+import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCharacteristicTypes;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 
 /**
  * Доработки {@code DynamicFeatureAccessComputer} — вычислителя членов выражения «через точку».
  *
- * <p>Сейчас одна: методы значения определяемого типа (1C-Company/1c-edt-issues#2402). Методы
+ * <p>Методы значения определяемого типа и характеристики (1C-Company/1c-edt-issues#2402). Методы
  * {@link TypeSet} ищет {@code DynamicFeatureAccessComputer$TypeSetMethodProvider.get(имя)}: сначала в
  * {@code getBaseTypes()} — у набора определяемого типа он пуст, — потом в {@code types(context)}, но
  * там берёт только {@code BslContextDefMethod} (методы модулей) и отбрасывает платформенные
@@ -37,9 +43,18 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * без такого отбора, поэтому с ними всё работает. Итог для методов — ложная проблема «Свойство (метод)
  * объекта не обнаружено» и «Ничего не найдено» в подсказке при наведении.
  *
- * <p>Если провайдер ничего не нашёл, а набор принадлежит определяемому типу, методы с этим именем
+ * <p>Если провайдер ничего не нашёл, а набор принадлежит определяемому типу или плану видов
+ * характеристик, методы с этим именем
  * добираются из всех типов {@code types(context)}. Через этот провайдер идут и проверка модуля, и
  * подсказка, и переход к определению — правка одна на всех.
+ *
+ * <p>Обобщённый {@code Отбор}: BSL 28.0.1.v202605050943 создаёт свойство именованной коллекции
+ * с типом {@code FilterItem}, но без {@code DerivedProperty.source}. Валидатор
+ * {@code isUnknownDFAPart} считает его неизвестным и через {@code unknownLeftPart} сообщает
+ * ложную ошибку в цепочке. Источник связываем с платформенным шаблоном {@code FilterElementName}.
+ * Копии Filter конкретных регистров находятся в модели метаданных; их проверка имён остаётся
+ * штатной. Это вплетение ставит
+ * ранний бандл {@code tormozit.comfort.early}, до загрузки вычислителя BSL.
  *
  * <p>Инструментирование через {@code WeavingHook}, как {@link OpenHelperAttributePropertiesHook}:
  * вызов через {@code System.getProperties}, без зависимости бандла BSL от Комфорта.
@@ -51,6 +66,7 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         "com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer$TypeSetMethodProvider"; //$NON-NLS-1$
     private static final String TARGET_INTERNAL = TARGET.replace('.', '/');
     private static final String GET_DESC = "(Ljava/lang/String;)Ljava/util/Collection;"; //$NON-NLS-1$
+    private static final String PROP_PROPERTY_TRACE = "tormozit.dynamicFeatureAccess.propertyTrace"; //$NON-NLS-1$
 
     private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
     private static volatile boolean woven;
@@ -62,6 +78,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             return;
         System.getProperties().put(PROP_TYPE_SET_METHODS,
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::typeSetMethods);
+        System.getProperties().put(PROP_PROPERTY_TRACE,
+            (Function<Object[], Object>) DynamicFeatureAccessComputerHook::traceProperty);
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -75,7 +93,49 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         if (woven)
             return;
         // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
-        BslDocCommentDescriptionFix.registerExtraTransformer(new ProviderTransformer(), TARGET);
+        BslDocCommentDescriptionFix.registerExtraTransformer(
+            new ProviderTransformer(), TARGET);
+    }
+
+    /** Дополняет источник найденного свойства, сохраняя штатный список результата. */
+    static Object traceProperty(Object[] args)
+    {
+        completeGenericFilterSource(args);
+        return args[0];
+    }
+
+    private static void completeGenericFilterSource(Object[] args)
+    {
+        if (!(args[0] instanceof Collection<?> found) || found.isEmpty()
+            || !(args[1] instanceof Collection<?> types) || !(args[3] instanceof Resource resource))
+            return;
+        for (Object raw : types)
+        {
+            if (!(raw instanceof TypeItem item) || !isGenericFilter(item))
+                continue;
+            if (!(EcoreUtil.resolve(item, resource) instanceof Type type) || type.getContextDef() == null)
+                continue;
+            for (Property template : type.getContextDef().allProperties())
+            {
+                if (!template.isDependsOnMetadata() || !"FilterElementName".equals(template.getName())) //$NON-NLS-1$
+                    continue;
+                for (Object entry : found)
+                    if (entry instanceof com._1c.g5.v8.dt.bsl.model.FeatureEntry feature
+                        && feature.getFeature() instanceof DerivedProperty property && property.getSource() == null)
+                    {
+                        property.setSource(template);
+                    }
+                return;
+            }
+        }
+    }
+
+    private static boolean isGenericFilter(TypeItem item)
+    {
+        URI uri = EcoreUtil.getURI(item);
+        return uri != null
+            && uri.toString().startsWith("platform:/plugin/com._1c.g5.v8.dt.platform_v") //$NON-NLS-1$
+            && "Filter.type".equals(uri.lastSegment()); //$NON-NLS-1$
     }
 
     /**
@@ -86,11 +146,16 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
     static Object typeSetMethods(Object[] args)
     {
         Object result = args[0];
+        Global.tempLog("type-set-methods", "enter name=" + args[3] //$NON-NLS-1$ //$NON-NLS-2$
+            + " typeSet=" + args[1] + " found=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (result instanceof Collection<?> found ? found.size() : "not-collection")); //$NON-NLS-1$
         try
         {
             if (!(result instanceof Collection<?> found) || !found.isEmpty()
-                || !(args[1] instanceof TypeSet set) || !(args[3] instanceof String name)
-                || !(BslEditorHyperlinkHook.typeProducer(set) instanceof DefinedType))
+                || !(args[1] instanceof TypeSet set) || !(args[3] instanceof String name))
+                return result;
+            var producer = BslEditorHyperlinkHook.typeProducer(set);
+            if (!(producer instanceof DefinedType) && !(producer instanceof ChartOfCharacteristicTypes))
                 return result;
             EObject context = args[2] instanceof EObject object ? object : null;
             Collection<Object> methods = (Collection<Object>)found;
@@ -103,10 +168,14 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                         && !methods.contains(method))
                         methods.add(method);
             }
+            Global.tempLog("type-set-methods", "resolved name=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                + " type=" + EcoreUtil.getURI(set) + " context=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (context == null ? null : EcoreUtil.getURI(context)) + " found=" + methods.size()); //$NON-NLS-1$
         }
-        catch (RuntimeException ignored)
+        catch (RuntimeException exception)
         {
             // Не удалось добрать — остаётся штатный результат EDT.
+            Global.tempLogException("type-set-methods", "name=" + args[3], exception); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return result;
     }
@@ -121,7 +190,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                 return null;
             try
             {
-                return transformProvider(classfileBuffer);
+                byte[] transformed = transformProvider(classfileBuffer);
+                return transformed;
             }
             catch (Throwable t)
             {
@@ -135,7 +205,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         @Override
         public void weave(WovenClass wovenClass)
         {
-            if (wovenClass.getState() != WovenClass.TRANSFORMING || !TARGET.equals(wovenClass.getClassName()))
+            if (wovenClass.getState() != WovenClass.TRANSFORMING
+                || !TARGET.equals(wovenClass.getClassName()))
                 return;
             try
             {
@@ -146,7 +217,7 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                     woven = true;
                 }
             }
-            catch (Throwable ignored)
+            catch (Throwable exception)
             {
             }
         }

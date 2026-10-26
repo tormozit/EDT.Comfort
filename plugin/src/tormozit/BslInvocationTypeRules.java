@@ -200,8 +200,6 @@ public class BslInvocationTypeRules
             return List.of();
         Set<Invocation> computing = COMPUTING.get();
         boolean entered = computing.add(invocation);
-        Global.tempLog("invocation-type-cycle", "method=" + access.getName() + " invocation=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + System.identityHashCode(invocation) + " entered=" + entered + " depth=" + computing.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (!entered)
             return List.of();
         try

@@ -3,6 +3,7 @@ package tormozit.early;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -38,6 +39,7 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        DynamicFeatureWeaving.install(context);
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
@@ -49,6 +51,106 @@ public final class Activator
     public void stop(BundleContext context)
     {
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
+    }
+
+    /** Вычислитель BSL загружается до основного бандла: вплетение ставится здесь. */
+    private static final class DynamicFeatureWeaving implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer"; //$NON-NLS-1$
+        private static final String PROP_PROPERTY_TRACE = "tormozit.dynamicFeatureAccess.propertyTrace"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            // Основной бандл позже заменит эти функции; до него результат строго штатный.
+            System.getProperties().putIfAbsent(PROP_PROPERTY_TRACE, (Function<Object[], Object>) args -> args[0]);
+            context.registerService(WeavingHook.class, new DynamicFeatureWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+            }
+        }
+
+        private static final String PROPERTY_DESC = "(Ljava/util/Collection;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/mcore/util/Environments;Ljava/lang/String;Z" //$NON-NLS-1$
+            + "Lorg/eclipse/emf/ecore/resource/Resource;Lorg/eclipse/xtext/util/CancelIndicator;)Ljava/util/List;"; //$NON-NLS-1$
+
+        static byte[] transform(byte[] classfileBuffer)
+        {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            // Добавленный вызов не меняет ветвление и типы локальных переменных.
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"getObjectFromContextDefOfTypes".equals(name) //$NON-NLS-1$
+                        || !PROPERTY_DESC.equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                // Callback дополняет source найденного свойства; список сохраняется.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PROP_PROPERTY_TRACE);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_4);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_2);
+                                super.visitVarInsn(Opcodes.ALOAD, 3);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_3);
+                                super.visitVarInsn(Opcodes.ALOAD, 5);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/List"); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+
+                    };
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
     }
 
     /** Контекст операторных слов в строках: класс задания загружается до основного бандла. */

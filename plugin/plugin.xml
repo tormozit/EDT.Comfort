@@ -1882,6 +1882,11 @@
     не попадал.
   -->
   <extension point="org.eclipse.ui.editors.annotationTypes">
+    <!-- Подтипы Xtext: оформление и сводки свёрток наследуются, а AnnotationIssueProcessor
+         не удаляет живые ошибки запросов при очередной проверке BSL-модуля. -->
+    <type name="tormozit.queryLiteral.error" super="org.eclipse.xtext.ui.editor.error"/>
+    <type name="tormozit.queryLiteral.warning" super="org.eclipse.xtext.ui.editor.warning"/>
+    <type name="tormozit.queryLiteral.info" super="org.eclipse.xtext.ui.editor.info"/>
     <type name="tormozit.bslParseTruncation" super="org.eclipse.ui.workbench.texteditor.error"/>
     <type name="tormozit.bslParseTruncationTail"/>
   </extension>
