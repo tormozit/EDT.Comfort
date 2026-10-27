@@ -200,17 +200,19 @@ public final class BslStructureInsertCommentTypes
         Field field = DynamicFeatureAccessComputer.class.getDeclaredField("computerTypes"); //$NON-NLS-1$
         field.setAccessible(true);
         Object onDfa = field.get(dfa);
-        if (onDfa instanceof ComfortTypesComputer)
-            return;
         TypesComputer source = onDfa instanceof TypesComputer typed ? typed : current;
-        if (source instanceof ComfortTypesComputer)
-        {
-            field.set(dfa, source);
-            return;
-        }
-        ComfortTypesComputer ours = new ComfortTypesComputer();
-        copyTypesComputerFields(source, ours);
+        ComfortTypesComputer ours = source instanceof ComfortTypesComputer existing
+            ? existing : new ComfortTypesComputer();
+        if (ours != source)
+            copyTypesComputerFields(source, ours);
         field.set(dfa, ours);
+        // CreatorTreeState получает этот вычислитель из BslTreeTypeSystem (проверено в JAR).
+        Field treeField = BslTypeSystemProvider.class.getDeclaredField(TREE_FIELD);
+        treeField.setAccessible(true);
+        Object tree = treeField.get(rsp.get(BslTypeSystemProvider.class));
+        Field computerField = BslTreeTypeSystem.class.getDeclaredField("computerTypes");
+        computerField.setAccessible(true);
+        computerField.set(tree, ours);
     }
 
     private static void copyTypesComputerFields(TypesComputer from, TypesComputer to)
@@ -484,6 +486,7 @@ public final class BslStructureInsertCommentTypes
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))
             || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree))
             return;
+        refreshExternalFunctionTypes(resource, offset);
         Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
         if (queryLock != null)
             ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
@@ -503,6 +506,114 @@ public final class BslStructureInsertCommentTypes
                     });
                 return true;
             });
+    }
+
+    private static final java.util.Map<Method, Long> EXTERNAL_RETURN_REVISIONS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** Спросить возвраты вызовов в присваиваниях выбранной переменной, без открытия их подсказок. */
+    static void requestVariableReturnSources(Resource resource, Variable variable, Method method, int offset,
+        String variableKey)
+    {
+        if (method == null || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(method)
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem tree))
+            return;
+        Object lock = Global.invoke(resource, "getLock");
+        if (lock == null)
+            return;
+        ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+        {
+            var dfa = xtext.getResourceServiceProvider().get(DynamicFeatureAccessComputer.class);
+            var owner = (com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService)
+                service(tree, "ownerComputerService");
+            if (dfa == null || owner == null)
+                return false;
+            java.util.Map<String, FunctionReturnTypes.Target> targets = new java.util.LinkedHashMap<>();
+            for (var statement : EcoreUtil2.getAllContentsOfType(method,
+                com._1c.g5.v8.dt.bsl.model.SimpleStatement.class))
+            {
+                var node = NodeModelUtils.findActualNodeFor(statement);
+                if (node == null || node.getOffset() > offset || statement.getRight() == null
+                    || !(statement.getLeft() instanceof StaticFeatureAccess left)
+                    || left.getName() == null || !left.getName().equalsIgnoreCase(variable.getName()))
+                    continue;
+                Set<Invocation> calls = new java.util.LinkedHashSet<>();
+                if (statement.getRight() instanceof Invocation invocation)
+                    calls.add(invocation);
+                calls.addAll(EcoreUtil2.getAllContentsOfType(statement.getRight(), Invocation.class));
+                for (Invocation invocation : calls)
+                {
+                    if (invocation.getMethodAccess() == null)
+                        continue;
+                    for (FeatureEntry entry : com._1c.g5.v8.dt.bsl.util.BslUtil.getRealObject(
+                        invocation.getMethodAccess(), method, dfa, owner, true))
+                    {
+                        FunctionReturnTypes.Target target = FunctionReturnTypes.targetOf(entry.getFeature(), 0);
+                        if (target != null && target.exported() != null)
+                            targets.put(target.key(), target);
+                    }
+                }
+            }
+            FunctionReturnTypes.rememberVariableSources(variableKey, targets.values());
+            if (!targets.isEmpty())
+                org.eclipse.swt.widgets.Display.getDefault().asyncExec(() ->
+                    targets.values().forEach(target -> FunctionReturnTypes.requestFunction(target, false)));
+            return true;
+        });
+    }
+
+    /** Обновляет штатные состояния вызывающего метода после уточнения внешнего возврата. */
+    static void refreshExternalFunctionTypes(Resource resource, int offset)
+    {
+        long revision = FunctionReturnTypes.semanticRevision();
+        if (revision == 0 || org.eclipse.swt.widgets.Display.getCurrent() != null
+            || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
+            || resource.getContents().isEmpty() || !(resource.getContents().get(0) instanceof Module module)
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module)
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem tree))
+            return;
+        Object lock = Global.invoke(resource, "getLock");
+        if (lock == null)
+            return;
+        Method selected = offset < 0 ? null : EcoreUtil2.getContainerOfType(
+            new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset), Method.class);
+        boolean[] changed = { false };
+        ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+        {
+            var dfa = xtext.getResourceServiceProvider().get(DynamicFeatureAccessComputer.class);
+            var owner = (com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService)
+                service(tree, "ownerComputerService");
+            if (dfa == null || owner == null)
+                return false;
+            for (Method method : new ArrayList<>(module.allMethods()))
+            {
+                if (offset >= 0 && method != selected
+                    || Long.valueOf(revision).equals(EXTERNAL_RETURN_REVISIONS.get(method)))
+                    continue;
+                boolean affected = false;
+                for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+                {
+                    if (invocation.getMethodAccess() == null
+                        || !FunctionReturnTypes.hasSemanticReturnName(invocation.getMethodAccess().getName()))
+                        continue;
+                    for (FeatureEntry entry : com._1c.g5.v8.dt.bsl.util.BslUtil.getRealObject(
+                        invocation.getMethodAccess(), method, dfa, owner, true))
+                        if (entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Method exported
+                            && !FunctionReturnTypes.semanticReturnTypes(exported).isEmpty())
+                            affected = true;
+                }
+                if (affected && !tree.recomputeDependent(module, method, CancelIndicator.NullImpl))
+                    continue;
+                changed[0] |= affected;
+                EXTERNAL_RETURN_REVISIONS.put(method, revision);
+            }
+            if (changed[0])
+                BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            return true;
+        });
+        if (changed[0])
+            BslDocCommentComputedTypes.bumpTypesGeneration();
     }
 
     /**
@@ -542,16 +653,8 @@ public final class BslStructureInsertCommentTypes
                 }
                 whole = false;
             }
-            // #region agent log second-pass
-            long diagStart = System.currentTimeMillis();
-            String diagModule = BslDocCommentComputedTypes.diagModuleName(module);
-            // #endregion
             if (whole)
             {
-                // #region agent log second-pass
-                Global.tempLog("see-second-pass", "assist.whole.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                    + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                // #endregion
                 onRecompute.accept("Пересчёт типов модуля…"); //$NON-NLS-1$
                 ComfortTreeTypeSystem.SecondPassProgress progress = new ComfortTreeTypeSystem.SecondPassProgress(module, 0);
                 try
@@ -567,10 +670,6 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
-                    // #region agent log second-pass
-                    Global.tempLog("see-second-pass", "assist.whole.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
-                    // #endregion
                 }
                 ComfortTreeTypeSystem.StaleTypes.clear(resource);
                 BslDocCommentComputedTypes.bumpTypesGeneration();
@@ -594,12 +693,6 @@ public final class BslStructureInsertCommentTypes
             List<Method> dependencies = new ArrayList<>();
             collectStaleDependencies(module, method, names,
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), dependencies);
-            // #region agent log second-pass
-            Global.tempLog("see-second-pass", "assist.method module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + method.getName() + " staleNames=" + names.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " version=" + version + " dependencies=" + dependencies.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
             if (!dependencies.isEmpty())
             {
                 onRecompute.accept("Пересчёт типов: " + method.getName() + "…"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -626,11 +719,6 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
-                    // #region agent log second-pass
-                    Global.tempLog("see-second-pass", "assist.method.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                        + " method=" + method.getName() //$NON-NLS-1$
-                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
-                    // #endregion
                 }
                 if (!done)
                     // Подставить метод не удалось — пометку не снимаем.
@@ -2654,6 +2742,13 @@ public final class BslStructureInsertCommentTypes
         extends TypesComputer
     {
         @Override
+        protected List<TypeItem> _compute(com._1c.g5.v8.dt.mcore.Method method, Environments environments)
+        {
+            List<TypeItem> computed = FunctionReturnTypes.semanticReturnTypes(method);
+            return computed.isEmpty() ? super._compute(method, environments) : computed;
+        }
+
+        @Override
         public java.util.List<TypeItem> computeTypes(EObject object, Environments environments)
         {
             fillMockExportPropertyTypes(object);
@@ -2858,6 +2953,7 @@ public final class BslStructureInsertCommentTypes
             java.util.Set<String> diagTypedBefore = module != null && partialParseResult(module) != null
                 ? BslDocCommentComputedTypes.diagTypedReturnFunctions(module) : null;
             // #endregion
+            boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
             try
             {
                 if (isWorkbenchClosing())
@@ -2871,6 +2967,7 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
+                BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
                 if (diagTypedBefore != null)
                     logReturnLost(module, diagTypedBefore, complete);
                 if (resource != null)
@@ -2916,23 +3013,6 @@ public final class BslStructureInsertCommentTypes
                     + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
                     + " AFTER=" + BslDocCommentComputedTypes.diagReturnStateDeep(method)); //$NON-NLS-1$
             }
-        }
-
-        /** Первые имена набора — без простыни на сотни функций. */
-        private static String diagNames(java.util.Set<String> names)
-        {
-            StringBuilder text = new StringBuilder();
-            int shown = 0;
-            for (String name : names)
-            {
-                if (shown++ == 15)
-                {
-                    text.append(" …+").append(names.size() - 15); //$NON-NLS-1$
-                    break;
-                }
-                text.append(shown == 1 ? "" : ",").append(name); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            return text.toString();
         }
 
         private static String diagReparseMethodName(Module module)
@@ -3029,20 +3109,11 @@ public final class BslStructureInsertCommentTypes
             }
             if (changed.isEmpty())
                 return;
-            // #region agent log second-pass
-            long diagStart = System.currentTimeMillis();
-            String diagModule = BslDocCommentComputedTypes.diagModuleName(module);
-            // #endregion
             if (partial == null)
             {
                 // Полный переразбор: повторный штатный расчёт всего модуля. Готовые состояния тела
                 // он не пересоздаёт (параметр в теле оставался без слияния, лог 18.10: «Структура.»
                 // — 0 членов), поэтому NORMAL сначала сбрасывается.
-                // #region agent log second-pass
-                Global.tempLog("see-second-pass", "build.full.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                    + " changed=" + changed.size() + " names=" + diagNames(changed) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                // #endregion
                 SecondPassProgress progress = new SecondPassProgress(module, 0);
                 try
                 {
@@ -3060,11 +3131,6 @@ public final class BslStructureInsertCommentTypes
                 finally
                 {
                     progress.finish();
-                    // #region agent log second-pass
-                    Global.tempLog("see-second-pass", "build.full.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                        + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$
-                        + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
-                    // #endregion
                 }
                 return;
             }
@@ -3075,16 +3141,6 @@ public final class BslStructureInsertCommentTypes
             // прохода подставляется ссылающийся. Полный расчёт модуля здесь не годится — на модуле
             // БСП это ~20 с на правку.
             List<Method> dependents = BslDocCommentComputedTypes.methodsReferencing(module, changed);
-            // #region agent log second-pass
-            Global.tempLog("see-second-pass", "build.partial.start module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                + " reparse=" + diagReparseMethodName(module) //$NON-NLS-1$
-                + " changed=" + changed.size() + " dependents=" + dependents.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " referencesMs=" + (System.currentTimeMillis() - diagStart) //$NON-NLS-1$
-                + " names=" + diagNames(changed) //$NON-NLS-1$
-                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            int diagDone = 0;
-            String diagStop = "end"; //$NON-NLS-1$
-            // #endregion
             SecondPassProgress progress = new SecondPassProgress(module, dependents.size());
             try
             {
@@ -3092,17 +3148,11 @@ public final class BslStructureInsertCommentTypes
                 {
                     if (stopSecondPass(cancelIndicator))
                     {
-                        // #region agent log second-pass
-                        diagStop = "canceled"; //$NON-NLS-1$
-                        // #endregion
                         return;
                     }
                     // Отмена в «Ходе выполнения»: оставшиеся методы сохраняют прежний слитый тип.
                     if (progress.cancelRequestedByUser())
                     {
-                        // #region agent log second-pass
-                        diagStop = "userCancel"; //$NON-NLS-1$
-                        // #endregion
                         break;
                     }
                     progress.step(dependent.getName());
@@ -3114,9 +3164,6 @@ public final class BslStructureInsertCommentTypes
                     catch (IllegalStateException ignored)
                     {
                         // Поле разбора недоступно — ссылающиеся методы останутся с прежним типом.
-                        // #region agent log second-pass
-                        diagStop = "noSubstitute"; //$NON-NLS-1$
-                        // #endregion
                         return;
                     }
                     try
@@ -3134,19 +3181,11 @@ public final class BslStructureInsertCommentTypes
                         restore.run();
                     }
                     progress.stepDone();
-                    // #region agent log second-pass
-                    diagDone++;
-                    // #endregion
                 }
             }
             finally
             {
                 progress.finish();
-                // #region agent log second-pass
-                Global.tempLog("see-second-pass", "build.partial.end module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                    + " done=" + diagDone + "/" + dependents.size() + " stop=" + diagStop //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " ms=" + (System.currentTimeMillis() - diagStart)); //$NON-NLS-1$
-                // #endregion
             }
             ModuleVariableStates.fix(module);
             if (!isCanceled(cancelIndicator))
@@ -3532,12 +3571,14 @@ public final class BslStructureInsertCommentTypes
             Statement statement, int offset, BmOperationContext context)
         {
             boolean scopeOwner = beginExportVarsScope();
+            boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
             try
             {
                 lightInstallingTypeSystemInScope(module, method, variable, statement, offset, context);
             }
             finally
             {
+                BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
                 endExportVarsScope(scopeOwner);
             }
         }

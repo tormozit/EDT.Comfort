@@ -26,9 +26,7 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
     protected void configureCheck(CheckConfigurer builder)
     {
         builder.title("Неизвестное поле результата запроса") //$NON-NLS-1$
-            .description("Проверяет имена полей выборки по рассчитанному тексту запроса. Работает при включённом" //$NON-NLS-1$
-                + " параметре «Расширенный расчет типов» (<a href=\"#\" "
-                + "onclick=\"comfortOpenProjectPreferences();return false;\">Свойства проекта → Комфорт</a>). "
+            .description("Проверяет имена полей выборки по рассчитанному тексту запроса. " //$NON-NLS-1$
                 + "Неоднозначный текст запроса и изменяемые строки" //$NON-NLS-1$
                 + " таблиц значений не проверяются.") //$NON-NLS-1$
             .complexity(CheckComplexity.NORMAL)

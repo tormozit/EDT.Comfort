@@ -1474,7 +1474,8 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(new NullProgressMonitor());
-        return objectToSideHintString(BslExpectedTypePremiums.withReceiverType(resolveEdtAssistSideHint(baseInfo)));
+        return objectToSideHintString(withComputedFunctionType(
+            BslExpectedTypePremiums.withReceiverType(resolveEdtAssistSideHint(baseInfo))));
 
     }
 
@@ -1616,8 +1617,49 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
-        return BslExpectedTypePremiums.withReceiverType(withParentLine(resolveEdtAssistSideHint(baseInfo)));
+        return withComputedFunctionType(
+            BslExpectedTypePremiums.withReceiverType(withParentLine(resolveEdtAssistSideHint(baseInfo))));
 
+    }
+
+    private Object withComputedFunctionType(Object info)
+    {
+        return FunctionReturnTypes.withFunctionReturnType(info, functionTarget(),
+            ContentAssistSessionReloader.getActiveViewer());
+    }
+
+    /** Штатное описание переменной после пересчёта её метода; чтение только в фоне. */
+    void refreshNativeVariableSideHint(ContentAssistant assistant)
+    {
+        if (variableTarget() == null)
+            return;
+        var job = new org.eclipse.core.runtime.jobs.Job("Комфорт: обновление типа переменной")
+        {
+            @Override
+            protected org.eclipse.core.runtime.IStatus run(IProgressMonitor monitor)
+            {
+                Object info = getAdditionalProposalInfo(monitor);
+                if (info != null)
+                    Display.getDefault().asyncExec(() ->
+                    {
+                        if (assistant != ContentAssistSessionReloader.getActiveAssistant()
+                            || !ContentAssistPopupSync.isPopupVisible(assistant))
+                            return;
+                        var rows = ContentAssistPopupSync.visibleProposals(assistant);
+                        var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
+                        int selected = table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
+                        if (rows != null && selected >= 0 && selected < rows.size()
+                            && rows.get(selected) == SmartCompletionProposal.this)
+                        {
+                            ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, null, info);
+                        }
+                    });
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setRule(ForeignModuleModel.SERIAL);
+        job.schedule();
     }
 
     private static final String PARENT_LINE_CLASS = "comfort-row-parent"; //$NON-NLS-1$

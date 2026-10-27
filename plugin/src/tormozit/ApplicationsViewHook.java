@@ -19,6 +19,7 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.Adapters;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ContributionItem;
 import org.eclipse.jface.action.IMenuListener;
@@ -112,6 +113,7 @@ import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
 import com.e1c.g5.dt.applications.IUrlAccess;
+import com.e1c.g5.dt.applications.contributors.IApplicationOwnerProvider;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 import com.google.inject.Injector;
 
@@ -362,7 +364,7 @@ public class ApplicationsViewHook implements IStartup
     {
         if (page == null)
             return;
-        IProject expected = ActiveProjectTracker.resolveContextProject(page);
+        IProject expected = resolveApplicationsProject(ActiveProjectTracker.resolveContextProject(page));
         if (expected == null)
         {
             if (ActiveProjectTracker.shouldPreferEditorProject(page))
@@ -391,7 +393,7 @@ public class ApplicationsViewHook implements IStartup
         {
             if (!ActiveProjectTracker.shouldPreferEditorProject(page))
                 return;
-            IProject expected = ActiveProjectTracker.resolveContextProject(page);
+            IProject expected = resolveApplicationsProject(ActiveProjectTracker.resolveContextProject(page));
             if (expected == null)
                 return;
             IViewPart appsView = findApplicationsView(page);
@@ -568,7 +570,8 @@ public class ApplicationsViewHook implements IStartup
                 return false;
             return true;
         }
-        return expected.equals(Global.invoke(appsView, "getCurrentProject")); //$NON-NLS-1$
+        IProject applicationProject = resolveApplicationsProject(expected);
+        return java.util.Objects.equals(applicationProject, Global.invoke(appsView, "getCurrentProject")); //$NON-NLS-1$
     }
 
     private static void detachStockNavigatorSelectionListener(IViewPart appsView)
@@ -683,6 +686,15 @@ public class ApplicationsViewHook implements IStartup
         applyApplicationsProject(page, project, false);
     }
 
+    /** Как в ApplicationsView.findProjectOfSelection: приложения принадлежат базовой конфигурации. */
+    private static IProject resolveApplicationsProject(IProject project)
+    {
+        if (project == null)
+            return null;
+        IApplicationOwnerProvider owner = Adapters.adapt(project, IApplicationOwnerProvider.class, true);
+        return owner != null ? owner.getProject(project) : project;
+    }
+
     private static void applyApplicationsProject(IWorkbenchPage page, IProject project, boolean forceReload)
     {
         if (page == null || project == null)
@@ -690,10 +702,11 @@ public class ApplicationsViewHook implements IStartup
         IViewPart appsView = findApplicationsView(page);
         if (appsView == null)
             return;
+        project = resolveApplicationsProject(project);
         Object current = Global.invoke(appsView, "getCurrentProject"); //$NON-NLS-1$
-        if (project.equals(current) && !forceReload)
+        if (java.util.Objects.equals(project, current) && !forceReload)
             return;
-        Global.invoke(appsView, "updateViewUsingProject", project); //$NON-NLS-1$
+        Global.invokeVoid(appsView, "updateViewUsingProject", project); //$NON-NLS-1$
         ensureHookApplicationsView(appsView);
         if (ActiveProjectTracker.shouldPreferEditorProject(page))
             scheduleStockOverwriteCorrection(page, 0);

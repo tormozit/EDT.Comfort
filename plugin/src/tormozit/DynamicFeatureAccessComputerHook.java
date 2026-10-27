@@ -146,9 +146,6 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
     static Object typeSetMethods(Object[] args)
     {
         Object result = args[0];
-        Global.tempLog("type-set-methods", "enter name=" + args[3] //$NON-NLS-1$ //$NON-NLS-2$
-            + " typeSet=" + args[1] + " found=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (result instanceof Collection<?> found ? found.size() : "not-collection")); //$NON-NLS-1$
         try
         {
             if (!(result instanceof Collection<?> found) || !found.isEmpty()
@@ -168,14 +165,10 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                         && !methods.contains(method))
                         methods.add(method);
             }
-            Global.tempLog("type-set-methods", "resolved name=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                + " type=" + EcoreUtil.getURI(set) + " context=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (context == null ? null : EcoreUtil.getURI(context)) + " found=" + methods.size()); //$NON-NLS-1$
         }
         catch (RuntimeException exception)
         {
             // Не удалось добрать — остаётся штатный результат EDT.
-            Global.tempLogException("type-set-methods", "name=" + args[3], exception); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return result;
     }

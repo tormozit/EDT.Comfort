@@ -57,7 +57,7 @@ public final class BslForEachCollectionCheck extends BasicCheck<Object>
         "InformationRegisterRecordSet", "AccumulationRegisterRecordSet", //$NON-NLS-1$ //$NON-NLS-2$
         "CalculationRegisterRecordSet", "AccountingRegisterRecordSet"); //$NON-NLS-1$ //$NON-NLS-2$
 
-    private static final String REPLACEMENT_NOTE = "<br><br>Заменяет штатную bsl-legacy-check-for-each-statetement-collection, её включить нельзя.";
+    private static final String REPLACEMENT_NOTE = "<br><br>Динамически замещает штатную проверку bsl-legacy-check-for-each-statetement-collection.";
 
     @Override
     public String getCheckId()

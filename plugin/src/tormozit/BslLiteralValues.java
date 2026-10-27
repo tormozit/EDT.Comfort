@@ -56,6 +56,7 @@ import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.Pragma;
+import com._1c.g5.v8.dt.bsl.model.PropertyType;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
@@ -79,6 +80,9 @@ import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.Event;
+import com._1c.g5.v8.dt.mcore.DerivedField;
+import com._1c.g5.v8.dt.mcore.Field;
+import com._1c.g5.v8.dt.mcore.FieldSource;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.NamedElement;
 import com._1c.g5.v8.dt.mcore.ParamSet;
@@ -89,10 +93,14 @@ import com._1c.g5.v8.dt.mcore.TypeContainer;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicDbObject;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonAttribute;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonAttributeDataSeparation;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.RegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
 
@@ -174,6 +182,20 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     }
 
     private static List<String> unknownLiteralValues(StringLiteral literal, BooleanSupplier canceled, Pass pass,
+        Map<String, List<String>> corrections)
+    {
+        boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(literal);
+        try
+        {
+            return unknownLiteralValuesInScope(literal, canceled, pass, corrections);
+        }
+        finally
+        {
+            BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
+        }
+    }
+
+    private static List<String> unknownLiteralValuesInScope(StringLiteral literal, BooleanSupplier canceled, Pass pass,
         Map<String, List<String>> corrections)
     {
         if (!(literal.eResource() instanceof XtextResource resource))
@@ -623,6 +645,29 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         return types != null ? types : List.of();
     }
 
+    /** Сужение обобщённого типа параметра до типа поля; остальные типы сигнатуры сохраняются. */
+    public static List<TypeItem> dataLockFieldTypes(XtextResource resource, List<TypeItem> sourceTypes, String field,
+        List<TypeItem> parameterTypes)
+    {
+        Analysis analysis = new Analysis(resource, false, isRussian(resource), "", -1); //$NON-NLS-1$
+        analysis.dataLockFields(sourceTypes);
+        List<TypeItem> fieldTypes = analysis.valueTypes.getOrDefault(lower(field), List.of());
+        List<TypeItem> expected = new ArrayList<>();
+        for (TypeItem parameterType : parameterTypes)
+        {
+            Type resolved = analysis.resolve(parameterType);
+            if (resolved != null && "Arbitrary".equals(resolved.getName()) && !fieldTypes.isEmpty()) //$NON-NLS-1$
+            {
+                for (TypeItem fieldType : fieldTypes)
+                    if (!expected.contains(fieldType))
+                        expected.add(fieldType);
+            }
+            else if (!expected.contains(parameterType))
+                expected.add(parameterType);
+        }
+        return expected;
+    }
+
     /** Типы всех ключей литерала ключей (первый параметр {@code call}) по имени в нижнем регистре. */
     static Map<String, List<TypeItem>> structureKeysTypes(XtextResource resource, EObject call, List<Expression> args)
     {
@@ -918,6 +963,19 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         void call(EObject target, List<Expression> args, int index, String structureType)
         {
+            boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
+            try
+            {
+                callInScope(target, args, index, structureType);
+            }
+            finally
+            {
+                BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
+            }
+        }
+
+        private void callInScope(EObject target, List<Expression> args, int index, String structureType)
+        {
             checkCanceled();
             if (target instanceof IndexAccess access)
             {
@@ -1120,6 +1178,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             String leftOfAssignment = ""; //$NON-NLS-1$
             Module handlerModule = null;
             List<TypeItem> objectTypes = call.sourceTypes;
+            if (call.index == 0 && in(method, "УстановитьЗначение", "SetValue") //$NON-NLS-1$ //$NON-NLS-2$
+                && hasType(objectTypes, "DataLockItem")) //$NON-NLS-1$
+            {
+                branch("dataLockFields"); //$NON-NLS-1$
+                dataLockFields(objectTypes);
+                return;
+            }
             if (call.index == 0 && call.constructor
                 && (in(method, "Структура", "ФиксированнаяСтруктура", "ПолеКомпоновкиДанных") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     || "Действие".equalsIgnoreCase(method) && "ИмяПроцедуры".equalsIgnoreCase(parameter))) //$NON-NLS-1$ //$NON-NLS-2$
@@ -2412,6 +2477,52 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
 
         // ---- Метаданные ----
+
+        /**
+         * EDT DataLockAddInvocationTypesComputer хранит пространство блокировки в PropertyType.propertyName.
+         * Поля и ограничения — как у StringLiteralProposalProviderDataLockItemSetValue EDT.
+         */
+        void dataLockFields(List<TypeItem> types)
+        {
+            for (TypeItem item : types)
+            {
+                Type type = resolve(item);
+                if (!(type instanceof PropertyType lock) || !hasType(List.of(type), "DataLockItem") //$NON-NLS-1$
+                    || lock.getPropertyName().isEmpty())
+                    continue;
+                String[] path = lock.getPropertyName().get(0).split("\\."); //$NON-NLS-1$
+                if (path.length < 2)
+                    continue;
+                MdObject md = mdByKind(path[0], path[1]);
+                boolean recordSet = path.length == 3 && in(path[2], "НаборЗаписей", "RecordSet"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (md instanceof BasicDbObject object)
+                {
+                    Type ref = typeByName(md.eClass().getName() + "Ref." + md.getName()); //$NON-NLS-1$
+                    if (ref != null)
+                        add(russian ? "Ссылка" : "Ref", List.of(ref)); //$NON-NLS-1$ //$NON-NLS-2$
+                    for (Field field : object.getDataLockFields())
+                        add(dualName(field), field.getType());
+                }
+                else if (md instanceof FieldSource fields)
+                {
+                    for (Field field : fields.getFields())
+                    {
+                        String name = field.getName();
+                        EObject origin = field instanceof DerivedField derived ? derived.getSource() : null;
+                        boolean allowed = recordSet ? "Recorder".equals(name) //$NON-NLS-1$
+                            : "Period".equals(name) || origin instanceof RegisterDimension //$NON-NLS-1$
+                                || "AccountingRegister".equals(md.eClass().getName()) //$NON-NLS-1$
+                                    && ("Account".equals(name) || name != null && name.startsWith("ExtDimension")) //$NON-NLS-1$ //$NON-NLS-2$
+                                || "CalculationRegister".equals(md.eClass().getName()) //$NON-NLS-1$
+                                    && in(name, "ActionPeriod", "RegistrationPeriod") //$NON-NLS-1$ //$NON-NLS-2$
+                                || origin instanceof CommonAttribute common
+                                    && common.getDataSeparation() == CommonAttributeDataSeparation.SEPARATE;
+                        if (allowed)
+                            add(dualName(field), field.getType());
+                    }
+                }
+            }
+        }
 
         Configuration configuration()
         {

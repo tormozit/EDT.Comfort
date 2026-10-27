@@ -4679,7 +4679,6 @@ public final class ParamHintHtmlModifier
     {
         Object page = Global.invoke(input, "getViewPage"); //$NON-NLS-1$
         String link = asString(Global.invoke(page, "getLink")); //$NON-NLS-1$
-        Global.tempLog("method-description-links", "page source link=" + link); //$NON-NLS-1$ //$NON-NLS-2$
         if (link == null || link.isBlank())
             return Map.of();
         try
@@ -4700,7 +4699,6 @@ public final class ParamHintHtmlModifier
             Object loaded = Global.invoke(provider, "loadBslResource", external); //$NON-NLS-1$
             Object source = loaded instanceof Resource resource && !resource.getContents().isEmpty()
                 ? resource.getContents().get(0) : null;
-            Global.tempLog("method-description-links", "page module=" + DefaultValueDebug.identity(source)); //$NON-NLS-1$ //$NON-NLS-2$
             if (!(source instanceof com._1c.g5.v8.dt.bsl.model.Module module))
                 return Map.of();
             var construct = util.getMethod("constructMethodLinkInternalPart", String.class, int.class); //$NON-NLS-1$
@@ -4711,11 +4709,9 @@ public final class ParamHintHtmlModifier
                     && internal.equals(construct.invoke(null, method.getName(), ordinal)))
                     return methodDescriptionLinks(method, documentUri, register);
             }
-            Global.tempLog("method-description-links", "page method missing internal=" + internal); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError ex)
         {
-            Global.tempLogException("method-description-links", "page source failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return Map.of();
     }
@@ -4724,16 +4720,12 @@ public final class ParamHintHtmlModifier
     static Map<String, String> methodDescriptionLinks(EObject member, URI documentUri,
         java.util.function.Function<Runnable, String> register)
     {
-        Global.tempLog("method-description-links", "collect member=" + DefaultValueDebug.identity(member) //$NON-NLS-1$ //$NON-NLS-2$
-            + " document=" + documentUri); //$NON-NLS-1$
         try
         {
             return collectMethodDescriptionLinks(member, documentUri, register);
         }
         catch (RuntimeException | LinkageError ex)
         {
-            Global.tempLog("method-description-links", "collect failed=" + ex //$NON-NLS-1$ //$NON-NLS-2$
-                + " stack=" + java.util.Arrays.toString(ex.getStackTrace())); //$NON-NLS-1$
             return Map.of();
         }
     }
@@ -4752,44 +4744,31 @@ public final class ParamHintHtmlModifier
             return Map.of();
         }
         var method = ParameterSeeLinks.sourceMethod(member);
-        Global.tempLog("method-description-links", "source=" + DefaultValueDebug.identity(method) //$NON-NLS-1$ //$NON-NLS-2$
-            + " container=" + (method == null ? null : DefaultValueDebug.identity(method.eContainer()))); //$NON-NLS-1$
         var module = method == null ? null : org.eclipse.xtext.EcoreUtil2.getContainerOfType(method,
             com._1c.g5.v8.dt.bsl.model.Module.class);
         if (module == null)
             return Map.of();
         var comment = BslStructureInsertCommentTypes.parseMethodComment(method, module);
-        Global.tempLog("method-description-links", "parsed method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " comment=" + (comment != null) + " description=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (comment != null && comment.getDescription() != null));
         if (comment == null || comment.getDescription() == null)
             return Map.of();
         Map<String, String> result = new java.util.LinkedHashMap<>();
         for (var part : comment.getDescription().getParts())
         {
-            Global.tempLog("method-description-links", "part=" + part.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " text=" + (part instanceof LinkPart linkPart ? linkPart.getLinkText() //$NON-NLS-1$
-                    + " initial=" + linkPart.getInitialContent() : part.toString())); //$NON-NLS-1$
             if (!(part instanceof LinkPart link) || link.getLinkText().isBlank())
                 continue;
             EObject target = ParameterSeeLinks.resolveTarget(link, method);
-            Global.tempLog("method-description-links", "resolve text=" + link.getLinkText() //$NON-NLS-1$ //$NON-NLS-2$
-                + " target=" + DefaultValueDebug.identity(target)); //$NON-NLS-1$
             if (target == null || target.eIsProxy())
                 continue;
             String text = link.getLinkText();
             String call = ParameterSeeLinks.hoverCallText(target, documentUri);
             result.put(escapeHtml(text), ParameterSeeLinks.memberLinkHtml(text, target, call, register));
         }
-        Global.tempLog("method-description-links", "collected keys=" + result.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
     /** Меняем только текст HTML: готовые ссылки, скрипты и стили остаются целыми. */
     static String injectMethodDescriptionLinks(String html, Map<String, String> links)
     {
-        Global.tempLog("method-description-links", "inject keys=" + (links == null ? null : links.keySet()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " html=" + html); //$NON-NLS-1$
         if (html == null || links == null || links.isEmpty() || html.contains("<!--comfort-description-links-->")) //$NON-NLS-1$
             return html;
         String alternatives = links.keySet().stream()
@@ -4839,7 +4818,6 @@ public final class ParamHintHtmlModifier
                 result.append(replaced);
             }
         }
-        Global.tempLog("method-description-links", "inject changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
         return changed ? withLinkStyle(result + "<!--comfort-description-links-->") : html; //$NON-NLS-1$
     }
 

@@ -220,18 +220,27 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
             Consumer<Boolean> updateCompletion = application != null && "update".equals(method.getName()) //$NON-NLS-1$
                 ? LongOperationNotifyHook.trackInfobaseUpdate(application.getName()) : null;
             boolean updated = false;
+            long logStarted = 0;
             try
             {
+                logStarted = InfobaseSyncDebug.begin(delegate, method, arguments);
                 if (application instanceof IInfobaseApplication infobaseApplication
                     && "update".equals(method.getName())) //$NON-NLS-1$
                     terminateDebugSessionsBeforeUpdate(infobaseApplication, (IProgressMonitor)arguments[3]);
                 Object result = method.invoke(delegate, arguments);
                 updated = result == ApplicationUpdateState.UPDATED;
+                InfobaseSyncDebug.finish(method, logStarted, result, null);
                 return result;
             }
             catch (InvocationTargetException e)
             {
+                InfobaseSyncDebug.finish(method, logStarted, null, e.getCause());
                 throw e.getCause();
+            }
+            catch (Throwable e)
+            {
+                InfobaseSyncDebug.finish(method, logStarted, null, e);
+                throw e;
             }
             finally
             {
@@ -250,6 +259,73 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
                     if (background != null && !updated && !background.display.isDisposed())
                         background.display.asyncExec(background::restore);
                 }
+            }
+        }
+    }
+
+    /** Компактная диагностика обновления, включаемая флажком «Вести журнал». */
+    private static final class InfobaseSyncDebug
+    {
+        private static final String TAG = "InfobaseSync"; //$NON-NLS-1$
+
+        private static long begin(Object delegate, Method method, Object[] arguments)
+        {
+            if (!Global.isLogEnabled()
+                || !("update".equals(method.getName()) || "prepare".equals(method.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
+                return 0;
+            long started = System.nanoTime();
+            IApplication application = arguments != null && arguments.length > 0
+                && arguments[0] instanceof IApplication candidate ? candidate : null;
+            String detail = "thread=" + Thread.currentThread().getId() //$NON-NLS-1$
+                + " application=" + (application == null ? "null" : application.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " class=" + (application == null ? "null" : application.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " delegate=" + delegate.getClass().getName(); //$NON-NLS-1$
+            if (Proxy.isProxyClass(delegate.getClass()))
+                detail += " handler=" + Proxy.getInvocationHandler(delegate).getClass().getName(); //$NON-NLS-1$
+            if ("update".equals(method.getName()) && arguments.length > 1) //$NON-NLS-1$
+                detail += " type=" + arguments[1]; //$NON-NLS-1$
+            Global.log(TAG, method.getName() + " start " + detail); //$NON-NLS-1$
+            if ("update".equals(method.getName())) //$NON-NLS-1$
+                logSynchronizationServices();
+            return started;
+        }
+
+        private static void finish(Method method, long started, Object result, Throwable failure)
+        {
+            if (started == 0 || !Global.isLogEnabled())
+                return;
+            String detail = method.getName() + " end thread=" + Thread.currentThread().getId() //$NON-NLS-1$
+                + " ms=" + (System.nanoTime() - started) / 1_000_000; //$NON-NLS-1$
+            if (failure != null)
+                Global.log(TAG, "[!] " + detail + " error=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            else
+                Global.log(TAG, detail + " result=" + result); //$NON-NLS-1$
+        }
+
+        /** Только сведения реестра OSGi: службы не получаем и не активируем. */
+        private static void logSynchronizationServices()
+        {
+            try
+            {
+                BundleContext context = Global.ourContext();
+                ServiceReference<?>[] references = context == null ? null : context.getServiceReferences(
+                    "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager", null); //$NON-NLS-1$
+                StringBuilder detail = new StringBuilder("sync services thread=") //$NON-NLS-1$
+                    .append(Thread.currentThread().getId());
+                if (references != null)
+                    for (ServiceReference<?> reference : references)
+                    {
+                        var bundle = reference.getBundle();
+                        detail.append(" [bundle=").append(bundle == null ? "null" : bundle.getSymbolicName()) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(" version=").append(bundle == null ? "null" : bundle.getVersion()) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(" id=").append(reference.getProperty("service.id")) //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(" ranking=").append(reference.getProperty("service.ranking")).append(']'); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                Global.log(TAG, detail.toString());
+            }
+            catch (Exception e)
+            {
+                Global.log(TAG, "[!] sync services: " + e); //$NON-NLS-1$
             }
         }
     }

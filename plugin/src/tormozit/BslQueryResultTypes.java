@@ -106,12 +106,13 @@ import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
 import com._1c.g5.v8.dt.ql.resource.QlParametersFinder;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
  * Поля выборки и выгрузки запроса из отдельного литерала (issue 836).
  * Схему получает тот же сервис, что у проверки «Хаб языка запросов».
- * Расчёт разрешён только из досчёта открытого редактора; расширение системы типов
- * читает готовый план и никогда не запускает разбор запроса из сборки или UI.
+ * Расширение системы типов читает готовый план. Проверки рассчитывают схемы закрытых
+ * модулей только при включённой проверке «Хаб языка запросов» в профиле проекта.
  */
 public final class BslQueryResultTypes implements IInvocationTypesComputerExtension
 {
@@ -219,6 +220,51 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
     private static final Set<String> SET_PARAMETER_METHODS = Set.of("setparameter", "установитьпараметр"); //$NON-NLS-1$ //$NON-NLS-2$
 
+    private static final ThreadLocal<Boolean> OPEN_MODULE_CALCULATION = new ThreadLocal<>();
+
+    /** Начало цепочки из открытого модуля. Вложенный расчёт не становится владельцем разрешения. */
+    public static boolean beginOpenModuleCalculation(EObject context)
+    {
+        if (Boolean.TRUE.equals(OPEN_MODULE_CALCULATION.get()))
+            return false;
+        Module module = EcoreUtil2.getContainerOfType(context, Module.class);
+        if (module == null || module.eResource() == null
+            || !MassiveChecksExemptionHook.isModuleOpen(module.eResource().getURI()))
+            return false;
+        OPEN_MODULE_CALCULATION.set(Boolean.TRUE);
+        return true;
+    }
+
+    /** Только владелец снимает разрешение, обязательно из finally. */
+    public static void endOpenModuleCalculation(boolean owner)
+    {
+        if (owner)
+            OPEN_MODULE_CALCULATION.remove();
+    }
+
+    /** Общий допуск к расчёту схем из проверок, включая анализ колонок строковых литералов. */
+    private static boolean canComputeQueryModel(EObject context)
+    {
+        if (Boolean.TRUE.equals(OPEN_MODULE_CALCULATION.get()))
+            return true;
+        Module module = EcoreUtil2.getContainerOfType(context, Module.class);
+        if (module == null || module.eResource() == null)
+            return false;
+        if (MassiveChecksExemptionHook.isModuleOpen(module.eResource().getURI()))
+            return true;
+        IProject project = BslStructureInsertCommentTypes.projectOf(module);
+        ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+        if (project == null || checks == null)
+            return false;
+        for (var uid : checks.getCheckUidForCheckId("bsl-ql-hub", project)) //$NON-NLS-1$
+        {
+            var settings = checks.getSettings(uid, project);
+            if (settings != null && settings.isEnabled())
+                return true;
+        }
+        return false;
+    }
+
     /**
      * Имена параметров запроса для литерала — первого аргумента {@code Запрос.УстановитьПараметр("…")}:
      * текст запроса той же переменной ({@link Plan#queryLiteral}), параметры — из его схемы.
@@ -239,13 +285,37 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
             || !SET_PARAMETER_METHODS.contains(lower(access.getName())))
             return Map.of();
+        return queryParametersOf(invocation);
+    }
+
+    /** Ожидаемые типы значения именованного параметра из схемы запроса. Вызывающий держит readOnly документа. */
+    public static List<TypeItem> queryParameterTypes(Invocation invocation, String name)
+    {
+        return BslDocCommentComputedTypes.isExtendedTypesEnabled(invocation)
+            ? queryParameterTypesForCheck(invocation, name) : List.of();
+    }
+
+    /** Проверка типов параметров не зависит от флажка расширенного расчёта типов редактора. */
+    public static List<TypeItem> queryParameterTypesForCheck(Invocation invocation, String name)
+    {
+        for (var entry : queryParametersOf(invocation).entrySet())
+            if (name.equalsIgnoreCase(entry.getKey()))
+                return new ArrayList<>(entry.getValue().getTypes());
+        return List.of();
+    }
+
+    private static Map<String, com._1c.g5.v8.dt.mcore.Property> queryParametersOf(Invocation invocation)
+    {
+        if (!canComputeQueryModel(invocation)
+            || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+            || !SET_PARAMETER_METHODS.contains(lower(access.getName())))
+            return Map.of();
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         if (method == null)
             return Map.of();
         Plan plan = new Plan(method, ""); //$NON-NLS-1$
         StringLiteral query = plan.queryLiteral(access.getSource(), invocation);
-        Map<String, com._1c.g5.v8.dt.mcore.Property> names = query == null ? Map.of() : plan.parameters(query);
-        return names;
+        return query == null ? Map.of() : plan.parameters(query);
     }
 
     /**
@@ -282,6 +352,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     static Map<String, List<TypeItem>> resultColumnsOf(Expression expression)
     {
+        if (!canComputeQueryModel(expression))
+            return null;
         Method method = expression == null ? null : EcoreUtil2.getContainerOfType(expression, Method.class);
         if (method == null)
             return null;
@@ -331,9 +403,22 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     public static List<DynamicFeatureAccess> unknownFields(Module module, CancelIndicator cancellation)
     {
+        boolean queryScopeOwner = beginOpenModuleCalculation(module);
+        try
+        {
+            return unknownFieldsInScope(module, cancellation);
+        }
+        finally
+        {
+            endOpenModuleCalculation(queryScopeOwner);
+        }
+    }
+
+    private static List<DynamicFeatureAccess> unknownFieldsInScope(Module module, CancelIndicator cancellation)
+    {
         List<DynamicFeatureAccess> problems = new ArrayList<>();
         if (module == null || !(module.eResource() instanceof XtextResource)
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+            || !canComputeQueryModel(module))
             return List.of();
         Object lock = Global.invoke(module.eResource(), "getLock"); //$NON-NLS-1$
         if (lock == null)

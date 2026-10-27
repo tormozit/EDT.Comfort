@@ -196,20 +196,6 @@ public final class ValidationChecksFilterHook implements IStartup
     private static boolean checkExecutorResolved;
     private static final String EXCLUDED_NAMES_FRAGMENT = "исключаемых имен объектов"; //$NON-NLS-1$
     private static final String EXCLUDED_NAMES_SHORT = "исключаемых объектов"; //$NON-NLS-1$
-    /**
-     * Абзац, дописываемый к штатному описанию замещённой проверки
-     * ({@link ComfortCheckIds#REPLACED_BUILTIN_CHECKS}): причина и коды замен.
-     */
-    private static final Map<String, String> REPLACED_BUILTIN_NOTES = Map.of(
-        "bsl-legacy-check-static-feature-access", //$NON-NLS-1$
-        "<p><b>Включить нельзя</b>: её проблемы дублируют замены " + String.join(", ", //$NON-NLS-1$ //$NON-NLS-2$
-            ComfortCheckIds.STATIC_ACCESS_PARAMETERS, ComfortCheckIds.STATIC_ACCESS_OBSOLETE,
-            ComfortCheckIds.STATIC_ACCESS_COMPATIBILITY, ComfortCheckIds.STATIC_ACCESS_VARIABLE,
-            ComfortCheckIds.STATIC_ACCESS_EVENT_HANDLER) + ".</p>", //$NON-NLS-1$
-        "bsl-legacy-check-for-each-statetement-collection", //$NON-NLS-1$
-        "<p><b>Включить нельзя</b>: её проблемы дублирует замена " + ComfortCheckIds.BSL_FOR_EACH_COLLECTION + ".</p>", //$NON-NLS-1$ //$NON-NLS-2$
-        "bsl-legacy-check-expression-type", //$NON-NLS-1$
-        "<p><b>Включить нельзя</b>: её проблемы дублирует замена " + ComfortCheckIds.BSL_VALUE_TYPE + ".</p>"); //$NON-NLS-1$ //$NON-NLS-2$
     /** Название типа {@code IssueType.WARNING} в местах, которые перехватывает плагин (issue 401). */
     static final String OTHER_WARNING_TYPE_TITLE = "Прочее предупреждение"; //$NON-NLS-1$
     /**
@@ -404,7 +390,7 @@ public final class ValidationChecksFilterHook implements IStartup
             // Назначение строки при открытии не зависит от замены фильтров:
             // команды передают цель только сюда, а не в штатный applyData EDT.
             InternalBslChecks.install(control, treeViewer);
-            ReplacedBuiltinGuard.install(control, treeViewer);
+            installBuiltinCheckDescriptions(control, page.getControl(), treeViewer);
             if (!ComfortSettings.isReplaceListFiltersEnabled())
             {
                 InternalBslChecks.installDetails(control);
@@ -435,10 +421,17 @@ public final class ValidationChecksFilterHook implements IStartup
             // в строке с тулбаром (fillDefaults + minSize 100 + grab).
             relaxBodyMinimumWidth(treeViewer);
             ChecksTablePane tablePane = ChecksTablePane.install(control, treeViewer, filter, pageControl);
+            Control descriptionViewer = findCheckViewer(pageControl);
+            if (descriptionViewer != null)
+                descriptionViewer.setData("tormozit.prepareReplacementNavigation", (Runnable)() -> { //$NON-NLS-1$
+                    searchBox.setText(""); //$NON-NLS-1$
+                    applySearch(treeViewer, filter, highlight, ""); //$NON-NLS-1$
+                    if (tablePane != null)
+                        tablePane.setTableMode(false);
+                });
             registerCheckReferencesMenu(control, treeViewer.getTree(), () ->
                 treeViewer.getStructuredSelection().getFirstElement() instanceof IChecksTreeNode node
                     ? node.getValue() : null);
-            installBuiltinCheckDescriptions(control, pageControl);
             TreeExpander.installWhitelisted(TreeExpander.Target.VALIDATION_CHECKS, treeViewer);
             installAutoExpandOnReset(treeViewer, filter);
 
@@ -556,20 +549,60 @@ public final class ValidationChecksFilterHook implements IStartup
     }
 
     /** Описания встроенных проверок в правой панели страницы «Валидация». */
-    private static void installBuiltinCheckDescriptions(ChecksViewerControl control, Control pageControl)
+    private static void installBuiltinCheckDescriptions(ChecksViewerControl control, Control pageControl,
+        TreeViewer treeViewer)
     {
         if (pageControl == null)
             return;
         Control checkViewer = findCheckViewer(pageControl);
         if (checkViewer == null)
             return;
+        if (Boolean.TRUE.equals(checkViewer.getData("tormozit.builtinCheckDescriptions"))) //$NON-NLS-1$
+            return;
+        checkViewer.setData("tormozit.builtinCheckDescriptions", Boolean.TRUE); //$NON-NLS-1$
+        Browser browser = checkViewer instanceof Composite composite ? CheckDescriptionRefresh.findBrowser(composite) : null;
+        if (browser != null)
+            browser.setData("tormozit.checkReplacementLink", //$NON-NLS-1$
+                new BrowserFunction(browser, "comfortOpenReplacementCheck") //$NON-NLS-1$
+                {
+                    @Override
+                    public Object function(Object[] arguments)
+                    {
+                        if (arguments.length == 1 && arguments[0] instanceof String checkId)
+                            browser.getDisplay().asyncExec(() -> {
+                                if (treeViewer.getControl().isDisposed())
+                                    return;
+                                ChecksViewerProvider provider = control.getChecksViewerProvider();
+                                Set<CheckUid> uids = provider.getCheckRepository()
+                                    .getCheckUidForCheckId(checkId, provider.getProject());
+                                if (uids.size() == 1)
+                                {
+                                    Global.invokeVoid(resolveCheckFilter(control), "setShowAll"); //$NON-NLS-1$
+                                    Object prepare = checkViewer.getData("tormozit.prepareReplacementNavigation"); //$NON-NLS-1$
+                                    if (prepare instanceof Runnable action)
+                                        action.run();
+                                    else
+                                    {
+                                        SearchBox search = findSearchBox(pageControl);
+                                        if (search != null)
+                                            search.setText(""); //$NON-NLS-1$
+                                    }
+                                    Object nativeProvider = Global.invoke(provider, "getChecksTreeProvider"); //$NON-NLS-1$
+                                    Global.invokeVoid(nativeProvider, "clearFilterCache"); //$NON-NLS-1$
+                                    treeViewer.refresh();
+                                    ChecksSelectionMemory.select(treeViewer, uids.iterator().next());
+                                }
+                            });
+                        return null;
+                    }
+                });
         Runnable update = () -> {
             Object selected = control.getSelectedCheckObjects().getValue();
             if (!(selected instanceof IChecksTreeNode node)
                 || !(node.getValue() instanceof ICheckSettings settings)
                 || settings.getId() == null)
                 return;
-            String description = builtinCheckDescription(settings);
+            String description = builtinCheckDescription(settings, control.getChecksViewerProvider());
             if (description == null)
                 return;
 
@@ -594,14 +627,30 @@ public final class ValidationChecksFilterHook implements IStartup
         update.run();
     }
 
-    private static String builtinCheckDescription(ICheckSettings settings)
+    private static String builtinCheckDescription(ICheckSettings settings, ChecksViewerProvider provider)
     {
         String checkId = settings.getId().getCheckId();
-        String replacedNote = REPLACED_BUILTIN_NOTES.get(checkId);
-        if (replacedNote != null)
+        List<String> replacements = ComfortCheckIds.BUILTIN_REPLACEMENTS.get(checkId);
+        if (replacements != null)
         {
+            List<String> links = new ArrayList<>();
+            for (String replacement : replacements)
+            {
+                Set<CheckUid> uids = provider.getCheckRepository()
+                    .getCheckUidForCheckId(replacement, provider.getProject());
+                for (CheckUid uid : uids)
+                {
+                    ICheckSettings target = provider.getCheckRepository().getSettings(uid, provider.getProject());
+                    if (target != null)
+                        links.add("<a href=\"#\" onclick=\"comfortOpenReplacementCheck('" + replacement //$NON-NLS-1$
+                            + "');return false;\">" + escapeCheckTitle(target.getTitle()) + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
             String original = settings.getDescription();
-            return original == null || original.isBlank() ? replacedNote : original + replacedNote;
+            String note = links.isEmpty() ? "" : "<p>Динамически замещается " //$NON-NLS-1$ //$NON-NLS-2$
+                + (links.size() == 1 ? "проверкой" : "проверками") + " Комфорта: " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "</p><ul><li>" + String.join("</li><li>", links) + "</li></ul>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return (original == null ? "" : original) + note; //$NON-NLS-1$
         }
         boolean critical = "reference-value-resolving".equals(checkId); //$NON-NLS-1$
         if (!critical && !"reference-value-resolving-non-critical".equals(checkId)) //$NON-NLS-1$
@@ -617,6 +666,12 @@ public final class ValidationChecksFilterHook implements IStartup
             return null;
         return settings.getDescription()
             + "<p>Проверяются только ссылочные значения свойства «Значение заполнения» стандартных реквизитов.</p>"; //$NON-NLS-1$
+    }
+
+    private static String escapeCheckTitle(String title)
+    {
+        return title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            .replace("\"", "&quot;"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -1266,78 +1321,6 @@ public final class ValidationChecksFilterHook implements IStartup
     {
         return uid != null && InternalBslChecks.CONTRIBUTOR.equals(uid.getContributorId())
             && isInternalBslCheckCode(uid.getCheckId());
-    }
-
-    /**
-     * Замещённые штатные проверки ({@link ComfortCheckIds#REPLACED_BUILTIN_CHECKS}) на странице
-     * не включаются. Все пути включения — флажок проверки или группы, пробел, двойной клик,
-     * «Включить все», табличный режим — штатно доходят до {@code ICheckSettings.setEnabled} рабочих
-     * копий страницы ({@code ChecksTreeViewer.setItemChecked/setTreeChecked}); сразу после них
-     * этим копиям возвращается «выключено». Выключение в реестре при запуске — {@code Activator}.
-     */
-    private static final class ReplacedBuiltinGuard
-    {
-        private static final String INSTALLED_KEY = "tormozit.replacedBuiltinGuard"; //$NON-NLS-1$
-
-        static void install(ChecksViewerControl control, TreeViewer viewer)
-        {
-            Tree tree = viewer.getTree();
-            if (Boolean.TRUE.equals(tree.getData(INSTALLED_KEY)))
-                return;
-            tree.setData(INSTALLED_KEY, Boolean.TRUE);
-            Runnable fix = () -> {
-                if (!tree.isDisposed() && disable(control))
-                    viewer.refresh();
-            };
-            fix.run();
-            // Слушатель добавлен после штатного: срабатывает уже после его setItemChecked.
-            if (viewer instanceof CheckboxTreeViewer checks)
-                checks.addCheckStateListener(event -> fix.run());
-            // «Включить все», меню, пробел и двойной клик — после штатной обработки события.
-            Shell shell = tree.getShell();
-            Display display = tree.getDisplay();
-            Listener after = event -> {
-                if (shellOf(event.widget) == shell)
-                    display.asyncExec(fix);
-            };
-            int[] eventTypes = { SWT.Selection, SWT.KeyUp, SWT.MouseDoubleClick };
-            for (int eventType : eventTypes)
-                display.addFilter(eventType, after);
-            tree.addDisposeListener(event -> {
-                for (int eventType : eventTypes)
-                    display.removeFilter(eventType, after);
-            });
-        }
-
-        /** {@code true}, если какая-то замещённая проверка была включена и выключена. */
-        static boolean disable(ChecksViewerControl control)
-        {
-            Object provider = Global.invoke(control.getChecksViewerProvider(), "getChecksTreeProvider"); //$NON-NLS-1$
-            if (!(Global.invoke(provider, "getChecks") instanceof java.util.Collection<?> checks)) //$NON-NLS-1$
-                return false;
-            boolean changed = false;
-            for (Object item : checks)
-                if (item instanceof ICheckSettings settings && settings.isEnabled() && settings.getId() != null
-                    && ComfortCheckIds.REPLACED_BUILTIN_CHECKS.contains(settings.getId().getCheckId()))
-                {
-                    settings.setEnabled(false);
-                    changed = true;
-                }
-            return changed;
-        }
-
-        private static Shell shellOf(Widget widget)
-        {
-            if (widget == null || widget.isDisposed())
-                return null;
-            if (widget instanceof Control control)
-                return control.getShell();
-            if (widget instanceof MenuItem item)
-                return item.getParent().getShell();
-            if (widget instanceof ToolItem item)
-                return item.getParent().getShell();
-            return null;
-        }
     }
 
     /** Информационные узлы: не ICheckSettings, поэтому EDT не сохраняет их в профили проверок. */
@@ -2799,11 +2782,6 @@ public final class ValidationChecksFilterHook implements IStartup
                 return;
             }
             Global.invoke(treeViewer, "setItemChecked", row.node, Boolean.valueOf(tableItem.getChecked())); //$NON-NLS-1$
-            if (ReplacedBuiltinGuard.disable(control))
-            {
-                treeViewer.refresh();
-                refreshRows();
-            }
             // При отборе «только включённые»/«только выключенные» строка после
             // переключения перестаёт проходить отбор — тогда пересобираем состав,
             // иначе достаточно перерисовать (пометка уже стоит).

@@ -2,14 +2,13 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
@@ -23,6 +22,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IFileEditorInput;
+import org.eclipse.ui.IPropertyListener;
+import org.eclipse.ui.IWorkbenchPartConstants;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -136,10 +137,10 @@ public class MassiveChecksExemptionHook
             ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commandService != null)
                 commandService.addExecutionListener(new StartCheckListener());
-            refreshOpenModules();
             PlatformUI.getWorkbench().addWindowListener(new WindowTracker());
             for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
                 WindowTracker.track(window);
+            refreshOpenModules();
         }
         catch (Exception | LinkageError e)
         {
@@ -152,15 +153,16 @@ public class MassiveChecksExemptionHook
     {
         Set<String> paths = new HashSet<>();
         Set<String> folders = new HashSet<>();
-        List<String> inputs = new ArrayList<>();
+        Set<IEditorReference> references = new HashSet<>();
         for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
         {
             for (IWorkbenchPage page : window.getPages())
             {
                 for (IEditorReference reference : page.getEditorReferences())
                 {
+                    references.add(reference);
+                    WindowTracker.trackEditor(reference);
                     IEditorInput input = editorInput(reference);
-                    inputs.add(reference.getId() + ":" + (input == null ? "null" : input.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                     if (input instanceof IFileEditorInput fileInput)
                         addPathForms(paths, fileInput.getFile());
                     else if (input instanceof IDtEditorInput<?> dtInput)
@@ -172,8 +174,7 @@ public class MassiveChecksExemptionHook
         openModules.addAll(paths);
         openObjectFolders.clear();
         openObjectFolders.addAll(folders);
-        // Временная диагностика «Только открытые модули».
-        Global.tempLog("open-modules", "refresh inputs=" + inputs + " paths=" + paths + " folders=" + folders); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        WindowTracker.untrackClosedEditors(references);
     }
 
     private static IEditorInput editorInput(IEditorReference reference)
@@ -347,15 +348,18 @@ public class MassiveChecksExemptionHook
         long now = System.currentTimeMillis();
         if (uri.segmentCount() > 1 && isActive(manualProjects.get(URI.decode(uri.segment(1))), now))
             return true;
+        return isModuleOpen(uri);
+    }
+
+    /** Открыт модуль или его объект метаданных; ручной запуск и недавняя правка не учитываются. */
+    public static boolean isModuleOpen(URI uri)
+    {
+        if (uri == null || !uri.isPlatformResource())
+            return false;
         String raw = uri.toPlatformString(false);
         String decoded = uri.toPlatformString(true);
-        boolean open = openModules.contains(raw) || openModules.contains(decoded) || inOpenObject(raw)
+        return openModules.contains(raw) || openModules.contains(decoded) || inOpenObject(raw)
             || inOpenObject(decoded);
-        if (!open)
-            // Временная диагностика «Только открытые модули».
-            Global.tempLog("open-modules", "not open raw=" + raw + " decoded=" + decoded //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " known=" + openModules.size() + " folders=" + openObjectFolders.size()); //$NON-NLS-1$ //$NON-NLS-2$
-        return open;
     }
 
     private static boolean isActive(Long until, long now)
@@ -523,6 +527,46 @@ public class MassiveChecksExemptionHook
     private static final class WindowTracker
         implements org.eclipse.ui.IWindowListener
     {
+        private static final Set<IEditorReference> trackedEditors = new HashSet<>();
+        private static final AtomicBoolean refreshPending = new AtomicBoolean();
+
+        // При восстановлении EDT сначала отдаёт DtEditorProxyInput, а настоящий вход
+        // подставляет после загрузки проекта. makeInitialized обновляет имя и подсказку
+        // вкладки; повторного partOpened при этом нет.
+        private static final IPropertyListener EDITOR_PROPERTY_LISTENER = (source, property) ->
+        {
+            if (property != IWorkbenchPartConstants.PROP_INPUT
+                && property != IWorkbenchPartConstants.PROP_PART_NAME
+                && property != IWorkbenchPartConstants.PROP_TITLE)
+                return;
+            if (!refreshPending.compareAndSet(false, true))
+                return;
+            Display.getDefault().asyncExec(() ->
+            {
+                refreshPending.set(false);
+                refreshOpenModules();
+            });
+        };
+
+        static void trackEditor(IEditorReference reference)
+        {
+            if (trackedEditors.add(reference))
+                reference.addPropertyListener(EDITOR_PROPERTY_LISTENER);
+        }
+
+        static void untrackClosedEditors(Set<IEditorReference> references)
+        {
+            for (Iterator<IEditorReference> it = trackedEditors.iterator(); it.hasNext();)
+            {
+                IEditorReference reference = it.next();
+                if (!references.contains(reference))
+                {
+                    reference.removePropertyListener(EDITOR_PROPERTY_LISTENER);
+                    it.remove();
+                }
+            }
+        }
+
         private static final org.eclipse.ui.IPartListener2 PART_LISTENER = new org.eclipse.ui.IPartListener2()
         {
             @Override
@@ -534,6 +578,12 @@ public class MassiveChecksExemptionHook
 
             @Override
             public void partClosed(org.eclipse.ui.IWorkbenchPartReference reference)
+            {
+                refreshOpenModules();
+            }
+
+            @Override
+            public void partInputChanged(org.eclipse.ui.IWorkbenchPartReference reference)
             {
                 refreshOpenModules();
             }

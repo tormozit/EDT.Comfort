@@ -480,7 +480,12 @@ final class BslExpectedTypePremiums
         Snapshot snapshot = active;
         List<BslAddedWordProposal> added = snapshot != null ? snapshot.added() : List.of();
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
-        if (processor != null && processor.hasIrProposalsForCurrentContext())
+        // В ИР разбор предыдущей инструкции отделён условием мЯзыкПрограммы = 0.
+        // Список QL не должен получать слова из общего снимка предыдущего места BSL.
+        boolean query = containsQueryProposals(raw);
+        Global.tempLog("expected-type-language", "withAddedWords query=" + query //$NON-NLS-1$ //$NON-NLS-2$
+            + " raw=" + raw.length + " bslAdded=" + added.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        if (query || processor != null && processor.hasIrProposalsForCurrentContext())
             added = List.of();
         boolean changed = false;
         Set<ICompletionProposal> present = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -564,7 +569,7 @@ final class BslExpectedTypePremiums
         Expectation expectation = new Expectation(queryTypes, receiver, "=", "", -1, false, null); //$NON-NLS-1$ //$NON-NLS-2$
         Premiums result = Premiums.empty();
         Map<String, Word> words = words(proposals, Map.of(), Map.of());
-        typePremiums(result, context, expectation, words, new ArrayList<>(), null);
+        typePremiums(result, context, expectation, words, new ArrayList<>(), null, QUERY_LANGUAGE);
         // ЗагрузитьСтатистикуВыбораВТаблицуСлов; «внутри выражения» в запросе не различается
         String statisticsContext = queryStatisticsContext(parent, parentTypes);
         if (!GLOBAL_CONTEXT.equals(statisticsContext))
@@ -604,7 +609,7 @@ final class BslExpectedTypePremiums
         Context context;
         try
         {
-            context = contextAt(document, caret);
+            context = containsQueryProposals(list) ? null : contextAt(document, caret);
         }
         catch (Exception e)
         {
@@ -654,8 +659,27 @@ final class BslExpectedTypePremiums
         return file != null ? file.getProject() : null;
     }
 
+    /** Язык определяется и по самим предложениям: активный просмотрщик может ещё указывать на другое место. */
+    private static boolean containsQueryProposals(ICompletionProposal[] list)
+    {
+        for (ICompletionProposal proposal : list)
+            if (BslQueryLiteralSupport.expectedTypesOf(proposal) != null)
+                return true;
+        return false;
+    }
+
     private static Context contextAt(IDocument document, int caret) throws Exception
     {
+        // Для языка запросов премии считаются отдельно в queryPremiums; конструкции BSL здесь не нужны.
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        ITextViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        boolean queryEditor = reloader != null && reloader.getFacade() != null
+            && reloader.getFacade().isQueryMode() && viewer != null && viewer.getDocument() == document;
+        boolean queryLiteral = BslQueryLiteralSupport.segmentKeyAt(document, caret) >= 0;
+        Global.tempLog("expected-type-language", "caret=" + caret + " queryEditor=" + queryEditor //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " queryLiteral=" + queryLiteral); //$NON-NLS-1$
+        if (queryEditor || queryLiteral)
+            return null;
         // Выделение, на котором открыт список: место — его начало
         String selected = ""; //$NON-NLS-1$
         Selection selection = assistSelection;
@@ -1238,6 +1262,16 @@ final class BslExpectedTypePremiums
         List<TypeItem> sourceTypes = source != null ? expressionTypeItems(resource, source, offset) : List.of();
         List<TypeItem> types = new ArrayList<>();
         String receiver = parameterExpectation(resource, invocation, index, types);
+        // ЭлементБлокировкиДанных.УстановитьЗначение("Поле", Значение): тип поля пространства блокировки.
+        if (index == 1 && !args.isEmpty() && source != null
+            && ("УстановитьЗначение".equalsIgnoreCase(methodName) || "SetValue".equalsIgnoreCase(methodName)) //$NON-NLS-1$ //$NON-NLS-2$
+            && containsIgnoreCase(typeNames(sourceTypes), "ЭлементБлокировкиДанных")) //$NON-NLS-1$
+        {
+            String field = literalText(args.get(0));
+            if (IDENTIFIER.matcher(field).matches())
+                return new CallExpectation(BslLiteralValues.dataLockFieldTypes(resource, sourceTypes, field, types),
+                    field, methodName);
+        }
         if (FILL_PROPERTY_VALUES.equalsIgnoreCase(methodName) && index == 1 && !args.isEmpty() && args.get(0) != null)
         {
             types.clear();
@@ -1249,15 +1283,19 @@ final class BslExpectedTypePremiums
             }
             return new CallExpectation(types, expressionText(args.get(0)), methodName);
         }
-        // Запрос.УстановитьПараметр / …Параметры.Вставить: приёмник — имя параметра (тип — из текста запроса, не считается)
+        // Запрос.УстановитьПараметр: тип значения — из схемы запроса, приёмник — имя параметра.
+        boolean setQueryParameter = ("УстановитьПараметр".equalsIgnoreCase(methodName) //$NON-NLS-1$
+            || "SetParameter".equalsIgnoreCase(methodName)) //$NON-NLS-1$
+            && containsIgnoreCase(typeNames(sourceTypes), "Запрос"); //$NON-NLS-1$
         if (index == 1 && !args.isEmpty()
-            && ("УстановитьПараметр".equalsIgnoreCase(methodName) && containsIgnoreCase(typeNames(sourceTypes), "Запрос") //$NON-NLS-1$ //$NON-NLS-2$
-                || "Вставить".equalsIgnoreCase(methodName) && source != null //$NON-NLS-1$
-                    && lower(expressionText(source)).endsWith("параметры"))) //$NON-NLS-1$
+            && (setQueryParameter || "Вставить".equalsIgnoreCase(methodName) && source != null //$NON-NLS-1$
+                && lower(expressionText(source)).endsWith("параметры"))) //$NON-NLS-1$
         {
             String parameter = literalText(args.get(0));
             if (IDENTIFIER.matcher(parameter).matches())
-                return new CallExpectation(new ArrayList<>(), parameter, methodName);
+                return new CallExpectation(setQueryParameter
+                    ? new ArrayList<>(BslQueryResultTypes.queryParameterTypes(invocation, parameter))
+                    : new ArrayList<>(), parameter, methodName);
         }
         // ТаблицаЗначений/ТабличнаяЧасть.Найти(Значение, "Колонка")
         if ("Найти".equalsIgnoreCase(methodName) && index == 0 && args.size() > 1 && isTableType(sourceTypes)) //$NON-NLS-1$
@@ -2317,7 +2355,7 @@ final class BslExpectedTypePremiums
         }
         boolean byType = adder == null || adder.run();
         if (scene.expectation() != null && byType)
-            typePremiums(result, context, scene.expectation(), words, fuzzyCalls, adder);
+            typePremiums(result, context, scene.expectation(), words, fuzzyCalls, adder, MODULE_LANGUAGE);
         if (!context.parent().isEmpty())
             weightPremiums(result, words, scene.frequencies(), words.size(), true);
         if (scene.statisticsContext() != null)
@@ -2547,9 +2585,9 @@ final class BslExpectedTypePremiums
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     }
 
-    /** @param adder новые слова встроенного языка; {@code null} — язык запросов, слова не добавляются */
+    /** @param adder новые слова встроенного языка; {@code null} — слова не добавляются */
     private static void typePremiums(Premiums result, Context context, Expectation expectation,
-        Map<String, Word> words, List<FuzzyCall> fuzzyCalls, AddedWords adder)
+        Map<String, Word> words, List<FuzzyCall> fuzzyCalls, AddedWords adder, int language)
     {
         String parent = context.parent();
         boolean noParent = parent.isEmpty();
@@ -2640,7 +2678,11 @@ final class BslExpectedTypePremiums
                 && (noParent || rootType.startsWith(lower(parent)) || lower(manager).startsWith(lower(parent))))
             {
                 if (noParent)
-                    add(result, words, lower(manager), 2, false);
+                {
+                    // ИР: корневой менеджер метаданных премируется только во встроенном языке.
+                    if (language == MODULE_LANGUAGE)
+                        add(result, words, lower(manager), 2, false);
+                }
                 else if (parent.indexOf('.') < 0)
                     add(result, words, lower(lastFragment(dbTable)), 3, true);
             }
@@ -2697,7 +2739,8 @@ final class BslExpectedTypePremiums
                     }
                     // Менеджер перечисления премируется и при наличии предложенных EDT значений этого типа.
                     List<Word> managers = new ArrayList<>();
-                    if (typeName.indexOf('.') < 0 && !ENUM_RETRY_EXCLUDED.contains(lower(typeName)))
+                    if (language == MODULE_LANGUAGE && typeName.indexOf('.') < 0
+                        && !ENUM_RETRY_EXCLUDED.contains(lower(typeName)))
                     {
                         for (Word word : words.values())
                         {

@@ -20,6 +20,8 @@ import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.ecore.util.InternalEList;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.internal.text.html.HTMLPrinter;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
@@ -82,11 +84,12 @@ final class FunctionReturnTypes
      * сейчас идёт пересчёт, через секунды может смениться» — только пока пересчёт действительно
      * ждёт или идёт ({@link #state}); закончился — тип итоговый, без {@code ?}.
      */
-    private record Computed(String stamp, String type, boolean linePreserved)
+    // Поколение >= 0 — готовая модель редактора, -1 — индекс или итог для закрытого модуля.
+    private record Computed(String stamp, String type, boolean linePreserved, int typesGeneration)
     {
         Computed(String stamp, String type)
         {
-            this(stamp, type, false);
+            this(stamp, type, false, -1);
         }
     }
 
@@ -111,13 +114,15 @@ final class FunctionReturnTypes
      * ({@link #readyFromNative}), в состоянии {@code stamp} на момент запроса.
      */
     private record Request(URI module, IFile file, String stamp, IXtextDocument nativeDocument,
-        String method, VariableTarget variable, long queuedAt, long contextRevision)
+        String method, VariableTarget variable, long queuedAt, long contextRevision, int typesGeneration,
+        long returnsRevision)
     {
         Request(URI module, IFile file, String stamp, IXtextDocument nativeDocument,
             String method, VariableTarget variable)
         {
             this(module, file, stamp, nativeDocument, method, variable, System.nanoTime(),
-                FunctionReturnTypes.contextRevision(module));
+                FunctionReturnTypes.contextRevision(module), BslDocCommentComputedTypes.typesGeneration(),
+                semanticRevision());
         }
 
         String key()
@@ -127,11 +132,127 @@ final class FunctionReturnTypes
 
         String state()
         {
-            return stamp + "@" + (variable != null ? variable.offset() : -1) + "#" + contextRevision; //$NON-NLS-1$ //$NON-NLS-2$
+            return stamp + "@" + (variable != null ? variable.offset() : -1) + "#" + contextRevision //$NON-NLS-1$ //$NON-NLS-2$
+                + (variable == null ? "#types=" + typesGeneration : "#returns=" + returnsRevision); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
     private static final Map<String, Computed> RESULTS = new ConcurrentHashMap<>();
+
+    /** Привязка расчётного заголовка к исходному input EDT, независимо от времени создания окна. */
+    private record FunctionHint(Target target, java.lang.ref.WeakReference<ITextViewer> viewer, State shown)
+    {
+    }
+
+    private static final Map<Object, FunctionHint> FUNCTION_HINTS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** Переносимые типы для штатного вычислителя: адреса вместо объектов временного ResourceSet. */
+    private record SemanticReturn(String stamp, List<URI> types)
+    {
+    }
+
+    private static final Map<String, SemanticReturn> SEMANTIC_RETURNS = new ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicLong SEMANTIC_REVISION =
+        new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicBoolean NATIVE_HINTS_CHANGED =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    static long semanticRevision()
+    {
+        return SEMANTIC_REVISION.get();
+    }
+
+    static boolean hasSemanticReturnName(String name)
+    {
+        if (name == null)
+            return false;
+        String suffix = "#" + name.toLowerCase(Locale.ROOT);
+        return SEMANTIC_RETURNS.keySet().stream().anyMatch(key -> key.endsWith(suffix));
+    }
+
+    /** Тот же результат, что у строки функции, но в формате штатного TypesComputer. */
+    static List<TypeItem> semanticReturnTypes(com._1c.g5.v8.dt.mcore.Method method)
+    {
+        Target target = targetOf(method, 0);
+        if (target == null)
+            return List.of();
+        SemanticReturn value = SEMANTIC_RETURNS.get(target.key());
+        if (value == null || !value.stamp().equals(currentStamp(target.module())))
+            return List.of();
+        IFile file = ForeignModuleModel.fileOf(target.module());
+        if (file == null || !BslDocCommentComputedTypes.isExtendedTypesEnabled(file.getProject()))
+            return List.of();
+        List<TypeItem> result = new java.util.ArrayList<>();
+        org.eclipse.emf.ecore.EObject context = method instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMockMethod mock
+            && mock.getContext() != null ? mock.getContext() : method;
+        for (URI uri : value.types())
+        {
+            var type = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createType();
+            ((InternalEObject)type).eSetProxyURI(uri);
+            try
+            {
+                var resolved = EcoreUtil.resolve(type, context);
+                if (!(resolved instanceof TypeItem item) || item.eIsProxy())
+                {
+                    return List.of();
+                }
+                result.add(item);
+            }
+            catch (RuntimeException error)
+            {
+                return List.of();
+            }
+        }
+        return result;
+    }
+
+    private static void rememberSemanticReturn(Target target, String stamp, List<URI> types)
+    {
+        SemanticReturn value = types.isEmpty() ? null : new SemanticReturn(stamp, List.copyOf(types));
+        SemanticReturn old = value != null ? SEMANTIC_RETURNS.put(target.key(), value)
+            : SEMANTIC_RETURNS.remove(target.key());
+        if (java.util.Objects.equals(value, old))
+            return;
+        SEMANTIC_REVISION.incrementAndGet();
+        REQUEST_STAMPS.keySet().removeIf(key -> key.contains("#var#"));
+        Job job = new Job("Комфорт: типы вызовов функции")
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                List<IXtextDocument> documents = new java.util.ArrayList<>();
+                synchronized (LocalContextInvalidation.documents)
+                {
+                    for (var document : LocalContextInvalidation.documents.keySet())
+                        if (document instanceof IXtextDocument xtext)
+                            documents.add(xtext);
+                }
+                for (IXtextDocument document : documents)
+                {
+                    if (monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    try
+                    {
+                        document.readOnly(resource ->
+                        {
+                            BslStructureInsertCommentTypes.refreshExternalFunctionTypes(resource, -1);
+                            return null;
+                        });
+                    }
+                    catch (RuntimeException error)
+                    {
+                    }
+                }
+                NATIVE_HINTS_CHANGED.set(true);
+                publish();
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setRule(ForeignModuleModel.SERIAL);
+        job.schedule();
+    }
 
     /**
      * Переменная (параметр) метода {@code method} (нижний регистр; пустой — переменная модуля)
@@ -147,21 +268,41 @@ final class FunctionReturnTypes
     }
 
     /** Тип переменной в точке {@code offset} по состоянию модуля {@code stamp}. */
-    private record VariableComputed(String stamp, int offset, String type, int lineStart, int lineEnd)
+    private record VariableComputed(String stamp, int offset, String type, int lineStart, int lineEnd,
+        long returnsRevision)
     {
         VariableComputed(String stamp, int offset, String type)
         {
-            this(stamp, offset, type, -1, -1);
+            this(stamp, offset, type, -1, -1, semanticRevision());
         }
 
         boolean matches(String currentStamp, int point)
         {
             return stamp.equals(currentStamp)
+                && returnsRevision == semanticRevision()
                 && (lineStart >= 0 ? point >= lineStart && point <= lineEnd : offset == point);
         }
     }
 
     private static final Map<String, VariableComputed> VARIABLE_RESULTS = new ConcurrentHashMap<>();
+    /** Возвраты, от которых зависит показанный тип переменной; ожидающий источник делает тип предварительным. */
+    private static final Map<String, List<Target>> VARIABLE_SOURCES = new ConcurrentHashMap<>();
+
+    static void rememberVariableSources(String key, java.util.Collection<Target> sources)
+    {
+        VARIABLE_SOURCES.put(key, List.copyOf(sources));
+    }
+
+    private static boolean variableSourcesPending(String key)
+    {
+        for (Target source : VARIABLE_SOURCES.getOrDefault(key, List.of()))
+        {
+            State result = state(source);
+            if (result != null && !result.fresh())
+                return true;
+        }
+        return false;
+    }
     /**
      * Предварительные типы — из «Возвращаемое значение» комментария функций без готового типа,
      * разбором комментария в родной модели редактора ({@link #readyFromNative}): EDT в строке тип
@@ -878,7 +1019,10 @@ final class FunctionReturnTypes
             + " computed=" + computed); //$NON-NLS-1$
         // #endregion
         if (computed != null && computed.matches(stamp, target.offset()))
-            return new State(computed.type(), true);
+        {
+            boolean pending = variableSourcesPending(target.key());
+            return new State(computed.type(), !pending);
+        }
         if (stamp.isEmpty())
             return new State("", true); //$NON-NLS-1$
         return new State(computed != null ? computed.type() : "", false); //$NON-NLS-1$
@@ -928,7 +1072,7 @@ final class FunctionReturnTypes
         if (target.exported() == null)
             rememberLineContextKey(target.module(), target.key());
         Computed computed = RESULTS.get(target.key());
-        if (computed != null && computed.stamp().equals(stamp))
+        if (functionCurrent(computed, stamp, target.module()))
             return new State(computed.type(), true);
         // Конечный результат уже проверен выше. Только при его отсутствии пауза — ожидание с «?».
         if (stamp.isEmpty())
@@ -1291,14 +1435,15 @@ final class FunctionReturnTypes
                         if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp) || !sameLine)
                             return value;
                         retained[0]++;
-                        return new VariableComputed(afterStamp, value.offset(), value.type(), lineStart, newEnd);
+                        return new VariableComputed(afterStamp, value.offset(), value.type(), lineStart, newEnd,
+                            value.returnsRevision());
                     });
                     RESULTS.replaceAll((key, value) ->
                     {
                         if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp))
                             return value;
                         retained[0]++;
-                        return new Computed(afterStamp, value.type(), true);
+                        return new Computed(afterStamp, value.type(), true, value.typesGeneration());
                     });
                 }
                 Global.tempLog("assist-local-context", "after module=" + module + " stamp=" + afterStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -1366,16 +1511,18 @@ final class FunctionReturnTypes
                 return;
             }
             String stamp = currentStamp(target.module());
+            var known = KNOWN_DOCUMENTS.get(target.module());
+            IXtextDocument document = known != null ? known.get() : null;
             Computed ready = RESULTS.get(key);
             trace.detail = "current=" + first; //$NON-NLS-1$
-            if (ready != null && ready.stamp().equals(stamp))
+            if (functionCurrent(ready, stamp, target.module()))
             {
                 trace.cacheHit = true;
                 return;
             }
-            if (requestIndex(target, stamp, first))
+            // Открытый редактор уже содержит типы после расчёта запросов; индекс их ещё не хранит.
+            if (document == null && requestIndex(target, stamp, first))
                 return;
-            IXtextDocument document = ForeignModuleModel.openDocument(file);
             if (document == null)
             {
                 finishUnknown(new Request(target.module(), file, stamp, null, target.name(), null));
@@ -1393,13 +1540,13 @@ final class FunctionReturnTypes
         boolean first)
     {
         Computed ready = RESULTS.get(target.key());
-        if (document == null || ready != null && ready.stamp().equals(stamp))
+        if (document == null || functionCurrent(ready, stamp, target.module()))
             return;
         enqueue(new Request(target.module(), file, stamp, document, target.name(), null), first);
     }
 
     /**
-     * Экспортная функция немодифицированного модуля — тип из индекса сборки, как у штатной
+     * Экспортная функция закрытого модуля — тип из индекса сборки, как у штатной
      * подсказки EDT ({@link #computeIndex}); запрос — один на состояние модуля. Модуль с
      * несохранёнными правками — {@code false}: индекс устарел, нужен расчёт модели.
      * {@code first} — функция выбрана (в голову очереди). UI-поток.
@@ -1451,9 +1598,9 @@ final class FunctionReturnTypes
     }
 
     /**
-     * Тип экспортной функции из индекса сборки — {@code ExportMethodTypeProvider.getMethodType}, тот
-     * же источник, что у штатной подсказки EDT («*» — рассчитано системой типов). Индекс пуст —
-     * расчёт модели модуля.
+     * Индекс даёт предварительный тип. При расширенном расчёте закрытый модуль читается с диска
+     * через {@link ForeignModuleModel}, с подготовкой результатов запросов запрошенного метода.
+     * Открытый модуль читается только по родной модели редактора.
      */
     private static void computeIndex(IndexRequest request)
     {
@@ -1511,8 +1658,30 @@ final class FunctionReturnTypes
         }
         log("index key=" + target.key() + " type=" + type //$NON-NLS-1$ //$NON-NLS-2$
             + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
+        var knownDocument = KNOWN_DOCUMENTS.get(target.module());
+        if ((knownDocument == null || knownDocument.get() == null)
+            && BslDocCommentComputedTypes.isExtendedTypesEnabled(request.file().getProject()))
+        {
+            RESULTS.put(target.key(), new Computed(stampOf(request.stamp(), false), type != null ? type : ""));
+            publish();
+            String diskType = computeClosedFunction(request);
+            if (diskType != null && !diskType.isEmpty())
+                type = diskType;
+        }
+        if (!request.stamp().equals(ForeignModuleModel.stamp(request.file(), null)))
+        {
+            publish();
+            return;
+        }
         if (type != null)
         {
+            // Пока читался индекс, редактор мог открыться и уже опубликовать готовый тип.
+            var known = KNOWN_DOCUMENTS.get(target.module());
+            if (known != null && known.get() != null)
+            {
+                publish();
+                return;
+            }
             Computed result = new Computed(stampOf(request.stamp(), request.reliable()), type);
             Computed old = RESULTS.put(target.key(), result);
             if (!result.equals(old))
@@ -1539,6 +1708,87 @@ final class FunctionReturnTypes
                     publish();
                 }
             });
+    }
+
+    /**
+     * Принятый путь расчёта закрытого модуля с диска (как у типов внешних параметров).
+     * Вызывается только WORKER под ForeignModuleModel.SERIAL. Наружу выходят имена и URI,
+     * объекты временной модели не сохраняются; снимок открытого документа не создаётся.
+     */
+    private static String computeClosedFunction(IndexRequest request)
+    {
+        Target target = request.target();
+        try
+        {
+            List<URI> semanticTypes = new java.util.ArrayList<>();
+            ForeignModuleModel.Read<List<Object>> read = ForeignModuleModel.read(target.module(), request.file(),
+                null, resource ->
+                {
+                    com._1c.g5.v8.dt.bsl.model.Module module = moduleOf(resource);
+                    if (module == null)
+                        return null;
+                    for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+                    {
+                        if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function)
+                            || method.getName() == null || !method.getName().equalsIgnoreCase(target.name()))
+                            continue;
+                        var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(method);
+                        if (node == null || node.getLength() == 0)
+                            return null;
+                        BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource,
+                            node.getOffset() + node.getLength() - 1,
+                            status -> {});
+                        List<?> ready = BslDocCommentComputedTypes.readyNormalReturnTypes(method);
+                        if (ready == null || ready.isEmpty())
+                            return null;
+                        List<Object> parts = new java.util.ArrayList<>();
+                        for (Object item : ready)
+                        {
+                            Object part = partOf(item);
+                            if (part == null)
+                                return null;
+                            parts.add(part);
+                        }
+                        for (Object item : ready)
+                        {
+                            URI uri = item instanceof org.eclipse.emf.ecore.EObject object
+                                ? EcoreUtil.getURI(object) : null;
+                            if (uri == null || uri.isRelative())
+                            {
+                                semanticTypes.clear();
+                                break;
+                            }
+                            semanticTypes.add(uri);
+                        }
+                        return parts;
+                    }
+                    return null;
+                });
+            List<Object> parts = read.value();
+            if (parts == null)
+                return null;
+            Set<URI> uris = new LinkedHashSet<>();
+            for (Object part : parts)
+                if (part instanceof URI uri)
+                    uris.add(uri);
+            loadProxyNames(uris, target.module(), request.file().getProject());
+            Set<String> names = new LinkedHashSet<>();
+            for (Object part : parts)
+            {
+                String name = part instanceof URI uri ? PROXY_NAMES.get(uri) : (String)part;
+                if (name == null || name.isEmpty())
+                    return null;
+                names.add(name);
+            }
+            String result = formatTypeNames(names);
+            if (request.stamp().equals(ForeignModuleModel.stamp(request.file(), null)))
+                rememberSemanticReturn(target, request.stamp(), semanticTypes);
+            return result;
+        }
+        catch (Throwable error)
+        {
+            return null;
+        }
     }
 
     /**
@@ -1678,6 +1928,9 @@ final class FunctionReturnTypes
     private static boolean requestStillCurrent(Request request)
     {
         return request.contextRevision() == contextRevision(request.module())
+            && (request.variable() == null || request.returnsRevision() == semanticRevision())
+            && (request.variable() != null
+                || request.typesGeneration() == BslDocCommentComputedTypes.typesGeneration())
             && request.stamp().equals(ForeignModuleModel.stamp(request.file(), request.nativeDocument()));
     }
 
@@ -1689,32 +1942,37 @@ final class FunctionReturnTypes
             return computed != null && computed.matches(request.stamp(), request.variable().offset());
         }
         Computed computed = RESULTS.get(request.key());
-        return computed != null && computed.stamp().equals(request.stamp());
+        return computed != null && computed.stamp().equals(request.stamp())
+            && computed.typesGeneration() == request.typesGeneration();
     }
 
     /** Старый фоновый запрос не перезаписывает результат, сохранённый правкой текущей строки. */
     private static boolean storeNative(Request request, Computed result)
     {
+        Computed nativeResult = new Computed(result.stamp(), result.type(), result.linePreserved(),
+            request.nativeDocument() != null ? request.typesGeneration() : -1);
         boolean[] changed = { false };
         RESULTS.compute(request.key(), (key, old) ->
         {
             if (!requestStillCurrent(request))
                 return old;
-            changed[0] = !result.equals(old);
-            return result;
+            changed[0] = !nativeResult.equals(old);
+            return nativeResult;
         });
         return changed[0];
     }
 
     private static boolean storeNative(Request request, VariableComputed result)
     {
+        VariableComputed nativeResult = new VariableComputed(result.stamp(), result.offset(), result.type(),
+            result.lineStart(), result.lineEnd(), request.returnsRevision());
         boolean[] changed = { false };
         VARIABLE_RESULTS.compute(request.key(), (key, old) ->
         {
             if (!requestStillCurrent(request))
                 return old;
-            changed[0] = !result.equals(old);
-            return result;
+            changed[0] = !nativeResult.equals(old);
+            return nativeResult;
         });
         return changed[0];
     }
@@ -1921,6 +2179,18 @@ final class FunctionReturnTypes
             for (Object part : parts)
                 names.add((String)part);
             String type = formatTypeNames(names);
+            List<URI> semanticTypes = new java.util.ArrayList<>();
+            for (Object item : ready)
+            {
+                URI uri = item instanceof org.eclipse.emf.ecore.EObject object ? EcoreUtil.getURI(object) : null;
+                if (uri == null || uri.isRelative())
+                {
+                    semanticTypes.clear();
+                    break;
+                }
+                semanticTypes.add(uri);
+            }
+            rememberSemanticReturn(new Target(request.module(), request.method(), null), stamp, semanticTypes);
             Computed result = new Computed(stamp, type);
             done.add(key);
             dirty |= storeNative(request, result);
@@ -1947,6 +2217,7 @@ final class FunctionReturnTypes
         if (target == null)
             return 0;
         int offset = target.offset();
+        BslStructureInsertCommentTypes.refreshExternalFunctionTypes(module.eResource(), offset);
         long start = System.nanoTime();
         org.eclipse.emf.ecore.EObject object = module.eResource().getEObject(target.fragment());
         if (!(object instanceof com._1c.g5.v8.dt.bsl.model.Variable variable)
@@ -1959,6 +2230,8 @@ final class FunctionReturnTypes
         }
         com._1c.g5.v8.dt.bsl.model.Method method = org.eclipse.xtext.EcoreUtil2.getContainerOfType(
             variable, com._1c.g5.v8.dt.bsl.model.Method.class);
+        BslStructureInsertCommentTypes.requestVariableReturnSources(module.eResource(), variable, method, offset,
+            target.key());
         com._1c.g5.v8.dt.mcore.util.Environments environments = method != null ? method.environments()
             : module.environments();
         String key = target.key();
@@ -2029,6 +2302,139 @@ final class FunctionReturnTypes
         }
     }
 
+    /** Общий заголовок рассчитанного типа для боковой подсказки и подсказки при наведении. */
+    static Object withFunctionReturnType(Object info, FunctionReturnTypes.Target target, ITextViewer viewer)
+    {
+        if (info == null || target == null || viewer == null)
+            return info;
+        boolean browserInput = IrBslHoverHtml.isBslBrowserInput(info);
+        String html = browserInput ? IrBslHoverHtml.readDisplayHtml(info)
+            : info instanceof String text ? text : null;
+        if (html == null)
+            return info;
+        // При асинхронной смене строки браузер ещё может содержать описание предыдущей функции.
+        int title = html.indexOf("<span class=\"title\">");
+        int titleEnd = title >= 0 ? html.indexOf("</span>", title) : -1;
+        if (titleEnd < 0 || !html.substring(title, titleEnd).replaceAll("<[^>]*>", "")
+            .toLowerCase(java.util.Locale.ROOT).startsWith(target.name().toLowerCase(java.util.Locale.ROOT) + "("))
+            return info;
+        BslXtextEditor editor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer);
+        State current = state(target);
+        String result = injectFunctionTypeHeading(html, current, viewer, editor);
+        if (browserInput)
+            FUNCTION_HINTS.put(info, new FunctionHint(target, new java.lang.ref.WeakReference<>(viewer), current));
+        return result.equals(html) ? info : browserInput ? IrBslHoverHtml.withHtml(info, result) : result;
+    }
+
+    /** Повторное оформление только при смене типа; вызывается из setInput и публикации расчёта. */
+    static boolean refreshBoundFunctionType(Object input)
+    {
+        FunctionHint hint = FUNCTION_HINTS.get(input);
+        if (hint == null)
+            return false;
+        ITextViewer viewer = hint.viewer().get();
+        if (viewer == null || java.util.Objects.equals(hint.shown(), state(hint.target())))
+            return false;
+        String before = IrBslHoverHtml.readDisplayHtml(input);
+        withFunctionReturnType(input, hint.target(), viewer);
+        boolean changed = !java.util.Objects.equals(before, IrBslHoverHtml.readDisplayHtml(input));
+        return changed;
+    }
+
+    private static String injectFunctionTypeHeading(String html, FunctionReturnTypes.State state,
+        ITextViewer viewer, BslXtextEditor editor)
+    {
+        // Пересчёта нет и итога нет — штатный заголовок без «?».
+        if (state == null)
+            return html;
+        int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
+        int contentStart = heading >= 0 ? html.indexOf('>', heading) + 1 : 0;
+        int headingEnd = contentStart > 0 ? html.indexOf("</div>", contentStart) : -1; //$NON-NLS-1$
+        int title = contentStart > 0 ? html.indexOf("<span class=\"title\">", contentStart) : -1; //$NON-NLS-1$
+        if (headingEnd < 0 || title < 0 || title > headingEnd)
+        {
+            return html;
+        }
+        String segment = html.substring(contentStart, title);
+        String keyword = "Функция "; //$NON-NLS-1$
+        int keywordAt = segment.indexOf(keyword);
+        if (keywordAt < 0)
+        {
+            keyword = "Function "; //$NON-NLS-1$
+            keywordAt = segment.indexOf(keyword);
+        }
+        if (keywordAt < 0)
+        {
+            return html;
+        }
+        int typeStart = contentStart + keywordAt + keyword.length();
+        String type;
+        if (state.fresh())
+        {
+            if (state.type().isEmpty())
+                return html;
+            type = "&lt;" + linkedFunctionTypes(unwrapAngles(state.type()), viewer, editor) + "&gt;";
+        }
+        else
+        {
+            String inner;
+            if (!state.type().isEmpty())
+                inner = linkedFunctionTypes(unwrapAngles(state.type()), viewer, editor);
+            else
+            {
+                // Штатное «&lt;<a …>Строка</a>&gt;*»: внутренность с её ссылками, без скобок.
+                String edtType = html.substring(typeStart, title).trim();
+                int close = edtType.lastIndexOf("&gt;"); //$NON-NLS-1$
+                inner = edtType.startsWith("&lt;") && close > 4 //$NON-NLS-1$
+                    ? edtType.substring(4, close).trim() : edtType;
+            }
+            type = inner.isEmpty()
+                ? "&lt;" + FunctionReturnTypes.UNKNOWN + "&gt;" //$NON-NLS-1$ //$NON-NLS-2$
+                : "&lt;" + FunctionReturnTypes.UNKNOWN + ", " + inner + "&gt;"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        return MetadataTypeMenu.style(html.substring(0, typeStart) + type + " " + html.substring(title)); //$NON-NLS-1$
+    }
+
+    /** Ссылки и меню типов создаются тем же механизмом, что в остальных заголовках EDT. */
+    private static String linkedFunctionTypes(String names, ITextViewer viewer, BslXtextEditor editor)
+    {
+        List<String> parts = new java.util.ArrayList<>();
+        for (String part : names.split(","))
+        {
+            String name = part.trim();
+            var type = MetadataTypeMenu.resolveType(viewer, name);
+            parts.add(type != null ? MetadataTypeMenu.link(type, name, editor)
+                : HTMLPrinter.convertToHTMLContent(name));
+        }
+        return String.join(", ", parts);
+    }
+
+    private static String unwrapAngles(String type)
+    {
+        return type.length() >= 2 && type.charAt(0) == '<' && type.charAt(type.length() - 1) == '>'
+            ? type.substring(1, type.length() - 1).trim() : type;
+    }
+
+    /** Тип модели привязан также к поколению расчёта, индекс — только к закрытому модулю. */
+    private static boolean functionCurrent(Computed result, String stamp, URI module)
+    {
+        if (result == null || !result.stamp().equals(stamp))
+            return false;
+        var known = KNOWN_DOCUMENTS.get(module);
+        if (known != null && known.get() != null)
+            return result.typesGeneration() == BslDocCommentComputedTypes.typesGeneration();
+        return result.typesGeneration() < 0;
+    }
+
+    /** Готовые типы сменились без правки текста: повторно прочитать видимые функции. */
+    static void computedTypesChanged()
+    {
+        if (!RESULTS.isEmpty())
+        {
+            publish();
+        }
+    }
+
     private static void publish()
     {
         Display display = Display.getDefault();
@@ -2052,6 +2458,17 @@ final class FunctionReturnTypes
                     && table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
                     session.traceVisibleRows("refresh"); //$NON-NLS-1$
             }
+            if (NATIVE_HINTS_CHANGED.getAndSet(false) && visible)
+            {
+                List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+                    ContentAssistPopupSync.visibleProposals(assistant);
+                var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
+                int selected = table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
+                if (rows != null && selected >= 0 && selected < rows.size()
+                    && rows.get(selected) instanceof SmartCompletionProposal proposal)
+                    proposal.refreshNativeVariableSideHint(assistant);
+            }
+            IrBslHoverHtml.refreshComputedFunctionTypes();
             LISTENERS.removeIf(listener -> !listener.getAsBoolean());
         }
     }

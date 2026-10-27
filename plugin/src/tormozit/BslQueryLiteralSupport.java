@@ -482,10 +482,15 @@ final class BslQueryLiteralSupport
         }
     }
 
-    /** Эквивалент Strings.isNullOrEmpty вне нашего расчёта полного списка. */
+    /** Полный список ключевых слов нужен в корне; после точки остаётся штатное ограничение EDT. */
     private static boolean applyNativeEmptyPrefixRestriction(Object prefix)
     {
-        return (prefix == null || ((String)prefix).isEmpty()) && NATIVE_COMPLETION_SCOPE.get() == null;
+        NativeCompletionScope scope = NATIVE_COMPLETION_SCOPE.get();
+        boolean restricted = (prefix == null || ((String)prefix).isEmpty())
+            && (scope == null || !scope.rootLevel);
+        Global.tempLog("query-literal-completion", "emptyPrefixRestriction prefix=" + prefix //$NON-NLS-1$ //$NON-NLS-2$
+            + " root=" + (scope == null ? "native" : scope.rootLevel) + " restricted=" + restricted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return restricted;
     }
 
     private static boolean isConcatenatedLiteral(Object object)
@@ -1753,6 +1758,12 @@ final class BslQueryLiteralSupport
                 else
                     NATIVE_COMPLETION_SCOPE.set(previousScope);
             }
+            Global.tempLog("query-literal-completion", "compute key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " probe=" + lit.probeIndex + " root=" + scope.rootLevel + " raw=" + (raw == null ? 0 : raw.length)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (raw != null)
+                for (ICompletionProposal proposal : raw)
+                    Global.tempLog("query-literal-completion", "proposal class=" + proposal.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " display=" + proposal.getDisplayString()); //$NON-NLS-1$
             String lineBreak = TextUtilities.getDefaultLineDelimiter(doc) + lit.indent + "|"; //$NON-NLS-1$
             List<ICompletionProposal> result = new ArrayList<>(raw != null ? raw.length : 0);
             BslXtextEditor sourceEditor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer);
@@ -1764,6 +1775,16 @@ final class BslQueryLiteralSupport
             Set<String> seen = new java.util.HashSet<>();
             for (int i = 0; raw != null && i < raw.length; i++)
             {
+                // QlDcsProposalProvider.createProposalsForSelectWhereDcs/Characteristics:
+                // конструкции СКД начинаются с «{» и не могут продолжать обращение через точку.
+                // Поля (в том числе с именами ключевых слов) вставляются без этой скобки.
+                if (!scope.rootLevel && raw[i] instanceof ConfigurableCompletionProposal extension
+                    && extension.getReplacementString().stripLeading().startsWith("{")) //$NON-NLS-1$
+                {
+                    Global.tempLog("query-literal-completion", "dropDcsAfterDot display=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + extension.getDisplayString());
+                    continue;
+                }
                 if (raw[i] instanceof ConfigurableCompletionProposal cp
                     && seen.add(cp.getDisplayString() + '\u0000' + cp.getReplacementString()))
                 {

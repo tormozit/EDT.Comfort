@@ -34,6 +34,8 @@ public final class IrBslHoverHtml
     /** Представление отдельно от объекта EDT: ссылки и история используют исходный input. */
     private static final Map<Object, HtmlDecoration> HTML_DECORATIONS =
         Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<BrowserInformationControl, Boolean> DECORATED_CONTROLS =
+        Collections.synchronizedMap(new WeakHashMap<>());
     private static final String DECORATION_LISTENER_MARK = "tormozit.bslHtmlDecorationListener"; //$NON-NLS-1$
 
     private IrBslHoverHtml() {}
@@ -70,6 +72,7 @@ public final class IrBslHoverHtml
         Browser browser = findControlBrowser(control);
         if (browser == null || browser.isDisposed())
             return;
+        DECORATED_CONTROLS.put(information, Boolean.TRUE);
         MetadataTypeMenu.installBrowser(browser);
         if (browser.getData(DECORATION_LISTENER_MARK) == null)
         {
@@ -144,10 +147,32 @@ public final class IrBslHoverHtml
     {
         if (browser.isDisposed() || control.getInput() != input)
             return;
+        FunctionReturnTypes.refreshBoundFunctionType(input);
         String html = decoratedHtml(input);
         if (html != null)
         {
             browser.setText(html);
+        }
+    }
+
+    /** Обновляет реальные созданные контролы, в том числе первое окно с отложенным setInput. */
+    static void refreshComputedFunctionTypes()
+    {
+        java.util.List<BrowserInformationControl> controls;
+        synchronized (DECORATED_CONTROLS)
+        {
+            controls = new java.util.ArrayList<>(DECORATED_CONTROLS.keySet());
+        }
+        for (BrowserInformationControl control : controls)
+        {
+            Browser browser = findControlBrowser(control);
+            if (browser == null || browser.isDisposed())
+                continue;
+            Object input = control.getInput();
+            if (FunctionReturnTypes.refreshBoundFunctionType(input))
+            {
+                applyHtmlDecoration(control, browser, input);
+            }
         }
     }
 

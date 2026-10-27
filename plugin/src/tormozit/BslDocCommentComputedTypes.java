@@ -237,6 +237,7 @@ public final class BslDocCommentComputedTypes
     static void bumpTypesGeneration()
     {
         TYPES_GENERATION.incrementAndGet();
+        FunctionReturnTypes.computedTypesChanged();
     }
 
     /** Сколько версий текста одной функции держать (редактор, сборка, производные данные…). */
@@ -1142,15 +1143,6 @@ public final class BslDocCommentComputedTypes
         boolean build = isBuildThread();
         java.util.Set<String> changed = new java.util.HashSet<>();
         boolean selfReferenced = false;
-        // #region agent log second-pass
-        long diagStart = System.currentTimeMillis();
-        int diagFunctions = 0;
-        int diagEmpty = 0;
-        int diagNoEntry = 0;
-        int diagSideZero = 0;
-        int diagHashDiff = 0;
-        StringBuilder diagSample = new StringBuilder();
-        // #endregion
         try
         {
             Resource resource = module.eResource();
@@ -1179,33 +1171,11 @@ public final class BslDocCommentComputedTypes
                 }
                 // Пусто — не запоминаем и не считаем изменением: пустота бывает от недосчёта, а
                 // запись привязана к тексту функции, так что для другого текста она и так не найдётся.
-                // #region agent log second-pass
-                diagFunctions++;
-                // #endregion
                 if (types == null || types.isEmpty())
                 {
-                    // #region agent log second-pass
-                    diagEmpty++;
-                    // #endregion
                     continue;
                 }
                 long hash = signatureHash(typeSignature(types));
-                // #region agent log second-pass
-                if (method.getName() != null)
-                {
-                    String reason = previous == null ? "noEntry" //$NON-NLS-1$
-                        : previous.hash(build) == 0L ? "sideZero" //$NON-NLS-1$
-                        : previous.hash(build) != hash ? "hashDiff" : null; //$NON-NLS-1$
-                    if ("noEntry".equals(reason)) //$NON-NLS-1$
-                        diagNoEntry++;
-                    else if ("sideZero".equals(reason)) //$NON-NLS-1$
-                        diagSideZero++;
-                    else if ("hashDiff".equals(reason)) //$NON-NLS-1$
-                        diagHashDiff++;
-                    if (reason != null && diagSample.length() < 400)
-                        diagSample.append(' ').append(method.getName()).append('=').append(reason);
-                }
-                // #endregion
                 // Изменение — новая версия текста или смена самого типа при том же тексте: тип
                 // зависит и от вызываемых функций (правка ключа в «Яйцо» меняет тип «Новый123…»).
                 // Ложная смена теперь стоит только ленивого пересчёта одного метода при
@@ -1227,31 +1197,9 @@ public final class BslDocCommentComputedTypes
         {
             // Запомнить не удалось — слияние для этого расчёта останется без новых типов.
         }
-        // #region agent log second-pass
-        Global.tempLog("see-second-pass", "remember build=" + build //$NON-NLS-1$ //$NON-NLS-2$
-            + " module=" + diagModuleName(module) //$NON-NLS-1$
-            + " functions=" + diagFunctions + " empty=" + diagEmpty //$NON-NLS-1$ //$NON-NLS-2$
-            + " changed=" + changed.size() + " noEntry=" + diagNoEntry //$NON-NLS-1$ //$NON-NLS-2$
-            + " sideZero=" + diagSideZero + " hashDiff=" + diagHashDiff //$NON-NLS-1$ //$NON-NLS-2$
-            + " selfReferenced=" + selfReferenced //$NON-NLS-1$
-            + " ms=" + (System.currentTimeMillis() - diagStart) //$NON-NLS-1$
-            + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
-            + " sample:" + diagSample); //$NON-NLS-1$
-        // #endregion
         return selfReferenced ? changed : java.util.Set.of();
     }
 
-    // #region agent log second-pass
-    /** …/CommonModules/УправлениеДоступомСлужебный/Module.bsl → УправлениеДоступомСлужебный. */
-    static String diagModuleName(com._1c.g5.v8.dt.bsl.model.Module module)
-    {
-        Resource resource = module == null ? null : module.eResource();
-        URI uri = resource == null ? null : resource.getURI();
-        if (uri == null || uri.segmentCount() < 2)
-            return "?"; //$NON-NLS-1$
-        return URI.decode(uri.segment(uri.segmentCount() - 2));
-    }
-    // #endregion
 
     /**
      * Ссылается ли метод «см.» на одну из {@code names}: текст узла метода вместе с прилегающими

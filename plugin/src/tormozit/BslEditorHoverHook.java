@@ -559,8 +559,6 @@ public final class BslEditorHoverHook implements IStartup
         if (!(raw instanceof ConfigurableCompletionProposal configurable))
             return;
         Object hover = Global.getField(configurable, "hover"); //$NON-NLS-1$
-        Global.tempLog("method-description-links", "prepare side proposal=" + raw.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " hover=" + (hover == null ? null : hover.getClass().getName())); //$NON-NLS-1$
         if (hover instanceof SideHintHover installed)
             installed.proposalViewer = viewer;
         else if (hover instanceof IEObjectHover original)
@@ -607,9 +605,6 @@ public final class BslEditorHoverHook implements IStartup
     static Object decorateSideHint(Object info, org.eclipse.emf.ecore.EObject member,
         ITextViewer viewer)
     {
-        Global.tempLog("method-description-links", "side enter info=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (info == null ? null : info.getClass().getName()) + " bsl=" + IrBslHoverHtml.isBslBrowserInput(info) //$NON-NLS-1$
-            + " member=" + (member == null ? null : member.eClass().getName()) + " viewer=" + viewer); //$NON-NLS-1$ //$NON-NLS-2$
         try
         {
             if (info == null || viewer == null || !IrBslHoverHtml.isBslBrowserInput(info)
@@ -638,8 +633,6 @@ public final class BslEditorHoverHook implements IStartup
         }
         catch (Throwable ex)
         {
-            Global.tempLog("method-description-links", "side failed=" + ex //$NON-NLS-1$ //$NON-NLS-2$
-                + " stack=" + java.util.Arrays.toString(ex.getStackTrace())); //$NON-NLS-1$
             return info;
         }
     }
@@ -1083,8 +1076,6 @@ public final class BslEditorHoverHook implements IStartup
 
         private void prepareHoverDecorations(ITextViewer textViewer, IRegion region, Object info)
         {
-            Global.tempLog("method-description-links", "hover enter offset=" + region.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                + " info=" + (info == null ? null : info.getClass().getName())); //$NON-NLS-1$
             String directive = resolveHoverDirective(region.getOffset());
             lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             lastCreationSite = isImplicitVariableCreationAt(region);
@@ -1302,6 +1293,10 @@ public final class BslEditorHoverHook implements IStartup
                 functionTypeLog("refresh skip noHtml"); //$NON-NLS-1$
                 return;
             }
+            // Поколение типов могло смениться без правки текста (досчитан результат запроса).
+            // Повторное чтение — только для показанной подсказки; модель не пересчитывается.
+            if (IrBslHoverControlAccess.resolve(editor) != null)
+                FunctionReturnTypes.activate(lastFunctionTarget);
             String decorated = applyHoverDecorations(html);
             // Публикации идут по всем модулям; перерисовка без изменений сбивала бы прокрутку.
             if (base == lastFunctionTypeBase && decorated.equals(lastFunctionTypeHtml))
@@ -1349,70 +1344,8 @@ public final class BslEditorHoverHook implements IStartup
             FunctionReturnTypes.Target target = lastFunctionTarget;
             if (target == null || html == null)
                 return html;
-            return injectFunctionTypeHeading(html, FunctionReturnTypes.state(target));
-        }
-
-        private static String injectFunctionTypeHeading(String html, FunctionReturnTypes.State state)
-        {
-            // Пересчёта нет и итога нет — штатный заголовок без «?».
-            if (state == null)
-                return html;
-            int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
-            int contentStart = heading >= 0 ? html.indexOf('>', heading) + 1 : 0;
-            int headingEnd = contentStart > 0 ? html.indexOf("</div>", contentStart) : -1; //$NON-NLS-1$
-            int title = contentStart > 0 ? html.indexOf("<span class=\"title\">", contentStart) : -1; //$NON-NLS-1$
-            if (headingEnd < 0 || title < 0 || title > headingEnd)
-            {
-                functionTypeLog("inject skip heading=" + heading + " headingEnd=" + headingEnd //$NON-NLS-1$ //$NON-NLS-2$
-                    + " title=" + title + " snippet=" + headingSnippet(html)); //$NON-NLS-1$ //$NON-NLS-2$
-                return html;
-            }
-            String segment = html.substring(contentStart, title);
-            String keyword = "Функция "; //$NON-NLS-1$
-            int keywordAt = segment.indexOf(keyword);
-            if (keywordAt < 0)
-            {
-                keyword = "Function "; //$NON-NLS-1$
-                keywordAt = segment.indexOf(keyword);
-            }
-            if (keywordAt < 0)
-            {
-                functionTypeLog("inject skip noKeyword segment=" + segment); //$NON-NLS-1$
-                return html;
-            }
-            int typeStart = contentStart + keywordAt + keyword.length();
-            functionTypeLog("inject state=" + state + " edt=" + html.substring(typeStart, title)); //$NON-NLS-1$ //$NON-NLS-2$
-            String type;
-            if (state.fresh())
-            {
-                if (state.type().isEmpty())
-                    return html;
-                type = escapeHtml(state.type());
-            }
-            else
-            {
-                String inner;
-                if (!state.type().isEmpty())
-                    inner = escapeHtml(unwrapAngles(state.type()));
-                else
-                {
-                    // Штатное «&lt;<a …>Строка</a>&gt;*»: внутренность с её ссылками, без скобок.
-                    String edtType = html.substring(typeStart, title).trim();
-                    int close = edtType.lastIndexOf("&gt;"); //$NON-NLS-1$
-                    inner = edtType.startsWith("&lt;") && close > 4 //$NON-NLS-1$
-                        ? edtType.substring(4, close).trim() : edtType;
-                }
-                type = inner.isEmpty()
-                    ? "&lt;" + FunctionReturnTypes.UNKNOWN + "&gt;" //$NON-NLS-1$ //$NON-NLS-2$
-                    : "&lt;" + FunctionReturnTypes.UNKNOWN + ", " + inner + "&gt;"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-            return html.substring(0, typeStart) + type + " " + html.substring(title); //$NON-NLS-1$
-        }
-
-        private static String unwrapAngles(String type)
-        {
-            return type.length() >= 2 && type.charAt(0) == '<' && type.charAt(type.length() - 1) == '>'
-                ? type.substring(1, type.length() - 1).trim() : type;
+            return (String)FunctionReturnTypes.withFunctionReturnType(html, target,
+                editor.getInternalSourceViewer());
         }
 
         private Object maybeDecorateHoverInfo(Object info)

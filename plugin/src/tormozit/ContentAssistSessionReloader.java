@@ -2551,6 +2551,7 @@ boolean inLiteral = endCaret >= 0
      */
     static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
+        IUnitOfWork<T, XtextResource> queryWork = withQueryCalculationScope(work);
         // Без удержания перепарсинга штатное чтение идёт одновременно с ним
         // (withModelSyncHeld): так упало «Unhandled event loop exception: StackOverflowError»
         // из подсказки параметров сразу после вставки УстановитьТекстЗапроса(Текст)
@@ -2564,7 +2565,7 @@ boolean inLiteral = endCaret >= 0
             return null;
         }
         Object result = withModelSyncHeld(doc, null,
-            () -> invokeBslRead(doc, "readOnlyForContentAssist", work)); //$NON-NLS-1$
+            () -> invokeBslRead(doc, "readOnlyForContentAssist", queryWork)); //$NON-NLS-1$
         if (result != BSL_READ_MISSING)
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
@@ -2580,7 +2581,27 @@ boolean inLiteral = endCaret >= 0
             T typed = (T) result;
             return typed;
         }
-        return doc == null || work == null ? null : doc.readOnly(work);
+        return doc == null || queryWork == null ? null : doc.readOnly(queryWork);
+    }
+
+    /** Разрешение открытого документа действует и при синхронном переходе в чужие модули. */
+    private static <T> IUnitOfWork<T, XtextResource> withQueryCalculationScope(IUnitOfWork<T, XtextResource> work)
+    {
+        if (work == null)
+            return null;
+        return resource ->
+        {
+            boolean owner = BslQueryResultTypes.beginOpenModuleCalculation(
+                resource == null || resource.getContents().isEmpty() ? null : resource.getContents().get(0));
+            try
+            {
+                return work.exec(resource);
+            }
+            finally
+            {
+                BslQueryResultTypes.endOpenModuleCalculation(owner);
+            }
+        };
     }
 
     /** Семейство штатного задания, догоняющего модель до текста для автодополнения. */
@@ -4142,7 +4163,7 @@ boolean inLiteral = endCaret >= 0
      */
     static <T> T readOnlyPeekAst(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
-        Object result = invokeBslRead(doc, "readOnlyDataModelWithoutSync", work); //$NON-NLS-1$
+        Object result = invokeBslRead(doc, "readOnlyDataModelWithoutSync", withQueryCalculationScope(work)); //$NON-NLS-1$
         if (result != BSL_READ_MISSING)
         {
             @SuppressWarnings("unchecked")

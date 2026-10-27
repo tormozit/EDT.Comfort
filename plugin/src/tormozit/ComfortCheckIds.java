@@ -1,6 +1,8 @@
 package tormozit;
 
 import java.util.Set;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Идентификаторы проверок, которые плагин добавляет в EDT.
@@ -49,15 +51,16 @@ public final class ComfortCheckIds
     /** Литерал вне полного списка допустимых значений; прежний id сохраняет настройки проверки. */
     public static final String BSL_UNKNOWN_LITERAL = "comfort-bsl-unknown-column"; //$NON-NLS-1$
 
-    /**
-     * Штатные проверки EDT, которые целиком заменены проверками «Комфорта». Включить их нельзя:
-     * страница «Проверки» сразу возвращает им «выключено», а при запуске и изменении настроек
-     * их выключает {@code Activator}.
-     */
-    public static final Set<String> REPLACED_BUILTIN_CHECKS = Set.of(
-        "bsl-legacy-check-static-feature-access", //$NON-NLS-1$
-        "bsl-legacy-check-for-each-statetement-collection", //$NON-NLS-1$
-        "bsl-legacy-check-expression-type"); //$NON-NLS-1$
+    /** Штатные проверки и их замены; настройки штатных проверок не изменяются. */
+    public static final Map<String, List<String>> BUILTIN_REPLACEMENTS = Map.of(
+        "bsl-legacy-check-static-feature-access", List.of( //$NON-NLS-1$
+            STATIC_ACCESS_PARAMETERS, STATIC_ACCESS_OBSOLETE, STATIC_ACCESS_COMPATIBILITY,
+            STATIC_ACCESS_VARIABLE, STATIC_ACCESS_EVENT_HANDLER),
+        "bsl-legacy-check-for-each-statetement-collection", List.of(BSL_FOR_EACH_COLLECTION), //$NON-NLS-1$
+        "bsl-legacy-check-expression-type", List.of(BSL_VALUE_TYPE)); //$NON-NLS-1$
+
+    /** Выполнение этих проверок динамически замещается независимо от включённости замен. */
+    public static final Set<String> REPLACED_BUILTIN_CHECKS = BUILTIN_REPLACEMENTS.keySet();
 
     private ComfortCheckIds() {}
 }

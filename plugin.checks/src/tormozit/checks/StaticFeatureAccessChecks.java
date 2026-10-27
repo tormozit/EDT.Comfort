@@ -86,7 +86,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         }
     }
 
-    private static final String REPLACEMENT_NOTE = "<br><br>Заменяет штатную bsl-legacy-check-static-feature-access, её включить нельзя.";
+    private static final String REPLACEMENT_NOTE = "<br><br>Динамически замещает штатную проверку bsl-legacy-check-static-feature-access.";
 
     private static final IMessages MESSAGES = IMessages.INSTANCE;
 

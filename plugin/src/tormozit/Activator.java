@@ -1,19 +1,8 @@
 package tormozit;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Set;
-
-import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.IResourceChangeEvent;
-import org.eclipse.core.resources.IResourceChangeListener;
-import org.eclipse.core.resources.IResourceDelta;
-import org.eclipse.core.resources.ResourcesPlugin;
-import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.core.runtime.IStatus;
-import org.eclipse.core.runtime.Status;
-import org.eclipse.core.runtime.jobs.Job;
+import java.lang.instrument.ClassFileTransformer;
+import java.security.ProtectionDomain;
+import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.swt.widgets.Display;
@@ -21,6 +10,13 @@ import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexManager;
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexProvider;
@@ -35,11 +31,7 @@ import com._1c.g5.wiring.AbstractGuiceAwareExecutableExtensionFactory;
 import com._1c.g5.wiring.AbstractServiceAwareModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
-import com.e1c.g5.v8.dt.check.settings.CheckSettingsChange;
-import com.e1c.g5.v8.dt.check.settings.CheckUid;
-import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
-import com.e1c.g5.v8.dt.check.settings.ICheckSettingsChangeListener;
 
 /**
  * Activator (точка входа) плагина EDT Compare - Open Object.
@@ -72,6 +64,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        BuiltinCheckReplacements.start(context);
         CheckRecomputeNotifications.install();
         FunctionReturnTypes.installLocalContextInvalidation();
         TypeDescriptionPresentationHook.install(context);
@@ -225,7 +218,6 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
         BslXtextDocumentHook.install();
-        BuiltinCheckReplacements.start();
         QueryParameterAutoCloseFix.install();
     }
 
@@ -340,7 +332,7 @@ public class Activator extends AbstractUIPlugin
             String logMessage = (String) event[0];
             long timeMs = ((Long) event[2]).longValue();
             var toast = ToastNotification.show("Полный пересчёт проверок", //$NON-NLS-1$
-                event[1] + ". Подробности — в журнале EDT.", 15_000, //$NON-NLS-1$
+                event[1] + ".", 15_000, //$NON-NLS-1$
                 () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
             if (toast != null)
                 lastToastNs.put(projectKey, Long.valueOf(now));
@@ -386,140 +378,111 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
-     * Штатные проверки, целиком заменённые проверками «Комфорта» ({@link ComfortCheckIds#REPLACED_BUILTIN_CHECKS}),
-     * всегда выключены: иначе их проблемы дублируют замены. На странице «Проверки» их не включить
-     * ({@code ValidationChecksFilterHook}); здесь — выключение при запуске и после любого изменения
-     * настроек другим путём. Об этом сказано в описаниях штатных проверок и их замен.
+     * Динамическое замещение без изменения профилей: только при выполнении CheckExecutor
+     * считает штатные проверки неактивными. Включённость замен на это не влияет.
+     * Вызовы ICheckSettings.isEnabled() подтверждены в com.e1c.g5.v8.dt.check 6.0.100.v202605050943:
+     * проверки языка, модели и делегатов. Замена вызова сохраняет стек и штатную очистку маркеров.
      */
-    private static final class BuiltinCheckReplacements
+    private static final class BuiltinCheckReplacements implements WeavingHook, ClassFileTransformer
     {
-        private static volatile boolean active;
-        private static volatile ICheckRepository repository;
-        /** Повторы, пока реестр не загрузил проверки проектов: до 5 минут после запуска. */
-        private static final int MAX_RETRIES = 30;
-        private static final long RETRY_DELAY_MS = 10_000;
-        private static final java.util.concurrent.atomic.AtomicInteger retries =
-            new java.util.concurrent.atomic.AtomicInteger();
+        private static final String TARGET = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
+        private static final String SETTINGS_TYPE = "com/e1c/g5/v8/dt/check/settings/ICheckSettings"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.checkReplacement.enabled"; //$NON-NLS-1$
+        private static volatile boolean woven;
 
-        private static final IResourceChangeListener PROJECTS = event -> {
-            IResourceDelta delta = event.getDelta();
-            if (delta == null)
-                return;
-            for (IResourceDelta child : delta.getAffectedChildren())
-                if (child.getResource() instanceof IProject
-                    && (child.getKind() == IResourceDelta.ADDED
-                        || (child.getFlags() & IResourceDelta.OPEN) != 0))
-                {
-                    schedule();
-                    return;
-                }
-        };
-
-        private static final ICheckSettingsChangeListener SETTINGS = new ICheckSettingsChangeListener()
+        static void start(BundleContext context)
         {
-            @Override
-            public void onChange(IProject project, Collection<CheckSettingsChange> changes)
+            System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)settings -> {
+                boolean replaced = settings.getId() != null
+                    && ComfortCheckIds.REPLACED_BUILTIN_CHECKS.contains(settings.getId().getCheckId());
+                if (replaced)
+                    Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
+                        "динамически замещена: " + settings.getId() + "; enabled=" + settings.isEnabled()); //$NON-NLS-1$ //$NON-NLS-2$
+                return !replaced && settings.isEnabled();
+            });
+            BuiltinCheckReplacements hook = new BuiltinCheckReplacements();
+            context.registerService(WeavingHook.class, hook, null);
+            try
             {
-                schedule();
-            }
-
-            @Override
-            public void onPreferenceChange(IProject project)
-            {
-                schedule();
-            }
-        };
-
-        private static final Job JOB = new Job("Замена штатных проверок") //$NON-NLS-1$
-        {
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
-            {
-                if (!active)
-                    return Status.OK_STATUS;
-                ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+                Bundle checks = org.eclipse.core.runtime.Platform.getBundle("com.e1c.g5.v8.dt.check"); //$NON-NLS-1$
                 if (checks == null)
-                {
-                    Global.tempLog("StaticFeatureAccessReplacement", "ICheckRepository недоступен"); //$NON-NLS-1$ //$NON-NLS-2$
-                    schedule();
-                    return Status.OK_STATUS;
-                }
-                if (repository != checks)
-                {
-                    if (repository != null)
-                        repository.removeChangeListener(SETTINGS);
-                    checks.addChangeListener(SETTINGS);
-                    repository = checks;
-                }
-                boolean notLoaded = false;
-                for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
-                {
-                    if (!project.isAccessible() || monitor.isCanceled())
-                        continue;
-                    try
-                    {
-                        List<ICheckSettings> changes = new ArrayList<>();
-                        for (String builtinId : ComfortCheckIds.REPLACED_BUILTIN_CHECKS)
-                        {
-                            Set<CheckUid> uids = checks.getCheckUidForCheckId(builtinId, project);
-                            // Сразу после запуска реестр ещё не знает проверок проекта: повторить позже
-                            if (uids.isEmpty())
-                                notLoaded = true;
-                            for (CheckUid uid : uids)
-                            {
-                                ICheckSettings settings = checks.getSettings(uid, project);
-                                if (settings != null && settings.isEnabled())
-                                {
-                                    settings.setEnabled(false);
-                                    changes.add(settings);
-                                }
-                            }
-                        }
-                        if (!changes.isEmpty())
-                        {
-                            checks.applyChanges(changes, project);
-                            Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
-                                "отключены штатные проверки (" + changes.size() + "): " + project.getName()); //$NON-NLS-1$ //$NON-NLS-2$
-                        }
-                    }
-                    catch (RuntimeException failure)
-                    {
-                        Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
-                            project.getName() + ": " + failure); //$NON-NLS-1$
-                    }
-                }
-                // Проект без проверок EDT (не 1С) тоже даёт пустой набор — поэтому число повторов ограничено
-                if (notLoaded && retries.incrementAndGet() <= MAX_RETRIES)
-                    JOB.schedule(RETRY_DELAY_MS);
-                else if (!notLoaded)
-                    retries.set(0);
-                return Status.OK_STATUS;
+                    throw new IllegalStateException("Бандл проверок EDT недоступен"); //$NON-NLS-1$
+                checks.loadClass(TARGET);
+                if (!woven && !BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET))
+                    Global.tempLog("StaticFeatureAccessReplacement", "Не удалось установить замещение"); //$NON-NLS-1$ //$NON-NLS-2$
             }
-        };
-
-        static void start()
-        {
-            active = true;
-            ResourcesPlugin.getWorkspace().addResourceChangeListener(PROJECTS, IResourceChangeEvent.POST_CHANGE);
-            schedule();
+            catch (ClassNotFoundException | RuntimeException | LinkageError failure)
+            {
+                Global.tempLog("StaticFeatureAccessReplacement", "Установка замещения: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
 
         static void stop()
         {
-            active = false;
-            ResourcesPlugin.getWorkspace().removeResourceChangeListener(PROJECTS);
-            if (repository != null)
-                repository.removeChangeListener(SETTINGS);
-            repository = null;
-            JOB.cancel();
+            // Уже преобразованный класс продолжает обращаться к callback после остановки бандла.
+            System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)ICheckSettings::isEnabled);
         }
 
-        private static void schedule()
+        @Override
+        public void weave(WovenClass type)
         {
-            if (!active)
-                return;
-            retries.set(0);
-            JOB.schedule(2_000);
+            if (type.getState() == WovenClass.TRANSFORMING && TARGET.equals(type.getClassName()))
+            {
+                type.setBytes(rewrite(type.getBytes()));
+                woven = true;
+            }
+        }
+
+        @Override
+        public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
+            ProtectionDomain domain, byte[] bytes)
+        {
+            return TARGET.replace('.', '/').equals(name) ? rewrite(bytes) : null;
+        }
+
+        private static byte[] rewrite(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] calls = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    return new MethodVisitor(Opcodes.ASM9,
+                        super.visitMethod(access, name, descriptor, signature, exceptions))
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method,
+                            String descriptor, boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEINTERFACE && SETTINGS_TYPE.equals(owner)
+                                && "isEnabled".equals(method) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                // В стеке settings; Predicate из java.base доступен загрузчику EDT.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
+                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
+                                    "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", //$NON-NLS-1$
+                                    "test", "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                calls[0]++;
+                                return;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            Global.tempLog("StaticFeatureAccessReplacement", "Перехвачено вызовов isEnabled: " + calls[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            if (calls[0] == 0)
+                throw new IllegalStateException("В CheckExecutor не найдены вызовы isEnabled"); //$NON-NLS-1$
+            return writer.toByteArray();
         }
     }
 
