@@ -1,23 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project name="Sync version" default="sync">
 	<property name="site.dir" location="${basedir}/site"/>
-	<property name="comfort.pde.workspace" location="${basedir}/../EDT-plugin-WS"/>
-	<property name="comfort.pde.repository" location="${comfort.pde.workspace}/.metadata/.plugins/org.eclipse.pde.core/tempp2metadata"/>
 
 	<target name="sync">
-		<!-- PDE собирает метаданные здесь до переноса в site. Сброс только site
-		     оставляет старые IU сборок в памяти p2 и возвращает их в content.jar. -->
-		<fail message="PDE workspace not found: ${comfort.pde.workspace}; set comfort.pde.workspace to the active PDE workspace.">
-			<condition><not><available file="${comfort.pde.workspace}/.metadata" type="dir"/></not></condition>
-		</fail>
-		<mkdir dir="${comfort.pde.repository}"/>
-		<mkdir dir="${basedir}/.tmp/checks-site"/>
-		<local name="comfort.pde.reset.time"/>
-		<tstamp><format property="comfort.pde.reset.time" pattern="yyyy-MM-dd HH:mm:ss.SSS"/></tstamp>
-		<makeurl file="${comfort.pde.repository}" property="comfort.pde.repository.url"/>
-		<echo file="${basedir}/.tmp/checks-site/build-diagnostic.log" append="true" encoding="UTF-8" message="${comfort.pde.reset.time} reset PDE repository begin: ${comfort.pde.repository.url}${line.separator}"/>
-		<eclipse.publish.featuresAndBundles repository="${comfort.pde.repository.url}" append="false" compress="false"/>
-		<echo file="${basedir}/.tmp/checks-site/build-diagnostic.log" append="true" encoding="UTF-8" message="${comfort.pde.reset.time} reset PDE repository completed${line.separator}"/>
 		<delete dir="${site.dir}/plugins" failonerror="false" quiet="true"/>
 		<delete dir="${site.dir}/features" failonerror="false" quiet="true"/>
 		<delete file="${site.dir}/content.jar" failonerror="false" quiet="true"/>

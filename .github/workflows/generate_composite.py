@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 
 deploy_dir = os.environ.get("DEPLOY_DIR", "deploy")
@@ -126,6 +127,10 @@ def publish_p2_files(target_dir: str) -> None:
             if "artifacts.xml" in zin.namelist():
                 artifacts_xml = zin.read("artifacts.xml").decode("utf-8")
 
+    if artifacts_xml is None:
+        artifacts_xml = read_artifacts_xml(target_dir)
+    content_xml = remove_stale_build_units(content_xml, artifacts_xml, target_dir)
+
     with open(content_xml_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(content_xml)
 
@@ -195,6 +200,65 @@ UNIT_KEY_RE = re.compile(r"<unit id='([^']+)'\s+version='([^']+)'")
 ARTIFACT_KEY_RE = re.compile(
     r"<artifact classifier='([^']+)'\s+id='([^']+)'\s+version='([^']+)'"
 )
+
+
+def remove_stale_build_units(content_xml: str, artifacts_xml: str, target_dir: str) -> str:
+    """Убрать IU прежних сборок из кэша PDE, сверяя с текущими артефактами."""
+    artifact_keys = set()
+    for artifact in ET.fromstring(artifacts_xml).findall("artifacts/artifact"):
+        classifier, name, version = (artifact.attrib[k] for k in ("classifier", "id", "version"))
+        subdir = {"osgi.bundle": "plugins", "org.eclipse.update.feature": "features"}.get(classifier)
+        if subdir is None:
+            raise SystemExit(f"ERROR: unsupported artifact classifier {classifier} in {target_dir}")
+        path = os.path.join(target_dir, subdir, f"{name}_{version}.jar")
+        if not os.path.isfile(path):
+            raise SystemExit(f"ERROR: artifact file missing: {path}")
+        artifact_keys.add((classifier, name, version))
+
+    feature_versions = {
+        version for classifier, name, version in artifact_keys
+        if classifier == "org.eclipse.update.feature" and name == "tormozit.comfort.feature"
+    }
+    if len(feature_versions) != 1:
+        raise SystemExit(f"ERROR: expected one Comfort feature artifact in {target_dir}, found {len(feature_versions)}")
+    feature_version = next(iter(feature_versions))
+    removed = []
+
+    def retain_unit(match: re.Match[str]) -> str:
+        block = match.group(0)
+        unit = ET.fromstring(block)
+        key = (unit.attrib["id"], unit.attrib["version"])
+        stale = key[0] == FEATURE_GROUP_IU and key[1] != feature_version
+        is_category = any(
+            prop.get("name") == "org.eclipse.equinox.p2.type.category" and prop.get("value") == "true"
+            for prop in unit.findall("properties/property")
+        )
+        if is_category:
+            requirements = unit.findall("requires/required")
+            stale = bool(requirements) and all(
+                req.get("namespace") == "org.eclipse.equinox.p2.iu"
+                and req.get("name") == FEATURE_GROUP_IU
+                and re.fullmatch(r"\[([^,]+),\1\]", req.get("range", ""))
+                and req.get("range") != f"[{feature_version},{feature_version}]"
+                for req in requirements
+            )
+        for artifact in unit.findall("artifacts/artifact"):
+            artifact_key = tuple(artifact.attrib[k] for k in ("classifier", "id", "version"))
+            if artifact_key not in artifact_keys:
+                # Удаляем только заменённую версию; отсутствие самого бандла — ошибка.
+                if not any(k[:2] == artifact_key[:2] for k in artifact_keys):
+                    raise SystemExit(f"ERROR: IU {key} references missing artifact {artifact_key} in {target_dir}")
+                stale = True
+        if stale:
+            removed.append(key)
+            return ""
+        return block
+
+    content_xml = UNIT_BLOCK_RE.sub(retain_unit, content_xml)
+    count = len(UNIT_BLOCK_RE.findall(content_xml))
+    content_xml = re.sub(r"<units size='\d+'>", f"<units size='{count}'>", content_xml, count=1)
+    print(f"PDE metadata {target_dir}: kept {count} units, removed stale units: {removed}")
+    return content_xml
 
 
 def _block_key(block: str, key_re: re.Pattern[str]) -> tuple[str, ...]:
