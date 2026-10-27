@@ -8,8 +8,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\sync-version.p
 if errorlevel 1 exit /b 1
 
 echo Cleaning old build artifacts...
-if not exist "..\.tmp\checks-site" mkdir "..\.tmp\checks-site"
-echo Pending p2 reset>"..\.tmp\checks-site\reset-p2.marker"
 if exist content.jar del /f content.jar
 if exist artifacts.jar del /f artifacts.jar
 if exist features rmdir /s /q features

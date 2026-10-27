@@ -4,16 +4,16 @@
 	<property name="comfort.site.dir" location="${comfort.feature.dir}/../site"/>
 	<property name="comfort.state.dir" location="${comfort.feature.dir}/../.tmp/checks-site"/>
 
-	<target name="check-reset">
-		<available file="${comfort.state.dir}/reset-p2.marker" property="comfort.reset.pending"/>
-	</target>
-
-	<!-- p2 хранит репозиторий в памяти EDT. После clean.bat нужно очистить
-	     не только файлы, но и дескрипторы, иначе прежние версии JAR пропускаются. -->
-	<target name="reset-p2" depends="check-reset" if="comfort.reset.pending">
+	<!-- sync удаляет JAR при каждой сборке. p2 хранит дескрипторы в памяти EDT:
+	     сброс нужен каждый раз, в том числе без предварительного clean.bat. -->
+	<target name="reset-p2">
+		<mkdir dir="${comfort.state.dir}"/>
+		<local name="comfort.reset.time"/>
+		<tstamp><format property="comfort.reset.time" pattern="yyyy-MM-dd HH:mm:ss.SSS"/></tstamp>
 		<makeurl file="${comfort.site.dir}" property="comfort.site.url"/>
+		<echo file="${comfort.state.dir}/build-diagnostic.log" append="true" encoding="UTF-8" message="${comfort.reset.time} reset-p2 begin: ${comfort.site.url}${line.separator}"/>
 		<eclipse.publish.featuresAndBundles repository="${comfort.site.url}" append="false" compress="true"/>
-		<delete file="${comfort.state.dir}/reset-p2.marker"/>
+		<echo file="${comfort.state.dir}/build-diagnostic.log" append="true" encoding="UTF-8" message="${comfort.reset.time} reset-p2 completed${line.separator}"/>
 	</target>
 
 	<target name="pre.gather.bin.parts" depends="reset-p2"/>

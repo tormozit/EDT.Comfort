@@ -20,10 +20,14 @@
 		</exec>
 
 		<eclipse.refreshLocal resource="/plugin" depth="infinite"/>
+		<eclipse.refreshLocal resource="/plugin.early" depth="infinite"/>
+		<eclipse.refreshLocal resource="/plugin.checks" depth="infinite"/>
 		<eclipse.refreshLocal resource="/feature" depth="infinite"/>
 		<eclipse.refreshLocal resource="/site" depth="infinite"/>
 
 		<eclipse.incrementalBuild project="plugin" kind="full"/>
+		<eclipse.incrementalBuild project="plugin.early" kind="full"/>
+		<eclipse.incrementalBuild project="plugin.checks" kind="full"/>
 		<eclipse.incrementalBuild project="feature" kind="full"/>
 	</target>
 
