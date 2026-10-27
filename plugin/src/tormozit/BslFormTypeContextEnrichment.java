@@ -1,6 +1,8 @@
 // BslFormTypeContextEnrichment.java
 package tormozit;
 
+import java.lang.instrument.ClassFileTransformer;
+import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -12,6 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.eclipse.emf.common.util.EList;
 
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.xtext.EcoreUtil2;
 
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import org.objectweb.asm.ClassReader;
@@ -29,13 +33,29 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
+import com._1c.g5.v8.dt.bsl.model.Statement;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
+import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProvider;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProviderCollector;
 import com._1c.g5.v8.dt.mcore.ContextDef;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
+import com._1c.g5.v8.dt.mcore.McoreFactory;
+import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
+import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.form.model.FormAttribute;
+import com._1c.g5.v8.dt.platform.IEObjectProvider;
+import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
+import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 
 /**
@@ -77,6 +97,15 @@ public final class BslFormTypeContextEnrichment
     private static final String IS_GET_FORM_DESC = "(Ljava/lang/String;)Z"; //$NON-NLS-1$
 
     private static final AtomicBoolean installed = new AtomicBoolean();
+    private static final AtomicBoolean attributeTransformerInstalled = new AtomicBoolean();
+    private static final String ATTRIBUTE_INFERRER =
+        "com._1c.g5.v8.dt.form.resource.FormImplicitRefInferrer"; //$NON-NLS-1$
+    private static final String PROPERTY_COMPUTER =
+        "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+    private static final String ATTRIBUTE_CALLBACK = "tormozit.formAttribute.types"; //$NON-NLS-1$
+    private static final String ATTRIBUTE_ACCESS_CALLBACK = "tormozit.formAttribute.accessTypes"; //$NON-NLS-1$
+    private static final ThreadLocal<Set<StaticFeatureAccess>> ATTRIBUTE_ACCESS_VISITING =
+        ThreadLocal.withInitial(() -> Collections.newSetFromMap(new IdentityHashMap<>()));
 
     private BslFormTypeContextEnrichment() {}
 
@@ -85,10 +114,171 @@ public final class BslFormTypeContextEnrichment
     {
         if (!installed.compareAndSet(false, true))
             return;
+        System.getProperties().put(ATTRIBUTE_CALLBACK,
+            (java.util.function.Function<Object[], Object>) BslFormTypeContextEnrichment::afterAttributeTypes);
+        System.getProperties().put(ATTRIBUTE_ACCESS_CALLBACK,
+            (java.util.function.Function<Object[], Object>) BslFormTypeContextEnrichment::afterAttributeAccessTypes);
         Bundle bundle = FrameworkUtil.getBundle(BslFormTypeContextEnrichment.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
             context.registerService(WeavingHook.class, new FormTypesWeavingHook(), null);
+    }
+
+    /** Уже загруженные вычислители и сохранённые контексты форм проходят тот же нормализатор. */
+    static void installAttributeTypes()
+    {
+        if (!attributeTransformerInstalled.compareAndSet(false, true))
+            return;
+        if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
+        {
+            Global.tempLog("form-attribute-types", "early callback installed; inferrer=" //$NON-NLS-1$ //$NON-NLS-2$
+                + System.getProperties().get("tormozit.typeComputation.early." + ATTRIBUTE_INFERRER) //$NON-NLS-1$
+                + " computer=" + System.getProperties().get("tormozit.typeComputation.early." + PROPERTY_COMPUTER)); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new AttributeTypesTransformer(),
+            ATTRIBUTE_INFERRER, PROPERTY_COMPUTER);
+        Global.tempLog("form-attribute-types", "transformer installed=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!ok)
+            attributeTransformerInstalled.set(false);
+    }
+
+    /** Пустой тип реквизита формы означает Произвольный, а не отсутствие значения. */
+    private static Object afterAttributeTypes(Object[] args)
+    {
+        Object result = args[0];
+        DerivedProperty property = result instanceof DerivedProperty derived ? derived
+            : args[1] instanceof DerivedProperty derived ? derived : null;
+        FormAttribute attribute = args[1] instanceof FormAttribute formAttribute ? formAttribute
+            : property != null && property.getSource() instanceof FormAttribute formAttribute ? formAttribute : null;
+        if (property == null || attribute == null || attribute.eIsProxy())
+            return result;
+        Global.tempLog("form-attribute-types", "attribute=" + attribute.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " declared=" + (attribute.getValueType() == null ? "<null>" : attribute.getValueType().getTypes().size()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " computed=" + property.getTypes().size()); //$NON-NLS-1$
+        if (!property.getTypes().isEmpty() || attribute.getValueType() == null
+            || !attribute.getValueType().getTypes().isEmpty())
+            return result;
+        IRuntimeVersionSupport versions = (IRuntimeVersionSupport)args[2];
+        Version version = versions.getRuntimeVersionOrDefault(attribute, Version.LATEST);
+        IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
+        TypeItem arbitrary = (TypeItem)provider.getProxy("Arbitrary"); //$NON-NLS-1$
+        Global.tempLog("form-attribute-types", "attribute=" + attribute.getName() + " default=Arbitrary"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // Чтение уже сохранённого BM-контекста может идти в read-only транзакции.
+        if (result instanceof List<?>)
+            return List.of(arbitrary);
+        var container = McoreFactory.eINSTANCE.createTypeContainerRef();
+        container.getTypes().add(arbitrary);
+        property.setTypeContainer(container);
+        return result;
+    }
+
+    /** Тип произвольного реквизита в точке чтения — по предшествующему безусловному присваиванию. */
+    private static Object afterAttributeAccessTypes(Object[] args)
+    {
+        StaticFeatureAccess access = (StaticFeatureAccess)args[1];
+        if (access.getFeatureEntries().size() != 1
+            || !(access.getFeatureEntries().get(0).getFeature() instanceof DerivedProperty property)
+            || !(property.getSource() instanceof FormAttribute attribute)
+            || attribute.getValueType() == null)
+            return args[0];
+        for (TypeItem item : attribute.getValueType().getTypes())
+            if (!"Arbitrary".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$
+                return args[0];
+        Method method = EcoreUtil2.getContainerOfType(access, Method.class);
+        if (method == null)
+            return args[0];
+        Global.tempLog("form-attribute-types", "access attribute=" + attribute.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " uri=" + EcoreUtil.getURI(access)); //$NON-NLS-1$
+        Set<StaticFeatureAccess> visiting = ATTRIBUTE_ACCESS_VISITING.get();
+        if (!visiting.add(access))
+            return args[0];
+        try
+        {
+            Expression assigned = null;
+            boolean reached = false;
+            for (Statement statement : method.getStatements())
+            {
+                if (EcoreUtil.isAncestor(statement, access))
+                {
+                    reached = true;
+                    if (writesAttribute(statement, property))
+                        assigned = null;
+                    break;
+                }
+                if (statement instanceof SimpleStatement simple && refersToAttribute(simple.getLeft(), property))
+                    assigned = simple.getRight();
+                else if (writesAttribute(statement, property))
+                    assigned = null;
+            }
+            if (!reached || assigned == null)
+            {
+                Global.tempLog("form-attribute-types", "access no dominating assignment"); //$NON-NLS-1$ //$NON-NLS-2$
+                return args[0];
+            }
+            TypesComputer computer = (TypesComputer)args[3];
+            List<TypeItem> computed = computer.computeTypes(assigned, (Environments)args[4]);
+            Global.tempLog("form-attribute-types", "access assignment=" + EcoreUtil.getURI(assigned) //$NON-NLS-1$ //$NON-NLS-2$
+                + " result=" + computed.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
+            return computed.isEmpty() ? args[0] : new ArrayList<>(computed);
+        }
+        finally
+        {
+            visiting.remove(access);
+            if (visiting.isEmpty())
+                ATTRIBUTE_ACCESS_VISITING.remove();
+        }
+    }
+
+    private static boolean writesAttribute(Statement statement, Property property)
+    {
+        if (statement instanceof SimpleStatement simple && refersToAttribute(simple.getLeft(), property))
+            return true;
+        for (SimpleStatement simple : EcoreUtil2.getAllContentsOfType(statement, SimpleStatement.class))
+            if (refersToAttribute(simple.getLeft(), property))
+                return true;
+        return false;
+    }
+
+    private static boolean refersToAttribute(Expression expression, Property property)
+    {
+        if (expression instanceof StaticFeatureAccess access)
+            for (var entry : access.getFeatureEntries())
+                if (entry.getFeature() == property || entry.getFeature() != null
+                    && EcoreUtil.getURI(entry.getFeature()).equals(EcoreUtil.getURI(property)))
+                    return true;
+        // Запись через объект формы тоже отменяет ранее установленный тип.
+        return expression instanceof DynamicFeatureAccess access
+            && access.getName() != null && (access.getName().equalsIgnoreCase(property.getName())
+                || access.getName().equalsIgnoreCase(property.getNameRu()));
+    }
+
+    /** Точки возврата подтверждены FormImplicitRefInferrer/TypesComputer из EDT 28.0.1.v202605050943. */
+    static byte[] transformAttributeTypes(String className, byte[] bytes)
+    {
+        boolean inferrer = ATTRIBUTE_INFERRER.equals(className);
+        String descriptor = inferrer
+            ? "(Lcom/_1c/g5/v8/dt/form/model/FormAttribute;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Lcom/_1c/g5/v8/dt/mcore/DerivedProperty;" //$NON-NLS-1$
+            : "(Lcom/_1c/g5/v8/dt/mcore/Property;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;"; //$NON-NLS-1$
+        byte[] transformed = BslTypesComputerHook.transformReturnCallback(className, bytes,
+            inferrer ? "inferProperty" : "_compute", descriptor, ATTRIBUTE_CALLBACK); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!inferrer && transformed != null)
+            transformed = BslTypesComputerHook.transformReturnCallback(className, transformed, "_compute", //$NON-NLS-1$
+                "(Lcom/_1c/g5/v8/dt/bsl/model/StaticFeatureAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;", //$NON-NLS-1$
+                ATTRIBUTE_ACCESS_CALLBACK);
+        return transformed;
+    }
+
+    private static final class AttributeTypesTransformer implements ClassFileTransformer
+    {
+        @Override
+        public byte[] transform(ClassLoader loader, String name, Class<?> redefining, ProtectionDomain domain,
+            byte[] bytes)
+        {
+            String className = name == null ? "" : name.replace('/', '.'); //$NON-NLS-1$
+            return ATTRIBUTE_INFERRER.equals(className) || PROPERTY_COMPUTER.equals(className)
+                ? transformAttributeTypes(className, bytes) : null;
+        }
     }
 
     /**

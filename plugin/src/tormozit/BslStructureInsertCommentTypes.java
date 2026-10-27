@@ -1592,10 +1592,7 @@ public final class BslStructureInsertCommentTypes
             return;
         try
         {
-            // Как и остальные наши расчёты типов — только под флажком проекта.
-            if (!Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyPeekAst(document,
-                BslStructureInsertCommentTypes::isExtendedTypesEnabled)))
-                return;
+            // Расчёты типов зависят от флажка проекта; исправление ключа платформы — всегда.
             Property property = ContentAssistSessionReloader.readOnlyPeekAst(document,
                 resource -> propertyForHint(object, resource));
             if (property == null)
@@ -1631,12 +1628,15 @@ public final class BslStructureInsertCommentTypes
 
     private static Property propertyForHint(List<? extends EObject> members, Resource resource)
     {
-        if (resource == null || !Boolean.TRUE.equals(isExtendedTypesEnabled(resource)))
+        if (resource == null || resource.getContents().isEmpty())
             return null;
+        boolean extended = Boolean.TRUE.equals(isExtendedTypesEnabled(resource));
         Property first = null;
         for (EObject member : members)
         {
             if (!(member instanceof Property property))
+                continue;
+            if (!extended && !DynamicFeatureAccessComputerHook.isStringKey(property))
                 continue;
             if (first == null)
                 first = property;
@@ -1652,7 +1652,8 @@ public final class BslStructureInsertCommentTypes
     {
         Object original = Global.invoke(value, "getGroups"); //$NON-NLS-1$
         if (resource == null || resource.getContents().isEmpty()
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            || (!DynamicFeatureAccessComputerHook.isStringKey(property)
+                && !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))))
             return original;
         // У штатного DerivedProperty одна группа. Сохраняем её описание и сноску:
         // это отдельные данные от ValueContent.description.

@@ -224,6 +224,9 @@ final class MetadataTypeMenu
             while (matcher.find())
             {
                 String name = matcher.group(1).replaceAll("<[^>]*>", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+                String formBase = BslFormDataTypes.baseTypeName(matcher.group());
+                if (formBase != null)
+                    name = formBase;
                 var description = TYPE_NAME.matcher(name).matches()
                     ? scope.getSingleElement(converter.toQualifiedName(name)) : null;
                 var object = description == null ? null : description.getEObjectOrProxy();

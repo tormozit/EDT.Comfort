@@ -161,6 +161,9 @@ public class SmartCompletionProposal implements
             ? overlapDisplay
             : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
         String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
+        if (delegate instanceof ConfigurableCompletionProposal configurable)
+            localized = BslFormDataTypes.decorateProposal(localized,
+                Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
         // #region temp #877 — почему строка без типа: первый показ каждой строки
         if (!rowLogged)
         {

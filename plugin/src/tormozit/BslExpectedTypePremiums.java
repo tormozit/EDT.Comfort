@@ -202,7 +202,7 @@ final class BslExpectedTypePremiums
     /** Коллекции, у которых индекс — ещё и имя (ИР: тип есть в {@code ТаблицаШаблоновКонтекстов}). */
     private static final Set<String> NAMED_INDEX_TYPES = Set.of("структура", "фиксированнаяструктура", //$NON-NLS-1$ //$NON-NLS-2$
         "строкатаблицызначений", "строкадеревазначений", "данныеформыструктура", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "данныеформыэлементколлекции", "данныеформыэлементдерева"); //$NON-NLS-1$ //$NON-NLS-2$
+        "данныеформыэлементколлекции", "данныеформыэлементдерева", "формаклиентскогоприложения"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     /**
      * Место списка: начало выражения ({@code Объект.} входит), родитель до точки и текст перед выражением.
@@ -1215,7 +1215,7 @@ final class BslExpectedTypePremiums
             systemProperty, formalParameter);
     }
 
-    /** Тип ключа индекса {@code коллекция[}: у соответствия — тип ключа, у индексируемых — Число, у именованных — ещё Строка. */
+    /** Тип ключа {@code коллекция[}: ключ соответствия, Число по ЕстьЧисловойИндекс, Строка для доступа по имени. */
     private static List<TypeItem> indexTypes(XtextResource resource, List<TypeItem> collection)
     {
         List<TypeItem> result = new ArrayList<>();
@@ -1227,13 +1227,13 @@ final class BslExpectedTypePremiums
                 result.addAll(propertyTypes(resource, elementTypes(resource, List.of(item)), "Ключ")); //$NON-NLS-1$
                 continue;
             }
-            if (hasMethod(resource, item, "Получить")) //$NON-NLS-1$
+            Type type = resolveType(resource, item);
+            Boolean numericIndex = BslNumericIndexTypes.allows(type, resource);
+            if (Boolean.TRUE.equals(numericIndex))
                 addTypeByName(result, NUMBER);
             if (NAMED_INDEX_TYPES.contains(name))
                 addTypeByName(result, STRING);
         }
-        if (result.isEmpty() && !collection.isEmpty())
-            addTypeByName(result, NUMBER);
         return result;
     }
 
@@ -1692,20 +1692,6 @@ final class BslExpectedTypePremiums
                 result.addAll(elements.allTypes());
         }
         return result;
-    }
-
-    private static boolean hasMethod(XtextResource resource, TypeItem owner, String name)
-    {
-        Type type = resolveType(resource, owner);
-        ContextDef def = type != null ? type.getContextDef() : null;
-        if (def == null)
-            return false;
-        for (com._1c.g5.v8.dt.mcore.Method method : def.allMethods())
-        {
-            if (name.equalsIgnoreCase(method.getNameRu()) || name.equalsIgnoreCase(method.getName()))
-                return true;
-        }
-        return false;
     }
 
     private static boolean isTableType(List<TypeItem> types)

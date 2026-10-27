@@ -56,6 +56,10 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * штатной. Это вплетение ставит
  * ранний бандл {@code tormozit.comfort.early}, до загрузки вычислителя BSL.
  *
+ * <p>Строковая специализация {@code КлючИЗначение}: общий список свойств модели исключает
+ * унаследованный произвольный ключ; собственный строковый ключ получает код документации
+ * из базового свойства. Вплетение {@code ContextDefImpl.allProperties} ставит ранний бандл.
+ *
  * <p>Инструментирование через {@code WeavingHook}, как {@link OpenHelperAttributePropertiesHook}:
  * вызов через {@code System.getProperties}, без зависимости бандла BSL от Комфорта.
  */
@@ -80,6 +84,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::typeSetMethods);
         System.getProperties().put(PROP_PROPERTY_TRACE,
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::traceProperty);
+        System.getProperties().put("tormozit.platform.structureKey", //$NON-NLS-1$
+            (Function<Object[], Object>) StructureKeyDefinition::complete);
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -95,6 +101,51 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         // Класс мог загрузиться до регистрации WeavingHook — тогда остаётся только агент.
         BslDocCommentDescriptionFix.registerExtraTransformer(
             new ProviderTransformer(), TARGET);
+    }
+
+    /** Строковая специализация ключа; общий Key соответствия сюда не попадает. */
+    static boolean isStringKey(Property property)
+    {
+        return property != null && "Key".equals(property.getName()) //$NON-NLS-1$
+            && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef context
+            && context.eContainer() instanceof Type owner && "KeyAndValue".equals(owner.getName()) //$NON-NLS-1$
+            && property.getTypes().size() == 1
+            && "String".equals(com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(property.getTypes().get(0))); //$NON-NLS-1$
+    }
+
+    /** Исправление определения свойства, общее для расчёта типов и документации EDT. */
+    private static final class StructureKeyDefinition
+    {
+        static Object complete(Object[] args)
+        {
+            if (!(args[1] instanceof com._1c.g5.v8.dt.mcore.ContextDef context)
+                || !(context.eContainer() instanceof Type owner) || !"KeyAndValue".equals(owner.getName())) //$NON-NLS-1$
+                return args[0];
+            @SuppressWarnings("unchecked")
+            var properties = (org.eclipse.emf.common.util.EList<Property>)args[0];
+            Property key = null;
+            for (Property property : context.getProperties())
+                if (isStringKey(property))
+                    key = property;
+            if (key == null)
+                return properties;
+            var result = new org.eclipse.emf.common.util.BasicEList<Property>();
+            int removed = 0;
+            for (Property property : properties)
+            {
+                if (property != key && "Key".equals(property.getName())) //$NON-NLS-1$
+                {
+                    // Специализация из $String_Arbitrary$KeyAndValue.type не имеет своего code.
+                    // Код берём из унаследованного определения, а тип оставляем строковым.
+                    if (key.getCode() == -1 && property.getCode() != -1)
+                        key.setCode(property.getCode());
+                    removed++;
+                }
+                else
+                    result.add(property);
+            }
+            return removed == 0 ? properties : org.eclipse.emf.common.util.ECollections.unmodifiableEList(result);
+        }
     }
 
     /** Дополняет источник найденного свойства, сохраняя штатный список результата. */

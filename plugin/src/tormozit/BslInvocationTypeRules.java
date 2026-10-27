@@ -93,12 +93,6 @@ public class BslInvocationTypeRules
     // Временный переключатель контрольного замера CPU для обоих расширений, включая WithParameters.
     private static final boolean TEMPORARILY_DISABLED_FOR_CPU_COMPARISON = false;
 
-    public BslInvocationTypeRules()
-    {
-        Global.tempLog("invocation-type-disabled", "CPU comparison version=1.0.18 disabled=" //$NON-NLS-1$ //$NON-NLS-2$
-            + TEMPORARILY_DISABLED_FOR_CPU_COMPARISON + " class=" + getClass().getName()); //$NON-NLS-1$
-    }
-
     /** Те же правила для вызовов, тип которых зависит от типов переменных-параметров. */
     public static final class WithParameters
         extends BslInvocationTypeRules

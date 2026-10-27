@@ -18,6 +18,7 @@ import java.util.function.Consumer;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.util.Tuples;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -30,6 +31,7 @@ import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.model.BslFactory;
+import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.ExtendedType;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.ContextDefWithRefItem;
@@ -43,6 +45,10 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com._1c.g5.v8.dt.platform.core.uconverter.IUObjectConverterServiceProvider;
+import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
+import com._1c.g5.v8.dt.platform.version.Version;
+import com._1c.g5.wiring.ServiceAccess;
 
 /**
  * Несколько типов через запятую на одной строке комментария:
@@ -85,8 +91,13 @@ public final class BslDocCommentTypeMerge
      */
     public static void installWeavingHook()
     {
+        BslFormDataTypes.installWeavingHook();
         if (!installed.compareAndSet(false, true))
             return;
+
+        System.getProperties().put("tormozit.formData.comment", //$NON-NLS-1$
+            (java.util.function.Function<Object[], Object>) args -> afterComputeTypes(
+                afterComputeFormAttributeTypes((Collection<?>)args[0], args[1], (EObject)args[2])));
 
         Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
         @SuppressWarnings("unchecked")
@@ -102,13 +113,17 @@ public final class BslDocCommentTypeMerge
 
         Bundle bundle = FrameworkUtil.getBundle(BslDocCommentTypeMerge.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
-        if (context != null)
+        if (context != null && !BslFormDataTypes.earlyWeavingActive())
             context.registerService(WeavingHook.class, new ComputeTypesWeavingHook(), null);
     }
 
     public static void install()
     {
         installWeavingHook();
+        BslFormDataTypes.install();
+
+        if (BslFormDataTypes.earlyWeavingActive())
+            return;
 
         if (transformerOk.get())
             return;
@@ -174,6 +189,140 @@ public final class BslDocCommentTypeMerge
         catch (Throwable t)
         {
             return types;
+        }
+    }
+
+    /** Типы реквизита виртуальной формы — до объединения контекстов одной строки. */
+    public static Collection<?> afterComputeFormAttributeTypes(Collection<?> types, Object section,
+        EObject context)
+    {
+        if (types == null || types.isEmpty() || context == null || context.eResource() == null)
+            return types;
+        try
+        {
+            // Поле без своей TypeSection EDT считает через getTypesFromLinkParts,
+            // минуя computeTypes. Поэтому обрабатываем и готовые свойства формы.
+            FormAttributeTypes.convertFormProperties(types, context);
+            if (!(section instanceof TypeSection typeSection)
+                || !(typeSection.getParent() instanceof TypeSection.FieldDefinition field)
+                || !(field.getParent() instanceof TypeSection.TypeDefinition owner)
+                || !FormAttributeTypes.isForm(owner.getTypeName()))
+                return types;
+            return FormAttributeTypes.convert(types, context);
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("doc-defined-form-types", "conversion failed", t); //$NON-NLS-1$ //$NON-NLS-2$
+            return types;
+        }
+    }
+
+    private static final class FormAttributeTypes
+    {
+        static void convertFormProperties(Collection<?> types, EObject context)
+        {
+            for (Object raw : types)
+            {
+                if (!(raw instanceof ExtendedType form) || form.getContextDef() == null
+                    || !(isForm(McoreUtil.getTypeName(form)) || isForm(McoreUtil.getTypeNameRu(form))))
+                    continue;
+                for (Property property : form.getContextDef().getProperties())
+                {
+                    List<TypeItem> original = new ArrayList<>(property.getTypes());
+                    Collection<?> converted = convert(original, context);
+                    if (original.equals(new ArrayList<>(converted)))
+                        continue;
+                    TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+                    for (Object item : converted)
+                        container.getTypes().add((TypeItem)item);
+                    property.setTypeContainer(container);
+                }
+            }
+        }
+
+        static boolean isForm(String name)
+        {
+            if (name == null)
+                return false;
+            // Формы и добавляемые FormImplicitRefInferrer расширения могут быть объединены.
+            for (String part : name.split(",")) //$NON-NLS-1$
+            {
+                String type = part.trim();
+                if ("ClientApplicationForm".equalsIgnoreCase(type) //$NON-NLS-1$
+                    || "ManagedForm".equalsIgnoreCase(type) //$NON-NLS-1$
+                    || "ФормаКлиентскогоПриложения".equalsIgnoreCase(type) //$NON-NLS-1$
+                    || "УправляемаяФорма".equalsIgnoreCase(type) //$NON-NLS-1$
+                    || type.startsWith("ManagedFormExtensionFor") //$NON-NLS-1$
+                    || type.startsWith("РасширениеУправляемойФормыДля")) //$NON-NLS-1$
+                    return true;
+            }
+            return false;
+        }
+
+        static Collection<?> convert(Collection<?> types, EObject context)
+        {
+            Global.tempLog("doc-defined-form-types", "convert count=" + types.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            List<TypeItem> converted = new ArrayList<>();
+            IResourceServiceProvider services = null;
+            IUObjectConverterServiceProvider converter = null;
+            Version version = null;
+            for (Object raw : types)
+            {
+                if (!(raw instanceof TypeItem item))
+                    return types;
+                TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, context);
+                Global.tempLog("doc-defined-form-types", "candidate=" + McoreUtil.getTypeName(resolved) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " class=" + resolved.eClass().getName() + " proxy=" + resolved.eIsProxy()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (resolved instanceof TypeSet typeSet && !typeSet.eIsProxy())
+                {
+                    // types(context) раскрывает и определяемые типы, и общие категории
+                    // через индекс метаданных проекта. getTypes() у категории пуст,
+                    // а baseTypes содержит только платформенный шаблон без реквизитов метаданных.
+                    List<Type> base = new ArrayList<>(typeSet.types(context));
+                    if (base.isEmpty())
+                        base.addAll(typeSet.getBaseTypes());
+                    Global.tempLog("doc-defined-form-types", "set types=" + typeSet.getTypes().size() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " baseTypes=" + typeSet.getBaseTypes().size() + " selected=" + base.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                    Collection<?> convertedBase = convert(base, context);
+                    // Определяемый тип сохраняем, если ни одна альтернатива не преобразована.
+                    if (!base.equals(new ArrayList<>(convertedBase)))
+                    {
+                        for (Object value : convertedBase)
+                            converted.add((TypeItem)value);
+                        continue;
+                    }
+                }
+                // Поддержку типа определяет конвертер EDT, включая типы без квалификатора.
+                if (resolved instanceof Type)
+                {
+                    if (services == null)
+                    {
+                        services = IResourceServiceProvider.Registry.INSTANCE
+                            .getResourceServiceProvider(context.eResource().getURI());
+                        if (services == null)
+                            return types;
+                        // PlatformCore регистрирует конвертер в OSGi; у BSL ResourceServiceProvider его нет.
+                        converter = ServiceAccess.get(IUObjectConverterServiceProvider.class);
+                        IRuntimeVersionSupport versions = services.get(IRuntimeVersionSupport.class);
+                        if (converter == null || versions == null)
+                            return types;
+                        version = versions.getRuntimeVersionOrDefault(context, Version.LATEST);
+                    }
+                    // Тот же конвертер, что FormImplicitRefInferrer применяет к реквизитам
+                    // настоящей формы: свойства, табличные части и методы данных формы.
+                    boolean available = converter.hasConverter(resolved, version);
+                    Global.tempLog("doc-defined-form-types", "converter type=" + McoreUtil.getTypeName(resolved) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " available=" + available); //$NON-NLS-1$
+                    if (available)
+                    {
+                        TypeItem data = converter.convert(resolved, version, context.eResource());
+                        if (data != null && !data.eIsProxy())
+                            item = BslFormDataTypes.afterConvert(data, resolved);
+                    }
+                }
+                converted.add(item);
+            }
+            return converted;
         }
     }
 
@@ -659,7 +808,7 @@ public final class BslDocCommentTypeMerge
     {
         if (types == null)
             return;
-        LinkedHashMap<String, Type> byName = new LinkedHashMap<>();
+        LinkedHashMap<Object, Type> byName = new LinkedHashMap<>();
         for (Object raw : types)
         {
             if (!(raw instanceof TypeItem item))
@@ -667,7 +816,10 @@ public final class BslDocCommentTypeMerge
             TypeItem resolved = resolveItem(item);
             if (resolved instanceof Type type && type.getContextDef() != null)
             {
-                String key = typeKey(type);
+                // У данных формы одно имя, но разные реквизиты порождающих объектов.
+                // Объединяем все такие контексты, сохраняя свойства каждой альтернативы.
+                Object key = "FormDataStructure".equals(McoreUtil.getTypeName(type)) //$NON-NLS-1$
+                    ? type : typeKey(type);
                 if (!byName.containsKey(key))
                     byName.put(key, type);
             }
@@ -707,6 +859,7 @@ public final class BslDocCommentTypeMerge
         ctx.getRefMethods().addAll(methods);
         ctx.getRefProperties().addAll(properties);
         extended.setContextDef(ctx);
+        BslFormDataTypes.inheritOrigins(extended, contexts);
         return extended;
     }
 
@@ -744,6 +897,7 @@ public final class BslDocCommentTypeMerge
         else
             ctx.getRefProperties().addAll(properties);
         copy.setContextDef(ctx);
+        BslFormDataTypes.inheritOrigins(copy, List.of(source));
         return copy;
     }
 
@@ -798,7 +952,11 @@ public final class BslDocCommentTypeMerge
             for (TypeItem propType : sourceTypes)
             {
                 if (propType instanceof EObject eObject)
-                    propTypes.getTypes().add((TypeItem)EcoreUtil.copy(eObject));
+                {
+                    TypeItem copy = (TypeItem)EcoreUtil.copy(eObject);
+                    BslFormDataTypes.inheritOrigins(copy, List.of(propType));
+                    propTypes.getTypes().add(copy);
+                }
             }
         }
         derived.setTypeContainer(propTypes);
@@ -870,6 +1028,15 @@ public final class BslDocCommentTypeMerge
                     {
                         if (opcode == Opcodes.ARETURN)
                         {
+                            if ("computeTypes".equals(name)) //$NON-NLS-1$
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 1); // TypeSection
+                                visitVarInsn(Opcodes.ALOAD, 8); // EObject context (EDT bsl.comment)
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL,
+                                    "afterComputeFormAttributeTypes", //$NON-NLS-1$
+                                    "(Ljava/util/Collection;Ljava/lang/Object;Lorg/eclipse/emf/ecore/EObject;)Ljava/util/Collection;", //$NON-NLS-1$
+                                    false);
+                            }
                             visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL,
                                 "afterComputeTypes", AFTER_COMPUTE_DESC, false); //$NON-NLS-1$
                             touched.set(true);

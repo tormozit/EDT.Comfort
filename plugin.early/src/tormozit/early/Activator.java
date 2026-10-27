@@ -39,7 +39,10 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        FormDataWeaving.install(context);
+        TypeComputationWeaving.install(context);
         DynamicFeatureWeaving.install(context);
+        StructureKeyWeaving.install(context);
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
@@ -51,6 +54,392 @@ public final class Activator
     public void stop(BundleContext context)
     {
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
+    }
+
+    /** ContextDefImpl.allProperties в mcore 8.6.0.v202607090722 добавляет наследуемый Key вторым. */
+    private static final class StructureKeyWeaving implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.platform.structureKey"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (Function<Object[], Object>) args -> args[0]);
+            context.registerService(WeavingHook.class, new StructureKeyWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || !"com._1c.g5.v8.dt.mcore.impl.ContextDefImpl".equals(woven.getClassName())) //$NON-NLS-1$
+                return;
+            ClassReader reader = new ClassReader(woven.getBytes());
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"allProperties".equals(name) || !"()Lorg/eclipse/emf/common/util/EList;".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_2);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/emf/common/util/EList"); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            if (touched.get())
+                woven.setBytes(writer.toByteArray());
+            System.getProperties().put(CALLBACK + ".woven", touched.get()); //$NON-NLS-1$
+        }
+    }
+
+    /** Вычислители типов должны быть вплетены до загрузки; поздний Instrumentation может отсутствовать. */
+    private static final class TypeComputationWeaving implements WeavingHook
+    {
+        private static final String STATUS = "tormozit.typeComputation.early"; //$NON-NLS-1$
+        private static final String INFERRER = "com._1c.g5.v8.dt.form.resource.FormImplicitRefInferrer"; //$NON-NLS-1$
+        private static final String COMPUTER = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final String ATTRIBUTE = "tormozit.formAttribute.types"; //$NON-NLS-1$
+        private static final String BINARY = "tormozit.expression.plusTypes"; //$NON-NLS-1$
+        private static final String ATTRIBUTE_ACCESS = "tormozit.formAttribute.accessTypes"; //$NON-NLS-1$
+        private final BundleContext context;
+
+        private TypeComputationWeaving(BundleContext context)
+        {
+            this.context = context;
+        }
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(ATTRIBUTE, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(BINARY, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(ATTRIBUTE_ACCESS, (Function<Object[], Object>) args -> args[0]);
+            context.registerService(WeavingHook.class, new TypeComputationWeaving(context), null);
+            System.getProperties().put(STATUS, Boolean.TRUE);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING || !INFERRER.equals(name) && !COMPUTER.equals(name))
+                return;
+            try
+            {
+                byte[] bytes = transform(name, woven.getBytes());
+                if (bytes == null)
+                    throw new IllegalStateException("Type computation method not found: " + name); //$NON-NLS-1$
+                woven.setBytes(bytes);
+                System.getProperties().put(STATUS + "." + name, Boolean.TRUE); //$NON-NLS-1$
+                log("woven " + name, null); //$NON-NLS-1$
+            }
+            catch (RuntimeException failure)
+            {
+                System.getProperties().put(STATUS + "." + name, Boolean.FALSE); //$NON-NLS-1$
+                log("weaving failed " + name, failure); //$NON-NLS-1$
+            }
+        }
+
+        private void log(String message, Throwable failure)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            if (reference == null)
+                return;
+            FrameworkLog log = context.getService(reference);
+            try
+            {
+                if (log != null)
+                    log.log(new FrameworkLogEntry("tormozit.comfort.early", //$NON-NLS-1$
+                        failure == null ? FrameworkLogEntry.INFO : FrameworkLogEntry.ERROR,
+                        0, "[TypeComputationWeaving] " + message, 0, failure, null)); //$NON-NLS-1$
+            }
+            finally
+            {
+                context.ungetService(reference);
+            }
+        }
+
+        static byte[] transform(String className, byte[] bytes)
+        {
+            String owner = className.replace('.', '/');
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean property = new AtomicBoolean();
+            AtomicBoolean binary = new AtomicBoolean();
+            AtomicBoolean attributeAccess = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    String callback;
+                    if (INFERRER.equals(className) && "inferProperty".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/form/model/FormAttribute;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Lcom/_1c/g5/v8/dt/mcore/DerivedProperty;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        callback = ATTRIBUTE;
+                        property.set(true);
+                    }
+                    else if (COMPUTER.equals(className) && "_compute".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/mcore/Property;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        callback = ATTRIBUTE;
+                        property.set(true);
+                    }
+                    else if (COMPUTER.equals(className) && "_compute".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/bsl/model/BinaryExpression;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        callback = BINARY;
+                        binary.set(true);
+                    }
+                    else if (COMPUTER.equals(className) && "_compute".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/bsl/model/StaticFeatureAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        callback = ATTRIBUTE_ACCESS;
+                        attributeAccess.set(true);
+                    }
+                    else
+                        return mv;
+                    String cast = org.objectweb.asm.Type.getReturnType(descriptor).getInternalName();
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String calledOwner, String calledName,
+                            String calledDescriptor, boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, calledOwner, calledName, calledDescriptor, isInterface);
+                            if (BINARY.equals(callback) && owner.equals(calledOwner)
+                                && "computeTypes".equals(calledName) //$NON-NLS-1$
+                                && "(Lorg/eclipse/emf/ecore/EObject;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;".equals(calledDescriptor)) //$NON-NLS-1$
+                                emitCallback();
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN && !BINARY.equals(callback))
+                                emitCallback();
+                            super.visitInsn(opcode);
+                        }
+
+                        private void emitCallback()
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            super.visitLdcInsn(callback);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitInsn(Opcodes.ICONST_5);
+                            super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.DUP_X1);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitInsn(Opcodes.ICONST_0);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitInsn(Opcodes.AASTORE);
+                            for (int index : new int[] {1, 3, 4})
+                            {
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitLdcInsn(index);
+                                super.visitVarInsn(Opcodes.ALOAD, index == 1 ? 1 : index == 3 ? 0 : 2);
+                                super.visitInsn(Opcodes.AASTORE);
+                            }
+                            super.visitInsn(Opcodes.DUP);
+                            super.visitInsn(Opcodes.ICONST_2);
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETFIELD, owner, "versionSupport", "Lcom/_1c/g5/v8/dt/platform/version/IRuntimeVersionSupport;"); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitInsn(Opcodes.AASTORE);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, cast);
+                        }
+                    };
+                }
+            }, 0);
+            return property.get() && (!COMPUTER.equals(className) || binary.get() && attributeAccess.get())
+                ? writer.toByteArray() : null;
+        }
+    }
+
+    /** Классы комментариев и формы могут загрузиться до основного бандла. */
+    private static final class FormDataWeaving implements WeavingHook
+    {
+        private static final String PREFIX = "tormozit.formData."; //$NON-NLS-1$
+        private static final String COMMENT = "com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment"; //$NON-NLS-1$
+        private static final String CONVERTER = "com._1c.g5.v8.dt.internal.platform.core.uconverter.UObjectConverterServiceProvider"; //$NON-NLS-1$
+        private static final String DOCUMENTATION = "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"; //$NON-NLS-1$
+        private static final String PAGE = "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            for (String operation : List.of("comment", "convert", "reference", "html", "property")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                System.getProperties().putIfAbsent(PREFIX + operation, (Function<Object[], Object>) args -> args[0]);
+            context.registerService(WeavingHook.class, new FormDataWeaving(), null);
+            System.getProperties().put(PREFIX + "early", Boolean.TRUE); //$NON-NLS-1$
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING)
+                return;
+            byte[] bytes = transform(woven.getClassName(), woven.getBytes());
+            if (bytes != null)
+            {
+                woven.setBytes(bytes);
+            }
+        }
+
+        static byte[] transform(String className, byte[] bytes)
+        {
+            if (!List.of(COMMENT, CONVERTER, DOCUMENTATION, PAGE).contains(className))
+                return null;
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (visitor != null && DOCUMENTATION.equals(className)
+                        && "getDocByNotDerivedProperty".equals(name) //$NON-NLS-1$
+                        && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/Property;")) //$NON-NLS-1$
+                    {
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PREFIX + "property"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/mcore/Property"); //$NON-NLS-1$
+                                super.visitVarInsn(Opcodes.ASTORE, 1);
+                                touched.set(true);
+                            }
+                        };
+                    }
+                    String operation;
+                    int[] slots;
+                    if (COMMENT.equals(className) && ("computeTypes".equals(name) //$NON-NLS-1$
+                        || "computeParameterTypes".equals(name)) //$NON-NLS-1$
+                        && descriptor.endsWith(")Ljava/util/Collection;")) //$NON-NLS-1$
+                    {
+                        operation = "comment"; //$NON-NLS-1$
+                        slots = new int[] {"computeTypes".equals(name) ? 1 : -1, 8}; //$NON-NLS-1$
+                    }
+                    else if (CONVERTER.equals(className) && "convert".equals(name) //$NON-NLS-1$
+                        && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/TypeItem;")) //$NON-NLS-1$
+                    {
+                        operation = "convert"; //$NON-NLS-1$
+                        slots = new int[] {1};
+                    }
+                    else if (DOCUMENTATION.equals(className) && "convertTypeItemToReference".equals(name)) //$NON-NLS-1$
+                    {
+                        operation = "reference"; //$NON-NLS-1$
+                        slots = new int[] {1, 2};
+                    }
+                    else if (PAGE.equals(className) && ("generateReferenceFullHtml".equals(name) //$NON-NLS-1$
+                        || "generateReferenceShortHtml".equals(name))) //$NON-NLS-1$
+                    {
+                        operation = "html"; //$NON-NLS-1$
+                        slots = new int[] {0};
+                    }
+                    else
+                        return visitor;
+                    if (visitor == null)
+                        return null;
+                    return new MethodVisitor(Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PREFIX + operation);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitLdcInsn(slots.length + 1);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.AASTORE);
+                                for (int index = 0; index < slots.length; index++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(index + 1);
+                                    if (slots[index] < 0)
+                                        super.visitInsn(Opcodes.ACONST_NULL);
+                                    else
+                                        super.visitVarInsn(Opcodes.ALOAD, slots[index]);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST,
+                                    org.objectweb.asm.Type.getReturnType(descriptor).getInternalName());
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
     }
 
     /** Вычислитель BSL загружается до основного бандла: вплетение ставится здесь. */

@@ -216,6 +216,8 @@ public class Activator extends AbstractUIPlugin
         IRModuleChangeCollector.ensureListenerInstalled();
         // Как можно раньше: WeavingHook до первой загрузки BslDocumentationComment
         BslDocCommentDescriptionFix.install();
+        BslFormTypeContextEnrichment.installAttributeTypes();
+        BslTypesComputerHook.install();
         BslDocCommentTypeMerge.install();
         BslXtextDocumentHook.install();
         QueryParameterAutoCloseFix.install();
@@ -395,9 +397,6 @@ public class Activator extends AbstractUIPlugin
             System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)settings -> {
                 boolean replaced = settings.getId() != null
                     && ComfortCheckIds.REPLACED_BUILTIN_CHECKS.contains(settings.getId().getCheckId());
-                if (replaced)
-                    Global.tempLog("StaticFeatureAccessReplacement", //$NON-NLS-1$
-                        "динамически замещена: " + settings.getId() + "; enabled=" + settings.isEnabled()); //$NON-NLS-1$ //$NON-NLS-2$
                 return !replaced && settings.isEnabled();
             });
             BuiltinCheckReplacements hook = new BuiltinCheckReplacements();
@@ -408,12 +407,11 @@ public class Activator extends AbstractUIPlugin
                 if (checks == null)
                     throw new IllegalStateException("Бандл проверок EDT недоступен"); //$NON-NLS-1$
                 checks.loadClass(TARGET);
-                if (!woven && !BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET))
-                    Global.tempLog("StaticFeatureAccessReplacement", "Не удалось установить замещение"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!woven)
+                    BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET);
             }
             catch (ClassNotFoundException | RuntimeException | LinkageError failure)
             {
-                Global.tempLog("StaticFeatureAccessReplacement", "Установка замещения: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -479,7 +477,6 @@ public class Activator extends AbstractUIPlugin
                     };
                 }
             }, 0);
-            Global.tempLog("StaticFeatureAccessReplacement", "Перехвачено вызовов isEnabled: " + calls[0]); //$NON-NLS-1$ //$NON-NLS-2$
             if (calls[0] == 0)
                 throw new IllegalStateException("В CheckExecutor не найдены вызовы isEnabled"); //$NON-NLS-1$
             return writer.toByteArray();
