@@ -77,6 +77,9 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     private final boolean statistical;
     /** Слово метаданных проекта: статистика выбора — проектная. */
     private final boolean projectWord;
+    /** Слово провайдера литералов: живёт в его списке, вне снимка премий BSL. */
+    private boolean suppliedByLiteralProvider;
+    private String additionalInfo;
     private Point selection;
     private int extractOffset = -1;
     private String extractText;
@@ -105,6 +108,26 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         this.reopen = reopen;
         this.statistical = statistical;
         this.projectWord = projectWord;
+    }
+
+    static BslAddedWordProposal literalProperties(String template, int offset, String prefix)
+    {
+        BslAddedWordProposal proposal = new BslAddedWordProposal("<СписокВсехСвойств>", Kind.CONSTRUCTION, //$NON-NLS-1$
+            template, Absorb.CONTEXT, offset, prefix, null, false, false, false);
+        proposal.suppliedByLiteralProvider = true;
+        return proposal;
+    }
+
+    /** Описание синтетического слова, независимое от текста вставки. */
+    BslAddedWordProposal withAdditionalInfo(String info)
+    {
+        additionalInfo = info;
+        return this;
+    }
+
+    boolean isSuppliedByLiteralProvider()
+    {
+        return suppliedByLiteralProvider;
     }
 
     String getWord()
@@ -229,7 +252,8 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
             result = result.replace(CENTER, body.toString());
         }
         else
-            result = result.replace(CENTER, word.contains(CARET) ? "\t" : CARET); //$NON-NLS-1$
+            // У генератора маркер может быть только в шаблоне, а не в подписи слова.
+            result = result.replace(CENTER, word.contains(CARET) || template.contains(CARET) ? "\t" : CARET); //$NON-NLS-1$
         StringBuilder indented = new StringBuilder(indent);
         indented.append(result.replace("\n", "\n" + indent)); //$NON-NLS-1$ //$NON-NLS-2$
         if (selected)
@@ -419,10 +443,15 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
             : kind == Kind.PROPERTY ? BslSharedImages.IMG_EXTERNAL_PROPERTY : BslSharedImages.IMG_STATEMENT_BLOCK);
     }
 
-    /** Боковая подсказка — текст, который будет вставлен (код, без переноса строк). */
+    /** Боковая подсказка — отдельное описание слова либо текст вставки (код, без переноса строк). */
     @Override
     public String getAdditionalProposalInfo()
     {
+        if (additionalInfo != null)
+        {
+            Global.tempLog("common-module-group-hint", "side word=" + word); //$NON-NLS-1$ //$NON-NLS-2$
+            return additionalInfo;
+        }
         String text = closing != null && !closing.isEmpty() ? template + "\n" + CENTER + "\n" + closing : template; //$NON-NLS-1$ //$NON-NLS-2$
         return text.equals(word) ? null : text.replace(CARET, "|").replace(CENTER, "…"); //$NON-NLS-1$ //$NON-NLS-2$
     }

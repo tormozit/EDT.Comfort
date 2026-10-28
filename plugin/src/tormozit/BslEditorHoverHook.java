@@ -537,6 +537,9 @@ public final class BslEditorHoverHook implements IStartup
 
     private static ContentHover contentHover(BslXtextEditor editor, ITextViewer viewer, int offset)
     {
+        ContentHover group = CommonModuleAssistGroups.groupHover(viewer, offset);
+        if (group != null)
+            return group;
         var query = BslQueryLiteralSupport.queryHover(editor, viewer, offset);
         return query != null ? new ContentHover(query.info(), query.creator())
             : BslLiteralValues.valueHover(viewer, offset);
@@ -544,6 +547,9 @@ public final class BslEditorHoverHook implements IStartup
 
     private static IRegion contentHoverRegion(ITextViewer viewer, int offset)
     {
+        IRegion group = CommonModuleAssistGroups.groupHoverRegion(viewer, offset);
+        if (group != null)
+            return group;
         IRegion query = BslQueryLiteralSupport.queryHoverRegion(viewer, offset);
         return query != null ? query : BslLiteralValues.valueHoverRegion(viewer, offset);
     }

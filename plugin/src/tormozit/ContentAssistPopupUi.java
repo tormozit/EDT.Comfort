@@ -30,9 +30,6 @@ public final class ContentAssistPopupUi
     /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */
     private static boolean suppressToggleSelection;
     private static final String PARENT_PLACEHOLDER = "Родитель: —"; //$NON-NLS-1$
-    private static int cachedContextLabelDot = -1;
-    private static String cachedContextLabelReceiver = ""; //$NON-NLS-1$
-    private static String cachedContextLabelText = ""; //$NON-NLS-1$
 
     private ContentAssistPopupUi() {}
 
@@ -422,57 +419,20 @@ public final class ContentAssistPopupUi
             String ctx = BslQueryLiteralSupport.parentTypeTextAt(viewer.getDocument(), caret);
             if (ctx == null)
                 ctx = reloader != null ? reloader.getIrAssistContextTypeLabel() : null;
-            cachedContextLabelDot = -1;
-            cachedContextLabelReceiver = ""; //$NON-NLS-1$
-            cachedContextLabelText = ctx != null && !ctx.isEmpty()
+            return ctx != null && !ctx.isEmpty()
                 ? "Родитель: " + ctx : PARENT_PLACEHOLDER;
-            return cachedContextLabelText;
         }
         int dot = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
             viewer.getDocument(), caret);
         if (dot < 0)
-        {
-            cachedContextLabelDot = -1;
-            cachedContextLabelReceiver = ""; //$NON-NLS-1$
-            cachedContextLabelText = ""; //$NON-NLS-1$
             return ""; //$NON-NLS-1$
-        }
-        String receiver = SmartContentAssistProcessor.memberAccessReceiver(
-            viewer.getDocument(), caret);
-        if (dot == cachedContextLabelDot
-            && receiver.equals(cachedContextLabelReceiver)
-            && !cachedContextLabelText.isEmpty()
-            && !PARENT_PLACEHOLDER.equals(cachedContextLabelText))
-        {
-            return cachedContextLabelText;
-        }
-
-        String fromList = parentFromCurrentProposals();
-        if (!fromList.isEmpty())
-        {
-            cachedContextLabelDot = dot;
-            cachedContextLabelReceiver = receiver;
-            cachedContextLabelText = fromList;
-            return cachedContextLabelText;
-        }
-        // Подпись второстепенна: readOnly модели на UI ждёт разрешение всех ссылок
-        // (лог 16.10 23:39: ReceiverTypeLabel.resolve → waitAllBslResolveCrossReferencesJob).
-        // publishMemberStock обновит подпись по готовому списку через updateContextTypeLabel.
-        cachedContextLabelDot = dot;
-        cachedContextLabelReceiver = receiver;
-        cachedContextLabelText = PARENT_PLACEHOLDER;
-        return cachedContextLabelText;
-    }
-
-    private static String parentFromCurrentProposals()
-    {
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
-        if (processor == null)
-            return ""; //$NON-NLS-1$
-        String label = processor.resolveReceiverTypeLabel();
-        if (label == null || label.isEmpty())
-            return ""; //$NON-NLS-1$
-        return "Родитель: " + label;
+        String label = processor != null
+            ? processor.resolveReceiverTypeLabel(viewer.getDocument(), caret) : ""; //$NON-NLS-1$
+        // Только готовый фоновый снимок: readOnly на UI ждёт разрешения ссылок EDT
+        // (16.10.2026: waitAllBslResolveCrossReferencesJob). До готовности показываем «—».
+        // Не кэшируем по одной точке: полный тип может прийти после первого показа окна.
+        return label != null && !label.isEmpty() ? "Родитель: " + label : PARENT_PLACEHOLDER; //$NON-NLS-1$
     }
 
     private static Composite createFilterBar(Shell shell, ContentAssistant assistant,

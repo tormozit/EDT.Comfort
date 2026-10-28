@@ -1792,6 +1792,33 @@ final class BslQueryLiteralSupport
                         fieldHover.getHoverControlCreator(), expectedType, tempTables));
                 }
             }
+            // ИР: после родителя в QL — все свойства по алфавиту, каждое с псевдонимом.
+            String parent = expectedType.parent();
+            List<String> allProperties = new ArrayList<>();
+            if (!parent.isEmpty() && result.size() > 1 && result.size() < 100)
+            {
+                for (ICompletionProposal proposal : result)
+                {
+                    QueryLiteralProposal field = (QueryLiteralProposal)proposal;
+                    String name = field.replacement;
+                    if (!name.isEmpty() && name.chars().allMatch(c -> isIdentifierChar((char)c))
+                        && !allProperties.contains(name))
+                        allProperties.add(name);
+                }
+                allProperties.sort(String.CASE_INSENSITIVE_ORDER);
+                if (!allProperties.isEmpty())
+                {
+                    List<String> lines = new ArrayList<>();
+                    for (String name : allProperties)
+                        lines.add(parent + "." + name + " КАК " + name + ","); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    String replacement = String.join("\n", lines); //$NON-NLS-1$
+                    ConfigurableCompletionProposal generator = new ConfigurableCompletionProposal(replacement,
+                        lit.probeIndex - parent.length() - 1, parent.length() + 1, replacement.length(), null,
+                        new StyledString("<СписокВсехСвойств>"), null, null); //$NON-NLS-1$
+                    result.add(new QueryLiteralProposal(generator, lit, lineBreak, sourceEditor, project, query,
+                        fieldHover.getHoverControlCreator(), expectedType, tempTables));
+                }
+            }
             ICompletionProposal[] proposals = result.toArray(SmartContentAssistProcessor.EMPTY);
             expectedType.start(viewer, doc, key, proposals);
             return proposals;

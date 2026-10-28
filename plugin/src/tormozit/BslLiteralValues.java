@@ -335,6 +335,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     {
         final boolean manual;
         final Set<String> produced = new HashSet<>();
+        /** Значения полного набора из Analysis.full, приведённые к ключу dedupeKey. */
+        final Set<String> fullValues = new HashSet<>();
         /** Описание строки провайдера по тексту вставки: свойство с типом значения. */
         final Map<String, Object> infos = new HashMap<>();
         final Set<ICompletionProposal> added = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -342,6 +344,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         Request(boolean manual)
         {
             this.manual = manual;
+        }
+
+        void rememberFull(Analysis analysis, String prefix)
+        {
+            if (analysis.full && !analysis.values.isEmpty())
+                for (String name : analysis.values.values())
+                    fullValues.add(lower((prefix + name).trim()));
         }
     }
 
@@ -516,6 +525,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return List.of();
         }
         Segment segment = Segment.of(typed);
+        request.rememberFull(analysis, typed.substring(0, segment.start));
         String before = "\"" + typed.substring(0, segment.start); //$NON-NLS-1$
         List<Triple<String, String, IBslStringLiteralProposalImageProvider>> proposals = new ArrayList<>();
         for (String name : analysis.values.values())
@@ -580,7 +590,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<ICompletionProposal> result = new ArrayList<>(Arrays.asList(raw));
         try
         {
-            Added added = xdoc.readOnly(resource -> outsideCall(resource, doc, offset, request.manual));
+            Added added = xdoc.readOnly(resource -> outsideCall(resource, doc, offset, request));
             if (added != null && !added.names.isEmpty())
             {
                 for (int i = 0; i < added.names.size(); i++)
@@ -630,7 +640,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             describeProposal(configurable, info, viewer, resource, hover);
         }
         int quote = literalQuote(doc, offset);
-        return quote >= 0 ? dedupe(result, request, doc, quote) : result.toArray(ICompletionProposal[]::new);
+        if (quote >= 0 && !request.fullValues.isEmpty())
+            result.removeIf(proposal -> !request.fullValues.contains(dedupeKey(proposal, doc, quote)));
+        if (quote < 0)
+            return result.toArray(ICompletionProposal[]::new);
+        result = new ArrayList<>(Arrays.asList(dedupe(result, request, doc, quote)));
+        addAllProperties(result, doc, quote, offset);
+        return result.toArray(ICompletionProposal[]::new);
     }
 
     /**
@@ -700,7 +716,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
     }
 
-    private static Added outsideCall(XtextResource resource, IDocument doc, int offset, boolean manual)
+    private static Added outsideCall(XtextResource resource, IDocument doc, int offset, Request request)
     {
         if (resource == null || resource.getParseResult() == null || offset <= 0)
             return null;
@@ -726,9 +742,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             return null;
         }
-        Analysis analysis = new Analysis(resource, manual, isRussian(resource), prefix, start);
+        Analysis analysis = new Analysis(resource, request.manual, isRussian(resource), prefix, start);
         analysis.outside(literal);
         analysis.finish();
+        request.rememberFull(analysis, prefix.substring(0, Segment.of(prefix).start));
         List<String> names = new ArrayList<>(analysis.values.values());
         List<Property> infos = new ArrayList<>();
         for (String name : names)
@@ -782,6 +799,49 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
         value = value.startsWith("\"") ? value.substring(1).trim() : value.trim(); //$NON-NLS-1$
         return value.isEmpty() ? null : lower(value);
+    }
+
+    /** ИР: список свойств в литерале без запятой; заменяется весь контекст внутри кавычек. */
+    private static void addAllProperties(List<ICompletionProposal> result, IDocument doc, int quote, int offset)
+    {
+        try
+        {
+            String typed = doc.get(quote + 1, offset - quote - 1);
+            List<String> names = new ArrayList<>();
+            if (typed.indexOf(',') < 0 && result.size() > 1 && result.size() < 100)
+            {
+                for (ICompletionProposal proposal : result)
+                {
+                    if (!(SmartContentAssistProcessor.unwrapProposal(proposal)
+                        instanceof ConfigurableCompletionProposal configurable))
+                        continue;
+                    int from = configurable.getReplacementOffset();
+                    String replacement = configurable.getReplacementString();
+                    if (from < quote || from > offset || replacement == null)
+                        continue;
+                    String name = doc.get(quote, from - quote) + replacement;
+                    if (name.startsWith("\"")) //$NON-NLS-1$
+                        name = name.substring(1);
+                    name = name.trim();
+                    String leaf = name.substring(name.lastIndexOf('.') + 1);
+                    if (!IDENTIFIER.matcher(leaf).matches() || in(leaf, "ЭтотОбъект", "ThisObject")) //$NON-NLS-1$ //$NON-NLS-2$
+                        continue;
+                    if (!names.contains(leaf))
+                        names.add(leaf);
+                }
+                names.sort(String.CASE_INSENSITIVE_ORDER);
+                if (!names.isEmpty())
+                {
+                    int wordStart = SmartContentAssistProcessor.computeIdentifierWordStart(doc, offset);
+                    result.add(BslAddedWordProposal.literalProperties(String.join(", ", names), quote + 1, //$NON-NLS-1$
+                        doc.get(quote + 1, wordStart - quote - 1)));
+                }
+            }
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            // Документ изменился во время расчёта — генератор не добавляется.
+        }
     }
 
     private static boolean isOurs(ICompletionProposal proposal, Request request)
@@ -977,6 +1037,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private void callInScope(EObject target, List<Expression> args, int index, String structureType)
         {
             checkCanceled();
+            if (structureType.isEmpty() && index == 0 && target instanceof Invocation invocation
+                && invocation.getMethodAccess() instanceof StaticFeatureAccess access
+                && in(access.getName(), "Тип", "Type")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                typeNameLiteral(invocation);
+                return;
+            }
             if (target instanceof IndexAccess access)
             {
                 if (structureType.isEmpty())
@@ -991,6 +1058,45 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 moduleMethodCall(call, structureType);
             else if (structureType.isEmpty())
                 platformCall(call);
+        }
+
+        /** ИР: ЗаполнитьТаблицуСлов, ветка Тип("…") с полным набором имён из внешнего вызова. */
+        void typeNameLiteral(Invocation invocation)
+        {
+            branch("typeNameLiteral"); //$NON-NLS-1$
+            EObject outer = enclosingCall(invocation);
+            if (!(outer instanceof Invocation outerInvocation) || outerInvocation.getMethodAccess() == null)
+                return;
+            FeatureAccess access = outerInvocation.getMethodAccess();
+            String method = access.getName();
+            List<TypeItem> resultTypes = new ArrayList<>();
+            for (FeatureEntry entry : featureEntries(access))
+                if (entry != null && entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Method platformMethod
+                    && !platformMethod.eIsProxy())
+                    resultTypes.addAll(platformMethod.getRetValType());
+            List<String> names = typeNames(resultTypes);
+            // ЛиИмяМетодаВозвращающегоЗначениеТипаИзПараметра — без ограничения номера параметра.
+            if (in(method, "Добавить", "Add", "Вставить", "Insert", "НайтиОбъект", "FindObject", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+                "ПолучитьОбъект", "GetObject")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                if (names.size() > 1)
+                    addAll(names);
+            }
+            else if (in(method, "УстановитьЭлементУправления", "SetControl")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                add(russian ? "ПолеВвода" : "TextBox"); //$NON-NLS-1$ //$NON-NLS-2$
+                add(russian ? "ПолеВыбора" : "ComboBox"); //$NON-NLS-1$ //$NON-NLS-2$
+                add(russian ? "Флажок" : "CheckBox"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            else if (in(method, "Выполнить", "Execute") && outerInvocation.getParams().indexOf(invocation) == 4 //$NON-NLS-1$ //$NON-NLS-2$
+                && access instanceof DynamicFeatureAccess dynamic
+                && hasType(typesOf(dynamic.getSource()), "DataCompositionTemplateComposer")) //$NON-NLS-1$
+            {
+                add(russian ? "ГенераторМакетаКомпоновкиДанных" : "DataCompositionTemplateGenerator"); //$NON-NLS-1$ //$NON-NLS-2$
+                add(russian ? "ГенераторМакетаКомпоновкиДанныхДляКоллекцииЗначений" //$NON-NLS-1$
+                    : "DataCompositionValueCollectionTemplateGenerator"); //$NON-NLS-1$
+            }
+            full = !values.isEmpty();
         }
 
         /** {@code [""]} у структуры: её ключи ({@code ЗначенияТекстовогоПеречисленияИзСтруктуры}). */

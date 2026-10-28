@@ -22,6 +22,7 @@ import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
+import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Function;
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
@@ -57,14 +58,69 @@ final class CommonModuleAssistGroups
     {
     }
 
-    /** Слова {@code База_} групп модулей, доступных в месте {@code offset}; по алфавиту. */
-    static List<String> groupWords(XtextResource resource, int offset)
+    /** Слова {@code База_} и описания всех доступных участников; группы и модули — по алфавиту. */
+    static Map<String, String> groupWords(XtextResource resource, int offset)
     {
-        List<String> result = new ArrayList<>();
+        Map<String, String> result = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         for (Map.Entry<String, List<CommonModule>> group : groups(resource, offset).entrySet())
-            result.add(group.getKey() + "_"); //$NON-NLS-1$
-        result.sort(String.CASE_INSENSITIVE_ORDER);
+        {
+            String word = group.getKey() + "_"; //$NON-NLS-1$
+            List<String> names = new ArrayList<>();
+            for (CommonModule module : group.getValue())
+                names.add(module.getName());
+            names.sort(String.CASE_INSENSITIVE_ORDER);
+            result.put(word, word + " - группа общих модулей (" + names.size() + "):\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + String.join("\n", names)); //$NON-NLS-1$
+        }
         return result;
+    }
+
+    /** Область виртуального имени, которое не разрешается моделью EDT. */
+    static org.eclipse.jface.text.IRegion groupHoverRegion(ITextViewer viewer, int offset)
+    {
+        if (viewer == null || viewer.getDocument() == null)
+            return null;
+        var document = viewer.getDocument();
+        if (offset < 0 || offset > document.getLength()
+            || SmartContentAssistProcessor.isCommentAssistContext(document, offset)
+            || SmartContentAssistProcessor.isStringLiteralAssistContext(document, offset))
+            return null;
+        try
+        {
+            int start = offset;
+            int end = offset;
+            while (start > 0 && SmartContentAssistProcessor.isFilterChar(document.getChar(start - 1)))
+                start--;
+            while (end < document.getLength() && SmartContentAssistProcessor.isFilterChar(document.getChar(end)))
+                end++;
+            if (start == end || start > 0 && document.getChar(start - 1) == '.'
+                || !GROUP_WORD.matcher(document.get(start, end - start)).matches())
+                return null;
+            return new org.eclipse.jface.text.Region(start, end - start);
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            Global.tempLog("common-module-group-hint", "region error " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** То же описание, что у строки группы в автодополнении. */
+    static BslEditorHoverHook.ContentHover groupHover(ITextViewer viewer, int offset)
+    {
+        var region = groupHoverRegion(viewer, offset);
+        if (region == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        return document.readOnly(resource ->
+        {
+            if (resource == null)
+                return null;
+            String word = document.get(region.getOffset(), region.getLength());
+            String info = groupWords(resource, region.getOffset()).get(word);
+            Global.tempLog("common-module-group-hint", "hover word=" + word + " found=" + (info != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return info == null ? null : new BslEditorHoverHook.ContentHover(info,
+                parent -> new org.eclipse.jface.text.DefaultInformationControl(parent));
+        });
     }
 
     /**
@@ -199,9 +255,19 @@ final class CommonModuleAssistGroups
         if (configuration == null)
             return result;
         Method method = methodAt(resource, offset);
-        Environments environments = method != null ? method.environments()
-            : !resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module module
-                ? module.environments() : null;
+        Module sourceModule = !resource.getContents().isEmpty()
+            && resource.getContents().get(0) instanceof Module module ? module : null;
+        Environments moduleEnvironments = sourceModule != null ? sourceModule.environments() : null;
+        Environments environments = method != null ? method.environments() : moduleEnvironments;
+        // «НаКлиенте» у метода содержит все клиенты; модуль формы определяет вид приложения.
+        if (environments != null && moduleEnvironments != null)
+            environments = environments.intersect(moduleEnvironments);
+        IBslPreferences preferences = resource.getResourceServiceProvider().get(IBslPreferences.class);
+        Environments loadedEnvironments = preferences != null && !resource.getContents().isEmpty()
+            ? preferences.getLoadEnvs(resource.getContents().get(0)) : null;
+        // environments() включает и контексты, не выбранные в настройках проекта EDT.
+        if (environments != null && loadedEnvironments != null)
+            environments = loadedEnvironments.intersect(environments);
         boolean server = environments == null || environments.containsAny(Environments.ALL_SERVERS);
         boolean managedClient = environments != null && environments.containsAny(Environments.MNG_CLIENTS);
         boolean ordinaryClient = environments != null && environments.contains(Environment.CLIENT);
@@ -209,9 +275,10 @@ final class CommonModuleAssistGroups
         {
             if (module == null || module.getName() == null || module.isGlobal())
                 continue;
-            if (module.isServerCall() || server && module.isServer()
+            boolean moduleAvailable = module.isServerCall() || server && module.isServer()
                 || managedClient && module.isClientManagedApplication()
-                || ordinaryClient && module.isClientOrdinaryApplication())
+                || ordinaryClient && module.isClientOrdinaryApplication();
+            if (moduleAvailable)
                 result.add(module);
         }
         return result;

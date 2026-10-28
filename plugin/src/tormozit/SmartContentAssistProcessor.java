@@ -590,33 +590,31 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
-     * Извлекает тип ресивера из кэша списка автодополнения.
-     *
-     * <p>1С:EDT формирует displayString элементов как:
-     * {@code <Имя> : <ТипЗначения> ~ <ТипРодителя>}
-     * Часть после {@code ~} — это расчётный тип выражения слева от точки.
-     * Собираем уникальные значения и возвращаем {@code "(N) Тип"}.
-     *
-     * @return метка вида {@code "(3) ОбъектМетаданных"} или {@code ""} если кэш пуст / нет метаданных о типе
+     * Полный тип выражения из фонового снимка: UI не обращается к модели EDT.
+     * Родители строк списка нужны только для виртуального контекста (например, группы
+     * общих модулей), для которого снимок не определил тип выражения.
      */
-    public String resolveReceiverTypeLabel()
+    public String resolveReceiverTypeLabel(IDocument document, int caret)
     {
-        java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
-        if (types.isEmpty())
-            types = collectParentTypesFromProposals(memberStockFullList);
-
+        List<String> fullTypes = BslExpectedTypePremiums.parentTypeNamesAt(document, caret);
+        if (fullTypes == null)
+            return ""; //$NON-NLS-1$
+        java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>(fullTypes);
         if (types.isEmpty())
         {
-            return ""; //$NON-NLS-1$
+            types = collectParentTypesFromProposals(fullListCache);
+            if (types.isEmpty())
+                types = collectParentTypesFromProposals(memberStockFullList);
         }
-
+        Global.tempLog("assist-parent-type", "full=" + fullTypes + " displayed=" + types); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (types.isEmpty())
+            return ""; //$NON-NLS-1$
         if (types.size() == 1)
             return types.iterator().next();
-
         return "(" + types.size() + ") " + String.join(", ", types); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
-    /** Больше одного родителя у строк текущего списка — те же, что в {@link #resolveReceiverTypeLabel}. */
+    /** Несколько родителей именно у строк списка — для пояснения конкретного члена в боковой подсказке. */
     boolean hasSeveralParentTypes()
     {
         java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
@@ -841,6 +839,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private static boolean isSameSignatureExtension(ICompletionProposal shorter,
         List<String> shorterParams, ICompletionProposal longer, List<String> longerParams)
     {
+        if (!signatureGroupKey(shorter).equals(signatureGroupKey(longer)))
+            return false;
         ParamSet a = paramSetSignatureOf(shorter);
         ParamSet b = paramSetSignatureOf(longer);
         if (a != null && b != null)
@@ -1078,6 +1078,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         if (emptyForm == null || paramForm == null)
             return null;
+        if (!signatureGroupKey(emptyForm).equals(signatureGroupKey(paramForm)))
+            return null;
         // Голое слово (тип «Строка») — не перегрузка метода «Строка(…)».
         if (parseProposalSignature(displayString(unwrapProposal(emptyForm))).indexOf('(') < 0)
             return null;
@@ -1122,7 +1124,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
-     * Схлопывание перегрузок одного имени без подрезки вставки; слова ИР не трогает.
+     * Схлопывание перегрузок одного имени и родителя без подрезки вставки; слова ИР не трогает.
      * Те же объекты proposal (identity).
      */
     private static List<ICompletionProposal> collapseSameNameOverlaps(
@@ -1136,7 +1138,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             // Слова ИР и добавленные премиями — свои, не перегрузки
             if (unwrapProposal(p) instanceof IrCompletionProposal || p instanceof BslAddedWordProposal)
                 continue;
-            String key = dedupKey(p);
+            String key = signatureGroupKey(p);
             if (key.isEmpty())
                 continue;
             byKey.computeIfAbsent(key.toLowerCase(java.util.Locale.ROOT), k -> new ArrayList<>())
@@ -1164,7 +1166,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 result.add(p);
                 continue;
             }
-            String key = dedupKey(p);
+            String key = signatureGroupKey(p);
             if (key.isEmpty())
             {
                 result.add(p);
@@ -7256,6 +7258,21 @@ return stripEmptyPlaceholderProposals(result);
     static String dedupKeyForMerge(ICompletionProposal proposal)
     {
         return dedupKey(proposal);
+    }
+
+    /**
+     * Группа сигнатур: имя и родитель из исходной подписи EDT. Одноимённые методы
+     * разных модулей не являются перегрузками друг друга. Общий ключ мёржа не меняем.
+     */
+    static String signatureGroupKey(ICompletionProposal proposal)
+    {
+        String name = dedupKey(proposal);
+        if (name.isEmpty())
+            return name;
+        String display = displayString(unwrapProposal(proposal));
+        int ownerSep = display != null ? display.indexOf(" ~ ") : -1; //$NON-NLS-1$
+        String owner = ownerSep >= 0 ? display.substring(ownerSep + 3).trim() : ""; //$NON-NLS-1$
+        return (name + '\n' + owner).toLowerCase(java.util.Locale.ROOT);
     }
 
     private static int countIrProposals(ICompletionProposal[] proposals)

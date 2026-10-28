@@ -265,7 +265,7 @@ final class BslExpectedTypePremiums
      */
     private record Scene(Expectation expectation, String statisticsContext, boolean insideExpression,
         Map<String, Integer> frequencies, String receiverLine, String expectedTypeText, Map<String, String> predefinedTypes,
-        Facts facts, List<String> literalTypes)
+        Facts facts, List<String> literalTypes, List<String> parentDisplayTypes)
     {
         /** Типы приёмника без слишком широких ({@link #BROAD_TYPES}), в нижнем регистре. */
         Set<String> strongReceiverTypes()
@@ -401,6 +401,7 @@ final class BslExpectedTypePremiums
      * @param moduleType           вид модуля; {@code null} — не определён
      * @param commonModuleGroups   слова {@code База_} групп общих модулей глобального контекста
      *                             ({@link CommonModuleAssistGroups}); после точки — пусто
+     * @param methodParameters    имена параметров текущего метода в порядке объявления
      * @param tempTableColumns     родитель — {@code Колонки} временной таблицы менеджера ({@code М.Таблицы["Вт"]}): её
      *                             колонки (метаданные {@code ВременнаяТаблицаЗапроса} ИР); {@code null} — не определены
      */
@@ -408,7 +409,8 @@ final class BslExpectedTypePremiums
         boolean parentSystemEnum, Set<String> constructorTypes, List<String> nestedTypes,
         Set<String> objectPropertyEnums, boolean formClient, boolean structureConstructor, List<Local> locals,
         List<Local> receiverProperties, List<String> selectionTypes, List<String> queryTotals, boolean betweenMethods,
-        ModuleType moduleType, List<String> commonModuleGroups, List<String> tempTableColumns)
+        ModuleType moduleType, Map<String, String> commonModuleGroups, List<String> methodParameters,
+        List<String> tempTableColumns)
     {
     }
 
@@ -442,6 +444,9 @@ final class BslExpectedTypePremiums
     /** Премия слова для текущего места; {@code 0} — нет. */
     static int premiumOf(ICompletionProposal proposal)
     {
+        // ИР: генератор списка свойств ниже обычных слов, в том числе внутри литералов.
+        if (proposal != null && "<СписокВсехСвойств>".equals(SmartContentAssistProcessor.filterMatchName(proposal))) //$NON-NLS-1$
+            return -1;
         Integer queryPremium = BslQueryLiteralSupport.premiumOf(proposal);
         if (queryPremium != null)
             return queryPremium.intValue();
@@ -491,8 +496,12 @@ final class BslExpectedTypePremiums
         Set<ICompletionProposal> present = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         for (ICompletionProposal proposal : raw)
         {
-            if (proposal instanceof BslAddedWordProposal)
+            if (proposal instanceof BslAddedWordProposal word)
             {
+                if (word.isSuppliedByLiteralProvider())
+                {
+                    continue;
+                }
                 if (added.contains(proposal))
                     present.add(proposal);
                 else
@@ -504,7 +513,8 @@ final class BslExpectedTypePremiums
         List<ICompletionProposal> result = new ArrayList<>(raw.length + added.size());
         for (ICompletionProposal proposal : raw)
         {
-            if (!(proposal instanceof BslAddedWordProposal) || present.contains(proposal))
+            if (!(proposal instanceof BslAddedWordProposal word) || word.isSuppliedByLiteralProvider()
+                || present.contains(proposal))
                 result.add(proposal);
         }
         for (BslAddedWordProposal proposal : added)
@@ -535,6 +545,26 @@ final class BslExpectedTypePremiums
         catch (Exception e)
         {
             return false;
+        }
+    }
+
+    /**
+     * Полные типы родителя из готового фонового снимка, включая примитивные типы без членов.
+     * {@code null} — снимок места ещё не готов; пустой список — типы не определены.
+     */
+    static List<String> parentTypeNamesAt(IDocument document, int caret)
+    {
+        Snapshot snapshot = current;
+        try
+        {
+            Context context = document != null && caret >= 0 ? contextAt(document, caret) : null;
+            if (snapshot == null || !snapshot.context().sameAs(context))
+                return null;
+            return snapshot.scene().parentDisplayTypes();
+        }
+        catch (Exception error)
+        {
+            return null;
         }
     }
 
@@ -820,6 +850,10 @@ final class BslExpectedTypePremiums
                         Display display = Display.getDefault();
                         if (display != null && !display.isDisposed())
                             display.asyncExec(() -> {
+                                ITextViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+                                if (viewer instanceof org.eclipse.jface.text.source.SourceViewer source
+                                    && viewer.getDocument() == context.document())
+                                    ContentAssistPopupUi.updateContextTypeLabel(source);
                                 ContentAssistSessionReloader.refreshPopupIfOpen();
                                 ContentAssistSessionReloader.onContextPremiumsReady(context.document());
                             });
@@ -981,7 +1015,7 @@ final class BslExpectedTypePremiums
             // Здесь строки списка — имена типов, а не значения/конструкции встроенного языка.
             // ИменаВложенныхТипов не проходят фильтр Expectation: «Неопределено» тоже имя типа.
             return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
-                Collections.emptyMap(), null, aliases);
+                Collections.emptyMap(), null, aliases, List.of());
         }
         ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
         if (site != null && !site.contains(context.start()))
@@ -995,7 +1029,8 @@ final class BslExpectedTypePremiums
             : memberFrequencies(resource, context);
         return new Scene(expectation, statisticsContext, insideExpression, frequencies,
             receiverTypeLine(expectation, resource), String.join(", ", receiverTypes(expectation)), //$NON-NLS-1$
-            predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes), List.of());
+            predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes), List.of(),
+            displayTypeNames(parentTypes, resource));
     }
 
     /** Приставка ключа {@link Scene#predefinedTypes} для предопределённых значений ссылочного типа. */
@@ -2002,12 +2037,16 @@ final class BslExpectedTypePremiums
             ? BslTempTableSessions.columnNames(findExpression(resource, context.start(), context.anchor() - 1),
                 org.eclipse.xtext.util.CancelIndicator.NullImpl)
             : null;
+        List<String> methodParameters = new ArrayList<>();
+        if (method != null)
+            for (FormalParam parameter : method.getFormalParams())
+                methodParameters.add(parameter.getName());
         return new Facts(method != null ? bodyStartLine(document, method) : -1, typeNames(parentItems),
             elements != null && !elements.allTypes().isEmpty(), parentIndexed, parentSystemEnum, constructorTypes,
             nestedTypes, objectPropertyEnums, formClient, structureConstructor, locals, receiverProperties,
             selectionTypes, queryTotals, method == null, module != null ? module.getModuleType() : null,
-            context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : List.of(),
-            tempTableColumns);
+            context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : Map.of(),
+            methodParameters, tempTableColumns);
     }
 
     /** {@code мНомерПервойСтрокиТелаМетода}: строка после закрывающей скобки параметров (с 0); {@code -1} — нет. */
@@ -3012,6 +3051,17 @@ final class BslExpectedTypePremiums
                 if (!selected.isBlank())
                     return false;
             }
+            // ИР: локальный контекст, вне литерала, параметры текущего метода (не вызываемого).
+            if (parent.isEmpty() && facts.methodParameters().size() > 1)
+                generator("<СписокПараметров>", -1, String.join(", ", facts.methodParameters()), //$NON-NLS-1$ //$NON-NLS-2$
+                    BslAddedWordProposal.Absorb.CONTEXT, -1, false, false);
+            List<String> parentTypes = facts.parentTypes();
+            boolean checkType = singleExpression && !parent.isEmpty()
+                && !lower(parentTypes.isEmpty() ? "" : parentTypes.get(0)).startsWith("общиймодуль") //$NON-NLS-1$ //$NON-NLS-2$
+                && (parentTypes.size() > 2 || parentTypes.size() > 1
+                    && !containsIgnoreCase(parentTypes, UNDEFINED));
+            if (checkType)
+                checkType();
             boolean firstWordOfLine = lineBeforeWord.isBlank();
             int premiumShort = firstWordOfLine ? 2 : 3;
             int premiumLong = firstWordOfLine ? 3 : 2;
@@ -3263,12 +3313,14 @@ final class BslExpectedTypePremiums
         {
             if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
                 return;
-            for (String name : facts.commonModuleGroups())
+            for (Map.Entry<String, String> group : facts.commonModuleGroups().entrySet())
             {
+                String name = group.getKey();
                 String key = lower(name);
                 if (!proposals.containsKey(key))
                     added.putIfAbsent(key, new BslAddedWordProposal(name, BslAddedWordProposal.Kind.PROPERTY, name,
-                        BslAddedWordProposal.Absorb.WORD, -1, "", null, false, false, true)); //$NON-NLS-1$
+                        BslAddedWordProposal.Absorb.WORD, -1, "", null, false, false, true) //$NON-NLS-1$
+                            .withAdditionalInfo(group.getValue()));
             }
         }
 
@@ -3610,6 +3662,18 @@ final class BslExpectedTypePremiums
         }
 
         // ---- Слова-генераторы ------------------------------------------------------------------------
+
+        /** ИР: проверка одного из нескольких типов родителя, каретка — внутри имени типа. */
+        private void checkType()
+        {
+            String name = "<ПроверитьТип>"; //$NON-NLS-1$
+            String key = lower(name);
+            String header = "Если ТипЗнч(" + parent + ") = Тип(\"<?>\") Тогда"; //$NON-NLS-1$ //$NON-NLS-2$
+            words.putIfAbsent(key, new Word(key, name, List.of(), false, false));
+            added.put(key, new BslAddedWordProposal(name, BslAddedWordProposal.Kind.CONSTRUCTION, header,
+                BslAddedWordProposal.Absorb.LINE, -1, "", "КонецЕсли;", true, false, false)); //$NON-NLS-1$ //$NON-NLS-2$
+            add(result, words, key, 0, false);
+        }
 
         /** {@code <СоздатьПеременную>}: выделение — штатное извлечение EDT; без выделения — создание по ожидаемому типу. */
         private void createVariable(String selected, List<String> types)
@@ -4301,6 +4365,20 @@ final class BslExpectedTypePremiums
         String name = item instanceof DuallyNamedElement dually && dually.getNameRu() != null
             && !dually.getNameRu().isEmpty() ? dually.getNameRu() : item.getName();
         return name != null ? SmartContentAssistProcessor.localizeAssistTypeSegment(name) : ""; //$NON-NLS-1$
+    }
+
+    /** Порядок только для показа: общий с подсказками и полями типа, без смены главного типа в Facts. */
+    private static List<String> displayTypeNames(List<TypeItem> items, XtextResource resource)
+    {
+        if (items.size() < 2 || resource.getContents().isEmpty())
+            return typeNames(items);
+        int[] order = TypeDescriptionPresentationHook.displayOrder(items, resource.getContents().get(0));
+        if (order == null)
+            return typeNames(items);
+        List<TypeItem> ordered = new ArrayList<>(items.size());
+        for (int index : order)
+            ordered.add(items.get(index));
+        return typeNames(ordered);
     }
 
     private static List<String> typeNames(List<TypeItem> items)

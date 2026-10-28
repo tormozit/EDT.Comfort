@@ -317,13 +317,13 @@ public class SmartCompletionProposal implements
     private static java.lang.ref.WeakReference<java.util.List<ICompletionProposal>> severalSignatureList =
         new java.lang.ref.WeakReference<>(null);
     private static int severalSignatureListSize = -1;
-    /** Имена (ключ dedup), у которых в окне больше одной строки со скобками. */
+    /** Ключи имени и родителя, у которых в окне больше одной строки со скобками. */
     private static java.util.Set<String> severalSignatureKeys = java.util.Collections.emptySet();
 
     /**
      * У имени несколько сигнатур: перегрузки одной сигнатуры к показу уже схлопнуты
      * (см. {@code SmartContentAssistProcessor.collapseOptionalParamOverlaps}), значит,
-     * оставшиеся в окне строки со скобками и тем же именем — разные сигнатуры. Модель не
+     * оставшиеся в окне строки со скобками, тем же именем и родителем — разные сигнатуры. Модель не
      * читаем: сигнатуры конструктора без {@code readOnly} не получить, а это отрисовка.
      */
     private boolean hasSeveralSignatures(String sourceDisplay)
@@ -362,7 +362,7 @@ public class SmartCompletionProposal implements
 
     private static String rowKey(ICompletionProposal proposal)
     {
-        return SmartContentAssistProcessor.dedupKeyForMerge(proposal).toLowerCase(java.util.Locale.ROOT);
+        return SmartContentAssistProcessor.signatureGroupKey(proposal);
     }
 
     /**
