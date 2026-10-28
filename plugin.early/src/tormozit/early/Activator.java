@@ -39,6 +39,7 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        QueryNullCastWeaving.install(context);
         FormDataWeaving.install(context);
         TypeComputationWeaving.install(context);
         DynamicFeatureWeaving.install(context);
@@ -3159,6 +3160,83 @@ public final class Activator
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
                 "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
             mv.visitTypeInsn(Opcodes.CHECKCAST, castTo);
+        }
+    }
+    /** CastOperatorChecker из com._1c.g5.v8.dt.ql 22.1.0.v202605050943: исключение для NULL (#914). */
+    private static final class QueryNullCastWeaving implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.ql.typesystem.CastOperatorChecker"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.query.nullCast"; //$NON-NLS-1$
+        private static final String CROSS_DESCRIPTOR =
+            "(Lcom/_1c/g5/v8/dt/ql/typesystem/TypeDescriptionSource;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/ql/typesystem/TypeDescriptionSource;Lorg/eclipse/emf/ecore/EObject;)Z"; //$NON-NLS-1$
+        private static final String CHECK_DESCRIPTOR =
+            "(Lorg/eclipse/emf/ecore/EObject;Lcom/_1c/g5/v8/dt/ql/typesystem/IExpressionTypeChecker$CheckResult;" //$NON-NLS-1$
+            + "Ljava/util/Map;)Lcom/_1c/g5/v8/dt/ql/typesystem/IExpressionTypeChecker$CheckResult;"; //$NON-NLS-1$
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (java.util.function.Predicate<Object>) object -> false);
+            context.registerService(WeavingHook.class, new QueryNullCastWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass type)
+        {
+            if (type.getState() != WovenClass.TRANSFORMING || !TARGET.equals(type.getClassName()))
+                return;
+            try
+            {
+                byte[] bytes = rewrite(type.getBytes());
+                if (bytes != null)
+                    type.setBytes(bytes);
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                // При несовместимой версии EDT остаётся штатная проверка.
+            }
+        }
+        private static byte[] rewrite(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] calls = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"checkType".equals(name) || !CHECK_DESCRIPTOR.equals(descriptor)) //$NON-NLS-1$
+                        return method;
+                    return new MethodVisitor(Opcodes.ASM9, method)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name,
+                            String descriptor, boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                            if (opcode != Opcodes.INVOKEVIRTUAL || !TARGET.replace('.', '/').equals(owner)
+                                || !"isCrossCompoundType".equals(name) || !CROSS_DESCRIPTOR.equals(descriptor)) //$NON-NLS-1$
+                                return;
+                            // В стеке штатный boolean. Добавляем «или операнд — NULL», без новых ветвей.
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
+                                "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitLdcInsn(CALLBACK);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
+                                "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", //$NON-NLS-1$
+                                "test", "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitInsn(Opcodes.IOR);
+                            calls[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            return calls[0] == 1 ? writer.toByteArray() : null;
         }
     }
 }

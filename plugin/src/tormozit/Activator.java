@@ -27,6 +27,8 @@ import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
+import com._1c.g5.v8.dt.ql.model.CastOperationExpression;
+import com._1c.g5.v8.dt.ql.model.NullLiteralExpression;
 import com._1c.g5.wiring.AbstractGuiceAwareExecutableExtensionFactory;
 import com._1c.g5.wiring.AbstractServiceAwareModule;
 import com.google.inject.Guice;
@@ -65,6 +67,7 @@ public class Activator extends AbstractUIPlugin
         super.start(context);
         instance = this;
         BuiltinCheckReplacements.start(context);
+        QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
         FunctionReturnTypes.installLocalContextInvalidation();
         TypeDescriptionPresentationHook.install(context);
@@ -229,6 +232,7 @@ public class Activator extends AbstractUIPlugin
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
+        QueryNullCastFix.stop();
         IRApplication.disconnectAll();
 
         ContentAssistManager mgr = ContentAssistManager.getInstance();
@@ -480,6 +484,32 @@ public class Activator extends AbstractUIPlugin
             if (calls[0] == 0)
                 throw new IllegalStateException("В CheckExecutor не найдены вызовы isEnabled"); //$NON-NLS-1$
             return writer.toByteArray();
+        }
+    }
+
+    /**
+     * Приведение NULL допустимо независимо от целевого типа (issue 914).
+     * В com._1c.g5.v8.dt.ql 22.1.0.v202605050943 CastOperatorChecker.checkType сначала
+     * рассчитывает тип результата и проверяет операнд и параметры типа, затем единственным
+     * вызовом isCrossCompoundType решает, выдавать ли «Тип приведения не найден в составном типе».
+     * Дополняем только результат этого вызова; остальные проверки и тип результата сохраняются.
+     * По Ql.xtext обычные скобки не создают отдельного узла: (NULL) тоже NullLiteralExpression.
+     */
+    private static final class QueryNullCastFix
+    {
+        private static final String CALLBACK = "tormozit.query.nullCast"; //$NON-NLS-1$
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK, (Predicate<Object>)object ->
+                object instanceof CastOperationExpression cast
+                    && cast.getExpression() instanceof NullLiteralExpression);
+        }
+
+        static void stop()
+        {
+            // Загруженный класс EDT продолжает обращаться к мосту после остановки плагина.
+            System.getProperties().put(CALLBACK, (Predicate<Object>)object -> false);
         }
     }
 
