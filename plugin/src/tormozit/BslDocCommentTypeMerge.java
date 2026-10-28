@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.common.notify.impl.AdapterImpl;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.util.Tuples;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
@@ -212,7 +213,6 @@ public final class BslDocCommentTypeMerge
         }
         catch (Throwable t)
         {
-            Global.tempLogException("doc-defined-form-types", "conversion failed", t); //$NON-NLS-1$ //$NON-NLS-2$
             return types;
         }
     }
@@ -261,7 +261,6 @@ public final class BslDocCommentTypeMerge
 
         static Collection<?> convert(Collection<?> types, EObject context)
         {
-            Global.tempLog("doc-defined-form-types", "convert count=" + types.size()); //$NON-NLS-1$ //$NON-NLS-2$
             List<TypeItem> converted = new ArrayList<>();
             IResourceServiceProvider services = null;
             IUObjectConverterServiceProvider converter = null;
@@ -271,8 +270,6 @@ public final class BslDocCommentTypeMerge
                 if (!(raw instanceof TypeItem item))
                     return types;
                 TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, context);
-                Global.tempLog("doc-defined-form-types", "candidate=" + McoreUtil.getTypeName(resolved) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " class=" + resolved.eClass().getName() + " proxy=" + resolved.eIsProxy()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (resolved instanceof TypeSet typeSet && !typeSet.eIsProxy())
                 {
                     // types(context) раскрывает и определяемые типы, и общие категории
@@ -281,8 +278,6 @@ public final class BslDocCommentTypeMerge
                     List<Type> base = new ArrayList<>(typeSet.types(context));
                     if (base.isEmpty())
                         base.addAll(typeSet.getBaseTypes());
-                    Global.tempLog("doc-defined-form-types", "set types=" + typeSet.getTypes().size() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " baseTypes=" + typeSet.getBaseTypes().size() + " selected=" + base.size()); //$NON-NLS-1$ //$NON-NLS-2$
                     Collection<?> convertedBase = convert(base, context);
                     // Определяемый тип сохраняем, если ни одна альтернатива не преобразована.
                     if (!base.equals(new ArrayList<>(convertedBase)))
@@ -311,8 +306,6 @@ public final class BslDocCommentTypeMerge
                     // Тот же конвертер, что FormImplicitRefInferrer применяет к реквизитам
                     // настоящей формы: свойства, табличные части и методы данных формы.
                     boolean available = converter.hasConverter(resolved, version);
-                    Global.tempLog("doc-defined-form-types", "converter type=" + McoreUtil.getTypeName(resolved) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " available=" + available); //$NON-NLS-1$
                     if (available)
                     {
                         TypeItem data = converter.convert(resolved, version, context.eResource());
@@ -839,6 +832,28 @@ public final class BslDocCommentTypeMerge
         return resolved instanceof TypeItem typeItem ? typeItem : item;
     }
 
+    /** Исходные варианты объединённого контекста: для сравнения типов, а не только их подписей. */
+    public static List<TypeItem> alternatives(TypeItem type)
+    {
+        for (var adapter : type.eAdapters())
+            if (adapter instanceof MergedAlternatives merged)
+                return merged.types;
+        return List.of(type);
+    }
+
+    private static final class MergedAlternatives extends AdapterImpl
+    {
+        final List<TypeItem> types;
+
+        MergedAlternatives(List<? extends TypeItem> sources)
+        {
+            List<TypeItem> flattened = new ArrayList<>();
+            for (TypeItem source : sources)
+                flattened.addAll(alternatives(source));
+            types = List.copyOf(flattened);
+        }
+    }
+
     private static Type mergeContexts(List<Type> contexts)
     {
         Type primary = pickPrimary(contexts);
@@ -859,6 +874,7 @@ public final class BslDocCommentTypeMerge
         ctx.getRefMethods().addAll(methods);
         ctx.getRefProperties().addAll(properties);
         extended.setContextDef(ctx);
+        extended.eAdapters().add(new MergedAlternatives(contexts));
         BslFormDataTypes.inheritOrigins(extended, contexts);
         return extended;
     }
@@ -897,6 +913,9 @@ public final class BslDocCommentTypeMerge
         else
             ctx.getRefProperties().addAll(properties);
         copy.setContextDef(ctx);
+        List<TypeItem> alternatives = alternatives(source);
+        if (alternatives.size() != 1 || alternatives.get(0) != source)
+            copy.eAdapters().add(new MergedAlternatives(alternatives));
         BslFormDataTypes.inheritOrigins(copy, List.of(source));
         return copy;
     }

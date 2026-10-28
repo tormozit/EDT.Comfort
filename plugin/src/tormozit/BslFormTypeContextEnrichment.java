@@ -131,14 +131,10 @@ public final class BslFormTypeContextEnrichment
             return;
         if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
         {
-            Global.tempLog("form-attribute-types", "early callback installed; inferrer=" //$NON-NLS-1$ //$NON-NLS-2$
-                + System.getProperties().get("tormozit.typeComputation.early." + ATTRIBUTE_INFERRER) //$NON-NLS-1$
-                + " computer=" + System.getProperties().get("tormozit.typeComputation.early." + PROPERTY_COMPUTER)); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new AttributeTypesTransformer(),
             ATTRIBUTE_INFERRER, PROPERTY_COMPUTER);
-        Global.tempLog("form-attribute-types", "transformer installed=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         if (!ok)
             attributeTransformerInstalled.set(false);
     }
@@ -153,9 +149,6 @@ public final class BslFormTypeContextEnrichment
             : property != null && property.getSource() instanceof FormAttribute formAttribute ? formAttribute : null;
         if (property == null || attribute == null || attribute.eIsProxy())
             return result;
-        Global.tempLog("form-attribute-types", "attribute=" + attribute.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " declared=" + (attribute.getValueType() == null ? "<null>" : attribute.getValueType().getTypes().size()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " computed=" + property.getTypes().size()); //$NON-NLS-1$
         if (!property.getTypes().isEmpty() || attribute.getValueType() == null
             || !attribute.getValueType().getTypes().isEmpty())
             return result;
@@ -163,7 +156,6 @@ public final class BslFormTypeContextEnrichment
         Version version = versions.getRuntimeVersionOrDefault(attribute, Version.LATEST);
         IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
         TypeItem arbitrary = (TypeItem)provider.getProxy("Arbitrary"); //$NON-NLS-1$
-        Global.tempLog("form-attribute-types", "attribute=" + attribute.getName() + " default=Arbitrary"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // Чтение уже сохранённого BM-контекста может идти в read-only транзакции.
         if (result instanceof List<?>)
             return List.of(arbitrary);
@@ -188,8 +180,6 @@ public final class BslFormTypeContextEnrichment
         Method method = EcoreUtil2.getContainerOfType(access, Method.class);
         if (method == null)
             return args[0];
-        Global.tempLog("form-attribute-types", "access attribute=" + attribute.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " uri=" + EcoreUtil.getURI(access)); //$NON-NLS-1$
         Set<StaticFeatureAccess> visiting = ATTRIBUTE_ACCESS_VISITING.get();
         if (!visiting.add(access))
             return args[0];
@@ -213,13 +203,10 @@ public final class BslFormTypeContextEnrichment
             }
             if (!reached || assigned == null)
             {
-                Global.tempLog("form-attribute-types", "access no dominating assignment"); //$NON-NLS-1$ //$NON-NLS-2$
                 return args[0];
             }
             TypesComputer computer = (TypesComputer)args[3];
             List<TypeItem> computed = computer.computeTypes(assigned, (Environments)args[4]);
-            Global.tempLog("form-attribute-types", "access assignment=" + EcoreUtil.getURI(assigned) //$NON-NLS-1$ //$NON-NLS-2$
-                + " result=" + computed.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
             return computed.isEmpty() ? args[0] : new ArrayList<>(computed);
         }
         finally

@@ -1117,6 +1117,12 @@ public final class Activator
             CheckRecomputeNotifications diagnostics =
                 new CheckRecomputeNotifications(log, context.getBundle().getSymbolicName());
             System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
+            DeferredCheckResults results = new DeferredCheckResults(context, diagnostics);
+            if (results.load())
+            {
+                System.getProperties().put(CALLBACK + ".defer", (Consumer<Object[]>) results::defer);
+                System.getProperties().put(CALLBACK + ".results", (Function<Object[], Object>) results::access);
+            }
             context.registerService(WeavingHook.class, diagnostics, null);
             diagnostics.write("installed; earlyBundle=" + context.getBundle().getVersion() //$NON-NLS-1$
                 + "; waiting for CheckScheduler, ProjectCheckMetadataManager, DerivedDataManager", null); //$NON-NLS-1$
@@ -1134,6 +1140,7 @@ public final class Activator
                 ClassReader reader = new ClassReader(wovenClass.getBytes());
                 ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
                 int[] matches = {0};
+                int[] deferredCalls = {0};
                 boolean[] metadataField = {!METADATA.equals(name)};
                 reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
                 {
@@ -1183,6 +1190,44 @@ public final class Activator
                                 visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
                                     "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
                             }
+
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                // Единственный заказ по изменению поставщиков; clearance остаётся штатным.
+                                if (METADATA.equals(name) && opcode == Opcodes.INVOKEINTERFACE
+                                    && owner.equals("com/e1c/g5/v8/dt/check/ICheckScheduler")
+                                    && method.equals("scheduleValidation")
+                                    && descriptor.equals("(" + REQUEST + MONITOR + ")V")
+                                    && System.getProperties().containsKey(CALLBACK + ".defer"))
+                                {
+                                    deferredCalls[0]++;
+                                    // Сохраняем пять исходных аргументов, включая receiver, для fail-open.
+                                    for (int i = 4; i >= 0; i--)
+                                        super.visitVarInsn(Opcodes.ASTORE, 5 + i);
+                                    EarlyWeaving.emitGetProperty(this, CALLBACK + ".defer", "java/util/function/Consumer");
+                                    super.visitLdcInsn(6);
+                                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    for (int i = 0; i < 5; i++)
+                                    {
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitLdcInsn(i);
+                                        super.visitVarInsn(Opcodes.ALOAD, 5 + i);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                    }
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(5);
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, name.replace('.', '/'),
+                                        "recomputationTasks", "Ljava/util/Map;");
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer",
+                                        "accept", "(Ljava/lang/Object;)V", true);
+                                    return;
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                            }
                         };
                     }
                 }, 0);
@@ -1190,7 +1235,10 @@ public final class Activator
                 String status = "class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$
                     + wovenClass.getBundleWiring().getBundle().getVersion()
                     + "; methods=" + matches[0] + "/" + expected; //$NON-NLS-1$ //$NON-NLS-2$
-                if (matches[0] == expected && metadataField[0])
+                boolean deferCompatible = !METADATA.equals(name)
+                    || !System.getProperties().containsKey(CALLBACK + ".defer") || deferredCalls[0] == 1;
+                status += "; deferredCalls=" + deferredCalls[0];
+                if (matches[0] == expected && metadataField[0] && deferCompatible)
                 {
                     wovenClass.setBytes(writer.toByteArray());
                     write("woven; " + status, null); //$NON-NLS-1$
@@ -1201,6 +1249,132 @@ public final class Activator
             catch (Throwable error)
             {
                 write("NOT WOVEN: " + name, error); //$NON-NLS-1$
+            }
+        }
+
+        /** Долговечные пометки по проекту и полному UID; доступ UI через JDK Function. */
+        private static final class DeferredCheckResults
+        {
+            private final java.io.File file;
+            private final CheckRecomputeNotifications diagnostics;
+            private java.util.Properties state = new java.util.Properties();
+
+            DeferredCheckResults(BundleContext context, CheckRecomputeNotifications diagnostics)
+            {
+                file = context.getDataFile("deferred-check-results.properties");
+                this.diagnostics = diagnostics;
+            }
+
+            boolean load()
+            {
+                try
+                {
+                    if (file == null)
+                        throw new java.io.IOException("Bundle data area unavailable");
+                    if (file.isFile())
+                        try (var input = new java.io.FileInputStream(file)) { state.load(input); }
+                    return true;
+                }
+                catch (Exception error)
+                {
+                    return false;
+                }
+            }
+
+            private void save(java.util.Properties next) throws java.io.IOException
+            {
+                file.getParentFile().mkdirs();
+                // Durable before suppressing the original request; retain previous file on write failure.
+                byte[] previous = file.isFile() ? java.nio.file.Files.readAllBytes(file.toPath()) : null;
+                try (var output = new java.io.FileOutputStream(file))
+                {
+                    next.store(output, "Deferred validation results");
+                    output.getFD().sync();
+                }
+                catch (java.io.IOException error)
+                {
+                    if (previous != null)
+                        try { java.nio.file.Files.write(file.toPath(), previous); }
+                        catch (java.io.IOException restore) { error.addSuppressed(restore); }
+                    throw error;
+                }
+                state = next;
+            }
+
+            synchronized Object access(Object[] args)
+            {
+                String prefix = args[1] + "\n";
+                Map<String, String> values = new java.util.HashMap<>();
+                for (String key : state.stringPropertyNames())
+                    if (key.startsWith(prefix))
+                        values.put(key.substring(prefix.length()), state.getProperty(key));
+                if ("snapshot".equals(args[0]))
+                    return Map.copyOf(values);
+                if ("complete".equals(args[0]) && args[2] instanceof Map<?, ?> completed)
+                {
+                    java.util.Properties next = new java.util.Properties();
+                    next.putAll(state);
+                    completed.forEach((uid, token) -> next.remove(prefix + uid, token));
+                    try { save(next); }
+                    catch (java.io.IOException error)
+                    {
+                        throw new IllegalStateException(error);
+                    }
+                }
+                return null;
+            }
+
+            synchronized void defer(Object[] args)
+            {
+                try
+                {
+                    java.util.Properties next = new java.util.Properties();
+                    next.putAll(state);
+                    String token = java.util.UUID.randomUUID().toString();
+                    var contributors = new java.util.LinkedHashSet<String>();
+                    for (var entry : ((Map<?, ?>) args[5]).entrySet())
+                    {
+                        String prefix = args[1] + "\n" + entry.getKey() + "\t";
+                        Object delta = entry.getValue();
+                        for (String field : List.of("removed", "added", "updated"))
+                        {
+                            var member = delta.getClass().getDeclaredField(field);
+                            member.setAccessible(true);
+                            for (Object check : (Collection<?>) member.get(delta))
+                            {
+                                if ("removed".equals(field))
+                                    next.remove(prefix + check);
+                                else
+                                {
+                                    next.setProperty(prefix + check, token);
+                                    contributors.add(String.valueOf(entry.getKey()));
+                                }
+                            }
+                        }
+                    }
+                    save(next);
+                    diagnostics.publish(new Object[] { "deferred-checks",
+                        "Изменены проверки " + String.join(", ", contributors)
+                            + ".\nРезультаты неактуальны. Обновите их здесь или в списке «Проверки».",
+                        Long.valueOf(System.currentTimeMillis()), args[1],
+                        java.util.Set.copyOf((Collection<?>) args[2]) });
+                }
+                catch (Exception error)
+                {
+                    // API подтверждён ProjectCheckMetadataManager.javap.txt; типы EDT не грузим при старте.
+                    try
+                    {
+                        ClassLoader loader = args[0].getClass().getClassLoader();
+                        Class<?> scheduler = loader.loadClass("com.e1c.g5.v8.dt.check.ICheckScheduler");
+                        scheduler.getMethod("scheduleValidation", loader.loadClass("org.eclipse.core.resources.IProject"),
+                            java.util.Set.class, Collection.class, loader.loadClass("org.eclipse.core.runtime.IProgressMonitor"))
+                            .invoke(args[0], args[1], args[2], args[3], args[4]);
+                    }
+                    catch (ReflectiveOperationException fallback)
+                    {
+                        throw new IllegalStateException(fallback);
+                    }
+                }
             }
         }
 
@@ -1282,28 +1456,41 @@ public final class Activator
                             ? "Назначена полная перепроверка проекта " + event[1] //$NON-NLS-1$
                             : "Запрошен полный пересчёт производных данных") + ".\nПричина: " + reason, //$NON-NLS-1$ //$NON-NLS-2$
                         Long.valueOf(System.currentTimeMillis()), event[1]};
-                    Consumer<Object[]> consumer;
-                    var properties = System.getProperties();
-                    synchronized (properties)
-                    {
-                        @SuppressWarnings("unchecked")
-                        Consumer<Object[]> callback = (Consumer<Object[]>) properties.get(CALLBACK + ".notify"); //$NON-NLS-1$
-                        consumer = callback;
-                        if (consumer == null)
-                        {
-                            @SuppressWarnings("unchecked")
-                            Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
-                                CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
-                            pending.put(event[1], notification);
-                        }
-                    }
-                    if (consumer != null)
-                        consumer.accept(notification);
+                    publish(notification);
                 }
             }
             catch (Throwable error)
             {
                 write("diagnostic callback failed; event=" + event[0], error); //$NON-NLS-1$
+            }
+        }
+
+        private void publish(Object[] notification)
+        {
+            try
+            {
+                Consumer<Object[]> consumer;
+                var properties = System.getProperties();
+                synchronized (properties)
+                {
+                    @SuppressWarnings("unchecked")
+                    Consumer<Object[]> callback = (Consumer<Object[]>) properties.get(CALLBACK + ".notify"); //$NON-NLS-1$
+                    consumer = callback;
+                    if (consumer == null)
+                    {
+                        @SuppressWarnings("unchecked")
+                        Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
+                            CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
+                        pending.compute(notification[3], (key, previous) -> previous != null
+                            && previous.length > 4 && notification.length <= 4 ? previous : notification);
+                    }
+                }
+                if (consumer != null)
+                    consumer.accept(notification);
+            }
+            catch (Throwable error)
+            {
+                // Отказ уведомления не должен запускать уже отложенную перепроверку.
             }
         }
 

@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
-import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -19,7 +18,6 @@ import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
 import com._1c.g5.v8.dt.bsl.util.BslUtil;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.TypeItem;
-import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
@@ -43,12 +41,9 @@ final class BslTypesComputerHook
         System.getProperties().put(CALLBACK, (Function<Object[], Object>) BslTypesComputerHook::afterBinaryTypes);
         if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
         {
-            Global.tempLog("binary-expression-types", "early callback installed; woven=" //$NON-NLS-1$ //$NON-NLS-2$
-                + System.getProperties().get("tormozit.typeComputation.early." + TARGET)); //$NON-NLS-1$
             return;
         }
         boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new ComputerTransformer(), TARGET);
-        Global.tempLog("binary-expression-types", "transformer installed=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         if (!ok)
             installed.set(false);
     }
@@ -59,7 +54,6 @@ final class BslTypesComputerHook
         BinaryExpression expression = (BinaryExpression)args[1];
         if (expression.getOperation() != BinaryOperation.PLUS)
             return args[0];
-        Environments envs = (Environments)args[4];
         // Штатный _compute уже вычислил левую часть; повторный обход удваивает работу на каждом +.
         @SuppressWarnings("unchecked")
         List<TypeItem> left = (List<TypeItem>)args[0];
@@ -69,9 +63,6 @@ final class BslTypesComputerHook
             String name = McoreUtil.getTypeName(item);
             unknown |= name == null || "Arbitrary".equals(name); //$NON-NLS-1$
         }
-        Global.tempLog("binary-expression-types", "expression=" + EcoreUtil.getURI(expression) //$NON-NLS-1$ //$NON-NLS-2$
-            + " envs=" + envs + " left=" + left.stream().map(McoreUtil::getTypeName).toList() //$NON-NLS-1$ //$NON-NLS-2$
-            + " unknown=" + unknown); //$NON-NLS-1$
         if (!unknown)
             return args[0];
         List<TypeItem> result = new ArrayList<>(left);
@@ -81,7 +72,6 @@ final class BslTypesComputerHook
         for (String name : List.of("Number", "String")) //$NON-NLS-1$ //$NON-NLS-2$
             if (result.stream().noneMatch(item -> name.equals(McoreUtil.getTypeName(item))))
                 result.addAll(BslUtil.getTypeByName(name, provider));
-        Global.tempLog("binary-expression-types", "result=" + result.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 

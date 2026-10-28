@@ -3546,11 +3546,39 @@ public final class BslStructureInsertCommentTypes
             java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
             try
             {
+                resetPartialMethodStates(module, cancelIndicator);
                 super.installTypeSystem(module, cancelIndicator);
             }
             finally
             {
                 BslDocCommentComputedTypes.releaseCalleeReturns(previous);
+            }
+        }
+
+        /**
+         * Частичный NORMAL-проход EDT пересоздаёт итоговые входы, но getOrInitVariableProvider
+         * оставляет прежние состояния параметров и тела. После повторного расчёта одного AST
+         * чтение параметра поэтому может идти через старый контекст формы (лог 28.10.2026).
+         * Сбрасываем тот же набор методов, что в штатном initFinalStateForMethod:
+         * переразобранный и его вызывающие. Такой же сброс используется в recomputeDependent.
+         */
+        private static void resetPartialMethodStates(Module module, CancelIndicator cancelIndicator)
+        {
+            if (isCanceled(cancelIndicator)
+                || !(module.eResource() instanceof com._1c.g5.v8.dt.bsl.resource.BslResource resource)
+                || !resource.isOnlyMethodReparse())
+                return;
+            Method reparsed = resource.getReparseMethod();
+            if (reparsed == null)
+                return;
+            java.util.Set<Method> methods = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            methods.add(reparsed);
+            for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(reparsed))
+                if (caller instanceof Method method)
+                    methods.add(method);
+            for (Method method : methods)
+            {
+                dropNormalStates(method);
             }
         }
 

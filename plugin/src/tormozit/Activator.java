@@ -2,6 +2,9 @@ package tormozit;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.function.BiFunction;
 import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
@@ -26,6 +29,8 @@ import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.export.IExportOperationFactory;
+import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
+import com._1c.g5.v8.dt.metadata.mdclass.URLTemplate;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.ql.model.CastOperationExpression;
 import com._1c.g5.v8.dt.ql.model.NullLiteralExpression;
@@ -66,6 +71,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        RightsEditDialogHook.start(context);
         BuiltinCheckReplacements.start(context);
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
@@ -232,6 +238,7 @@ public class Activator extends AbstractUIPlugin
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
+        RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
         IRApplication.disconnectAll();
 
@@ -287,7 +294,10 @@ public class Activator extends AbstractUIPlugin
         {
             if (!running)
                 return;
-            pending.put(projectKey(event[3]), event);
+            String key = projectKey(event[3]);
+            // Предложение отложенной проверки важнее сопутствующей диагностики того же проекта.
+            pending.compute(key, (ignored, previous) -> previous != null
+                && previous.length > 4 && event.length <= 4 ? previous : event);
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed() && posted.compareAndSet(false, true))
                 display.asyncExec(() -> showPending(display));
@@ -335,6 +345,20 @@ public class Activator extends AbstractUIPlugin
             Long last = lastToastNs.get(projectKey);
             if (last != null && now - last.longValue() < INTERVAL_NS)
                 return;
+            if (event.length > 4 && event[4] instanceof java.util.Set<?> requested
+                && event[3] instanceof org.eclipse.core.resources.IProject project)
+            {
+                java.util.Set<String> checks = requested.stream().filter(String.class::isInstance)
+                    .map(String.class::cast).collect(java.util.stream.Collectors.toUnmodifiableSet());
+                if (checks.isEmpty())
+                    return;
+                var offer = ToastNotification.showStickyUntilToastHover("Перепроверить проект «" + project.getName() + "»?",
+                    String.valueOf(event[1]),
+                    () -> ComfortCheckRecompute.recomputeProject(project, checks), "Запустить");
+                if (offer != null)
+                    lastToastNs.put(projectKey, Long.valueOf(now));
+                return;
+            }
             String logMessage = (String) event[0];
             long timeMs = ((Long) event[2]).longValue();
             var toast = ToastNotification.show("Полный пересчёт проверок", //$NON-NLS-1$
@@ -342,6 +366,142 @@ public class Activator extends AbstractUIPlugin
                 () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
             if (toast != null)
                 lastToastNs.put(projectKey, Long.valueOf(now));
+        }
+    }
+
+    /**
+     * В rights.ui 13.0.100.v202605050943 getCurrentSelectedObjects используется и для
+     * списка прав (setRightsInputs), и для сохранения (buttonPressed). У HTTP-сервиса
+     * права принадлежат дочерним объектам; одного корня недостаточно (issue 924).
+     */
+    private static final class RightsEditDialogHook implements WeavingHook, ClassFileTransformer
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.rights.ui.dialogs.RightsEditDialog"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.rightsEditDialog.objects"; //$NON-NLS-1$
+        private static volatile boolean woven;
+
+        static void start(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK,
+                (BiFunction<Object, Object, Object>)RightsEditDialogHook::expandObjects);
+            RightsEditDialogHook hook = new RightsEditDialogHook();
+            context.registerService(WeavingHook.class, hook, null);
+            try
+            {
+                Bundle bundle = org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.rights.ui"); //$NON-NLS-1$
+                if (bundle == null)
+                    throw new IllegalStateException("Бандл редактора прав EDT недоступен"); //$NON-NLS-1$
+                bundle.loadClass(TARGET);
+                if (!woven)
+                    BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET);
+            }
+            catch (ClassNotFoundException | RuntimeException | LinkageError failure)
+            {
+                Global.logError("RightsEditDialog", "start", failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        static void stop()
+        {
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)(input, add) -> input);
+        }
+
+        @Override
+        public void weave(WovenClass type)
+        {
+            if (type.getState() != WovenClass.TRANSFORMING || !TARGET.equals(type.getClassName()))
+                return;
+            byte[] rewritten = rewrite(type.getBytes());
+            if (rewritten != null)
+            {
+                type.setBytes(rewritten);
+                woven = true;
+            }
+        }
+
+        private static Object expandObjects(Object input, Object dialog)
+        {
+            if (!(input instanceof Collection<?> objects))
+                return input;
+            if (!Boolean.TRUE.equals(Global.getField(dialog, "isAddAction"))) //$NON-NLS-1$
+            {
+                // Контроллер сохраняет права content[0] и RightsPanel.initRights читает
+                // текущие значения из той же строки; список прав должен относиться к ней.
+                Object content = Global.getField(dialog, "content"); //$NON-NLS-1$
+                Object selected = content instanceof java.util.List<?> rows && !rows.isEmpty()
+                    ? Global.invoke(rows.get(0), "getEObject") : null; //$NON-NLS-1$
+                if (selected instanceof com._1c.g5.v8.dt.metadata.mdclass.Method method)
+                    return java.util.List.of(method);
+                return input;
+            }
+            LinkedHashSet<Object> expanded = null;
+            for (Object object : objects)
+            {
+                if (!(object instanceof HTTPService service))
+                    continue;
+                if (expanded == null)
+                    expanded = new LinkedHashSet<>(objects);
+                // Корень сохраняем: не меняем штатную обработку прав самого объекта.
+                for (URLTemplate template : service.getUrlTemplates())
+                {
+                    expanded.addAll(template.getMethods());
+                }
+            }
+            return expanded == null ? input : expanded;
+        }
+
+        @Override
+        public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
+            ProtectionDomain domain, byte[] bytes)
+        {
+            if (!TARGET.replace('.', '/').equals(name))
+                return null;
+            return rewrite(bytes);
+        }
+
+        private static byte[] rewrite(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] returns = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String method, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor visitor = super.visitMethod(access, method, descriptor, signature, exceptions);
+                    if (!"getCurrentSelectedObjects".equals(method) //$NON-NLS-1$
+                        || !"()Ljava/util/Collection;".equals(descriptor)) //$NON-NLS-1$
+                        return visitor;
+                    return new MethodVisitor(Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                // Collection → BiFunction.apply(Collection, dialog).
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
+                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
+                                    "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", //$NON-NLS-1$
+                                    "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection"); //$NON-NLS-1$
+                                returns[0]++;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return returns[0] == 0 ? null : writer.toByteArray();
         }
     }
 

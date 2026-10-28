@@ -171,6 +171,7 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final String OPEN_COLUMN_FILTER_DATA_KEY = "tormozit.validationColumnFilterToOpen"; //$NON-NLS-1$
 
     private record CheckColumnFilter(int column, String value) {}
+    private static final String RECOMPUTE_MENU_KEY = "tormozit.checkRecomputeMenuOwner";
     private static final String PATCHED_KEY = "tormozit.validationChecksFilterPatched"; //$NON-NLS-1$
     private static final String PAGE_COPY_ROOT_KEY = "tormozit.validationPageCopyRoot"; //$NON-NLS-1$
     private static final String COPY_WIRED_KEY = "tormozit.validationCopyWired"; //$NON-NLS-1$
@@ -409,7 +410,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 return false;
             }
 
-            ValidationSearchFilter filter = new ValidationSearchFilter(resolveCheckFilter(control));
+            ValidationSearchFilter filter = new ValidationSearchFilter(resolveCheckFilter(control), control.getChecksViewerProvider().getProject());
             filter.captureInitialExpanded(treeViewer);
             treeViewer.addFilter(filter);
             CellLabelHighlightWrapper highlight = installHighlight(treeViewer);
@@ -544,6 +545,8 @@ public final class ValidationChecksFilterHook implements IStartup
             }
             problemsItem.setEnabled(selected != null && selected.getId() != null
                 && (selected instanceof ICheckSettings || isInternalBslCheckUid(selected.getId())));
+            if (entry.getKey().getData(RECOMPUTE_MENU_KEY) instanceof ChecksTablePane pane)
+                pane.patchRecomputeMenu(menu);
             return;
         }
     }
@@ -2054,6 +2057,7 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final class ValidationSearchFilter extends ViewerFilter
     {
         private final Object checkFilter;
+        private final CheckResultState results;
         private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
         /** Результат {@link #isVisible} (текст + отбор). */
         private final Map<Object, Boolean> subtreeMemo = new IdentityHashMap<>();
@@ -2063,9 +2067,10 @@ public final class ValidationChecksFilterHook implements IStartup
         private Object[] initialExpanded = new Object[0];
         private final List<Runnable> treeRefreshListeners = new ArrayList<>();
 
-        ValidationSearchFilter(Object checkFilter)
+        ValidationSearchFilter(Object checkFilter, IProject project)
         {
             this.checkFilter = checkFilter;
+            results = new CheckResultState(project);
         }
 
         void setPattern(String pattern)
@@ -2143,6 +2148,7 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             subtreeMemo.clear();
             acceptsMemo.clear();
+            results.refresh();
             CheckFilterState fresh = CheckFilterState.read(checkFilter);
             if (!fresh.equals(state))
             {
@@ -2173,12 +2179,13 @@ public final class ValidationChecksFilterHook implements IStartup
             ICheckSettings settings = settingsOf(element);
             if (element instanceof IChecksTreeNode node && node.getValue() instanceof InternalBslChecks.Entry entry
                 && entry.code != null)
-                result = matcher.isEmpty || matcher.matches(entry.getTitle()) || matcher.matches(entry.code);
+                result = !results.onlyStale
+                    && (matcher.isEmpty || matcher.matches(entry.getTitle()) || matcher.matches(entry.code));
             else if (settings != null)
             {
                 String text = titleOf(element);
                 String checkId = settings.getId() != null ? settings.getId().getCheckId() : null;
-                result = state.accepts(settings) && (matcher.isEmpty
+                result = results.accepts(settings) && state.accepts(settings) && (matcher.isEmpty
                     || (text != null && matcher.matches(text))
                     || (checkId != null && matcher.matches(checkId)));
             }
@@ -2204,9 +2211,9 @@ public final class ValidationChecksFilterHook implements IStartup
 
             ICheckSettings settings = settingsOf(element);
             boolean result = element instanceof IChecksTreeNode node
-                && node.getValue() instanceof InternalBslChecks.Entry entry && entry.code != null
+                && node.getValue() instanceof InternalBslChecks.Entry entry && entry.code != null && !results.onlyStale
                 || (settings != null
-                ? state.accepts(settings)
+                ? results.accepts(settings) && state.accepts(settings)
                 : anyChild(viewer, element, child -> acceptsAnyCheck(viewer, child)));
             acceptsMemo.put(element, result);
             return result;
@@ -2422,6 +2429,56 @@ public final class ValidationChecksFilterHook implements IStartup
         return image;
     }
 
+    private static final class CheckResultState
+    {
+        private static final String BRIDGE = "tormozit.checkRecompute.event.results";
+        final IProject project;
+        volatile Map<String, String> flags = Map.of();
+        boolean onlyStale;
+
+        CheckResultState(IProject project)
+        {
+            this.project = project;
+            refresh();
+        }
+
+        static String key(CheckUid uid)
+        {
+            return uid.getContributorId() + "\t" + uid.getCheckId();
+        }
+
+        boolean isStale(ICheckSettings settings)
+        {
+            return settings != null && flags.containsKey(key(settings.getId()));
+        }
+
+        boolean accepts(ICheckSettings settings)
+        {
+            return !onlyStale || isStale(settings);
+        }
+
+        @SuppressWarnings("unchecked")
+        boolean refresh()
+        {
+            Object bridge = System.getProperties().get(BRIDGE);
+            Map<String, String> next = bridge instanceof Function<?, ?> function && project != null
+                ? (Map<String, String>) ((Function<Object[], Object>) function).apply(
+                    new Object[] { "snapshot", String.valueOf(project) }) : Map.of();
+            boolean changed = !next.equals(flags);
+            flags = next;
+            return changed;
+        }
+
+        @SuppressWarnings("unchecked")
+        void complete(Map<String, String> tokens)
+        {
+            Object bridge = System.getProperties().get(BRIDGE);
+            if (bridge instanceof Function<?, ?> function)
+                ((Function<Object[], Object>) function).apply(
+                    new Object[] { "complete", String.valueOf(project), tokens });
+        }
+    }
+
     /**
      * Табличный режим списка проверок (issue 401): та же выборка, что в дереве,
      * но плоским списком с колонками «Тип», «Критичность», «Проверка» и «Раздел»
@@ -2526,6 +2583,10 @@ public final class ValidationChecksFilterHook implements IStartup
         private final CellLabels labels = new CellLabels();
         private FormTableInteraction interaction;
         private ToolItem toggleItem;
+        private ToolItem staleItem;
+        private ToolItem recomputeItem;
+        private boolean recomputing;
+        private final List<IChecksTreeNode> staleSelection = new ArrayList<>();
         private boolean tableMode;
         private boolean syncing;
         private boolean reloadScheduled;
@@ -2611,6 +2672,7 @@ public final class ValidationChecksFilterHook implements IStartup
 
             pane.wireListeners();
             pane.installToggle(pageControl);
+            pane.installResultControls(pageControl);
             pane.setTableMode(ComfortSettings.isValidationChecksTableMode());
             return pane;
         }
@@ -2634,6 +2696,24 @@ public final class ValidationChecksFilterHook implements IStartup
             TableColumn categoryColumn = addTextColumn(columnLayout, settings, "Раздел", //$NON-NLS-1$
                 labels.forCategory(), KEY_COL_CATEGORY_WIDTH, DEFAULT_CATEGORY_WIDTH);
 
+            TableViewerColumn staleColumn = new TableViewerColumn(viewer, SWT.CENTER);
+            staleColumn.getColumn().setText("Результаты неактуальны");
+            staleColumn.getColumn().setToolTipText(TooltipText.wrap(table,
+                "Проверка добавлена или обновлена; результаты ожидают перепроверки всего проекта"
+                    + Global.pluginSignForTooltip()));
+            columnLayout.setColumnData(staleColumn.getColumn(), new ColumnPixelData(FormTableColumnState.readWidth(settings, "staleWidth", 190, MIN_COLUMN_WIDTH), true, true));
+            staleColumn.getColumn().addListener(SWT.Resize,
+                event -> settings.put("staleWidth", staleColumn.getColumn().getWidth()));
+            staleColumn.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof CheckRow row && row.settings != null
+                        ? (filter.results.isStale(row.settings) ? "☑" : "☐") : "";
+                }
+            });
+
             viewer.setContentProvider(ArrayContentProvider.getInstance());
             viewer.setCheckStateProvider(new ICheckStateProvider()
             {
@@ -2652,9 +2732,13 @@ public final class ValidationChecksFilterHook implements IStartup
             viewer.setInput(rows);
 
             interaction = new FormTableInteraction(table, viewer,
-                (item, col) -> cellText(item != null ? item.getData() : null, col));
-            interaction.setFilterTextResolver(ChecksTablePane::cellFilterText);
+                (item, col) -> resultCellText(item != null ? item.getData() : null, col));
+            interaction.setFilterTextResolver((element, column) -> column == 4
+                ? resultCellText(element, column) : cellFilterText(element, column));
             interaction.setOwnerDrawColumns(titleColumn, categoryColumn);
+            String savedOrder = settings.get(KEY_COL_ORDER);
+            if (savedOrder != null && savedOrder.split(",").length == 4)
+                settings.put(KEY_COL_ORDER, savedOrder + ",4");
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             boolean hasSavedWidths = settings.get(KEY_COL_TITLE_WIDTH) != null
                 || settings.get(KEY_COL_CATEGORY_WIDTH) != null;
@@ -2864,6 +2948,265 @@ public final class ValidationChecksFilterHook implements IStartup
             toggleItem = item;
         }
 
+        private String resultCellText(Object element, int column)
+        {
+            if (column == 4)
+                return element instanceof CheckRow row && row.settings != null
+                    ? (filter.results.isStale(row.settings) ? "Да" : "Нет") : "";
+            return cellText(element, column);
+        }
+
+        private void installResultControls(Control pageControl)
+        {
+            ToolBar bar = pageControl != null ? findToolBar(pageControl) : null;
+            if (bar == null || bar.isDisposed())
+                return;
+            staleItem = new ToolItem(bar, SWT.CHECK);
+            staleItem.setToolTipText(TooltipText.wrap(bar,
+                "Показать только проверки с пометкой «Результаты неактуальны»"
+                    + Global.pluginSignForTooltip()));
+            staleItem.addListener(SWT.Selection, event ->
+            {
+                if (staleItem.getSelection())
+                {
+                    staleSelection.clear();
+                    if (tableMode)
+                        for (Object element : viewer.getStructuredSelection().toList())
+                            if (element instanceof CheckRow row)
+                                staleSelection.add(row.node);
+                    if (!tableMode)
+                        for (Object element : treeViewer.getStructuredSelection().toList())
+                            if (element instanceof IChecksTreeNode node)
+                                staleSelection.add(node);
+                }
+                filter.results.onlyStale = staleItem.getSelection();
+                treeViewer.refresh();
+                reload();
+                if (!filter.results.onlyStale && !staleSelection.isEmpty())
+                {
+                    for (IChecksTreeNode node : staleSelection)
+                        expandAncestors(treeViewer, node);
+                    treeViewer.setSelection(new StructuredSelection(staleSelection), true);
+                    restoreSelection(staleSelection);
+                }
+            });
+            recomputeItem = new ToolItem(bar, SWT.PUSH);
+            recomputeItem.setImage(recomputeIcon());
+            recomputeItem.setToolTipText(TooltipText.wrap(bar,
+                "Запустить перепроверку: перепроверить весь проект только выбранными проверками"
+                    + Global.pluginSignForTooltip()));
+            recomputeItem.addListener(SWT.Selection, event -> recomputeSelection());
+            installRecomputeMenu(table);
+            installRecomputeMenu(treeViewer.getTree());
+            viewer.addSelectionChangedListener(event -> updateResultActions());
+            treeViewer.addSelectionChangedListener(event -> updateResultActions());
+            updateResultActions();
+            // Состояние может измениться при открытии другого проекта/другой страницы.
+            Runnable poll = new Runnable()
+            {
+                @Override
+                public void run()
+                {
+                    if (table.isDisposed())
+                        return;
+                    if (filter.results.refresh())
+                    {
+                        treeViewer.refresh();
+                        reload();
+                    }
+                    table.getDisplay().timerExec(1000, this);
+                }
+            };
+            table.getDisplay().timerExec(1000, poll);
+        }
+
+        /** Тот же ресурс, что у tormozit.problemView.recomputeChecks в plugin.xml. */
+        private static Image recomputeIcon()
+        {
+            String key = "tormozit.checks.recompute";
+            var registry = Activator.getDefault().getImageRegistry();
+            Image image = registry.get(key);
+            if (image == null)
+            {
+                var descriptor = org.eclipse.ui.plugin.AbstractUIPlugin.imageDescriptorFromPlugin(
+                    "org.eclipse.ui", "icons/full/elcl16/refresh_nav.png");
+                if (descriptor != null)
+                {
+                    registry.put(key, descriptor);
+                    image = registry.get(key);
+                }
+            }
+            return image;
+        }
+
+        private void installRecomputeMenu(Control widget)
+        {
+            widget.setData(RECOMPUTE_MENU_KEY, this);
+            if (widget.getMenu() == null)
+                widget.setMenu(new Menu(widget));
+        }
+
+        /** EDT пересоздаёт контекстное меню; дополняем актуальный экземпляр при каждом показе. */
+        private void patchRecomputeMenu(Menu menu)
+        {
+            MenuItem item = null;
+            for (MenuItem candidate : menu.getItems())
+                if (Boolean.TRUE.equals(candidate.getData(RECOMPUTE_MENU_KEY)))
+                    item = candidate;
+            if (item == null)
+            {
+                item = new MenuItem(menu, SWT.PUSH);
+                item.setData(RECOMPUTE_MENU_KEY, Boolean.TRUE);
+                item.setText("Запустить перепроверку");
+                item.setImage(recomputeIcon());
+                ComfortSubmenuHelper.setMenuItemTooltip(item,
+                    "Перепроверить весь проект только выбранными проверками");
+                item.addListener(SWT.Selection, event -> recomputeSelection());
+            }
+            Set<CheckUid> selected = selectedChecks();
+            item.setEnabled(!recomputing && !selected.isEmpty() && filter.results.project != null);
+        }
+
+        private Set<CheckUid> selectedChecks()
+        {
+            Set<CheckUid> checks = new java.util.LinkedHashSet<>();
+            IStructuredSelection selection = tableMode ? viewer.getStructuredSelection()
+                : treeViewer.getStructuredSelection();
+            for (Object element : selection.toList())
+            {
+                ICheckSettings settings = element instanceof CheckRow row ? row.settings
+                    : ValidationSearchFilter.settingsOf(element);
+                if (settings != null)
+                    checks.add(settings.getId());
+            }
+            return checks;
+        }
+
+        private void updateResultActions()
+        {
+            if (staleItem != null && !staleItem.isDisposed())
+            {
+                ICheckRepository repository = control.getChecksViewerProvider().getCheckRepository();
+                IProject project = filter.results.project;
+                long count = project != null ? repository.getCheckUids().entrySet().stream()
+                    .filter(entry -> project.equals(entry.getKey().getWorkspaceProject()))
+                    .flatMap(entry -> entry.getValue().stream())
+                    .filter(uid -> filter.results.flags.containsKey(CheckResultState.key(uid))).count() : 0;
+                staleItem.setText("Только неактуальные (" + count + ")");
+                staleItem.getParent().requestLayout();
+            }
+            if (recomputeItem != null && !recomputeItem.isDisposed())
+                recomputeItem.setEnabled(!recomputing && !selectedChecks().isEmpty()
+                    && filter.results.project != null);
+        }
+
+        private void recomputeSelection()
+        {
+            Set<CheckUid> selected = selectedChecks();
+            IProject project = filter.results.project;
+            if (recomputing || selected.isEmpty() || project == null || !project.isAccessible())
+                return;
+            var scheduler = Global.getOsgiService(com.e1c.g5.v8.dt.check.ICheckScheduler.class);
+            var provider = Global.getOsgiService(com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider.class);
+            var manager = provider != null ? provider.get(project) : null;
+            if (scheduler == null || manager == null)
+            {
+                org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить перепроверку",
+                    "Планировщик проверок недоступен для проекта.");
+                return;
+            }
+            ICheckRepository repository = control.getChecksViewerProvider().getCheckRepository();
+            Set<String> checkIds = new java.util.LinkedHashSet<>();
+            for (CheckUid uid : selected)
+            {
+                String id = uid.getCheckId();
+                Set<CheckUid> resolved = repository.toUid(id, project);
+                // Планировщик принимает коды проверок, не SU. Проверяем точный состав:
+                // пустой resolved означал бы запуск ВСЕХ проверок, совпавший код — лишние проверки.
+                if (id == null || id.isBlank() || resolved.isEmpty() || !resolved.contains(uid)
+                    || !selected.containsAll(resolved))
+                {
+                    org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить перепроверку",
+                        "Не удалось определить код выбранной проверки: " + uid.getCheckId());
+                    return;
+                }
+                checkIds.add(id);
+            }
+            for (CheckUid uid : selected)
+            {
+                ICheckSettings settings = repository.getSettings(uid, project);
+                if (settings == null || !settings.isEnabled())
+                {
+                    org.eclipse.jface.dialogs.MessageDialog.openInformation(table.getShell(), "Запустить перепроверку",
+                        "Для перепроверки включите выбранные проверки и примените настройки проекта.");
+                    return;
+                }
+            }
+            filter.results.refresh();
+            Map<String, String> tokens = new java.util.HashMap<>();
+            for (CheckUid uid : selected)
+            {
+                String key = CheckResultState.key(uid);
+                if (filter.results.flags.containsKey(key))
+                    tokens.put(key, filter.results.flags.get(key));
+            }
+            recomputing = true;
+            updateResultActions();
+            MassiveChecksExemptionHook.openManualWindow(project);
+            Display display = table.getDisplay();
+            org.eclipse.core.runtime.jobs.Job.create("Перепроверка выбранных проверок: " + project.getName(), monitor ->
+            {
+                try
+                {
+                    scheduler.scheduleValidation(project, checkIds, List.of(), monitor);
+                    long deadline = System.currentTimeMillis() + 60 * 60_000L;
+                    boolean completed = false;
+                    while (!monitor.isCanceled() && System.currentTimeMillis() < deadline)
+                    {
+                        MassiveChecksExemptionHook.openManualWindow(project);
+                        if (!manager.waitAllComputations(1000))
+                            continue;
+                        Thread.sleep(3000);
+                        if (manager.isIdle())
+                        {
+                            completed = !monitor.isCanceled();
+                            break;
+                        }
+                    }
+                    if (!completed)
+                    {
+                        return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                    }
+                    filter.results.complete(tokens);
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                }
+                catch (InterruptedException error)
+                {
+                    Thread.currentThread().interrupt();
+                    return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                }
+                catch (Exception error)
+                {
+                    return new org.eclipse.core.runtime.Status(org.eclipse.core.runtime.IStatus.ERROR,
+                        "tormozit.comfort", "Не удалось завершить перепроверку выбранных проверок", error);
+                }
+                finally
+                {
+                    if (!display.isDisposed())
+                        display.asyncExec(() ->
+                    {
+                        recomputing = false;
+                        if (!table.isDisposed())
+                        {
+                            treeViewer.refresh();
+                            reload();
+                            updateResultActions();
+                        }
+                    });
+                }
+            }).schedule();
+        }
+
         /**
          * Тулбар и поле фильтра лежат в одной строке, и на момент патча страница
          * ещё не разложена — в логе все её родители нулевого размера. Раскладку
@@ -2924,6 +3267,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 reload();
             stackLayout.topControl = value ? tableHost : treeViewer.getTree();
             stack.layout();
+            updateResultActions();
         }
 
         /**
@@ -2976,6 +3320,7 @@ public final class ValidationChecksFilterHook implements IStartup
             for (Object root : tcp.getElements(treeViewer.getInput()))
                 collect(tcp, root, null);
             labels.setMatcher(filter.currentMatcher());
+            updateResultActions();
             viewer.refresh();
             if (!restoreSelection(selectedNodes))
                 syncSelectionFromTree();

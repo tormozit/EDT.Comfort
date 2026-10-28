@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
   <category-def name="comfort" label="EDT Comfort">
-    <description>Удобства и интеграция традиционных редакторов для EDT 1С</description>
+    <description>Многоцелевой плагин для 1С EDT с поддержкой ИР</description>
   </category-def>
   <!-- version="0.0.0" означает "последняя доступная версия" -->
   <feature id="tormozit.comfort.feature" version="0.0.0">

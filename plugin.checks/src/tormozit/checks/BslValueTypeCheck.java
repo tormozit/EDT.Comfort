@@ -54,7 +54,10 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
 
 import tormozit.BslQueryResultTypes;
 import tormozit.BslLiteralValues;
+import tormozit.BslMethodParameterTypes;
+import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
+import tormozit.Global;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -90,6 +93,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
     protected void check(Object object, ResultAcceptor acceptor, ICheckParameters parameters,
         IProgressMonitor monitor)
     {
+        Global.tempLog("parameter-type-check", "check.begin object=" + object //$NON-NLS-1$ //$NON-NLS-2$
+            + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
         if (!(object instanceof Module module) || !(module.eResource() instanceof XtextResource resource)
             || monitor.isCanceled())
             return;
@@ -101,6 +106,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         finally
         {
             BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
+            Global.tempLog("parameter-type-check", "check.end uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
         }
     }
 
@@ -233,6 +240,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
 
         private void checkInvocation(Invocation invocation, Environments envs)
         {
+            Global.tempLog("parameter-type-check", "invocation.begin uri=" + invocation.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " invocation=" + invocation + " envs=" + envs); //$NON-NLS-1$ //$NON-NLS-2$
             FeatureAccess access = invocation.getMethodAccess();
             if (access == null)
                 return;
@@ -243,16 +252,47 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             // Параметр необязателен хотя бы в одной подходящей сигнатуре: Неопределено — его пропуск.
             boolean[] optional = new boolean[invocation.getParams().size()];
             boolean[] unrestricted = new boolean[invocation.getParams().size()];
-            boolean platform = false;
+            boolean[] documentedInput = new boolean[invocation.getParams().size()];
+            boolean methodFound = false;
             for (FeatureEntry entry : entries(access, envs))
             {
+                Global.tempLog("parameter-type-check", "invocation.entry feature=" + entry.getFeature() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " envs=" + entry.getEnvironments()); //$NON-NLS-1$
                 if (!envs.containsAny(entry.getEnvironments()))
                     continue;
+                if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Method local)
+                {
+                    int count = invocation.getParams().size();
+                    if (local.eIsProxy() || count > local.getFormalParams().size())
+                        return;
+                    for (int i = count; i < local.getFormalParams().size(); i++)
+                        if (local.getFormalParams().get(i).getDefaultValue() == null)
+                            return;
+                    methodFound = true;
+                    for (int i = 0; i < count; i++)
+                    {
+                        var parameter = local.getFormalParams().get(i);
+                        List<TypeItem> declared = BslMethodParameterTypes.fromComment(local, parameter);
+                        List<TypeItem> resolved = declared != null ? resolve(declared, invocation) : null;
+                        Global.tempLog("parameter-type-check", "invocation.parameter method=" + local.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " parameter=" + parameter.getName() + " declared=" + declared //$NON-NLS-1$ //$NON-NLS-2$
+                            + " resolved=" + resolved); //$NON-NLS-1$
+                        unrestricted[i] |= resolved == null || resolved.isEmpty()
+                            || resolved.stream().allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
+                        if (declared != null)
+                            expected.get(i).addAll(declared);
+                        // Передача без Знач допускает изменение аргумента, но его входной
+                        // тип всё равно должен соответствовать документирующему комментарию.
+                        documentedInput[i] = true;
+                        optional[i] |= parameter.getDefaultValue() != null;
+                    }
+                    continue;
+                }
                 // Все варианты родительского типа участвуют в одной проверке аргумента,
                 // включая методы модулей: несовместимость одного варианта недостаточна.
                 if (!(entry.getFeature() instanceof Method method) || method.eIsProxy())
                     return;
-                platform = true;
+                methodFound = true;
                 boolean matching = false;
                 for (ParamSet set : method.getParamSet())
                 {
@@ -277,7 +317,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 if (!matching)
                     return;
             }
-            if (!platform)
+            if (!methodFound)
                 return;
             for (int i = 0; i < expected.size(); i++)
             {
@@ -285,7 +325,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 // проверяем до общего пропуска выходных параметров, сохраняя типы сигнатуры.
                 if (i == 1 && checkDataLockValue(invocation, envs, expected.get(i)))
                     continue;
-                if (!unrestricted[i] && !BslForEachCollectionCheck.isOutputArgument(invocation, i))
+                if (!unrestricted[i]
+                    && (documentedInput[i] || !BslForEachCollectionCheck.isOutputArgument(invocation, i)))
                 {
                     checkValue(invocation.getParams().get(i), expected.get(i), envs, true, optional[i]);
                 }
@@ -375,6 +416,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item)))) //$NON-NLS-1$
                 return;
             List<TypeItem> actual = resolve(types.computeTypes(value, envs), value);
+            Global.tempLog("parameter-type-check", "value expression=" + value + " envs=" + envs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " expected=" + typeNames(resolvedExpected) + " actual=" + typeNames(actual)); //$NON-NLS-1$ //$NON-NLS-2$
             if (resolvedExpected == null || actual == null || actual.isEmpty())
                 return;
             List<TypeItem> concreteActual = new ArrayList<>(actual);
@@ -398,6 +441,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             if (!concreteExpected.isEmpty() && !concreteActual.isEmpty())
             {
                 boolean compatible = compatibleTypes(concreteExpected, concreteActual, value);
+                Global.tempLog("parameter-type-check", "value.compatible=" + compatible //$NON-NLS-1$ //$NON-NLS-2$
+                    + " expression=" + value); //$NON-NLS-1$
                 if (compatible)
                     return;
             }
@@ -410,8 +455,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
 
         /**
          * BslUtil.intersectTypeItem через getCastingType допускает Date вместо Number/Boolean
-         * и наоборот. Конкретные ссылки на разные объекты метаданных также нельзя
-         * считать совместимыми по общему родителю (CatalogRef, AnyRef).
+         * и наоборот. Конкретные ссылки и объекты метаданных также нельзя
+         * считать совместимыми по общему родителю (CatalogRef, DocumentObject, AnyRef).
          * Составные типы сравниваем попарно: достаточно одной допустимой пары.
          */
         private static boolean compatibleTypes(List<TypeItem> expected, List<TypeItem> actual, EObject context)
@@ -420,9 +465,9 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 && (hasType(actual, "Number") || hasType(actual, "Boolean")) //$NON-NLS-1$ //$NON-NLS-2$
                 || hasType(actual, "Date") //$NON-NLS-1$
                 && (hasType(expected, "Number") || hasType(expected, "Boolean")); //$NON-NLS-1$ //$NON-NLS-2$
-            boolean concreteReferences = expected.stream().anyMatch(Session::isConcreteReference)
-                && actual.stream().anyMatch(Session::isConcreteReference);
-            if (!dateConversion && !concreteReferences)
+            boolean concreteMetadataValues = expected.stream().anyMatch(Session::isConcreteMetadataValue)
+                && actual.stream().anyMatch(Session::isConcreteMetadataValue);
+            if (!dateConversion && !concreteMetadataValues)
                 return BslUtil.intersectTypeItem(expected, actual, context);
             Set<String> strict = Set.of("Date", "Number", "Boolean"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             for (TypeItem target : expected)
@@ -430,7 +475,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 {
                     String targetName = McoreUtil.getTypeName(target);
                     String valueName = McoreUtil.getTypeName(value);
-                    if (isConcreteReference(target) && isConcreteReference(value))
+                    if (isConcreteMetadataValue(target) && isConcreteMetadataValue(value))
                     {
                         if (targetName.equals(valueName))
                             return true;
@@ -446,12 +491,18 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             return false;
         }
 
-        /** Категория ссылки с именем объекта метаданных: CatalogRef.Валюты, DocumentRef.Заказ и т.п. */
-        private static boolean isConcreteReference(TypeItem type)
+        private static List<String> typeNames(List<TypeItem> types)
+        {
+            return types == null ? null : types.stream().map(McoreUtil::getTypeName).toList();
+        }
+
+        /** Ссылка или объект с именем метаданных: CatalogRef.Валюты, DocumentObject.Заказ и т.п. */
+        private static boolean isConcreteMetadataValue(TypeItem type)
         {
             String name = McoreUtil.getTypeName(type);
             return name != null && name.indexOf('.') > 0
-                && McoreUtil.getTypeCategory(type).endsWith("Ref"); //$NON-NLS-1$
+                && (McoreUtil.getTypeCategory(type).endsWith("Ref") //$NON-NLS-1$
+                    || McoreUtil.getTypeCategory(type).endsWith("Object")); //$NON-NLS-1$
         }
 
         /** Неразрешённая ссылка — неполное знание, а не доказанная несовместимость. */
@@ -462,6 +513,15 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             {
                 if (!(EcoreUtil.resolve(item, context) instanceof TypeItem resolved) || resolved.eIsProxy())
                     return null;
+                List<TypeItem> alternatives = BslDocCommentTypeMerge.alternatives(resolved);
+                if (alternatives.size() != 1 || alternatives.get(0) != resolved)
+                {
+                    List<TypeItem> expanded = resolve(alternatives, context);
+                    if (expanded == null)
+                        return null;
+                    result.addAll(expanded);
+                    continue;
+                }
                 // У порождённого TypeSet getTypes() не отражает состав в контексте проекта.
                 // Именно этот геттер читает BslUtil.intersectTypeItem, поэтому раскрываем заранее.
                 if (resolved instanceof TypeSet

@@ -203,7 +203,7 @@ public final class ToastNotification
                 if (!shell.isDisposed())
                 {
                     shell.dispose();
-                    display.asyncExec(() -> openCopyableDialog(title, message));
+                    display.asyncExec(() -> openCopyableDialog(title, message, action, actionLabel));
                 }
             };
 
@@ -840,11 +840,11 @@ public final class ToastNotification
     // ДИАЛОГ ПРОСМОТРА ТЕКСТА УВЕДОМЛЕНИЯ (открывается по клику на тост)
     // =======================================================================
 
-    private static void openCopyableDialog(String title, String message)
+    private static void openCopyableDialog(String title, String message, Runnable action, String actionLabel)
     {
         Display display = Display.getDefault();
         Shell dialog = new Shell(display, SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
-        dialog.setText(title != null && !title.isEmpty() ? title : "Текст уведомления"); //$NON-NLS-1$
+        dialog.setText(Global.withPluginWindowTitle(title != null && !title.isEmpty() ? title : "Текст уведомления")); //$NON-NLS-1$
         dialog.setLayout(new GridLayout(1, false));
 
         // SWT.WRAP вместо SWT.H_SCROLL — текст переносится по словам,
@@ -857,6 +857,19 @@ public final class ToastNotification
         gd.heightHint = 220;
         textWidget.setLayoutData(gd);
         wireTextCopy(textWidget);
+
+        if (actionLabel != null && !actionLabel.isEmpty() && action != null)
+        {
+            Link actionLink = new Link(dialog, SWT.NONE);
+            actionLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, true, false));
+            actionLink.setText("<a>" + actionLabel + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
+            actionLink.addListener(SWT.Selection, e ->
+            {
+                if (!dialog.isDisposed())
+                    dialog.dispose();
+                display.asyncExec(action::run);
+            });
+        }
 
         Button btnClose = new Button(dialog, SWT.PUSH);
         btnClose.setText("Закрыть"); //$NON-NLS-1$

@@ -200,8 +200,6 @@ public final class BslFormDataTypes
             if (!(property instanceof DerivedProperty) && original != null && original != property)
             {
                 PROPERTY_DOCUMENTATION.put(property, original);
-                Global.tempLog("form-data-property-doc", "bind property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " original=" + EcoreUtil.getURI(original)); //$NON-NLS-1$
             }
         }
     }
@@ -210,8 +208,6 @@ public final class BslFormDataTypes
     public static Property documentationProperty(Property property)
     {
         Property original = PROPERTY_DOCUMENTATION.getOrDefault(property, property);
-        Global.tempLog("form-data-property-doc", "documentation property=" + (property == null ? null : property.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " mapped=" + (original != property)); //$NON-NLS-1$
         return original;
     }
 

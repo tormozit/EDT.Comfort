@@ -122,6 +122,13 @@ public final class ComfortCheckRecompute
      */
     public static void recomputeProject(IProject project)
     {
+        recomputeProject(project, Set.of());
+    }
+
+    /** Перепроверка проекта указанными кодами; пустой набор означает все проверки. */
+    public static void recomputeProject(IProject project, Set<String> requestedChecks)
+    {
+        Set<String> checkIds = new LinkedHashSet<>(requestedChecks);
         Debug.log("проверка проекта: вход, проект=" //$NON-NLS-1$
             + (project == null ? "null" : project.getName())); //$NON-NLS-1$
         if (project == null || !project.isAccessible())
@@ -138,6 +145,28 @@ public final class ComfortCheckRecompute
             return;
         }
 
+        if (!checkIds.isEmpty())
+        {
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            if (repository == null)
+            {
+                toast("Проверить", "Каталог проверок недоступен.");
+                return;
+            }
+            // Планировщик не выполняет выключенные проверки. Не превращаем пустой итог в «все».
+            checkIds.removeIf(id -> repository.toUid(id, project).stream().noneMatch(uid ->
+            {
+                var settings = repository.getSettings(uid, project);
+                return settings != null && settings.isEnabled();
+            }));
+            if (checkIds.isEmpty())
+            {
+                toast("Проверить", "Нет включённых обновлённых проверок. Их можно включить в списке «Проверки».");
+                return;
+            }
+        }
+        Map<String, String> resultTokens = deferredResultTokens(project, checkIds);
+
         // Режим «Отключить массовые проверки» не должен глушить то, что запросил пользователь
         MassiveChecksExemptionHook.openManualWindow(project);
         toast("Проверить", "Запущена проверка всех объектов проекта " + project.getName() //$NON-NLS-1$
@@ -148,9 +177,10 @@ public final class ComfortCheckRecompute
             try
             {
                 Debug.log("проверка проекта: планировщик вызван"); //$NON-NLS-1$
-                scheduler.scheduleValidation(project, Set.of(), List.of(), monitor);
+                scheduler.scheduleValidation(project, checkIds, List.of(), monitor);
                 Debug.log("проверка проекта: планировщик отработал, ждём завершения"); //$NON-NLS-1$
-                notifyProjectComplete(manager, project, monitor);
+                if (notifyProjectComplete(manager, project, monitor))
+                    completeDeferredResults(project, resultTokens);
             }
             catch (RuntimeException e)
             {
@@ -162,12 +192,53 @@ public final class ComfortCheckRecompute
         job.schedule();
     }
 
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> deferredResultTokens(IProject project, Set<String> checkIds)
+    {
+        Object bridge = System.getProperties().get("tormozit.checkRecompute.event.results");
+        if (!(bridge instanceof java.util.function.Function<?, ?> function))
+            return Map.of();
+        Map<String, String> snapshot = (Map<String, String>) ((java.util.function.Function<Object[], Object>) function)
+            .apply(new Object[] { "snapshot", String.valueOf(project) });
+        Map<String, String> tokens = new java.util.HashMap<>();
+        ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+        if (repository == null)
+            return Map.of();
+        for (var entry : snapshot.entrySet())
+        {
+            int separator = entry.getKey().indexOf('\t');
+            if (separator < 0)
+                continue;
+            String id = entry.getKey().substring(separator + 1);
+            if (!checkIds.isEmpty() && !checkIds.contains(id))
+                continue;
+            CheckUid uid = new CheckUid(id, entry.getKey().substring(0, separator));
+            if (!repository.toUid(id, project).contains(uid))
+                continue;
+            var settings = repository.getSettings(uid, project);
+            if (settings != null && settings.isEnabled())
+                tokens.put(entry.getKey(), entry.getValue());
+        }
+        return Map.copyOf(tokens);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void completeDeferredResults(IProject project, Map<String, String> tokens)
+    {
+        if (tokens.isEmpty())
+            return;
+        Object bridge = System.getProperties().get("tormozit.checkRecompute.event.results");
+        if (bridge instanceof java.util.function.Function<?, ?> function)
+            ((java.util.function.Function<Object[], Object>) function)
+                .apply(new Object[] { "complete", String.valueOf(project), tokens });
+    }
+
     /**
      * Ждёт завершения проверки проекта. Ожидание идёт отрезками: полная проверка большой
      * конфигурации длится куда дольше {@link #WAIT_COMPLETION_TIMEOUT_MS}, а отменить задачу
      * пользователь должен мочь в любой момент.
      */
-    private static void notifyProjectComplete(IDerivedDataManager manager, IProject project,
+    private static boolean notifyProjectComplete(IDerivedDataManager manager, IProject project,
         org.eclipse.core.runtime.IProgressMonitor monitor)
     {
         long deadline = System.currentTimeMillis() + PROJECT_WAIT_TIMEOUT_MS;
@@ -175,19 +246,22 @@ public final class ComfortCheckRecompute
         {
             while (true)
             {
+                MassiveChecksExemptionHook.openManualWindow(project);
                 if (monitor != null && monitor.isCanceled())
-                    return;
+                    return false;
                 if (System.currentTimeMillis() > deadline)
                 {
                     toast("Проверить", "Проверка проекта " + project.getName() //$NON-NLS-1$
                         + " не завершилась за " + (PROJECT_WAIT_TIMEOUT_MS / 60_000) + " мин."); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
+                    return false;
                 }
                 if (!manager.waitAllComputations(WAIT_COMPLETION_TIMEOUT_MS))
                     continue;
                 // Проверка идёт волнами: за паузой приходит следующая пачка объектов, и счёт
                 // сразу после первого затишья выходит заниженным
                 Thread.sleep(SETTLE_PAUSE_MS);
+                if (monitor != null && monitor.isCanceled())
+                    return false;
                 if (manager.isIdle())
                     break;
             }
@@ -195,13 +269,14 @@ public final class ComfortCheckRecompute
         catch (InterruptedException e)
         {
             Thread.currentThread().interrupt();
-            return;
+            return false;
         }
 
         int[] counts = countProjectProblems(project);
         toastWithAction("Проверить", "Завершена проверка всех объектов проекта " + project.getName() //$NON-NLS-1$
             + ". Ошибок: " + counts[0] + ", Предупреждений: " + counts[1], //$NON-NLS-1$ //$NON-NLS-2$
             ProblemViewMarkers::show, "Показать результаты"); //$NON-NLS-1$
+        return true;
     }
 
     /**

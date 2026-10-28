@@ -1402,9 +1402,7 @@ final class BslExpectedTypePremiums
                 && method.getFormalParams().size() > index)
             {
                 FormalParam parameter = method.getFormalParams().get(index);
-                ICompositeNode node = NodeModelUtils.findActualNodeFor(parameter);
-                types.addAll(variableTypeItemsAt(parameter, node != null ? node.getEndOffset() : 0,
-                    method.environments()));
+                types.addAll(formalParameterTypes(method, parameter));
                 return nullToEmpty(parameter.getName());
             }
         }
@@ -1469,9 +1467,8 @@ final class BslExpectedTypePremiums
                 if (methodName.equalsIgnoreCase(method.getName()) && method.getFormalParams().size() > index)
                 {
                     FormalParam parameter = method.getFormalParams().get(index);
-                    ICompositeNode node = NodeModelUtils.findActualNodeFor(parameter);
-                    return new CallExpectation(variableTypeItemsAt(parameter, node != null ? node.getEndOffset() : 0,
-                        method.environments()), nullToEmpty(parameter.getName()), methodName);
+                    return new CallExpectation(formalParameterTypes(method, parameter),
+                        nullToEmpty(parameter.getName()), methodName);
                 }
             }
             return null;
@@ -1866,6 +1863,22 @@ final class BslExpectedTypePremiums
         if (text.length() < 2 || text.charAt(0) != '"' || text.charAt(text.length() - 1) != '"')
             return ""; //$NON-NLS-1$
         return text.substring(1, text.length() - 1).replace("\"\"", "\"").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Тип параметра вызова — из актуального комментария, как в BslCommentUiUtils$2 EDT.
+     * Состояние переменной (особенно LIGHT) может ещё хранить прежний комментарий.
+     * Один путь для подсказки при наведении и боковой подсказки списка.
+     */
+    private static List<TypeItem> formalParameterTypes(com._1c.g5.v8.dt.bsl.model.Method method,
+        FormalParam parameter)
+    {
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(parameter);
+        List<TypeItem> stateTypes = variableTypeItemsAt(parameter, node != null ? node.getEndOffset() : 0,
+            method.environments());
+        List<TypeItem> documented = BslMethodParameterTypes.fromComment(method, parameter);
+        List<TypeItem> result = documented != null && !documented.isEmpty() ? documented : stateTypes;
+        return result;
     }
 
     /** Готовый тип переменной в точке — тем же вызовом, что боковая подсказка EDT. */
