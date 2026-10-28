@@ -606,7 +606,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (types.isEmpty())
                 types = collectParentTypesFromProposals(memberStockFullList);
         }
-        Global.tempLog("assist-parent-type", "full=" + fullTypes + " displayed=" + types); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (types.isEmpty())
             return ""; //$NON-NLS-1$
         if (types.size() == 1)

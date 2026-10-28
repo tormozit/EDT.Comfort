@@ -2484,6 +2484,66 @@ final class FunctionReturnTypes
     private static final Map<String, TypeDescriptionPresentationHook.TypeOrder> TYPE_ORDERS =
         new ConcurrentHashMap<>();
 
+    /** Штатный сокращённый перечень: общий порядок типов, многоточие остаётся в конце. */
+    static String sortProposalTypeDisplay(String display, Object info)
+    {
+        if (display == null)
+            return null;
+        int owner = display.indexOf(" ~ "); //$NON-NLS-1$
+        int end = owner >= 0 ? owner : display.length();
+        int colon = display.lastIndexOf(" : ", end); //$NON-NLS-1$
+        if (colon < 0 || display.lastIndexOf(')', end) > colon)
+            return display;
+        String text = display.substring(colon + 3, end).trim();
+        if (!text.startsWith("<") || !text.endsWith(">") || text.indexOf(',') < 0) //$NON-NLS-1$ //$NON-NLS-2$
+            return display;
+        rememberProposalTypeOrders(info, 0);
+        List<String> names = new java.util.ArrayList<>();
+        boolean unknown = false;
+        boolean more = false;
+        for (String part : text.substring(1, text.length() - 1).split(",")) //$NON-NLS-1$
+        {
+            String name = part.trim();
+            if (UNKNOWN.equals(name))
+                unknown = true;
+            else if ("...".equals(name)) //$NON-NLS-1$
+                more = true;
+            else
+                names.add(name);
+        }
+        String sorted = formatTypeNames(names);
+        String inner = sorted.isEmpty() ? "" : sorted.substring(1, sorted.length() - 1); //$NON-NLS-1$
+        if (unknown)
+            inner = UNKNOWN + (inner.isEmpty() ? "" : ", " + inner); //$NON-NLS-1$ //$NON-NLS-2$
+        if (more)
+            inner += (inner.isEmpty() ? "" : ", ") + "..."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        String result = display.substring(0, colon + 3) + "<" + inner + ">" + display.substring(end); //$NON-NLS-1$ //$NON-NLS-2$
+        return result.equals(display) ? display : result;
+    }
+
+    /** Готовые типы строки; прокси списка предложений не разрешаются. */
+    private static void rememberProposalTypeOrders(Object info, int depth)
+    {
+        if (depth > 3 || !(info instanceof InternalEObject object) || object.eIsProxy())
+            return;
+        if (info instanceof ProposalElement)
+        {
+            Object value = object.eGet(BslPackage.PROPOSAL_ELEMENT__LIST, false, false);
+            if (value instanceof InternalEList<?> list)
+            {
+                var entries = list.basicIterator();
+                while (entries.hasNext())
+                    rememberProposalTypeOrders(entries.next(), depth + 1);
+            }
+        }
+        else if (info instanceof ParamSet)
+            rememberProposalTypeOrders(object.eInternalContainer(), depth + 1);
+        else if (info instanceof com._1c.g5.v8.dt.mcore.Property property)
+            property.getTypes().forEach(FunctionReturnTypes::typeName);
+        else if (info instanceof com._1c.g5.v8.dt.mcore.Method method)
+            method.getRetValType().forEach(FunctionReturnTypes::typeName);
+    }
+
     /** Тот же порядок, что в подсказках; при неизвестном ключе сохраняется исходный порядок. */
     private static String formatTypeNames(java.util.Collection<String> names)
     {

@@ -433,10 +433,12 @@ public final class MdTypeMapping
         if (dotted == null || dotted.isEmpty())
             return dotted;
         StringBuilder result = new StringBuilder();
-        for (String part : dotted.split("\\.")) //$NON-NLS-1$
+        // Пустые сегменты сохраняют точки, в том числе многоточие в подписях EDT.
+        String[] parts = dotted.split("\\.", -1); //$NON-NLS-1$
+        for (int i = 0; i < parts.length; i++)
         {
-            if (result.length() > 0) result.append('.');
-            result.append(ru(part));
+            if (i > 0) result.append('.');
+            result.append(ru(parts[i]));
         }
         return result.toString();
     }

@@ -160,7 +160,7 @@ public class SmartCompletionProposal implements
         String sourceDisplay = overlapDisplay != null
             ? overlapDisplay
             : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
-        String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
+        String localized = localizeDisplayTypes(sourceDisplay);
         if (delegate instanceof ConfigurableCompletionProposal configurable)
             localized = BslFormDataTypes.decorateProposal(localized,
                 Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
@@ -713,8 +713,16 @@ public class SmartCompletionProposal implements
         if (delegate instanceof SmartCompletionProposal)
             return ""; //$NON-NLS-1$
         String raw = delegate.getDisplayString();
-        return SmartContentAssistProcessor.localizeAssistTypeNames(raw);
+        return localizeDisplayTypes(raw);
 
+    }
+
+    private String localizeDisplayTypes(String display)
+    {
+        String localized = SmartContentAssistProcessor.localizeAssistTypeNames(display);
+        return FunctionReturnTypes.sortProposalTypeDisplay(localized,
+            delegate instanceof ConfigurableCompletionProposal configurable
+                ? Global.getField(configurable, "additionalProposalInfo") : null); //$NON-NLS-1$
     }
 
     /**
