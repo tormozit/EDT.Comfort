@@ -689,8 +689,21 @@ public final class ValidationChecksFilterHook implements IStartup
             Global.invoke(checkViewer, "setCheck", control.getChecksViewerProvider().getProject(), //$NON-NLS-1$
                 described);
         };
-        control.getSelectedCheckObjects().addChangeListener(event -> update.run());
-        update.run();
+        Object[] previousSelection = { null };
+        Runnable updateSelection = () -> {
+            Object selected = control.getSelectedCheckObjects().getValue();
+            Object key = selected instanceof IChecksTreeNode node
+                && node.getValue() instanceof ICheckSettings settings ? settings.getId() : selected;
+            boolean changed = !java.util.Objects.equals(previousSelection[0], key);
+            previousSelection[0] = key;
+            update.run();
+            // Штатный setCheck и наше дополнение описания уже заменили HTML.
+            // Старый диапазон DOM может охватить весь новый текст и запустить его перетаскивание.
+            if (changed)
+                CheckDescriptionRefresh.clearSelection(browser);
+        };
+        control.getSelectedCheckObjects().addChangeListener(event -> updateSelection.run());
+        updateSelection.run();
     }
 
     private static String builtinCheckDescription(ICheckSettings settings, ChecksViewerProvider provider)
@@ -816,6 +829,21 @@ public final class ValidationChecksFilterHook implements IStartup
             };
             browser.addProgressListener(ProgressListener.completedAdapter(e -> refresh.run()));
             browser.getDisplay().asyncExec(refresh);
+        }
+
+        private static void clearSelection(Browser browser)
+        {
+            if (browser == null || browser.isDisposed())
+                return;
+            browser.execute("""
+                (function () {
+                    if (window.getSelection) {
+                        window.getSelection().removeAllRanges();
+                    } else if (document.selection) {
+                        document.selection.empty();
+                    }
+                })();
+                """); //$NON-NLS-1$
         }
 
         private static Browser findBrowser(Composite parent)

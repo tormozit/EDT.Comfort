@@ -45,6 +45,7 @@ public final class Activator
         FormDataWeaving.install(context);
         TypeComputationWeaving.install(context);
         ArrayElementTypesWeaving.install(context);
+        ArrayTypeReferenceWeaving.install(context);
         QuickFixPresentationWeaving.install(context);
         DynamicFeatureWeaving.install(context);
         StructureKeyWeaving.install(context);
@@ -722,18 +723,11 @@ public final class Activator
         private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
         private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
         private static final String STATUS = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
-        private final BundleContext context;
-
-        private ArrayElementTypesWeaving(BundleContext context)
-        {
-            this.context = context;
-        }
-
         static void install(BundleContext context)
         {
             System.getProperties().putIfAbsent(CALLBACK,
                 (Function<Object, Object>) payload -> ((Object[])payload)[0]);
-            context.registerService(WeavingHook.class, new ArrayElementTypesWeaving(context), null);
+            context.registerService(WeavingHook.class, new ArrayElementTypesWeaving(), null);
             System.getProperties().put(STATUS, Boolean.TRUE);
         }
 
@@ -750,33 +744,11 @@ public final class Activator
                 if (transformed == null)
                     throw new IllegalStateException("Array element types method not found: " + name); //$NON-NLS-1$
                 woven.setBytes(transformed);
-                log("woven " + name, null); //$NON-NLS-1$
             }
             catch (RuntimeException | LinkageError failure)
             {
                 System.getProperties().put(STATUS + "." + name, Boolean.FALSE); //$NON-NLS-1$
                 System.getProperties().put(STATUS + ".failure", failure.toString()); //$NON-NLS-1$
-                log("weaving failed " + name, failure); //$NON-NLS-1$
-            }
-        }
-
-        /** Временная диагностика раннего вплетения до запуска Global.tempLog. */
-        private void log(String message, Throwable failure)
-        {
-            var reference = context.getServiceReference(FrameworkLog.class);
-            if (reference == null)
-                return;
-            FrameworkLog log = context.getService(reference);
-            try
-            {
-                if (log != null)
-                    log.log(new FrameworkLogEntry("tormozit.comfort.early", //$NON-NLS-1$
-                        failure == null ? FrameworkLogEntry.INFO : FrameworkLogEntry.ERROR,
-                        0, "[ArrayElementTypesWeaving] " + message, 0, failure, null)); //$NON-NLS-1$
-            }
-            finally
-            {
-                context.ungetService(reference);
             }
         }
 
@@ -843,6 +815,89 @@ public final class Activator
                 }
             }, 0);
             System.getProperties().put(STATUS + "." + className.replace('/', '.'), changed.get()); //$NON-NLS-1$
+            return changed.get() ? writer.toByteArray() : null;
+        }
+    }
+
+    /** Полный тип массива в штатных ссылках документации — общий для наведения и автодополнения. */
+    private static final class ArrayTypeReferenceWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.arrayElementTypes.reference"; //$NON-NLS-1$
+        private static final String STATUS = "tormozit.arrayTypeReference.early"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK,
+                (Function<Object, Object>) payload -> ((Object[])payload)[0]);
+            context.registerService(WeavingHook.class, new ArrayTypeReferenceWeaving(), null);
+            System.getProperties().put(STATUS, Boolean.TRUE);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            byte[] transformed = transform(woven.getBytes());
+            System.getProperties().put(STATUS + ".woven", transformed != null); //$NON-NLS-1$
+            if (transformed != null)
+                woven.setBytes(transformed);
+        }
+
+        static byte[] transform(byte[] bytes)
+        {
+            var reader = new ClassReader(bytes);
+            var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean changed = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"convertTypeItemToReference".equals(name) || !descriptor.equals( //$NON-NLS-1$
+                        "(Lcom/_1c/g5/v8/dt/mcore/TypeItem;Lorg/eclipse/emf/ecore/resource/Resource;ZLcom/_1c/g5/v8/dt/platform/version/Version;Z)Lcom/_1c/g5/v8/dt/internal/bsl/ui/documentation/page/IPageReference;")) //$NON-NLS-1$
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                super.visitVarInsn(Opcodes.ASTORE, 6);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitLdcInsn(6);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                for (int index = 0; index < 6; index++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(index);
+                                    int slot = index == 0 ? 6 : index == 5 ? 0 : index;
+                                    super.visitVarInsn(index == 3 ? Opcodes.ILOAD : Opcodes.ALOAD, slot);
+                                    if (index == 3)
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST,
+                                    "com/_1c/g5/v8/dt/internal/bsl/ui/documentation/page/IPageReference"); //$NON-NLS-1$
+                                changed.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
             return changed.get() ? writer.toByteArray() : null;
         }
     }

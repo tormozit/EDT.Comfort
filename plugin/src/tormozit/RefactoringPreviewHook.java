@@ -35,13 +35,17 @@ import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
+import org.eclipse.jface.wizard.WizardDialog;
 import org.eclipse.ltk.core.refactoring.Change;
 import org.eclipse.ltk.core.refactoring.CompositeChange;
+import org.eclipse.ltk.core.refactoring.RefactoringStatusEntry;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChange;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChangeGroup;
 import org.eclipse.ltk.core.refactoring.TextFileChange;
@@ -203,10 +207,44 @@ public final class RefactoringPreviewHook
             return;
         if (!isPageOrShellShow(control, shell))
             return;
+        sortStatusMessages(shell);
         IndexFreshness.watch(shell);
         RefactoringWizardTitleHook.prepareRenameContext(shell);
         Marks.scheduleApply(shell, 0);
         scheduleAttach(shell, 0);
+    }
+
+    /** Серьёзность — как в LTK, внутри группы — алфавитный порядок отображаемых сообщений. */
+    private static void sortStatusMessages(Shell shell)
+    {
+        if (!(shell.getData() instanceof IWizardContainer container))
+            return;
+        IWizardPage page = container.getCurrentPage();
+        if (page == null || !(Global.getField(page, "fViewer") instanceof Composite statusViewer) //$NON-NLS-1$
+            || !statusViewer.getClass().getName().equals("org.eclipse.ltk.internal.ui.refactoring.RefactoringStatusViewer") //$NON-NLS-1$
+            || !(Global.getField(statusViewer, "fTableViewer") instanceof TableViewer viewer)) //$NON-NLS-1$
+            return;
+        Table table = viewer.getTable();
+        String key = "tormozit.refactoringStatusMessagesSorted"; //$NON-NLS-1$
+        if (table.isDisposed() || Boolean.TRUE.equals(table.getData(key)))
+            return;
+        table.setData(key, Boolean.TRUE);
+        var selection = viewer.getSelection();
+        viewer.setComparator(new ViewerComparator()
+        {
+            @Override
+            public int compare(Viewer source, Object left, Object right)
+            {
+                if (left instanceof RefactoringStatusEntry first && right instanceof RefactoringStatusEntry second)
+                {
+                    int severity = Integer.compare(second.getSeverity(), first.getSeverity());
+                    if (severity != 0)
+                        return severity;
+                }
+                return super.compare(source, left, right);
+            }
+        });
+        viewer.setSelection(selection, true);
     }
 
     private static boolean isPageOrShellShow(Control control, Shell shell)
@@ -1971,6 +2009,7 @@ public final class RefactoringPreviewHook
                 if (Boolean.TRUE.equals(shell.getData(SHELL_HANDLED_KEY)))
                     return;
                 shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
+                resetDeletePageMinimum(shell);
                 installShellSizeMemory(shell);
             }
             // Если предпросмотр уже создан, вставляем панели до показа мастера.
@@ -1979,8 +2018,28 @@ public final class RefactoringPreviewHook
         }
 
         /**
-         * Размер окна мастера рефакторинга — восстановление при открытии и запоминание при закрытии.
+         * RefactoringWizardDialog читает width/height своей секции настроек и передаёт их
+         * в setMinimumPageSize. В отличие от Dialog2 этот минимум действует и на подтверждение
+         * удаления, и на ErrorWizardPage. Возвращаем исходный минимум LTK (600 x 400),
+         * затем пересчитываем размер по содержимому до нативного показа окна.
          */
+        private static void resetDeletePageMinimum(Shell shell)
+        {
+            if (!(shell.getData() instanceof WizardDialog dialog)
+                || !dialog.getClass().getName().equals("org.eclipse.ltk.internal.ui.refactoring.RefactoringWizardDialog") //$NON-NLS-1$
+                || dialog.getCurrentPage() == null || dialog.getCurrentPage().getWizard() == null
+                || !dialog.getCurrentPage().getWizard().getClass().getName().equals("com._1c.g5.v8.dt.refactoring.ui.DtRefactoringDeleteWizard") //$NON-NLS-1$
+                || isPreviewPageCurrent(shell) || shell.getMaximized() || shell.getMinimized())
+                return;
+            Rectangle before = shell.getBounds();
+            dialog.setMinimumPageSize(600, 400);
+            Point preferred = shell.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+            Rectangle target = new Rectangle(before.x + (before.width - preferred.x) / 2,
+                before.y + (before.height - preferred.y) / 2, preferred.x, preferred.y);
+            shell.setBounds(clampToMonitor(shell, target));
+        }
+
+        /** Размер предпросмотра — восстановление при открытии и запоминание при закрытии. */
         private static void installShellSizeMemory(Shell shell)
         {
             if (Boolean.TRUE.equals(shell.getData(SIZE_MEMORY_KEY)))
@@ -2013,7 +2072,8 @@ public final class RefactoringPreviewHook
 
         private static void restoreShellSize(Shell shell)
         {
-            if (shell == null || shell.isDisposed() || shell.getMaximized())
+            // Размер предпросмотра не переносим на подтверждение удаления и страницы ввода (#935).
+            if (shell == null || shell.isDisposed() || shell.getMaximized() || !isPreviewPageCurrent(shell))
                 return;
             IDialogSettings settings = dialogSettings();
             if (settings.get(KEY_DIALOG_WIDTH) == null || settings.get(KEY_DIALOG_HEIGHT) == null)

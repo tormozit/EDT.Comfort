@@ -1629,8 +1629,6 @@ public final class BslStructureInsertCommentTypes
     /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
     static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
     {
-        Global.tempLog("query-parameter-types", "propertyHover object=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (object == null ? null : object.eClass().getName()));
         if (object == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
@@ -1658,12 +1656,9 @@ public final class BslStructureInsertCommentTypes
                 propertyTypeGroups(property, page, value, resource));
             Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
             Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
-            Global.tempLog("query-parameter-types", "propertyHover property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " html=" + IrBslHoverHtml.readHtml(info)); //$NON-NLS-1$
         }
         catch (Throwable failure)
         {
-            Global.tempLog("query-parameter-types", "propertyHover failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1698,8 +1693,6 @@ public final class BslStructureInsertCommentTypes
     /** Тип переменной в месте использования — тот же getVariableTypesAtOffset, что у страницы EDT. */
     private static Property variablePropertyForHint(EObject object, Resource resource, int offset)
     {
-        Global.tempLog("query-parameter-types", "variableHover object=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (object == null ? null : object.eClass().getName()) + " offset=" + offset); //$NON-NLS-1$
         if (object == null || resource == null || resource.getContents().isEmpty()
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
             return null;
@@ -1721,8 +1714,6 @@ public final class BslStructureInsertCommentTypes
             Environments environments = method != null ? method.environments()
                 : module != null ? module.environments() : Environments.ALL;
             List<TypeItem> types = TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments);
-            Global.tempLog("query-parameter-types", "variableHover name=" + variable.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " offset=" + position + " types=" + types); //$NON-NLS-1$ //$NON-NLS-2$
             if (types.stream().anyMatch(type -> type instanceof Type collection
                 && (type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType
                     || "Array".equals(collection.getName())) //$NON-NLS-1$
@@ -1760,7 +1751,7 @@ public final class BslStructureInsertCommentTypes
             Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
                 resolved, resource, Boolean.valueOf(russian), version, Boolean.FALSE);
             if (reference != null)
-                references.add(collectionTypeReference(resolved, reference, provider, resource, russian, version));
+                references.add(reference);
         }
         if (references.isEmpty())
             return original;
@@ -1775,7 +1766,7 @@ public final class BslStructureInsertCommentTypes
     }
 
     /** Штатная ссылка свойства не раскрывает элементы ExtendedCollectionType. */
-    static Object collectionTypeReference(TypeItem item, Object reference, Object provider,
+    private static Object collectionTypeReference(TypeItem item, Object reference, Object provider,
         Resource resource, boolean russian, Object version) throws Exception
     {
         if (!(item instanceof Type collection)
@@ -2064,10 +2055,9 @@ public final class BslStructureInsertCommentTypes
                 Property property = propertyAt(resource, offset);
                 if (property != null)
                     return property;
-                var helper = new org.eclipse.xtext.resource.EObjectAtOffsetHelper();
+                var helper = resource.getResourceServiceProvider()
+                    .get(org.eclipse.xtext.resource.EObjectAtOffsetHelper.class);
                 EObject referenced = helper.resolveCrossReferencedElementAt(resource, offset);
-                Global.tempLog("query-parameter-types", "pointerTypeHover offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " referenced=" + (referenced == null ? null : referenced.eClass().getName())); //$NON-NLS-1$
                 Property variable = variablePropertyForHint(referenced, resource, offset);
                 if (variable != null)
                     return variable;
@@ -2078,7 +2068,6 @@ public final class BslStructureInsertCommentTypes
         }
         catch (Throwable failure)
         {
-            Global.tempLog("query-parameter-types", "pointerTypeHover failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -2929,8 +2918,8 @@ public final class BslStructureInsertCommentTypes
     private static final class ArrayElementTypes
     {
         private static final String CALLBACK = "tormozit.arrayElementTypes.variableTypes"; //$NON-NLS-1$
-        private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
-        private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final ThreadLocal<Set<TypeItem>> REFERENCES = ThreadLocal.withInitial(
+            () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
         private static final ThreadLocal<Set<Variable>> RESOLVING = ThreadLocal.withInitial(
             () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
@@ -2945,16 +2934,43 @@ public final class BslStructureInsertCommentTypes
                 return arrayVariableTypes(types, (Variable)args[1], ((Integer)args[2]).intValue(),
                     (Environments)args[3]);
             });
-            String status = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
-            Global.tempLog("array-element-types", "early=" + System.getProperties().get(status) //$NON-NLS-1$ //$NON-NLS-2$
-                + " variableReader=" + System.getProperties().get(status + "." + TARGET) //$NON-NLS-1$ //$NON-NLS-2$
-                + " computer=" + System.getProperties().get(status + "." + COMPUTER_TARGET) //$NON-NLS-1$ //$NON-NLS-2$
-                + " failure=" + System.getProperties().get(status + ".failure")); //$NON-NLS-1$ //$NON-NLS-2$
+            System.getProperties().put("tormozit.arrayElementTypes.reference", //$NON-NLS-1$
+                (java.util.function.Function<Object, Object>) payload -> arrayReference((Object[])payload));
+        }
+
+        private static Object arrayReference(Object[] args)
+        {
+            Object original = args[0];
+            TypeItem item = (TypeItem)args[1];
+            Resource resource = (Resource)args[2];
+            if (original == null || !(item instanceof Type collection)
+                || !(item instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType
+                    || "Array".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$
+                || resource == null || resource.getContents().isEmpty()
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+                return original;
+            Set<TypeItem> references = REFERENCES.get();
+            if (!references.add(item))
+                return original;
+            try
+            {
+                return collectionTypeReference(item, original, args[5], resource,
+                    ((Boolean)args[3]).booleanValue(), args[4]);
+            }
+            catch (Exception | LinkageError failure)
+            {
+                return original;
+            }
+            finally
+            {
+                references.remove(item);
+                if (references.isEmpty())
+                    REFERENCES.remove();
+            }
         }
 
         static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
         {
-            Global.tempLog("array-element-types", "infer variable=" + variable.getName() + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             Set<Variable> resolving = RESOLVING.get();
             if (!resolving.add(variable))
                 return types;
@@ -2972,14 +2988,10 @@ public final class BslStructureInsertCommentTypes
                             break;
                         }
                     }
-                Global.tempLog("array-element-types", "context method=" + (method == null ? null : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " resource=" + (variable.eResource() == null ? null : variable.eResource().getClass().getName())); //$NON-NLS-1$
                 if (method == null || !(variable.eResource() instanceof XtextResource resource))
                     return types;
                 Plan plan = Plan.of(method);
                 List<Addition> additions = plan.additions.getOrDefault(variable, List.of());
-                Global.tempLog("array-element-types", "plan variable=" + variable.getName() + " additions=" + additions //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " variables=" + plan.additions.keySet().stream().map(Variable::getName).toList()); //$NON-NLS-1$
                 if (additions.isEmpty())
                     return types;
                 var services = resource.getResourceServiceProvider();
@@ -2998,13 +3010,10 @@ public final class BslStructureInsertCommentTypes
                     if (!"Array".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$
                         result.add(item);
                 result.add(array);
-                Global.tempLog("array-element-types", "result variable=" + variable.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " elements=" + elements.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
                 return result;
             }
             catch (RuntimeException | LinkageError failure)
             {
-                Global.tempLog("array-element-types", "infer failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
                 return types;
             }
             finally
@@ -3038,8 +3047,6 @@ public final class BslStructureInsertCommentTypes
                 if (++count > 2)
                     break;
                 List<TypeItem> inferred = computer.apply(addition.value, environments);
-                Global.tempLog("array-element-types", "addition offset=" + addition.start //$NON-NLS-1$ //$NON-NLS-2$
-                    + " elements=" + inferred.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
                 for (TypeItem element : inferred)
                     addElement(elements, element);
             }

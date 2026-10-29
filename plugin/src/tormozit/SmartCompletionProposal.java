@@ -599,7 +599,7 @@ public class SmartCompletionProposal implements
                 preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
             type = preliminary.isEmpty()
                 ? "<" + FunctionReturnTypes.UNKNOWN + ">" //$NON-NLS-1$ //$NON-NLS-2$
-                : "<" + FunctionReturnTypes.UNKNOWN + ", " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                : "<" + FunctionReturnTypes.UNKNOWN + " | " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         return display.substring(0, nameEnd) + " : " + type + display.substring(nameEnd); //$NON-NLS-1$
     }
@@ -635,7 +635,7 @@ public class SmartCompletionProposal implements
             preliminary = preliminary.substring(1, preliminary.length() - 1).trim();
         String type = preliminary.isEmpty()
             ? "<" + FunctionReturnTypes.UNKNOWN + ">" //$NON-NLS-1$ //$NON-NLS-2$
-            : "<" + FunctionReturnTypes.UNKNOWN + ", " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            : "<" + FunctionReturnTypes.UNKNOWN + " | " + preliminary + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return head + " : " + type + tail; //$NON-NLS-1$
     }
 

@@ -1639,9 +1639,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             boolean inOperand = parameter.eContainer() instanceof InExpression in
                                 && in.eContainer() instanceof ABinaryOperatorsExpression binary
                                 && binary.getRight() == in;
-                            Global.tempLog("query-parameter-types", "parameter=" + parameter.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                                + " inOperand=" + inOperand + " expected=" //$NON-NLS-1$ //$NON-NLS-2$
-                                + (expected == null ? null : expected.getTypes()));
                             if (expected == null)
                                 continue;
                             List<TypeItem> scalarTypes = new ArrayList<>();
@@ -1662,10 +1659,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                                     .get(McorePackage.Literals.TYPE_ITEM, version);
                                 Type array = TypeSystemUtil.createExtendedArrayType(scalarTypes, typeProvider, method);
                                 labels.add(array);
-                                Global.tempLog("query-parameter-types", "parameter=" + parameter.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                                    + " arrayClass=" + array.eClass().getName() + " elements=" //$NON-NLS-1$ //$NON-NLS-2$
-                                    + array.getCollectionElementTypes().allTypes().stream()
-                                        .map(McoreUtil::getTypeNameRu).toList());
                             }
                         }
                     }
@@ -1673,7 +1666,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             catch (RuntimeException | LinkageError failure)
             {
-                Global.tempLog("query-parameter-types", "failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
                 // Ошибка расчёта типов не должна убирать найденные имена параметров.
             }
             Map<String, com._1c.g5.v8.dt.mcore.Property> result = new java.util.LinkedHashMap<>();

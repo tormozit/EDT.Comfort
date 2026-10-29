@@ -343,9 +343,6 @@ public final class BslEditorHoverHook implements IStartup
             Object info = delegate instanceof IInformationProviderExtension ext
                 ? ext.getInformation2(textViewer, subject)
                 : delegate.getInformation(textViewer, subject);
-            Global.tempLog("query-parameter-types", "informationProvider offset=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (subject == null ? -1 : subject.getOffset()) + " input=" //$NON-NLS-1$
-                + (info == null ? null : info.getClass().getName()));
             if (subject != null && IrBslHoverHtml.isBslBrowserInput(info))
                 BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, subject.getOffset());
             return info;

@@ -234,14 +234,25 @@ final class BslExpectedTypePremiums
      * @param systemProperty приёмник — системное свойство: {@code имя@тип владельца} в нижнем регистре
      */
     private record Expectation(List<String> types, String receiver, String token, String callMethod,
-        int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems)
+        int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems,
+        List<String> matchingTypes)
     {
         /** Чистое «Неопределено» (типично — новая переменная) — ожидаемый тип неизвестен. */
         Expectation
         {
             if (types != null && types.size() == 1 && ("Неопределено".equalsIgnoreCase(types.get(0)) //$NON-NLS-1$
                 || "Undefined".equalsIgnoreCase(types.get(0)))) //$NON-NLS-1$
+            {
                 types = new ArrayList<>();
+                matchingTypes = List.of();
+            }
+        }
+
+        Expectation(List<String> types, String receiver, String token, String callMethod, int parameterIndex,
+            boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems)
+        {
+            this(types, receiver, token, callMethod, parameterIndex, systemEnum, systemProperty, formalParameter,
+                typeItems, typeItems.isEmpty() ? List.copyOf(types) : matchingTypeNames(typeItems));
         }
 
         Expectation(List<String> types, String receiver, String token, String callMethod, int parameterIndex,
@@ -280,7 +291,7 @@ final class BslExpectedTypePremiums
             Set<String> result = new HashSet<>();
             if (expectation == null)
                 return result;
-            List<String> types = expectation.types();
+            List<String> types = expectation.matchingTypes();
             if (types.isEmpty())
             {
                 String byName = typeFromReceiverName(expectation);
@@ -328,14 +339,13 @@ final class BslExpectedTypePremiums
         }
         if (receiver.isEmpty())
             return false;
-        String text = typeText.trim();
-        if (text.startsWith("<") && text.endsWith(">")) //$NON-NLS-1$ //$NON-NLS-2$
-            text = text.substring(1, text.length() - 1);
-        for (String part : text.split(",")) //$NON-NLS-1$
+        for (String type : splitTypeText(typeText))
         {
-            String type = lower(part.trim());
-            if (!BROAD_TYPES.contains(type) && receiver.contains(type))
-                return true;
+            for (String expected : receiver)
+            {
+                if (!BROAD_TYPES.contains(lower(type)) && compatibleType(type, expected))
+                    return true;
+            }
         }
         return false;
     }
@@ -347,7 +357,7 @@ final class BslExpectedTypePremiums
         {
             for (String type : types)
             {
-                if (type.equalsIgnoreCase(typeName)
+                if (compatibleType(type, typeName)
                     // Варианты формы ИР: расширения формы совместимы с «Форма…»
                     || lower(type).startsWith("расширениеформы") && lower(typeName).startsWith("форма")) //$NON-NLS-1$ //$NON-NLS-2$
                     return true;
@@ -916,7 +926,6 @@ final class BslExpectedTypePremiums
 
     private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list)
     {
-        long started = System.nanoTime();
         Scene[] scene = new Scene[1];
         Map<String, List<String>> variableTypes = new HashMap<>();
         Boolean read;
@@ -954,18 +963,6 @@ final class BslExpectedTypePremiums
         Set<String> evaluated = new HashSet<>();
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
-        // #region temp — типы слов, названных как ожидаемый тип (менеджер системного перечисления)
-        StringBuilder namedLikeType = new StringBuilder();
-        if (scene[0].expectation() != null)
-        {
-            Map<String, Word> diagnosticWords = words(list, variableTypes, scene[0].predefinedTypes());
-            for (String type : scene[0].expectation().types())
-            {
-                Word named = diagnosticWords.get(lower(type));
-                namedLikeType.append(type).append("->").append(named == null ? "нет" : named.types()).append(' '); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-        // #endregion
         // #region temp — строки предопределённых значений EDT: почему не распознан тип
         int predefinedShown = 0;
         for (ICompletionProposal proposal : list)
@@ -986,17 +983,6 @@ final class BslExpectedTypePremiums
                 break;
         }
         // #endregion
-        Global.tempLog(LOG, "start=" + context.start() + " parent=" + context.parent() //$NON-NLS-1$ //$NON-NLS-2$
-            + " namedLikeType=" + namedLikeType //$NON-NLS-1$
-            + " words=" + list.length + " expectation=" + scene[0].expectation() //$NON-NLS-1$ //$NON-NLS-2$
-            + " statistics=" + scene[0].statisticsContext() + " inExpression=" + scene[0].insideExpression() //$NON-NLS-1$ //$NON-NLS-2$
-            + " frequencies=" + scene[0].frequencies().size() //$NON-NLS-1$
-            + " predefinedTypes=" + scene[0].predefinedTypes() //$NON-NLS-1$
-            + " variables=" + variableTypes.size() + " premiums=" + premiums.values() //$NON-NLS-1$ //$NON-NLS-2$
-            + " autoOpen=" + premiums.autoOpen() //$NON-NLS-1$
-            + " added=" + added.keySet() //$NON-NLS-1$
-            + " facts=" + scene[0].facts() //$NON-NLS-1$
-            + " ms=" + (System.nanoTime() - started) / 1_000_000L); //$NON-NLS-1$
         reconcileFuzzyWithIr(fuzzyCalls);
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
             List.copyOf(added.values()));
@@ -1035,7 +1021,10 @@ final class BslExpectedTypePremiums
         Map<String, Integer> frequencies = context.parent().isEmpty() ? Collections.emptyMap()
             : memberFrequencies(resource, context);
         return new Scene(expectation, statisticsContext, insideExpression, frequencies,
-            receiverTypeLine(expectation, resource), String.join(", ", receiverTypes(expectation)), //$NON-NLS-1$
+            receiverTypeLine(expectation, resource), expectation.typeItems().isEmpty()
+                ? receiverTypes(expectation).isEmpty() ? "" //$NON-NLS-1$
+                    : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                : FunctionReturnTypes.typeSetText(expectation.typeItems()),
             predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes), List.of(),
             displayTypeNames(parentTypes, resource));
     }
@@ -1576,22 +1565,17 @@ final class BslExpectedTypePremiums
     /** Типы выражения {@code text} в {@code [start, end)}: переменная — по состоянию в точке, иначе — тип узла AST. */
     private static List<TypeItem> expressionTypeItems(XtextResource resource, int start, int end, String text)
     {
-        Global.tempLog("expected-receiver-type", "expression text=" + text + " start=" + start + " end=" + end); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (IDENTIFIER.matcher(text).matches())
         {
             Variable variable = findVariable(resource, text, start);
             if (variable != null)
             {
                 List<TypeItem> types = variableTypeItemsAt(variable, end, environmentsOf(resource, variable));
-                Global.tempLog("expected-receiver-type", "variable name=" + variable.getName() + " types=" + typeNames(types)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (!types.isEmpty())
                     return types;
             }
         }
         Expression expression = findExpression(resource, start, end);
-        Global.tempLog("expected-receiver-type", "node=" + (expression == null ? "null" : expression.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " text=" + (expression == null ? "" : expressionText(expression)) //$NON-NLS-1$ //$NON-NLS-2$
-            + " types=" + (expression == null ? List.of() : typeNames(expression.getTypes()))); //$NON-NLS-1$
         if (expression == null)
             return new ArrayList<>();
         return expressionTypeItems(resource, expression, end);
@@ -1604,7 +1588,6 @@ final class BslExpectedTypePremiums
     private static List<TypeItem> featureTypes(XtextResource resource, Expression expression, int offset)
     {
         List<TypeItem> result = new ArrayList<>();
-        Global.tempLog("expected-receiver-type", "featureTypes node=" + expression.eClass().getName() + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!(expression instanceof FeatureAccess access))
             return result;
         List<FeatureEntry> entries = featureEntries(access);
@@ -1615,21 +1598,15 @@ final class BslExpectedTypePremiums
                 ? provider.get(DynamicFeatureAccessComputer.class) : null;
             if (computer != null)
                 entries = DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer);
-            Global.tempLog("expected-receiver-type", "resolveDynamic computer=" + (computer != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " entries=" + entries.size()); //$NON-NLS-1$
         }
         for (FeatureEntry entry : entries)
         {
             EObject feature = entry != null ? entry.getFeature() : null;
-            Global.tempLog("expected-receiver-type", "feature=" + (feature == null ? "null" : feature.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " proxy=" + (feature != null && feature.eIsProxy()) //$NON-NLS-1$
-                + " propertyTypes=" + (feature instanceof Property property ? typeNames(property.getTypes()) : List.of())); //$NON-NLS-1$
             if (feature instanceof Property property && !property.eIsProxy())
                 result.addAll(property.getTypes());
             else if (feature instanceof Variable variable)
                 result.addAll(variableTypeItemsAt(variable, offset, environmentsOf(resource, variable)));
         }
-        Global.tempLog("expected-receiver-type", "featureTypes result=" + typeNames(result)); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -1666,8 +1643,6 @@ final class BslExpectedTypePremiums
             if (computed != null)
                 result.addAll(computed);
         }
-        Global.tempLog("expected-receiver-type", "compute node=" + expression.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " text=" + expressionText(expression) + " types=" + typeNames(result)); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -1866,9 +1841,6 @@ final class BslExpectedTypePremiums
                 }
             }
         }
-        Global.tempLog("expected-receiver-type", "beforeOperator end=" + end //$NON-NLS-1$ //$NON-NLS-2$
-            + " node=" + (result == null ? "null" : result.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " text=" + (result == null ? "" : expressionText(result))); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -1930,7 +1902,9 @@ final class BslExpectedTypePremiums
             return new ArrayList<>();
         try
         {
-            return new ArrayList<>(TypeSystemUtil.getVariableTypesAtOffset(variable, offset, environments));
+            List<TypeItem> types = TypeSystemUtil.getVariableTypesAtOffset(variable, offset, environments);
+            return new ArrayList<>(BslStructureInsertCommentTypes.arrayVariableTypes(types, variable, offset,
+                environments));
         }
         catch (RuntimeException e)
         {
@@ -1957,7 +1931,7 @@ final class BslExpectedTypePremiums
             EObject object = resource.getEObject(target.fragment());
             if (!(object instanceof Variable variable))
                 continue;
-            result.put(key, typeNames(variableTypeItemsAt(variable, context.start(), environmentsOf(resource, variable))));
+            result.put(key, matchingTypeNames(variableTypeItemsAt(variable, context.start(), environmentsOf(resource, variable))));
         }
     }
 
@@ -2546,10 +2520,8 @@ final class BslExpectedTypePremiums
             return null;
         String typesHtml = expectation != null && !expectation.typeItems().isEmpty()
             ? typeItemsHtml(resource, expectation.typeItems()) : edtTypesHtml(resource, types);
-        Global.tempLog("query-parameter-types", "receiverTypeLine receiver=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (expectation == null ? null : expectation.receiver()) + " html=" + typesHtml); //$NON-NLS-1$
         return "<div class=\"" + RECEIVER_TYPE_CLASS + "\"><b>Приемник.Тип</b>: " //$NON-NLS-1$ //$NON-NLS-2$
-            + (typesHtml != null ? typesHtml : escapeHtml(String.join(", ", types))) + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$
+            + (typesHtml != null ? typesHtml : escapeHtml("<" + String.join(" | ", types) + ">")) + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     /** Общий набор ожидаемых типов для HTML и подписи окна. */
@@ -2625,9 +2597,8 @@ final class BslExpectedTypePremiums
                 Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
                     resolved, resource, Boolean.TRUE, version, Boolean.FALSE);
                 if (reference == null)
-                    return escapeHtml(String.join(", ", names)); //$NON-NLS-1$
-                references.add(BslStructureInsertCommentTypes.collectionTypeReference(
-                    resolved, reference, provider, resource, true, version));
+                    return escapeHtml(FunctionReturnTypes.typeSetText(items));
+                references.add(reference);
             }
             Class<?> pageUtil = Class.forName(
                 "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil", true, //$NON-NLS-1$
@@ -2638,8 +2609,7 @@ final class BslExpectedTypePremiums
         }
         catch (Exception | LinkageError failure)
         {
-            Global.tempLog("query-parameter-types", "typeItemsHtml failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
-            return escapeHtml(String.join(", ", names)); //$NON-NLS-1$
+            return escapeHtml(FunctionReturnTypes.typeSetText(items));
         }
     }
 
@@ -2677,6 +2647,8 @@ final class BslExpectedTypePremiums
         List<String> allTypes = byName == null ? new ArrayList<>(expectation.types())
             // чтобы нестрогий подбор сработал
             : new ArrayList<>(List.of(byName.isEmpty() ? UNDEFINED : byName));
+        List<String> matchingTypes = (byName == null ? expectation.matchingTypes() : allTypes).stream()
+            .filter(type -> !"Произвольный".equalsIgnoreCase(type) && !"?".equals(type)).toList(); //$NON-NLS-1$ //$NON-NLS-2$
         allTypes.removeIf(type -> "Произвольный".equalsIgnoreCase(type) || "?".equals(type)); //$NON-NLS-1$ //$NON-NLS-2$
         List<String> trimmed = new ArrayList<>(allTypes);
         trimmed.removeIf(UNDEFINED::equalsIgnoreCase);
@@ -2792,7 +2764,7 @@ final class BslExpectedTypePremiums
             String except = receiverIsSource ? lastWord : ""; //$NON-NLS-1$
             boolean strict = false;
             int checked = 0;
-            for (String type : allTypes)
+            for (String type : matchingTypes)
             {
                 String typeName = firstFragment(type, '(');
                 List<Word> candidates = new ArrayList<>();
@@ -2836,21 +2808,21 @@ final class BslExpectedTypePremiums
         if (adder != null && !mainType.isEmpty() && !PRIMITIVE_TYPES.contains(lower(mainType)) && noParent
             && !FILL_PROPERTY_VALUES.equalsIgnoreCase(expectation.callMethod()))
             adder.typedValues(allTypes, mainType, dbTable);
-        if (!mainType.isEmpty() && (!PRIMITIVE_TYPES.contains(lower(mainType)) || BOOLEAN.equalsIgnoreCase(mainType)))
+        List<String> rankingTypes = matchingTypes.stream()
+            .filter(type -> !BROAD_TYPES.contains(lower(type)))
+            .filter(type -> !PRIMITIVE_TYPES.contains(lower(type)) || BOOLEAN.equalsIgnoreCase(type)).toList();
+        if (!rankingTypes.isEmpty())
         {
             List<Word> pool = new ArrayList<>();
-            boolean localsOnly = BOOLEAN.equalsIgnoreCase(mainType);
             for (Word word : words.values())
             {
                 // Ограничиваем число совпадений, а не весь словарь модуля: иначе методы
                 // подходящего типа теряли премию при любом списке длиннее 200 слов.
-                if ((!localsOnly || word.local()) && word.hasType(mainType)
+                if (rankingTypes.stream().anyMatch(type -> (!BOOLEAN.equalsIgnoreCase(type) || word.local())
+                    && word.hasType(type))
                     && (!receiverIsSource || !word.key().equals(lastLower)))
                     pool.add(word);
             }
-            Global.tempLog("expected-type-ranking", "expected=" + mainType + " words=" + words.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " compatible=" + pool.size() + " localsOnly=" + localsOnly //$NON-NLS-1$ //$NON-NLS-2$
-                + " candidates=" + pool.stream().map(Word::name).toList()); //$NON-NLS-1$
             if (pool.size() < MAX_WORDS_FOR_TYPE)
             {
                 for (Word word : pool)
@@ -3298,7 +3270,7 @@ final class BslExpectedTypePremiums
                 BslAddedWordProposal.Kind kind = BslAddedWordProposal.Kind.PROPERTY;
                 boolean premium = false;
                 String next = null;
-                if (parent.isEmpty())
+                if (parent.isEmpty() && firstWordOfLine)
                 {
                     premium = previousVariable != null && !previousVariable.isEmpty();
                     next = previousVariable;
@@ -4343,10 +4315,10 @@ final class BslExpectedTypePremiums
             return new ArrayList<>(List.of(contextType));
         Object info = proposalInfo(proposal);
         if (info instanceof Property property && !property.eIsProxy())
-            return typeNames(property.getTypes());
+            return matchingTypeNames(property.getTypes());
         if (info instanceof com._1c.g5.v8.dt.mcore.Method method && !method.eIsProxy()
             && !method.getRetValType().isEmpty())
-            return typeNames(method.getRetValType());
+            return matchingTypeNames(method.getRetValType());
         String predefinedType = SmartCompletionProposal.predefinedValueType(proposal);
         if (predefinedType != null)
             return new ArrayList<>(List.of(predefinedType));
@@ -4371,16 +4343,62 @@ final class BslExpectedTypePremiums
         int colon = head.lastIndexOf(" : "); //$NON-NLS-1$
         if (colon < 0 || head.lastIndexOf(')') > colon)
             return types;
-        String text = head.substring(colon + 3).trim();
+        return splitTypeText(head.substring(colon + 3));
+    }
+
+    /** Внешние типы разделены «|»; запятые после «из» относятся к элементам коллекции. */
+    private static List<String> splitTypeText(String text)
+    {
+        List<String> types = new ArrayList<>();
+        text = text.trim();
         if (text.startsWith("<") && text.endsWith(">")) //$NON-NLS-1$ //$NON-NLS-2$
             text = text.substring(1, text.length() - 1);
-        for (String part : text.split(",")) //$NON-NLS-1$
+        String separator = text.contains(" из ") || text.indexOf('|') >= 0 ? "\\|" : ","; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        for (String part : text.split(separator))
         {
             String type = part.trim();
             if (!type.isEmpty() && !FunctionReturnTypes.UNKNOWN.equals(type))
                 types.add(type);
         }
         return types;
+    }
+
+    /** Обобщённый приёмник принимает типизированную коллекцию, обратное совпадение не доказано. */
+    private static boolean compatibleType(String actual, String expected)
+    {
+        actual = lower(actual.trim());
+        expected = lower(expected.trim());
+        if (actual.equals(expected))
+            return true;
+        int actualElements = actual.indexOf(" из "); //$NON-NLS-1$
+        int expectedElements = expected.indexOf(" из "); //$NON-NLS-1$
+        if (actualElements < 0)
+            return false;
+        String expectedCollection = expectedElements < 0 ? expected : expected.substring(0, expectedElements);
+        if (!actual.substring(0, actualElements).equals(expectedCollection))
+            return false;
+        if (expectedElements < 0)
+            return true;
+        List<String> accepted = List.of(expected.substring(expectedElements + 4).split(",\\s*")); //$NON-NLS-1$
+        for (String element : actual.substring(actualElements + 4).split(",\\s*")) //$NON-NLS-1$
+        {
+            if (accepted.stream().noneMatch(type -> compatibleType(element, type)))
+                return false;
+        }
+        return true;
+    }
+
+    /** Имена с элементами коллекций вычисляются при чтении модели, до оформления списка в UI. */
+    private static List<String> matchingTypeNames(List<TypeItem> items)
+    {
+        List<String> names = new ArrayList<>();
+        for (TypeItem item : items)
+        {
+            String name = FunctionReturnTypes.typeName(item);
+            if (name != null && !name.isEmpty() && !containsIgnoreCase(names, name))
+                names.add(name);
+        }
+        return List.copyOf(names);
     }
 
     /**

@@ -57,7 +57,6 @@ import tormozit.BslLiteralValues;
 import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
-import tormozit.Global;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -434,15 +433,14 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             if (hasType(actual, "Arbitrary")) //$NON-NLS-1$
                 return;
             String message = mismatchMessage(typesLine(resolvedExpected, value), typesLine(actual, value), envs);
-            Global.tempLog("query-parameter-compatibility", "issue=" + message); //$NON-NLS-1$ //$NON-NLS-2$
             issue(message, value, null, WRONG_TYPE, envs, false);
         }
 
         private static String mismatchMessage(String expected, String actual, Environments environments)
         {
             return "Нет соответствия между типами [" + environmentsText(environments) + "]:" //$NON-NLS-1$ //$NON-NLS-2$
-                + "\n- ожидаемыми: '" + expected + "'" //$NON-NLS-1$ //$NON-NLS-2$
-                + "\n- полученными: '" + actual + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+                + "\n- ожидаемыми: " + expected //$NON-NLS-1$
+                + "\n- полученными: " + actual; //$NON-NLS-1$
         }
 
         private static String environmentsText(Environments environments)
@@ -454,14 +452,12 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         /** В тексте ошибки сохраняем типы элементов, по которым установлена несовместимость массивов. */
         private static String typesLine(List<TypeItem> types, EObject context)
         {
-            return typesLine(types, context, java.util.Collections.newSetFromMap(new IdentityHashMap<>()));
+            return "<" + typesLine(types, context, java.util.Collections.newSetFromMap(new IdentityHashMap<>()), " | ") + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
 
-        private static String typesLine(List<TypeItem> types, EObject context, Set<TypeItem> path)
+        private static String typesLine(List<TypeItem> types, EObject context, Set<TypeItem> path, String separator)
         {
-            if (!hasType(types, "Array")) //$NON-NLS-1$
-                return BslUtil.createTypesLineStr(types, true).replaceAll(",\\s*", ", "); //$NON-NLS-1$ //$NON-NLS-2$
-            Set<String> names = new java.util.TreeSet<>();
+            Set<String> names = new java.util.LinkedHashSet<>();
             for (TypeItem item : types)
             {
                 String name = BslUtil.createTypesLineStr(List.of(item), true);
@@ -473,8 +469,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         List<TypeItem> elements = resolve(array.getCollectionElementTypes().allTypes(), context);
                         if (elements != null && !elements.isEmpty() && !hasType(elements, "Arbitrary")) //$NON-NLS-1$
                         {
-                            String elementNames = typesLine(elements, context, path);
-                            name += " из " + (elements.size() > 1 ? "(" + elementNames + ")" : elementNames); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            String elementNames = typesLine(elements, context, path, ", "); //$NON-NLS-1$
+                            name += " из " + elementNames; //$NON-NLS-1$
                         }
                     }
                     finally
@@ -484,7 +480,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 }
                 names.add(name);
             }
-            return String.join(", ", names); //$NON-NLS-1$
+            return String.join(separator, names);
         }
 
         /**
@@ -543,8 +539,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private static boolean compatibleArrayElements(Type expected, Type actual, EObject context,
             Map<TypeItem, Set<TypeItem>> comparing)
         {
-            Global.tempLog("query-parameter-compatibility", "array expected=" //$NON-NLS-1$ //$NON-NLS-2$
-                + expected.getCollectionElementTypes() + " actual=" + actual.getCollectionElementTypes()); //$NON-NLS-1$
             if (expected.getCollectionElementTypes() == null || actual.getCollectionElementTypes() == null)
                 return true;
             List<TypeItem> targets = resolve(expected.getCollectionElementTypes().allTypes(), context);
@@ -566,9 +560,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             try
             {
                 boolean compatible = compatibleTypes(targets, values, context, comparing);
-                Global.tempLog("query-parameter-compatibility", "elements expected=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + targets.stream().map(McoreUtil::getTypeName).toList() + " actual=" //$NON-NLS-1$
-                    + values.stream().map(McoreUtil::getTypeName).toList() + " compatible=" + compatible); //$NON-NLS-1$
                 return compatible;
             }
             finally

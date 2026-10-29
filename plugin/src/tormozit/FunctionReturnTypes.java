@@ -31,7 +31,6 @@ import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
-import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
@@ -2263,8 +2262,9 @@ final class FunctionReturnTypes
      * Готовый тип переменной в точке — тот же вызов, что у боковой подсказки EDT
      * ({@code BslDocumentationProvider.getDocByNotFormalParamVariable}):
      * {@code TypeSystemUtil.getVariableTypesAtOffset} — ближайшее состояние для сред метода и его
-     * подсостояния этих сред, только чтение. Части типа — {@link #partOf} (имена и адреса не
-     * загруженных ссылок); {@code null} — готового нет.
+     * подсостояния этих сред. При включённом расширенном расчёте тип дополняется элементами массива
+     * через общий {@link BslStructureInsertCommentTypes#arrayVariableTypes}.
+     * Части типа — {@link #partOf} (имена и адреса не загруженных ссылок); {@code null} — готового нет.
      */
     private static List<Object> readyVariableType(com._1c.g5.v8.dt.bsl.model.Variable variable, int offset,
         com._1c.g5.v8.dt.mcore.util.Environments environments)
@@ -2273,6 +2273,8 @@ final class FunctionReturnTypes
         {
             List<TypeItem> types = com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil.getVariableTypesAtOffset(
                 variable, offset, environments);
+            // TypeSystemUtil может загрузиться до раннего хука; строка использует тот же расчёт явно.
+            types = BslStructureInsertCommentTypes.arrayVariableTypes(types, variable, offset, environments);
             if (types == null || types.isEmpty())
             {
                 // #region agent log — причина пустого типа переменной (временно)
@@ -2390,7 +2392,7 @@ final class FunctionReturnTypes
             }
             type = inner.isEmpty()
                 ? "&lt;" + FunctionReturnTypes.UNKNOWN + "&gt;" //$NON-NLS-1$ //$NON-NLS-2$
-                : "&lt;" + FunctionReturnTypes.UNKNOWN + ", " + inner + "&gt;"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                : "&lt;" + FunctionReturnTypes.UNKNOWN + " | " + inner + "&gt;"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         return MetadataTypeMenu.style(html.substring(0, typeStart) + type + " " + html.substring(title)); //$NON-NLS-1$
     }
@@ -2399,14 +2401,14 @@ final class FunctionReturnTypes
     private static String linkedFunctionTypes(String names, ITextViewer viewer, BslXtextEditor editor)
     {
         List<String> parts = new java.util.ArrayList<>();
-        for (String part : names.split(","))
+        for (String part : names.split("\\|")) //$NON-NLS-1$
         {
             String name = part.trim();
             var type = MetadataTypeMenu.resolveType(viewer, name);
             parts.add(type != null ? MetadataTypeMenu.link(type, name, editor)
                 : HTMLPrinter.convertToHTMLContent(name));
         }
-        return String.join(", ", parts);
+        return String.join(" | ", parts); //$NON-NLS-1$
     }
 
     private static String unwrapAngles(String type)
@@ -2495,13 +2497,15 @@ final class FunctionReturnTypes
         if (colon < 0 || display.lastIndexOf(')', end) > colon)
             return display;
         String text = display.substring(colon + 3, end).trim();
-        if (!text.startsWith("<") || !text.endsWith(">") || text.indexOf(',') < 0) //$NON-NLS-1$ //$NON-NLS-2$
+        if (!text.startsWith("<") || !text.endsWith(">")) //$NON-NLS-1$ //$NON-NLS-2$
             return display;
         rememberProposalTypeOrders(info, 0);
         List<String> names = new java.util.ArrayList<>();
         boolean unknown = false;
         boolean more = false;
-        for (String part : text.substring(1, text.length() - 1).split(",")) //$NON-NLS-1$
+        // Запятые после «из» принадлежат элементам массива, а не внешнему набору.
+        String separator = text.contains(" из ") || text.indexOf('|') >= 0 ? "\\|" : ","; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        for (String part : text.substring(1, text.length() - 1).split(separator))
         {
             String name = part.trim();
             if (UNKNOWN.equals(name))
@@ -2514,9 +2518,9 @@ final class FunctionReturnTypes
         String sorted = formatTypeNames(names);
         String inner = sorted.isEmpty() ? "" : sorted.substring(1, sorted.length() - 1); //$NON-NLS-1$
         if (unknown)
-            inner = UNKNOWN + (inner.isEmpty() ? "" : ", " + inner); //$NON-NLS-1$ //$NON-NLS-2$
+            inner = UNKNOWN + (inner.isEmpty() ? "" : " | " + inner); //$NON-NLS-1$ //$NON-NLS-2$
         if (more)
-            inner += (inner.isEmpty() ? "" : ", ") + "..."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            inner += (inner.isEmpty() ? "" : " | ") + "..."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String result = display.substring(0, colon + 3) + "<" + inner + ">" + display.substring(end); //$NON-NLS-1$ //$NON-NLS-2$
         return result.equals(display) ? display : result;
     }
@@ -2558,25 +2562,61 @@ final class FunctionReturnTypes
         }
         if (orders.size() == sorted.size())
             sorted.sort((left, right) -> orders.get(left).compareTo(orders.get(right)));
-        return sorted.isEmpty() ? "" : "<" + String.join(", ", sorted) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        return sorted.isEmpty() ? "" : "<" + String.join(" | ", sorted) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
-    private static String typeName(TypeItem type)
+    /** Текст того же набора типов, который EDT показывает ссылками в боковой подсказке. */
+    static String typeSetText(List<TypeItem> types)
     {
-        if (type == null || type.eIsProxy())
+        return formatTypeNames(types.stream().map(FunctionReturnTypes::typeName)
+            .filter(name -> name != null && !name.isEmpty()).toList());
+    }
+
+    static String typeName(TypeItem type)
+    {
+        return typeName(type, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+    }
+
+    private static String typeName(TypeItem type, Set<TypeItem> visiting)
+    {
+        if (type == null)
             return null;
-        String name = type instanceof DuallyNamedElement dually && dually.getNameRu() != null
-            && !dually.getNameRu().isEmpty()
-            ? SmartContentAssistProcessor.localizeAssistTypeSegment(dually.getNameRu())
-            : type.getName() != null
-            ? SmartContentAssistProcessor.localizeAssistTypeSegment(type.getName()) : null;
-        if (name != null && !name.isEmpty())
+        // McoreUtil читает имя прокси через штатный ITypeNameResolver, не загружая сам тип.
+        String russian = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(type);
+        String english = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(type);
+        String name = SmartContentAssistProcessor.localizeAssistTypeSegment(
+            russian != null && !russian.isEmpty() ? russian : english);
+        if (name != null && !name.isEmpty() && !type.eIsProxy())
         {
             var order = TypeDescriptionPresentationHook.assistOrder(type);
             if (order != null)
                 TYPE_ORDERS.put(name, order);
         }
-        return name;
+        if (name == null || !(type instanceof com._1c.g5.v8.dt.mcore.Type collection)
+            || !(type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType
+                || "Array".equals(type.getName())) //$NON-NLS-1$
+            || collection.getCollectionElementTypes() == null || !visiting.add(type))
+            return name;
+        try
+        {
+            Set<String> elements = new LinkedHashSet<>();
+            for (TypeItem element : collection.getCollectionElementTypes().allTypes())
+            {
+                // Неизвестный элемент сохраняет обобщённое имя коллекции, как в подсказках.
+                if (element == null || "Arbitrary".equals(com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(element))) //$NON-NLS-1$
+                    return name;
+                String elementName = typeName(element, visiting);
+                if (elementName == null || elementName.isEmpty())
+                    return name;
+                elements.add(elementName);
+            }
+            String result = elements.isEmpty() ? name : name + " из " + String.join(", ", elements); //$NON-NLS-1$ //$NON-NLS-2$
+            return result;
+        }
+        finally
+        {
+            visiting.remove(type);
+        }
     }
 
     /** Временный лог (снять после подтверждения). */
