@@ -287,6 +287,189 @@ public final class BslDocCommentComputedTypes
         return function == null ? null : cachedReturnTypes(methodLabel(function), function);
     }
 
+    /** Результаты именно тех источников, изменение которых вызвало текущий пересчёт потребителя. */
+    private static final ThreadLocal<java.util.Map<URI, List<?>>> DOC_RETURN_UPDATES = new ThreadLocal<>();
+
+    private static List<?> docReturnTypesFor(EObject function)
+    {
+        java.util.Map<URI, List<?>> updates = DOC_RETURN_UPDATES.get();
+        List<?> changed = updates == null ? null
+            : updates.get(org.eclipse.emf.ecore.util.EcoreUtil.getURI(function));
+        return changed != null ? changed : cachedTypesFor(function);
+    }
+
+    /** EDT только что разрешил «см.»: сохраняем зависимость исходного метода, без второго поиска. */
+    public static void rememberDocReturnDependency(Object target, Object documentation)
+    {
+        try
+        {
+            Object owner = Global.getField(documentation, "method"); //$NON-NLS-1$
+            if (!(owner instanceof Method consumer) || consumer.eIsProxy()
+                || !isExtendedTypesEnabled(consumer))
+                return;
+            if (!(target instanceof com._1c.g5.v8.dt.bsl.model.Function)
+                && !(target instanceof com._1c.g5.v8.dt.mcore.Method exported && exported.isRetVal()))
+                return;
+            URI source = target instanceof com._1c.g5.v8.dt.bsl.model.SourceObjectLinkProvider provider
+                ? provider.getSourceUri() : target instanceof Method method
+                    ? org.eclipse.emf.ecore.util.EcoreUtil.getURI(method) : null;
+            if (source != null)
+                DocReturnDependencies.remember(source, consumer);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /** Зависимости типов по комментариям, которых нет в штатном графе вызовов EDT. */
+    private static final class DocReturnDependencies
+    {
+        private static final java.util.Map<URI, List<ConsumerReference>> CONSUMERS =
+            new java.util.HashMap<>();
+        private static final java.lang.ref.ReferenceQueue<Resource> COLLECTED = new java.lang.ref.ReferenceQueue<>();
+        private static final java.util.Set<URI> PENDING = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private static final java.util.Map<URI, java.util.Map<URI, List<?>>> UPDATES =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+        private static final class ConsumerReference extends java.lang.ref.WeakReference<Resource>
+        {
+            final URI source;
+            final URI consumer;
+
+            ConsumerReference(URI source, Method consumer)
+            {
+                // Метод EDT заменяет при частичном переразборе; ресурс документа живёт дальше.
+                super(consumer.eResource(), COLLECTED);
+                this.source = source;
+                this.consumer = org.eclipse.emf.ecore.util.EcoreUtil.getURI(consumer);
+            }
+        }
+
+        /** Вызывается под монитором реестра; удаляет и пустые списки, и ключи URI. */
+        private static void removeCollected()
+        {
+            ConsumerReference reference;
+            while ((reference = (ConsumerReference)COLLECTED.poll()) != null)
+            {
+                List<ConsumerReference> references = CONSUMERS.get(reference.source);
+                if (references != null)
+                {
+                    references.remove(reference);
+                    if (references.isEmpty())
+                        CONSUMERS.remove(reference.source);
+                }
+            }
+        }
+
+        static synchronized void remember(URI source, Method consumer)
+        {
+            removeCollected();
+            if (consumer.eResource() == null)
+                return;
+            URI consumerUri = org.eclipse.emf.ecore.util.EcoreUtil.getURI(consumer);
+            List<ConsumerReference> references =
+                CONSUMERS.computeIfAbsent(source, key -> new ArrayList<>());
+            for (var reference : references)
+                if (reference.get() == consumer.eResource() && reference.consumer.equals(consumerUri))
+                    return;
+            references.add(new ConsumerReference(source, consumer));
+        }
+
+        static void changed(java.util.Map<URI, List<?>> sources)
+        {
+            java.util.Map<URI, java.util.Map<URI, List<?>>> consumers = new java.util.HashMap<>();
+            synchronized (DocReturnDependencies.class)
+            {
+                removeCollected();
+                for (URI source : sources.keySet())
+                {
+                    List<ConsumerReference> references = CONSUMERS.get(source);
+                    if (references == null)
+                        continue;
+                    for (var reference : references)
+                    {
+                        Resource resource = reference.get();
+                        if (resource != null && !source.trimFragment().equals(resource.getURI()))
+                            consumers.computeIfAbsent(reference.consumer, key -> new java.util.HashMap<>())
+                                .put(source, sources.get(source));
+                    }
+                }
+            }
+            for (var entry : consumers.entrySet())
+            {
+                URI consumer = entry.getKey();
+                UPDATES.compute(consumer, (key, old) -> {
+                    java.util.Map<URI, List<?>> merged = old == null
+                        ? new java.util.HashMap<>() : new java.util.HashMap<>(old);
+                    merged.putAll(entry.getValue());
+                    return merged;
+                });
+                schedule(consumer);
+            }
+        }
+
+        private static void schedule(URI consumer)
+        {
+            if (!PENDING.add(consumer))
+                return;
+            var display = org.eclipse.swt.widgets.Display.getDefault();
+            var file = ForeignModuleModel.fileOf(consumer.trimFragment());
+            if (display == null || display.isDisposed() || file == null)
+            {
+                PENDING.remove(consumer);
+                UPDATES.remove(consumer);
+                return;
+            }
+            display.asyncExec(() ->
+            {
+                var document = ForeignModuleModel.openDocument(file);
+                if (document == null)
+                {
+                    PENDING.remove(consumer);
+                    UPDATES.remove(consumer);
+                    return;
+                }
+                org.eclipse.core.runtime.jobs.Job job = new org.eclipse.core.runtime.jobs.Job(
+                    "Комфорт: обновление типа по ссылке") //$NON-NLS-1$
+                {
+                    @Override
+                    protected org.eclipse.core.runtime.IStatus run(org.eclipse.core.runtime.IProgressMonitor monitor)
+                    {
+                        java.util.Map<URI, List<?>> updates = UPDATES.remove(consumer);
+                        java.util.Map<URI, List<?>> previous = DOC_RETURN_UPDATES.get();
+                        DOC_RETURN_UPDATES.set(updates);
+                        try
+                        {
+                            if (monitor.isCanceled())
+                                return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                            boolean updated = Boolean.TRUE.equals(document.readOnly(resource ->
+                                BslStructureInsertCommentTypes.refreshDocReturnConsumer(resource, consumer)));
+                            if (updated)
+                                display.asyncExec(ContentAssistSessionReloader::refreshPopupIfOpen);
+                        }
+                        catch (Throwable ignored)
+                        {
+                        }
+                        finally
+                        {
+                            if (previous == null)
+                                DOC_RETURN_UPDATES.remove();
+                            else
+                                DOC_RETURN_UPDATES.set(previous);
+                            PENDING.remove(consumer);
+                            if (UPDATES.containsKey(consumer))
+                                DocReturnDependencies.schedule(consumer);
+                        }
+                        return org.eclipse.core.runtime.Status.OK_STATUS;
+                    }
+                };
+                job.setSystem(true);
+                job.setRule(ForeignModuleModel.SERIAL);
+                job.schedule();
+            });
+        }
+    }
+
     /** Типы из кэша для текущего текста функции; иначе {@code null}. */
     private static List<?> cachedReturnTypes(String cacheKey, EObject method)
     {
@@ -495,10 +678,11 @@ public final class BslDocCommentComputedTypes
             if (!resolvingDocLink())
                 return comment;
             // Только готовое: модуль цели ещё не считался — штатный тип без слияния.
-            String key = methodLabel(methodObject);
-            List<?> computed = cachedReturnTypes(key, methodObject);
+            List<?> computed = docReturnTypesFor(methodObject);
             if (computed != null && !computed.isEmpty())
+            {
                 fillReturnSection(comment, computed, methodObject);
+            }
         }
         catch (Throwable ignored)
         {
@@ -651,8 +835,9 @@ public final class BslDocCommentComputedTypes
     /**
      * Хвост {@code parseTemplateComment(BslContextDefMethod, …)}.
      * {@code см. ОбщийМодуль.Функция} часто резолвится в экспортный {@code BslContextDefMethod},
-     * а не в {@code bsl.model.Method}: без досчёта по исходному методу секция возврата пуста
-     * и {@code computeTypesByLinkPart} отдаёт 0 типов (цепочка {@code Форма.КэшАФВ.}).
+     * а не в {@code bsl.model.Method}. Для закрытого модуля рассчитанный возврат выдаёт
+     * штатный {@code ExportMethodTypeProvider}, как при обычном вызове функции: слияние
+     * не зависит от того, успел ли заполниться наш кэш при открытии её редактора.
      */
     public static Object afterParseContextDefMethodComment(Object comment, Object contextDefMethod)
     {
@@ -661,11 +846,40 @@ public final class BslDocCommentComputedTypes
             if (comment == null || !(contextDefMethod instanceof EObject contextMethod))
                 return comment;
             EObject source = resolveContextDefSourceMethod(contextMethod);
-            if (source == null)
+            if (source != null)
+                afterParseTemplateComment(comment, source);
+            if (!resolvingDocLink())
                 return comment;
-            return afterParseTemplateComment(comment, source);
+            EObject context = source != null ? source : contextMethod;
+            if (!(contextDefMethod instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported)
+                || returnMark(comment) == MARK_BAN
+                || !isExtendedTypesEnabled(resolveProject(context))
+                || Boolean.TRUE.equals(remembering.get())
+                || source != null && docReturnTypesFor(source) != null)
+                return comment;
+            URI uri = exported.getSourceUri();
+            IResourceServiceProvider rsp = uri == null ? null
+                : IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri.trimFragment());
+            com._1c.g5.v8.dt.bsl.typesystem.ExportMethodTypeProvider provider = rsp == null ? null
+                : rsp.get(com._1c.g5.v8.dt.bsl.typesystem.ExportMethodTypeProvider.class);
+            if (provider == null)
+                return comment;
+            List<TypeItem> types = new ArrayList<>();
+            List<TypeItem> nativeTypes = provider.getMethodType(exported);
+            if (nativeTypes != null)
+                for (TypeItem item : nativeTypes)
+                {
+                    EObject resolved = org.eclipse.emf.ecore.util.EcoreUtil.resolve(item, context);
+                    if (resolved instanceof TypeItem type && !type.eIsProxy())
+                        types.add(type);
+                }
+            if (!types.isEmpty())
+            {
+                fillReturnSection(comment, types, context);
+            }
+            return comment;
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
             return comment;
         }
@@ -829,10 +1043,17 @@ public final class BslDocCommentComputedTypes
     private static boolean isCyclicOrHuge(List<TypeItem> items)
     {
         int[] visited = { 0 };
-        boolean russian = items.stream().anyMatch(item ->
-            com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(item) != null);
-        return cyclicFrom(items, russian,
-            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), visited);
+        java.util.Set<Object> path =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        // Корневые варианты теперь заполняются отдельно; проверяем каждый из них,
+        // сохраняя общий предел объёма развёртывания для всей секции.
+        for (TypeItem item : items)
+        {
+            boolean russian = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(item) != null;
+            if (cyclicFrom(List.of(item), russian, path, visited))
+                return true;
+        }
+        return false;
     }
 
     /**
@@ -939,6 +1160,24 @@ public final class BslDocCommentComputedTypes
      */
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
+        long started = System.nanoTime();
+        String method = context == null ? "null" : methodLabel(context); //$NON-NLS-1$
+        Global.tempLog("doc-return-hang", "merge enter method=" + method //$NON-NLS-1$ //$NON-NLS-2$
+            + " types=" + computed.size() + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+        try
+        {
+            fillReturnSectionTraced(comment, computed, context);
+        }
+        finally
+        {
+            Global.tempLog("doc-return-hang", "merge exit method=" + method //$NON-NLS-1$ //$NON-NLS-2$
+                + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
+    }
+
+    private static void fillReturnSectionTraced(Object comment, List<?> computed, EObject context) throws Exception
+    {
         if (!(comment instanceof BslDocumentationComment documentation))
             return;
         List<TypeItem> items = new ArrayList<>();
@@ -963,15 +1202,24 @@ public final class BslDocCommentComputedTypes
         ReturnSection returnSection = existing != null ? existing : new ReturnSection(documentation, 0);
         TypeSection typeSection = new TypeSection(returnSection, 0);
 
-        typeSection.fill(items, "", true, context); //$NON-NLS-1$
-        int count = typeSection.getTypeDefinitions().size();
-        if (count == 0)
+        // EDT TypeSection.fill сохраняет поля только последнего контекстного типа.
+        // Заполняем варианты отдельно в той же секции (родители определений остаются
+        // правильными), затем собираем их вместе перед объединением одноимённых типов.
+        List<TypeSection.TypeDefinition> definitions = new ArrayList<>();
+        for (TypeItem item : items)
         {
-            typeSection.fill(items, "", false, context); //$NON-NLS-1$
-            count = typeSection.getTypeDefinitions().size();
+            List<TypeItem> variant = List.of(item);
+            typeSection.fill(variant, "", true, context); //$NON-NLS-1$
+            if (typeSection.getTypeDefinitions().isEmpty())
+                typeSection.fill(variant, "", false, context); //$NON-NLS-1$
+            definitions.addAll(typeSection.getTypeDefinitions());
         }
-        if (count == 0)
+        if (definitions.isEmpty())
             return;
+        // Каждый fill заменяет список определений, поэтому возвращаем все варианты
+        // после последнего вызова, до выравнивания мест создания и описаний полей.
+        typeSection.getTypeDefinitions().clear();
+        typeSection.getTypeDefinitions().addAll(definitions);
         // Место создания полей — и в сборке: из поля его берёт свойство, которое EDT создаёт
         // по секции, а без места вставки подсказка не найдёт описание свойства.
         try
@@ -1142,6 +1390,7 @@ public final class BslDocCommentComputedTypes
             return java.util.Set.of();
         boolean build = isBuildThread();
         java.util.Set<String> changed = new java.util.HashSet<>();
+        java.util.Map<URI, List<?>> changedSources = new java.util.HashMap<>();
         boolean selfReferenced = false;
         try
         {
@@ -1182,7 +1431,10 @@ public final class BslDocCommentComputedTypes
                 // автодополнении, а не второго прохода по всем ссылающимся (было 29 с, 18.10 02:13).
                 // Сравнение — только со своей стороной (сборка или редактор), см. CachedReturn.
                 if ((previous == null || previous.hash(build) != hash) && method.getName() != null)
+                {
                     changed.add(method.getName().toLowerCase(java.util.Locale.ROOT));
+                    changedSources.put(org.eclipse.emf.ecore.util.EcoreUtil.getURI(method), types);
+                }
                 putVersion(label, key, CachedReturn.with(previous, types, build, hash));
             }
             if (!changed.isEmpty())
@@ -1191,6 +1443,7 @@ public final class BslDocCommentComputedTypes
                 selfReferenced = node != null && referencesAny(node.getText(), changed);
                 // Тип функции сменился — запасы членов автодополнения у точек могут держать прежний.
                 bumpTypesGeneration();
+                DocReturnDependencies.changed(changedSources);
             }
         }
         catch (Throwable ignored)

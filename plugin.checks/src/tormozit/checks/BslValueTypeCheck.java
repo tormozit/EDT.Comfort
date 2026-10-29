@@ -35,12 +35,12 @@ import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.util.BslUtil;
-import com._1c.g5.v8.dt.bsl.validation.IMessages;
 import com._1c.g5.v8.dt.bsl.validation.TypesChecker;
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Property;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.Environment;
@@ -57,6 +57,7 @@ import tormozit.BslLiteralValues;
 import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
+import tormozit.Global;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -432,9 +433,58 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             }
             if (hasType(actual, "Arbitrary")) //$NON-NLS-1$
                 return;
-            String message = IMessages.INSTANCE.no_intersection_between_expected_types__and_expression_types(
-                BslUtil.createTypesLineStr(resolvedExpected, true), BslUtil.createTypesLineStr(actual, true));
-            issue(message, value, null, WRONG_TYPE, envs);
+            String message = mismatchMessage(typesLine(resolvedExpected, value), typesLine(actual, value), envs);
+            Global.tempLog("query-parameter-compatibility", "issue=" + message); //$NON-NLS-1$ //$NON-NLS-2$
+            issue(message, value, null, WRONG_TYPE, envs, false);
+        }
+
+        private static String mismatchMessage(String expected, String actual, Environments environments)
+        {
+            return "Нет соответствия между типами [" + environmentsText(environments) + "]:" //$NON-NLS-1$ //$NON-NLS-2$
+                + "\n- ожидаемыми: '" + expected + "'" //$NON-NLS-1$ //$NON-NLS-2$
+                + "\n- полученными: '" + actual + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String environmentsText(Environments environments)
+        {
+            return java.util.Arrays.stream(environments.toArray()).map(McoreUtil::getEnvironmentText)
+                .collect(java.util.stream.Collectors.joining(", ")); //$NON-NLS-1$
+        }
+
+        /** В тексте ошибки сохраняем типы элементов, по которым установлена несовместимость массивов. */
+        private static String typesLine(List<TypeItem> types, EObject context)
+        {
+            return typesLine(types, context, java.util.Collections.newSetFromMap(new IdentityHashMap<>()));
+        }
+
+        private static String typesLine(List<TypeItem> types, EObject context, Set<TypeItem> path)
+        {
+            if (!hasType(types, "Array")) //$NON-NLS-1$
+                return BslUtil.createTypesLineStr(types, true).replaceAll(",\\s*", ", "); //$NON-NLS-1$ //$NON-NLS-2$
+            Set<String> names = new java.util.TreeSet<>();
+            for (TypeItem item : types)
+            {
+                String name = BslUtil.createTypesLineStr(List.of(item), true);
+                if (item instanceof Type array && "Array".equals(McoreUtil.getTypeName(item)) //$NON-NLS-1$
+                    && array.getCollectionElementTypes() != null && path.add(item))
+                {
+                    try
+                    {
+                        List<TypeItem> elements = resolve(array.getCollectionElementTypes().allTypes(), context);
+                        if (elements != null && !elements.isEmpty() && !hasType(elements, "Arbitrary")) //$NON-NLS-1$
+                        {
+                            String elementNames = typesLine(elements, context, path);
+                            name += " из " + (elements.size() > 1 ? "(" + elementNames + ")" : elementNames); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        }
+                    }
+                    finally
+                    {
+                        path.remove(item);
+                    }
+                }
+                names.add(name);
+            }
+            return String.join(", ", names); //$NON-NLS-1$
         }
 
         /**
@@ -445,13 +495,20 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
          */
         private static boolean compatibleTypes(List<TypeItem> expected, List<TypeItem> actual, EObject context)
         {
+            return compatibleTypes(expected, actual, context, new IdentityHashMap<>());
+        }
+
+        private static boolean compatibleTypes(List<TypeItem> expected, List<TypeItem> actual, EObject context,
+            Map<TypeItem, Set<TypeItem>> comparing)
+        {
             boolean dateConversion = hasType(expected, "Date") //$NON-NLS-1$
                 && (hasType(actual, "Number") || hasType(actual, "Boolean")) //$NON-NLS-1$ //$NON-NLS-2$
                 || hasType(actual, "Date") //$NON-NLS-1$
                 && (hasType(expected, "Number") || hasType(expected, "Boolean")); //$NON-NLS-1$ //$NON-NLS-2$
             boolean concreteMetadataValues = expected.stream().anyMatch(Session::isConcreteMetadataValue)
                 && actual.stream().anyMatch(Session::isConcreteMetadataValue);
-            if (!dateConversion && !concreteMetadataValues)
+            boolean arrays = hasType(expected, "Array") && hasType(actual, "Array"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!dateConversion && !concreteMetadataValues && !arrays)
                 return BslUtil.intersectTypeItem(expected, actual, context);
             Set<String> strict = Set.of("Date", "Number", "Boolean"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             for (TypeItem target : expected)
@@ -459,6 +516,13 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 {
                     String targetName = McoreUtil.getTypeName(target);
                     String valueName = McoreUtil.getTypeName(value);
+                    if ("Array".equals(targetName) && "Array".equals(valueName) //$NON-NLS-1$ //$NON-NLS-2$
+                        && target instanceof Type targetArray && value instanceof Type valueArray)
+                    {
+                        if (compatibleArrayElements(targetArray, valueArray, context, comparing))
+                            return true;
+                        continue;
+                    }
                     if (isConcreteMetadataValue(target) && isConcreteMetadataValue(value))
                     {
                         if (targetName.equals(valueName))
@@ -473,6 +537,44 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         return true;
                 }
             return false;
+        }
+
+        /** Неизвестный состав массива не доказывает ошибку; известные элементы сравниваются как значения. */
+        private static boolean compatibleArrayElements(Type expected, Type actual, EObject context,
+            Map<TypeItem, Set<TypeItem>> comparing)
+        {
+            Global.tempLog("query-parameter-compatibility", "array expected=" //$NON-NLS-1$ //$NON-NLS-2$
+                + expected.getCollectionElementTypes() + " actual=" + actual.getCollectionElementTypes()); //$NON-NLS-1$
+            if (expected.getCollectionElementTypes() == null || actual.getCollectionElementTypes() == null)
+                return true;
+            List<TypeItem> targets = resolve(expected.getCollectionElementTypes().allTypes(), context);
+            List<TypeItem> values = resolve(actual.getCollectionElementTypes().allTypes(), context);
+            if (targets == null || values == null || targets.isEmpty() || values.isEmpty())
+                return true;
+            if (targets.stream().allMatch(type -> "Undefined".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
+                return true;
+            values.removeIf(type -> "Undefined".equals(McoreUtil.getTypeName(type))); //$NON-NLS-1$
+            targets.removeIf(type -> "Undefined".equals(McoreUtil.getTypeName(type))); //$NON-NLS-1$
+            if (values.isEmpty() || hasType(targets, "String") || hasType(targets, "Arbitrary") //$NON-NLS-1$ //$NON-NLS-2$
+                || hasType(values, "Arbitrary")) //$NON-NLS-1$
+                return true;
+            Set<TypeItem> paired = comparing.computeIfAbsent(expected,
+                key -> java.util.Collections.newSetFromMap(new IdentityHashMap<>()));
+            // Повтор той же пары на текущем пути — циклические типы коллекций.
+            if (!paired.add(actual))
+                return true;
+            try
+            {
+                boolean compatible = compatibleTypes(targets, values, context, comparing);
+                Global.tempLog("query-parameter-compatibility", "elements expected=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + targets.stream().map(McoreUtil::getTypeName).toList() + " actual=" //$NON-NLS-1$
+                    + values.stream().map(McoreUtil::getTypeName).toList() + " compatible=" + compatible); //$NON-NLS-1$
+                return compatible;
+            }
+            finally
+            {
+                paired.remove(actual);
+            }
         }
 
         /** Ссылка или объект с именем метаданных: CatalogRef.Валюты, DocumentObject.Заказ и т.п. */
@@ -531,22 +633,21 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private void issue(String message, EObject source, EStructuralFeature feature, String code,
             Environments envs)
         {
+            issue(message, source, feature, code, envs, true);
+        }
+
+        private void issue(String message, EObject source, EStructuralFeature feature, String code,
+            Environments envs, boolean appendEnvironments)
+        {
             if (!reported.add(new IssueKey(source, feature, code, message, envs)))
                 return;
             if (WRONG_TYPE.equals(code))
                 typeIssues.merge(source, envs, Environments::add);
-            StringBuilder text = new StringBuilder(message).append(" ["); //$NON-NLS-1$
-            for (Environment environment : envs.toArray())
-            {
-                if (text.charAt(text.length() - 1) != '[')
-                    text.append(", "); //$NON-NLS-1$
-                text.append(McoreUtil.getEnvironmentText(environment));
-            }
-            text.append(']');
+            String text = appendEnvironments ? message + " [" + environmentsText(envs) + "]" : message; //$NON-NLS-1$ //$NON-NLS-2$
             if (feature == null)
-                acceptor.addIssue(text.toString(), source);
+                acceptor.addIssue(text, source);
             else
-                acceptor.addIssue(text.toString(), source, feature);
+                acceptor.addIssue(text, source, feature);
         }
     }
 

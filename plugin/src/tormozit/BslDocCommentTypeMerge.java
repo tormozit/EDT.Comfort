@@ -99,6 +99,11 @@ public final class BslDocCommentTypeMerge
         System.getProperties().put("tormozit.formData.comment", //$NON-NLS-1$
             (java.util.function.Function<Object[], Object>) args -> afterComputeTypes(
                 afterComputeFormAttributeTypes((Collection<?>)args[0], args[1], (EObject)args[2])));
+        System.getProperties().put("tormozit.formData.docDependency", //$NON-NLS-1$
+            (java.util.function.Function<Object[], Object>) args -> {
+                BslDocCommentComputedTypes.rememberDocReturnDependency(args[0], args[1]);
+                return args[0];
+            });
 
         Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
         @SuppressWarnings("unchecked")
@@ -1041,6 +1046,26 @@ public final class BslDocCommentTypeMerge
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
                 if (mv == null)
                     return null;
+                if ("computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String called,
+                            String desc, boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                            if (opcode == Opcodes.INVOKESTATIC
+                                && "com/_1c/g5/v8/dt/bsl/documentation/comment/BslCommentUtils".equals(owner) //$NON-NLS-1$
+                                && "getObjectByLinkPart".equals(called)) //$NON-NLS-1$
+                            {
+                                visitInsn(Opcodes.DUP);
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/BslDocCommentComputedTypes", //$NON-NLS-1$
+                                    "rememberDocReturnDependency", "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                touched.set(true);
+                            }
+                        }
+                    };
                 if (!isComputeTypesMethod(name, descriptor))
                     return mv;
                 return new MethodVisitor(Opcodes.ASM9, mv)

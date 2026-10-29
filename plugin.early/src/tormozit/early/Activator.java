@@ -44,6 +44,8 @@ public final class Activator
         QueryNullCastWeaving.install(context);
         FormDataWeaving.install(context);
         TypeComputationWeaving.install(context);
+        ArrayElementTypesWeaving.install(context);
+        QuickFixPresentationWeaving.install(context);
         DynamicFeatureWeaving.install(context);
         StructureKeyWeaving.install(context);
         CheckRecomputeNotifications.install(context);
@@ -52,12 +54,148 @@ public final class Activator
         context.registerService(WeavingHook.class, new NaparnikWeaving(), null);
         TextSearchInvocationWeaving.install(context);
         ReferenceSearchResultWeaving.install(context);
+        DerivedProgressProjectNames.install(context);
     }
 
     @Override
     public void stop(BundleContext context)
     {
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
+        System.getProperties().put(DerivedProgressProjectNames.CALLBACK,
+            (BiFunction<Object, String, String>) (manager, title) -> title);
+    }
+
+    /**
+     * derived 17.0.200.v202605050943: scheduleJob берёт имя сегмента без проекта.
+     * Меняем только подпись создаваемого Job; getSupplierId менеджера — ID проекта EDT.
+     */
+    private static final class DerivedProgressProjectNames implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.internal.derived.DerivedDataProgressReporter"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.derivedProgress.projectName"; //$NON-NLS-1$
+        private static final String PROJECT_MANAGER =
+            "com._1c.g5.v8.dt.core.platform.IDtProjectManager"; //$NON-NLS-1$
+        private final BundleContext context;
+
+        private DerivedProgressProjectNames(BundleContext context)
+        {
+            this.context = context;
+        }
+
+        static void install(BundleContext context)
+        {
+            var hook = new DerivedProgressProjectNames(context);
+            System.getProperties().put(CALLBACK,
+                (BiFunction<Object, String, String>) hook::withProjectName);
+            context.registerService(WeavingHook.class, hook, null);
+        }
+
+        private String withProjectName(Object manager, String title)
+        {
+            var reference = context.getServiceReference(PROJECT_MANAGER);
+            if (reference == null)
+                return title;
+            try
+            {
+                Object service = context.getService(reference);
+                if (service == null)
+                    return title;
+                String projectId = (String) manager.getClass().getMethod("getSupplierId").invoke(manager); //$NON-NLS-1$
+                ClassLoader loader = service.getClass().getClassLoader();
+                Class<?> api = Class.forName(PROJECT_MANAGER, false, loader);
+                Object project = api.getMethod("getDtProject", String.class).invoke(service, projectId); //$NON-NLS-1$
+                if (project == null)
+                    return title;
+                Class<?> projectApi = Class.forName(
+                    "com._1c.g5.v8.dt.core.platform.IDtProject", false, loader); //$NON-NLS-1$
+                // getDtProjects возвращает активные контексты; внешние библиотеки не считаем проектами РМ.
+                Collection<?> projects = (Collection<?>) api.getMethod("getDtProjects").invoke(service); //$NON-NLS-1$
+                var workspaceProject = projectApi.getMethod("getWorkspaceProject"); //$NON-NLS-1$
+                int activeProjects = 0;
+                for (Object candidate : projects)
+                {
+                    if (workspaceProject.invoke(candidate) != null && ++activeProjects > 1)
+                        break;
+                }
+                if (activeProjects <= 1)
+                    return title;
+                String name = (String) projectApi.getMethod("getName").invoke(project); //$NON-NLS-1$
+                return name == null || name.isBlank() ? title : title + " (" + name + ")"; //$NON-NLS-1$
+            }
+            catch (ReflectiveOperationException | RuntimeException failure)
+            {
+                System.setProperty(CALLBACK + ".status", "name failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                return title;
+            }
+            finally
+            {
+                context.ungetService(reference);
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] calls = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        if (!name.equals("scheduleJob") || !desc.equals( //$NON-NLS-1$
+                            "(Ljava/lang/String;Lcom/_1c/g5/v8/derived/pipeline/PipelineSegmentStatus;)V")) //$NON-NLS-1$
+                            return original;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                                if (opcode != Opcodes.INVOKEINTERFACE || !owner.equals(
+                                    "com/_1c/g5/v8/internal/derived/IComputationTaskManager") //$NON-NLS-1$
+                                    || !method.equals("getSegmentName") //$NON-NLS-1$
+                                    || !descriptor.equals("(Ljava/lang/String;)Ljava/lang/String;")) //$NON-NLS-1$
+                                    return;
+                                // Стек: аргументы конструктора Job, title -> callback, manager, title.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, TARGET.replace('.', '/'),
+                                    "derivedDataStatusManager", "Lcom/_1c/g5/v8/derived/IDerivedDataManager;"); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
+                                calls[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                if (calls[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", calls[0] == 1 //$NON-NLS-1$
+                    ? "woven" : "skipped: name calls=" + calls[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
     }
 
     /**
@@ -577,6 +715,203 @@ public final class Activator
         }
     }
 
+    /** Типы элементов массива: ранний перехват обоих штатных способов чтения типа. */
+    private static final class ArrayElementTypesWeaving implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.arrayElementTypes.variableTypes"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
+        private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final String STATUS = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
+        private final BundleContext context;
+
+        private ArrayElementTypesWeaving(BundleContext context)
+        {
+            this.context = context;
+        }
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK,
+                (Function<Object, Object>) payload -> ((Object[])payload)[0]);
+            context.registerService(WeavingHook.class, new ArrayElementTypesWeaving(context), null);
+            System.getProperties().put(STATUS, Boolean.TRUE);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || !TARGET.equals(name) && !COMPUTER_TARGET.equals(name))
+                return;
+            try
+            {
+                byte[] transformed = transform(name.replace('.', '/'), woven.getBytes());
+                if (transformed == null)
+                    throw new IllegalStateException("Array element types method not found: " + name); //$NON-NLS-1$
+                woven.setBytes(transformed);
+                log("woven " + name, null); //$NON-NLS-1$
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                System.getProperties().put(STATUS + "." + name, Boolean.FALSE); //$NON-NLS-1$
+                System.getProperties().put(STATUS + ".failure", failure.toString()); //$NON-NLS-1$
+                log("weaving failed " + name, failure); //$NON-NLS-1$
+            }
+        }
+
+        /** Временная диагностика раннего вплетения до запуска Global.tempLog. */
+        private void log(String message, Throwable failure)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            if (reference == null)
+                return;
+            FrameworkLog log = context.getService(reference);
+            try
+            {
+                if (log != null)
+                    log.log(new FrameworkLogEntry("tormozit.comfort.early", //$NON-NLS-1$
+                        failure == null ? FrameworkLogEntry.INFO : FrameworkLogEntry.ERROR,
+                        0, "[ArrayElementTypesWeaving] " + message, 0, failure, null)); //$NON-NLS-1$
+            }
+            finally
+            {
+                context.ungetService(reference);
+            }
+        }
+
+        static byte[] transform(String className, byte[] bytes)
+        {
+            boolean variableUtility = TARGET.replace('.', '/').equals(className);
+            if (!variableUtility && !COMPUTER_TARGET.replace('.', '/').equals(className))
+                return null;
+            var reader = new org.objectweb.asm.ClassReader(bytes);
+            var writer = new org.objectweb.asm.ClassWriter(reader, org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean changed = new AtomicBoolean();
+            reader.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9, writer)
+            {
+                @Override
+                public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    var visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean selected = variableUtility
+                        ? "getVariableTypesAtOffset".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lcom/_1c/g5/v8/dt/bsl/model/Variable;ILcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;") //$NON-NLS-1$
+                        : "computeTypes".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lorg/eclipse/emf/ecore/EObject;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;"); //$NON-NLS-1$
+                    if (!selected)
+                        return visitor;
+                    return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == org.objectweb.asm.Opcodes.ARETURN)
+                            {
+                                visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 3);
+                                visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
+                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                visitLdcInsn(CALLBACK);
+                                visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
+                                    "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                int argumentCount = variableUtility ? 4 : 3;
+                                visitLdcInsn(Integer.valueOf(argumentCount));
+                                visitTypeInsn(org.objectweb.asm.Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                for (int index = 0; index < argumentCount; index++)
+                                {
+                                    visitInsn(org.objectweb.asm.Opcodes.DUP);
+                                    visitLdcInsn(Integer.valueOf(index));
+                                    boolean integer = variableUtility && index == 2;
+                                    int slot = index == 0 ? 3 : variableUtility ? index - 1 : index;
+                                    visitVarInsn(integer ? org.objectweb.asm.Opcodes.ILOAD
+                                        : org.objectweb.asm.Opcodes.ALOAD, slot);
+                                    if (integer)
+                                        visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "java/lang/Integer", //$NON-NLS-1$
+                                            "valueOf", "(I)Ljava/lang/Integer;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                    visitInsn(org.objectweb.asm.Opcodes.AASTORE);
+                                }
+                                visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEINTERFACE, "java/util/function/Function", //$NON-NLS-1$
+                                    "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, "java/util/List"); //$NON-NLS-1$
+                                changed.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            System.getProperties().put(STATUS + "." + className.replace('/', '.'), changed.get()); //$NON-NLS-1$
+            return changed.get() ? writer.toByteArray() : null;
+        }
+    }
+
+    /** Подпись подавления проверки — первая строка сообщения; само описание проблемы сохраняется целиком. */
+    private static final class QuickFixPresentationWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.ui.quickfix.BslQuickfixProvider"; //$NON-NLS-1$
+        private static final String STATUS = "tormozit.quickFixPresentation.early"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            context.registerService(WeavingHook.class, new QuickFixPresentationWeaving(), null);
+            System.getProperties().put(STATUS, Boolean.TRUE);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            byte[] transformed = transform(woven.getBytes());
+            System.getProperties().put(STATUS + ".woven", transformed != null); //$NON-NLS-1$
+            if (transformed != null)
+                woven.setBytes(transformed);
+        }
+
+        static byte[] transform(byte[] bytes)
+        {
+            var reader = new ClassReader(bytes);
+            var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean changed = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"skipCheckQuickFix".equals(name) || !descriptor.equals( //$NON-NLS-1$
+                        "(Lorg/eclipse/xtext/validation/Issue;Lorg/eclipse/xtext/ui/editor/quickfix/IssueResolutionAcceptor;)V")) //$NON-NLS-1$
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
+                            boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                            if (opcode != Opcodes.INVOKEINTERFACE || !"org/eclipse/xtext/validation/Issue".equals(owner) //$NON-NLS-1$
+                                || !"getMessage".equals(name) || !"()Ljava/lang/String;".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                                return;
+                            super.visitLdcInsn("(?s)\\R.*"); //$NON-NLS-1$
+                            super.visitLdcInsn(""); //$NON-NLS-1$
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "replaceFirst", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(":\\s*$"); //$NON-NLS-1$
+                            super.visitLdcInsn(""); //$NON-NLS-1$
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "replaceFirst", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", false); //$NON-NLS-1$
+                            changed.set(true);
+                        }
+                    };
+                }
+            }, 0);
+            return changed.get() ? writer.toByteArray() : null;
+        }
+    }
+
     /** Вычислители типов должны быть вплетены до загрузки; поздний Instrumentation может отсутствовать. */
     private static final class TypeComputationWeaving implements WeavingHook
     {
@@ -755,7 +1090,7 @@ public final class Activator
 
         static void install(BundleContext context)
         {
-            for (String operation : List.of("comment", "convert", "reference", "html", "property")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            for (String operation : List.of("comment", "convert", "reference", "html", "property", "docDependency")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
                 System.getProperties().putIfAbsent(PREFIX + operation, (Function<Object[], Object>) args -> args[0]);
             context.registerService(WeavingHook.class, new FormDataWeaving(), null);
             System.getProperties().put(PREFIX + "early", Boolean.TRUE); //$NON-NLS-1$
@@ -787,6 +1122,43 @@ public final class Activator
                     String signature, String[] exceptions)
                 {
                     MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (visitor != null && COMMENT.equals(className)
+                        && "computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String called,
+                                String desc, boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                                if (opcode != Opcodes.INVOKESTATIC
+                                    || !"com/_1c/g5/v8/dt/bsl/documentation/comment/BslCommentUtils".equals(owner) //$NON-NLS-1$
+                                    || !"getObjectByLinkPart".equals(called)) //$NON-NLS-1$
+                                    return;
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PREFIX + "docDependency"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_2);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/emf/ecore/EObject"); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                        };
                     if (visitor != null && DOCUMENTATION.equals(className)
                         && "getDocByNotDerivedProperty".equals(name) //$NON-NLS-1$
                         && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/Property;")) //$NON-NLS-1$

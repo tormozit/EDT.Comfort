@@ -29,6 +29,7 @@ import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.util.OnChangeEvictingCache;
 import org.eclipse.xtext.scoping.IScope;
 import org.eclipse.xtext.scoping.IScopeProvider;
@@ -178,6 +179,7 @@ public final class BslStructureInsertCommentTypes
                 field.set(provider, ours);
             }
             installTypesComputerWrap(rsp);
+            ArrayElementTypes.install();
             installed.set(true);
         }
         catch (Throwable ignored)
@@ -510,6 +512,46 @@ public final class BslStructureInsertCommentTypes
 
     private static final java.util.Map<Method, Long> EXTERNAL_RETURN_REVISIONS =
         java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** Обновление общей модели потребителя «см.» после изменения рассчитанного возврата цели. */
+    static boolean refreshDocReturnConsumer(Resource resource, URI consumer)
+    {
+        if (resource == null || org.eclipse.swt.widgets.Display.getCurrent() != null
+            || resource.getContents().isEmpty() || !(resource.getContents().get(0) instanceof Module module)
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module)
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem tree))
+        {
+            return false;
+        }
+        Method found = null;
+        for (Method candidate : module.allMethods())
+            if (consumer.equals(EcoreUtil.getURI(candidate)))
+            {
+                found = candidate;
+                break;
+            }
+        if (found == null)
+        {
+            return false;
+        }
+        Method method = found;
+        Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (lock == null)
+        {
+            return false;
+        }
+        boolean[] updated = { false };
+        ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+        {
+            updated[0] = tree.recomputeDependent(module, method, CancelIndicator.NullImpl);
+            if (updated[0])
+                BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            return updated[0];
+        });
+        if (updated[0])
+            BslDocCommentComputedTypes.bumpTypesGeneration();
+        return updated[0];
+    }
 
     /** Спросить возвраты вызовов в присваиваниях выбранной переменной, без открытия их подсказок. */
     static void requestVariableReturnSources(Resource resource, Variable variable, Method method, int offset,
@@ -1587,14 +1629,18 @@ public final class BslStructureInsertCommentTypes
     /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
     static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
     {
+        Global.tempLog("query-parameter-types", "propertyHover object=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (object == null ? null : object.eClass().getName()));
         if (object == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
         try
         {
             // Расчёты типов зависят от флажка проекта; исправление ключа платформы — всегда.
-            Property property = ContentAssistSessionReloader.readOnlyPeekAst(document,
-                resource -> propertyForHint(object, resource));
+            Property property = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+                Property found = propertyForHint(object, resource);
+                return found != null ? found : variablePropertyForHint(object, resource, -1);
+            });
             if (property == null)
                 return;
             String description = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
@@ -1612,9 +1658,12 @@ public final class BslStructureInsertCommentTypes
                 propertyTypeGroups(property, page, value, resource));
             Object replacement = value.getClass().getConstructor(String.class, List.class).newInstance(html, groups);
             Global.invokeVoid(page, "setValue", replacement); //$NON-NLS-1$
+            Global.tempLog("query-parameter-types", "propertyHover property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " html=" + IrBslHoverHtml.readHtml(info)); //$NON-NLS-1$
         }
         catch (Throwable failure)
         {
+            Global.tempLog("query-parameter-types", "propertyHover failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1646,6 +1695,44 @@ public final class BslStructureInsertCommentTypes
         return first;
     }
 
+    /** Тип переменной в месте использования — тот же getVariableTypesAtOffset, что у страницы EDT. */
+    private static Property variablePropertyForHint(EObject object, Resource resource, int offset)
+    {
+        Global.tempLog("query-parameter-types", "variableHover object=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (object == null ? null : object.eClass().getName()) + " offset=" + offset); //$NON-NLS-1$
+        if (object == null || resource == null || resource.getContents().isEmpty()
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+            return null;
+        List<? extends EObject> members = object instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement proposal
+            ? proposal.getList() : object instanceof StaticFeatureAccess access
+                ? access.getFeatureEntries().stream().map(FeatureEntry::getFeature).toList() : List.of(object);
+        for (EObject member : members)
+        {
+            int position = offset;
+            if (member instanceof com._1c.g5.v8.dt.bsl.model.FantomVariableOccurrence occurrence)
+            {
+                position = occurrence.getOffset();
+                member = occurrence.getVariable();
+            }
+            if (!(member instanceof Variable variable) || position < 0)
+                continue;
+            Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+            Module module = EcoreUtil2.getContainerOfType(variable, Module.class);
+            Environments environments = method != null ? method.environments()
+                : module != null ? module.environments() : Environments.ALL;
+            List<TypeItem> types = TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments);
+            Global.tempLog("query-parameter-types", "variableHover name=" + variable.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + position + " types=" + types); //$NON-NLS-1$ //$NON-NLS-2$
+            if (types.stream().anyMatch(type -> type instanceof Type collection
+                && (type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType
+                    || "Array".equals(collection.getName())) //$NON-NLS-1$
+                && collection.getCollectionElementTypes() != null
+                && !collection.getCollectionElementTypes().allTypes().isEmpty()))
+                return BslLiteralValues.valueDescription(variable.getName(), types);
+        }
+        return null;
+    }
+
     /** Как EDT getDocByDerivedProperty, но прокси типов разрешаются в ресурсе редактора. */
     private static Object propertyTypeGroups(Property property, Object page, Object value, Resource resource)
         throws Exception
@@ -1673,7 +1760,7 @@ public final class BslStructureInsertCommentTypes
             Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
                 resolved, resource, Boolean.valueOf(russian), version, Boolean.FALSE);
             if (reference != null)
-                references.add(reference);
+                references.add(collectionTypeReference(resolved, reference, provider, resource, russian, version));
         }
         if (references.isEmpty())
             return original;
@@ -1685,6 +1772,50 @@ public final class BslStructureInsertCommentTypes
         Object group = groupClass.getConstructor(String.class, List.class, footnoteClass)
             .newInstance(groupDescription, references, groupFootnote);
         return List.of(group);
+    }
+
+    /** Штатная ссылка свойства не раскрывает элементы ExtendedCollectionType. */
+    static Object collectionTypeReference(TypeItem item, Object reference, Object provider,
+        Resource resource, boolean russian, Object version) throws Exception
+    {
+        if (!(item instanceof Type collection)
+            || !(item instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType
+                || "Array".equals(collection.getName())) //$NON-NLS-1$
+            || collection.getCollectionElementTypes() == null
+            || collection.getCollectionElementTypes().allTypes().stream()
+                .anyMatch(element -> "Arbitrary".equals(McoreUtil.getTypeName(element)))) //$NON-NLS-1$
+            return reference;
+        List<String> elements = new ArrayList<>();
+        for (TypeItem element : collection.getCollectionElementTypes().allTypes())
+        {
+            TypeItem resolved = (TypeItem)EcoreUtil.resolve(element, resource);
+            Object elementReference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                resolved, resource, Boolean.valueOf(russian), version, Boolean.FALSE);
+            if (elementReference != null)
+                elements.add(typeReferenceHtml(elementReference));
+        }
+        if (elements.isEmpty())
+            return reference;
+        String html = typeReferenceHtml(reference) + (russian ? " из " : " of ") //$NON-NLS-1$ //$NON-NLS-2$
+            + String.join(", ", elements); //$NON-NLS-1$
+        Class<?> referenceClass = Class.forName(
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PlatformReference", //$NON-NLS-1$
+            true, reference.getClass().getClassLoader());
+        // PageUtil оставляет HTML без внешней ссылки при href=null: ссылки массива и элементов независимы.
+        return referenceClass.getConstructor(String.class, String.class, String.class).newInstance(null, html, null);
+    }
+
+    private static String typeReferenceHtml(Object reference) throws Exception
+    {
+        ClassLoader loader = reference.getClass().getClassLoader();
+        Class<?> pageUtil = Class.forName(
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil", true, loader); //$NON-NLS-1$
+        Class<?> referenceType = Class.forName(
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.IPageReference", true, loader); //$NON-NLS-1$
+        java.lang.reflect.Method render = pageUtil.getDeclaredMethod(
+            "generateReferenceShortHtml", referenceType, String[].class); //$NON-NLS-1$
+        render.setAccessible(true);
+        return (String)render.invoke(null, reference, new String[0]);
     }
 
     /**
@@ -1927,12 +2058,27 @@ public final class BslStructureInsertCommentTypes
             return;
         try
         {
-            EObject object = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                isExtendedTypesEnabled(resource) ? propertyAt(resource, offset) : null);
+            EObject object = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+                if (!isExtendedTypesEnabled(resource))
+                    return null;
+                Property property = propertyAt(resource, offset);
+                if (property != null)
+                    return property;
+                var helper = new org.eclipse.xtext.resource.EObjectAtOffsetHelper();
+                EObject referenced = helper.resolveCrossReferencedElementAt(resource, offset);
+                Global.tempLog("query-parameter-types", "pointerTypeHover offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " referenced=" + (referenced == null ? null : referenced.eClass().getName())); //$NON-NLS-1$
+                Property variable = variablePropertyForHint(referenced, resource, offset);
+                if (variable != null)
+                    return variable;
+                EObject expression = helper.resolveContainedElementAt(resource, offset);
+                return variablePropertyForHint(expression, resource, offset);
+            });
             completePropertyHover(info, object, viewer);
         }
-        catch (Throwable ignored)
+        catch (Throwable failure)
         {
+            Global.tempLog("query-parameter-types", "pointerTypeHover failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -2753,8 +2899,232 @@ public final class BslStructureInsertCommentTypes
         public java.util.List<TypeItem> computeTypes(EObject object, Environments environments)
         {
             fillMockExportPropertyTypes(object);
-            return super.computeTypes(object, environments);
+            return arrayExpressionTypes(super.computeTypes(object, environments), object, environments);
         }
+    }
+
+    /** Позиция обращения, переданная штатному вычислителю; используется и проверками закрытых модулей. */
+    public static List<TypeItem> arrayExpressionTypes(List<TypeItem> types, EObject object, Environments environments)
+    {
+        if (!(object instanceof StaticFeatureAccess access))
+            return types;
+        Variable variable = sourceVariable(access);
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(access);
+        return variable == null || node == null ? types
+            : arrayVariableTypes(types, variable, node.getOffset(), environments);
+    }
+
+    /** Общий вход для TypesComputer и прямых читателей состояний переменной EDT. */
+    public static List<TypeItem> arrayVariableTypes(List<TypeItem> types, Variable variable, int offset,
+        Environments environments)
+    {
+        if (types == null || variable == null || offset < 0
+            || types.stream().noneMatch(type -> "Array".equals(McoreUtil.getTypeName(type))) //$NON-NLS-1$
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
+            return types;
+        return ArrayElementTypes.infer(types, variable, offset, environments);
+    }
+
+    /** ИР: СобратьДинамическиеСвойстваОбъекта, ветка Массив — первые два Добавить/Вставить в диапазоне. */
+    private static final class ArrayElementTypes
+    {
+        private static final String CALLBACK = "tormozit.arrayElementTypes.variableTypes"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
+        private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final ThreadLocal<Set<Variable>> RESOLVING = ThreadLocal.withInitial(
+            () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+
+        static void install()
+        {
+            System.getProperties().put(CALLBACK, (java.util.function.Function<Object, Object>) payload -> {
+                Object[] args = (Object[])payload;
+                @SuppressWarnings("unchecked")
+                List<TypeItem> types = (List<TypeItem>)args[0];
+                if (args.length == 3)
+                    return arrayExpressionTypes(types, (EObject)args[1], (Environments)args[2]);
+                return arrayVariableTypes(types, (Variable)args[1], ((Integer)args[2]).intValue(),
+                    (Environments)args[3]);
+            });
+            String status = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
+            Global.tempLog("array-element-types", "early=" + System.getProperties().get(status) //$NON-NLS-1$ //$NON-NLS-2$
+                + " variableReader=" + System.getProperties().get(status + "." + TARGET) //$NON-NLS-1$ //$NON-NLS-2$
+                + " computer=" + System.getProperties().get(status + "." + COMPUTER_TARGET) //$NON-NLS-1$ //$NON-NLS-2$
+                + " failure=" + System.getProperties().get(status + ".failure")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
+        {
+            Global.tempLog("array-element-types", "infer variable=" + variable.getName() + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Set<Variable> resolving = RESOLVING.get();
+            if (!resolving.add(variable))
+                return types;
+            try
+            {
+                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+                if (method == null && variable.eResource() != null && !variable.eResource().getContents().isEmpty()
+                    && variable.eResource().getContents().get(0) instanceof Module module)
+                    for (Method candidate : module.allMethods())
+                    {
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
+                        if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
+                        {
+                            method = candidate;
+                            break;
+                        }
+                    }
+                Global.tempLog("array-element-types", "context method=" + (method == null ? null : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " resource=" + (variable.eResource() == null ? null : variable.eResource().getClass().getName())); //$NON-NLS-1$
+                if (method == null || !(variable.eResource() instanceof XtextResource resource))
+                    return types;
+                Plan plan = Plan.of(method);
+                List<Addition> additions = plan.additions.getOrDefault(variable, List.of());
+                Global.tempLog("array-element-types", "plan variable=" + variable.getName() + " additions=" + additions //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " variables=" + plan.additions.keySet().stream().map(Variable::getName).toList()); //$NON-NLS-1$
+                if (additions.isEmpty())
+                    return types;
+                var services = resource.getResourceServiceProvider();
+                TypesComputer computer = services.get(TypesComputer.class);
+                List<TypeItem> elements = collect(types, additions, plan.assignments.getOrDefault(variable, List.of()),
+                    offset, environments, (expression, envs) -> computer.computeTypes(expression, envs));
+                if (elements.isEmpty())
+                    return types;
+                var versions = services.get(com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport.class);
+                var version = versions.getRuntimeVersionOrDefault(variable, com._1c.g5.v8.dt.platform.version.Version.LATEST);
+                var provider = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE
+                    .get(McorePackage.Literals.TYPE_ITEM, version);
+                Type array = TypeSystemUtil.createExtendedArrayType(elements, provider, variable);
+                List<TypeItem> result = new ArrayList<>();
+                for (TypeItem item : types)
+                    if (!"Array".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$
+                        result.add(item);
+                result.add(array);
+                Global.tempLog("array-element-types", "result variable=" + variable.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " elements=" + elements.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
+                return result;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                Global.tempLog("array-element-types", "infer failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                return types;
+            }
+            finally
+            {
+                resolving.remove(variable);
+                if (resolving.isEmpty())
+                    RESOLVING.remove();
+            }
+        }
+
+        private static List<TypeItem> collect(List<TypeItem> original, List<Addition> additions,
+            List<Integer> assignments, int offset, Environments environments,
+            java.util.function.BiFunction<Expression, Environments, List<TypeItem>> computer)
+        {
+            int from = 0;
+            for (int assignment : assignments)
+                if (assignment <= offset)
+                    from = Math.max(from, assignment);
+            List<TypeItem> elements = new ArrayList<>();
+            for (TypeItem item : original)
+                if (item instanceof Type type && "Array".equals(McoreUtil.getTypeName(type)) //$NON-NLS-1$
+                    && type.getCollectionElementTypes() != null)
+                    for (TypeItem element : type.getCollectionElementTypes().allTypes())
+                        if (!"Arbitrary".equals(McoreUtil.getTypeName(element))) //$NON-NLS-1$
+                            addElement(elements, element);
+            int count = 0;
+            for (Addition addition : additions)
+            {
+                if (addition.start < from || addition.end > offset || !addition.environments.containsAny(environments))
+                    continue;
+                if (++count > 2)
+                    break;
+                List<TypeItem> inferred = computer.apply(addition.value, environments);
+                Global.tempLog("array-element-types", "addition offset=" + addition.start //$NON-NLS-1$ //$NON-NLS-2$
+                    + " elements=" + inferred.stream().map(McoreUtil::getTypeName).toList()); //$NON-NLS-1$
+                for (TypeItem element : inferred)
+                    addElement(elements, element);
+            }
+            return elements;
+        }
+
+        private static void addElement(List<TypeItem> elements, TypeItem item)
+        {
+            if (item == null)
+                return;
+            String name = McoreUtil.getTypeName(item);
+            if (!(item instanceof ExtendedType)
+                && !(item instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType)
+                && elements.stream().anyMatch(existing -> java.util.Objects.equals(name, McoreUtil.getTypeName(existing))))
+                return;
+            if (!elements.contains(item))
+                elements.add(item);
+        }
+
+        private static Expression addedValue(Invocation invocation)
+        {
+            if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+                || !(access.getSource() instanceof StaticFeatureAccess))
+                return null;
+            List<Expression> args = invocation.getParams();
+            String name = access.getName();
+            if (("Добавить".equalsIgnoreCase(name) || "Add".equalsIgnoreCase(name)) && args.size() == 1) //$NON-NLS-1$ //$NON-NLS-2$
+                return args.get(0);
+            if (("Вставить".equalsIgnoreCase(name) || "Insert".equalsIgnoreCase(name)) && args.size() == 2) //$NON-NLS-1$ //$NON-NLS-2$
+                return args.get(1);
+            return null;
+        }
+
+        private static record Addition(int start, int end, Expression value, Environments environments) {}
+
+        private static final class Plan extends org.eclipse.emf.common.notify.impl.AdapterImpl
+        {
+            private final ICompositeNode node;
+            private final java.util.Map<Variable, List<Addition>> additions = new java.util.IdentityHashMap<>();
+            private final java.util.Map<Variable, List<Integer>> assignments = new java.util.IdentityHashMap<>();
+
+            private Plan(Method method, ICompositeNode node)
+            {
+                this.node = node;
+                for (com._1c.g5.v8.dt.bsl.model.SimpleStatement statement : EcoreUtil2.getAllContentsOfType(
+                    method, com._1c.g5.v8.dt.bsl.model.SimpleStatement.class))
+                    if (statement.getLeft() instanceof StaticFeatureAccess access)
+                    {
+                        Variable variable = sourceVariable(access);
+                        ICompositeNode position = NodeModelUtils.findActualNodeFor(statement);
+                        if (variable != null && position != null)
+                            assignments.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(position.getEndOffset());
+                    }
+                for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+                {
+                    Expression value = addedValue(invocation);
+                    if (value == null)
+                        continue;
+                    Variable variable = sourceVariable(((DynamicFeatureAccess)invocation.getMethodAccess()).getSource());
+                    ICompositeNode position = NodeModelUtils.findActualNodeFor(invocation);
+                    Environmental owner = EcoreUtil2.getContainerOfType(invocation, Environmental.class);
+                    if (variable != null && position != null && owner != null)
+                        additions.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(new Addition(
+                            position.getOffset(), position.getEndOffset(), value, owner.environments()));
+                }
+                for (List<Addition> calls : additions.values())
+                    calls.sort(java.util.Comparator.comparingInt(Addition::start));
+            }
+
+            static Plan of(Method method)
+            {
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+                for (var iterator = method.eAdapters().iterator(); iterator.hasNext();)
+                    if (iterator.next() instanceof Plan existing)
+                    {
+                        if (existing.node == node)
+                            return existing;
+                        iterator.remove();
+                    }
+                Plan plan = new Plan(method, node);
+                method.eAdapters().add(plan);
+                return plan;
+            }
+        }
+
     }
 
     /**
@@ -2947,6 +3317,10 @@ public final class BslStructureInsertCommentTypes
             boolean scopeOwner = beginExportVarsScope();
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
+            long diagStarted = System.nanoTime();
+            String diagModule = String.valueOf(resource == null ? null : resource.getURI());
+            Global.tempLog("doc-return-hang", "install enter module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
             // #region agent log
             // Сторож на дефекты EDT вида «частичный расчёт стёр тип возврата непричастной
             // функции» (20.10.2026, bsl 28.0.1: сброс вызываемых). Только частичный расчёт:
@@ -2968,6 +3342,9 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
+                Global.tempLog("doc-return-hang", "install exit module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
+                    + " complete=" + complete + " elapsedMs=" + (System.nanoTime() - diagStarted) / 1_000_000 //$NON-NLS-1$ //$NON-NLS-2$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
                 BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
                 if (diagTypedBefore != null)
                     logReturnLost(module, diagTypedBefore, complete);

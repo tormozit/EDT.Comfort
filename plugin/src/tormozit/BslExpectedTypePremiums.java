@@ -234,7 +234,7 @@ final class BslExpectedTypePremiums
      * @param systemProperty приёмник — системное свойство: {@code имя@тип владельца} в нижнем регистре
      */
     private record Expectation(List<String> types, String receiver, String token, String callMethod,
-        int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter)
+        int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems)
     {
         /** Чистое «Неопределено» (типично — новая переменная) — ожидаемый тип неизвестен. */
         Expectation
@@ -242,6 +242,13 @@ final class BslExpectedTypePremiums
             if (types != null && types.size() == 1 && ("Неопределено".equalsIgnoreCase(types.get(0)) //$NON-NLS-1$
                 || "Undefined".equalsIgnoreCase(types.get(0)))) //$NON-NLS-1$
                 types = new ArrayList<>();
+        }
+
+        Expectation(List<String> types, String receiver, String token, String callMethod, int parameterIndex,
+            boolean systemEnum, String systemProperty, boolean formalParameter)
+        {
+            this(types, receiver, token, callMethod, parameterIndex, systemEnum, systemProperty, formalParameter,
+                List.of());
         }
 
         /** Ожидание не из формального параметра вызова. */
@@ -1247,7 +1254,7 @@ final class BslExpectedTypePremiums
         if (names.isEmpty() && receiver.isEmpty())
             return null;
         return new Expectation(names, receiver, token, callMethod, parameterIndex, hasSystemEnum(types),
-            systemProperty, formalParameter);
+            systemProperty, formalParameter, List.copyOf(types));
     }
 
     /** Тип ключа {@code коллекция[}: ключ соответствия, Число по ЕстьЧисловойИндекс, Строка для доступа по имени. */
@@ -2537,7 +2544,10 @@ final class BslExpectedTypePremiums
         List<String> types = receiverTypes(expectation);
         if (types.isEmpty())
             return null;
-        String typesHtml = edtTypesHtml(resource, types);
+        String typesHtml = expectation != null && !expectation.typeItems().isEmpty()
+            ? typeItemsHtml(resource, expectation.typeItems()) : edtTypesHtml(resource, types);
+        Global.tempLog("query-parameter-types", "receiverTypeLine receiver=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (expectation == null ? null : expectation.receiver()) + " html=" + typesHtml); //$NON-NLS-1$
         return "<div class=\"" + RECEIVER_TYPE_CLASS + "\"><b>Приемник.Тип</b>: " //$NON-NLS-1$ //$NON-NLS-2$
             + (typesHtml != null ? typesHtml : escapeHtml(String.join(", ", types))) + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -2602,8 +2612,35 @@ final class BslExpectedTypePremiums
         List<String> names = typeNames(items);
         if (names.isEmpty())
             return null;
-        String html = edtTypesHtml(resource, names);
-        return html != null ? html : escapeHtml(String.join(", ", names)); //$NON-NLS-1$
+        try
+        {
+            Object provider = BslSyntaxAssist.documentationProvider();
+            var versions = resource.getResourceServiceProvider().get(IRuntimeVersionSupport.class);
+            Version version = resource.getContents().isEmpty() ? Version.LATEST
+                : versions.getRuntimeVersionOrDefault(resource.getContents().get(0), Version.LATEST);
+            List<Object> references = new ArrayList<>();
+            for (TypeItem item : items)
+            {
+                TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, resource);
+                Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                    resolved, resource, Boolean.TRUE, version, Boolean.FALSE);
+                if (reference == null)
+                    return escapeHtml(String.join(", ", names)); //$NON-NLS-1$
+                references.add(BslStructureInsertCommentTypes.collectionTypeReference(
+                    resolved, reference, provider, resource, true, version));
+            }
+            Class<?> pageUtil = Class.forName(
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil", true, //$NON-NLS-1$
+                provider.getClass().getClassLoader());
+            var render = pageUtil.getDeclaredMethod("generatePrefixTypesString", List.class); //$NON-NLS-1$
+            render.setAccessible(true);
+            return (String)render.invoke(null, references);
+        }
+        catch (Exception | LinkageError failure)
+        {
+            Global.tempLog("query-parameter-types", "typeItemsHtml failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            return escapeHtml(String.join(", ", names)); //$NON-NLS-1$
+        }
     }
 
     /** Строка {@code line} первой в теле подсказки; уже есть или {@code line == null} — как было. */

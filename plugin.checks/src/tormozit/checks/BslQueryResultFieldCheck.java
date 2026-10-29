@@ -44,7 +44,9 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
         if (!(object instanceof Module module) || monitor.isCanceled())
             return;
         if (OpenModulesOnly.skip(module, parameters))
+        {
             return;
+        }
         for (var access : BslQueryResultTypes.unknownFields(module, monitor::isCanceled))
         {
             if (monitor.isCanceled())

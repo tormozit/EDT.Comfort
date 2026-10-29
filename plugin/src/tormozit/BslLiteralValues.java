@@ -479,6 +479,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (hover == null)
                     return null;
                 Object info = hover.getHoverInfo(property, viewer, region);
+                BslStructureInsertCommentTypes.completePropertyHover(info, property, viewer);
                 info = BslEditorHoverHook.decorateSideHint(info, property, viewer);
                 var creator = hover instanceof org.eclipse.jface.text.ITextHoverExtension extension
                     ? extension.getHoverControlCreator() : null;
@@ -1283,6 +1284,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return withIndex.get(withIndex.size() - 1).get(index);
         }
 
+        /** Общее правило для прямого вызова и анализа параметра через вызываемый метод. */
+        boolean isStructurePropertyProbe(String method, List<TypeItem> ownerTypes)
+        {
+            return hasType(ownerTypes, "Structure", "FixedStructure", "FormDataStructure") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                && in(method, "Свойство", "Property"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         /** Ветка «системный метод или конструктор» {@code ЗаполнитьТаблицуВозможныхЗначенийЛитерала}. */
         void platformCall(Call call)
         {
@@ -1401,8 +1409,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             // Ограничения мРежимПроверкиМодуля в ЗаполнитьТаблицуВозможныхЗначенийЛитерала ИР.
             // Список из места передачи структуры (выше) остаётся допустимым ограничением для Вставить.
-            if (validation && (hasType(objectTypes, "Structure", "FixedStructure") //$NON-NLS-1$ //$NON-NLS-2$
-                && in(method, "Вставить", "Insert", "Свойство", "Property") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            if (validation && (isStructurePropertyProbe(method, objectTypes)
+                || hasType(objectTypes, "Structure", "FixedStructure") && in(method, "Вставить", "Insert") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                 || context.contains("КоллекцияКолонок") && in(method, "Найти", "Find"))) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             {
                 full = false;
@@ -1536,7 +1544,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 && in(parameter, "СписокСвойств", "ИсключаяСвойства") && !call.args.isEmpty()) //$NON-NLS-1$ //$NON-NLS-2$
             {
                 branch("fillPropertyValues"); //$NON-NLS-1$
-                addAll(properties(typesOf(call.args.get(0))));
+                fillPropertyValuesNames(call.args);
             }
             else if ("ОформлениеКомпоновкиДанных".equalsIgnoreCase(context) //$NON-NLS-1$
                 && "УстановитьЗначениеПараметра".equalsIgnoreCase(method) && "Параметр".equalsIgnoreCase(parameter)) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1782,6 +1790,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             else if (in(structureType, STRUCTURE, "ФиксированнаяСтруктура")) //$NON-NLS-1$
             {
+                // Ключи из копирования свойств и типа параметра — подсказки, а не закрытый список.
+                // Полноту должно подтвердить место использования (structureKeys), не platformCall.
+                full = false;
                 String formVariable = name;
                 String fromForm = ".Параметры"; //$NON-NLS-1$
                 for (EObject object : contents(scope))
@@ -1823,6 +1834,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     {
                         branch("structureFromFill"); //$NON-NLS-1$
                         addAll(names);
+                        Global.tempLog("unknown-literal-structure", "structureFromFill variable=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                            + " validation=" + validation + " full=" + full + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         return;
                     }
                 }
@@ -1837,6 +1850,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         {
                             branch("structureParameter"); //$NON-NLS-1$
                             addAll(names);
+                            Global.tempLog("unknown-literal-structure", "structureParameter variable=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                                + " validation=" + validation + " full=" + full + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                             return;
                         }
                     }
@@ -1937,7 +1952,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     owner = access.getSource();
                 if (owner == null)
                     continue;
-                List<String> names = properties(typesOf(owner));
+                List<TypeItem> ownerTypes = typesOf(owner);
+                // Проверка существования допускает отсутствующий ключ, в том числе через обёртку.
+                // Для автодополнения сохраняем известные свойства; индексное обращение проверяем.
+                if (validation && object instanceof Invocation invocation
+                    && isStructurePropertyProbe(invocation.getMethodAccess().getName(), ownerTypes))
+                    continue;
+                List<String> names = properties(ownerTypes);
                 if (!names.isEmpty())
                 {
                     branch("objectProperties"); //$NON-NLS-1$
@@ -1956,16 +1977,39 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (!(object instanceof Invocation invocation) || !isFillPropertyValues(invocation)
                     || invocation.getParams().size() < 3 || !matches(invocation.getParams().get(2), name))
                     continue;
-                for (int i = 0; i < 2; i++)
+                fillPropertyValuesNames(invocation.getParams());
+                if (!values.isEmpty())
+                    return;
+            }
+        }
+
+        /** Полнота выборки подтверждается моделью запроса, а не числом вычисленных свойств. */
+        void fillPropertyValuesNames(List<Expression> args)
+        {
+            for (int i = 0; i < Math.min(2, args.size()); i++)
+            {
+                Expression argument = args.get(i);
+                List<TypeItem> types = typesOf(argument);
+                if (!hasType(types, "QueryResultSelection")) //$NON-NLS-1$
+                    continue;
+                Map<String, List<TypeItem>> columns = BslQueryResultTypes.selectionColumnsOf(argument);
+                branch("fillPropertySelection"); //$NON-NLS-1$
+                full = columns != null;
+                if (columns != null)
+                    columns.forEach(this::add);
+                else
+                    addAll(properties(types));
+                return;
+            }
+            for (int i = 0; i < Math.min(2, args.size()); i++)
+            {
+                List<String> names = properties(typesOf(args.get(i)));
+                if (names.size() > 1)
                 {
-                    List<String> names = properties(typesOf(invocation.getParams().get(i)));
-                    if (names.size() > 1)
-                    {
-                        branch("fillPropertyList"); //$NON-NLS-1$
-                        addAll(names);
-                        full = true;
-                        return;
-                    }
+                    branch("fillPropertyList"); //$NON-NLS-1$
+                    addAll(names);
+                    full = true;
+                    return;
                 }
             }
         }
@@ -2142,10 +2186,19 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (expression == null)
                 return List.of();
             if (expression instanceof StaticFeatureAccess access)
+            {
                 for (FeatureEntry entry : access.getFeatureEntries())
                     if (entry != null && entry.getFeature() instanceof Variable variable
                         && variable instanceof FormalParam parameter && bindings.containsKey(parameter))
                         return bindings.get(parameter);
+                // Общая исходная модель метода может ещё не иметь рассчитанных FeatureEntries.
+                // Неквалифицированный параметр разрешается в его собственном методе, а не в модуле вызова.
+                Method owner = methodOf(access);
+                if (owner != null && access.getName() != null)
+                    for (FormalParam parameter : owner.getFormalParams())
+                        if (access.getName().equalsIgnoreCase(parameter.getName()) && bindings.containsKey(parameter))
+                            return bindings.get(parameter);
+            }
             // Штатный вычислитель — как у колонок #876: только он отдаёт таблицу с колонками из запроса.
             TypesComputer computer = resource.getResourceServiceProvider() != null
                 ? resource.getResourceServiceProvider().get(TypesComputer.class) : null;
@@ -2550,16 +2603,46 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (!fromContext)
                 for (FormParameter parameter : form.getParameters())
                     add(nameOf(parameter), parameter.getValueType());
-            // Ожидаемые в коде формы параметры: ПриСозданииНаСервере читает Параметры.Имя и Параметры.Свойство("Имя").
+            // Ожидаемые параметры читаются в ПриСозданииНаСервере и вызываемых им методах формы.
             Module formModule = form.getModule();
             if (formModule == null || formModule.eIsProxy())
                 return;
+            Set<Method> localMethods = Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Method> pending = new ArrayList<>();
             for (Method method : formModule.allMethods())
             {
-                if (!in(method.getName(), "ПриСозданииНаСервере", "OnCreateAtServer")) //$NON-NLS-1$ //$NON-NLS-2$
+                localMethods.add(method);
+                if (in(method.getName(), "ПриСозданииНаСервере", "OnCreateAtServer")) //$NON-NLS-1$ //$NON-NLS-2$
+                    pending.add(method);
+            }
+            Set<Method> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (int i = 0; i < pending.size(); i++)
+            {
+                checkCanceled();
+                Method method = pending.get(i);
+                if (!visited.add(method))
                     continue;
                 for (EObject object : contents(method))
                 {
+                    if (object instanceof Invocation invocation && invocation.getMethodAccess() != null)
+                    {
+                        // У загруженного модуля другой формы FeatureEntries могут быть ещё не рассчитаны.
+                        // Неквалифицированный вызов локального метода разрешаем по имени в том же модуле.
+                        if (invocation.getMethodAccess() instanceof StaticFeatureAccess access
+                            && access.getFeatureEntries().isEmpty() && access.getName() != null)
+                            for (Method called : localMethods)
+                                if (access.getName().equalsIgnoreCase(called.getName()) && !visited.contains(called))
+                                    pending.add(called);
+                        for (FeatureEntry entry : featureEntries(invocation.getMethodAccess()))
+                        {
+                            EObject feature = entry != null ? entry.getFeature() : null;
+                            if (feature != null && feature.eIsProxy())
+                                feature = EcoreUtil.resolve(feature, formModule.eResource());
+                            if (feature instanceof Method called && localMethods.contains(called)
+                                && !visited.contains(called))
+                                pending.add(called);
+                        }
+                    }
                     if (object instanceof Invocation invocation
                         && invocation.getMethodAccess() instanceof DynamicFeatureAccess access
                         && in(access.getName(), "Свойство", "Property") && isFormParameters(access.getSource()) //$NON-NLS-1$ //$NON-NLS-2$

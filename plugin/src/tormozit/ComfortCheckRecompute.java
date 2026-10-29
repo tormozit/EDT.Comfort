@@ -34,6 +34,7 @@ import com._1c.g5.v8.derived.context.IObjectDerivedDataContext;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
@@ -172,7 +173,13 @@ public final class ComfortCheckRecompute
         toast("Проверить", "Запущена проверка всех объектов проекта " + project.getName() //$NON-NLS-1$
             + ". По окончании будет показано уведомление.");
 
-        Job job = Job.create("Комфорт: проверка проекта " + project.getName(), monitor -> //$NON-NLS-1$
+        IDtProjectManager projectManager = Global.getOsgiService(IDtProjectManager.class);
+        // Менеджер хранит активные контексты; внешние библиотеки в число проектов РМ не входят.
+        boolean severalProjects = projectManager != null && projectManager.getDtProjects().stream()
+            .filter(candidate -> candidate.getWorkspaceProject() != null).limit(2).count() > 1;
+        String jobTitle = "Комфорт: проверка проекта" //$NON-NLS-1$
+            + (severalProjects ? " (" + project.getName() + ")" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        Job job = Job.create(jobTitle, monitor ->
         {
             try
             {

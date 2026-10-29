@@ -73,6 +73,7 @@ import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.typesystem.IInvocationTypesComputerExtension;
+import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.bsl.typesystem.ValueTableDynamicContextDefProvider;
 import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
@@ -97,6 +98,8 @@ import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.dcs.resource.IDependentQuerySchemaProvider;
+import com._1c.g5.v8.dt.ql.model.ABinaryOperatorsExpression;
+import com._1c.g5.v8.dt.ql.model.InExpression;
 import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
@@ -352,6 +355,17 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     static Map<String, List<TypeItem>> resultColumnsOf(Expression expression)
     {
+        return resultColumnsOf(expression, "QueryResult"); //$NON-NLS-1$
+    }
+
+    /** Поля выборки из модели её запроса; {@code null} — связь с моделью не установлена. */
+    static Map<String, List<TypeItem>> selectionColumnsOf(Expression expression)
+    {
+        return resultColumnsOf(expression, "QueryResultSelection"); //$NON-NLS-1$
+    }
+
+    private static Map<String, List<TypeItem>> resultColumnsOf(Expression expression, String kind)
+    {
         if (!canComputeQueryModel(expression))
             return null;
         Method method = expression == null ? null : EcoreUtil2.getContainerOfType(expression, Method.class);
@@ -361,7 +375,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             Plan plan = new Plan(method, ""); //$NON-NLS-1$
             Shape shape = plan.shape(expression, Collections.newSetFromMap(new IdentityHashMap<>()));
-            if (shape == null || !shape.kind.equals("QueryResult") || shape.results.isEmpty()) //$NON-NLS-1$
+            if (shape == null || !shape.kind.equals(kind) || shape.results.isEmpty()
+                || !shape.results.get(0).ordinary)
                 return null;
             Map<String, List<TypeItem>> columns = new java.util.LinkedHashMap<>();
             for (Field field : shape.results.get(0).fields)
@@ -422,7 +437,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return List.of();
         Object lock = Global.invoke(module.eResource(), "getLock"); //$NON-NLS-1$
         if (lock == null)
+        {
             return List.of();
+        }
         synchronized (lock)
         {
             Session session = session(module.eResource(), true);
@@ -1389,7 +1406,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 return literal;
             Variable target = variable(expression);
             if (target == null)
+            {
                 return null;
+            }
             SimpleStatement last = null;
             for (SimpleStatement assignment : assignments)
             {
@@ -1422,6 +1441,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         || !(lower(access.getName()).equals("text") || lower(access.getName()).equals("текст")) //$NON-NLS-1$ //$NON-NLS-2$
                         || variable(access.getSource()) != target)
                         continue;
+                    if (passesQueryText(assignment, target))
+                        continue;
                 }
                 else if (variable(left) != target)
                     continue;
@@ -1429,6 +1450,23 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     last = assignment;
             }
             return last;
+        }
+
+        /** Для модели запроса {@code Запрос.Текст = Ф(..., Запрос.Текст, ...)} сохраняет исходный текст. */
+        private boolean passesQueryText(SimpleStatement assignment, Variable target)
+        {
+            if (!(assignment.getRight() instanceof Invocation invocation))
+                return false;
+            for (Expression argument : invocation.getParams())
+            {
+                if (argument instanceof DynamicFeatureAccess access
+                    && (lower(access.getName()).equals("text") || lower(access.getName()).equals("текст")) //$NON-NLS-1$ //$NON-NLS-2$
+                    && variable(access.getSource()) == target)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** Поздняя запись в теле цикла достигает использования на следующей итерации. */
@@ -1448,7 +1486,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         return true;
                     if (queryText && left instanceof DynamicFeatureAccess access
                         && (lower(access.getName()).equals("text") || lower(access.getName()).equals("текст")) //$NON-NLS-1$ //$NON-NLS-2$
-                        && variable(access.getSource()) == target)
+                        && variable(access.getSource()) == target && !passesQueryText(assignment, target))
                         return true;
                 }
             }
@@ -1596,13 +1634,38 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             key -> new java.util.LinkedHashSet<>());
                         for (var occurrence : entry.getValue())
                         {
+                            var parameter = occurrence.getFirst();
                             var expected = occurrence.getSecond();
+                            boolean inOperand = parameter.eContainer() instanceof InExpression in
+                                && in.eContainer() instanceof ABinaryOperatorsExpression binary
+                                && binary.getRight() == in;
+                            Global.tempLog("query-parameter-types", "parameter=" + parameter.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                                + " inOperand=" + inOperand + " expected=" //$NON-NLS-1$ //$NON-NLS-2$
+                                + (expected == null ? null : expected.getTypes()));
                             if (expected == null)
                                 continue;
+                            List<TypeItem> scalarTypes = new ArrayList<>();
                             for (TypeItem item : expected.getTypes())
                             {
                                 if (item != null)
+                                {
                                     labels.add(item);
+                                    scalarTypes.add(item);
+                                }
+                            }
+                            if (inOperand && !scalarTypes.isEmpty())
+                            {
+                                var services = ((XtextResource)method.eResource()).getResourceServiceProvider();
+                                Version version = services.get(IRuntimeVersionSupport.class)
+                                    .getRuntimeVersionOrDefault(method, Version.LATEST);
+                                IEObjectProvider typeProvider = IEObjectProvider.Registry.INSTANCE
+                                    .get(McorePackage.Literals.TYPE_ITEM, version);
+                                Type array = TypeSystemUtil.createExtendedArrayType(scalarTypes, typeProvider, method);
+                                labels.add(array);
+                                Global.tempLog("query-parameter-types", "parameter=" + parameter.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " arrayClass=" + array.eClass().getName() + " elements=" //$NON-NLS-1$ //$NON-NLS-2$
+                                    + array.getCollectionElementTypes().allTypes().stream()
+                                        .map(McoreUtil::getTypeNameRu).toList());
                             }
                         }
                     }
@@ -1610,6 +1673,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             catch (RuntimeException | LinkageError failure)
             {
+                Global.tempLog("query-parameter-types", "failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
                 // Ошибка расчёта типов не должна убирать найденные имена параметров.
             }
             Map<String, com._1c.g5.v8.dt.mcore.Property> result = new java.util.LinkedHashMap<>();

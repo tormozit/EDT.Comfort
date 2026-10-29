@@ -15,6 +15,15 @@ import java.text.Collator;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.hooks.weaving.WovenClass;
+
 import org.eclipse.core.databinding.observable.IObservable;
 import org.eclipse.core.databinding.observable.value.IObservableValue;
 import org.eclipse.core.resources.IProject;
@@ -210,6 +219,60 @@ public final class ValidationChecksFilterHook implements IStartup
     private static final Map<Display, Image> OTHER_WARNING_ICONS = new WeakHashMap<>();
     private static final Map<Display, Image> TABLE_MODE_ICONS = new WeakHashMap<>();
     private static boolean lazyCopyFilterInstalled;
+
+    /** Регистрируется до загрузки штатного дерева проверок. */
+    static void installWeavingHook(BundleContext context)
+    {
+        context.registerService(WeavingHook.class, new ChecksTreeStyleHook(), null);
+    }
+
+    private static final class ChecksTreeStyleHook implements WeavingHook
+    {
+        @Override
+        public void weave(WovenClass type)
+        {
+            if (type.getState() != WovenClass.TRANSFORMING
+                || !"com._1c.g5.v8.dt.internal.ui.validation.ChecksTreeViewer".equals(type.getClassName()))
+                return;
+            // EDT передаёт SWT.CHECK в CheckboxTreeViewer(Composite, int),
+            // а SWT при отсутствии MULTI добавляет SINGLE. Меняем стиль до создания Tree.
+            ClassReader reader = new ClassReader(type.getBytes());
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            boolean[] changed = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"<init>".equals(name))
+                        return visitor;
+                    return new MethodVisitor(Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String desc,
+                            boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKESPECIAL && "<init>".equals(method)
+                                && "org/eclipse/jface/viewers/CheckboxTreeViewer".equals(owner)
+                                && "(Lorg/eclipse/swt/widgets/Composite;I)V".equals(desc))
+                            {
+                                super.visitLdcInsn(~SWT.SINGLE);
+                                super.visitInsn(Opcodes.IAND);
+                                super.visitLdcInsn(SWT.MULTI);
+                                super.visitInsn(Opcodes.IOR);
+                                changed[0] = true;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            if (changed[0])
+                type.setBytes(writer.toByteArray());
+        }
+    }
     /** Сколько страниц проверок сейчас открыто — ограничивает патч меню отбора (см. {@link #patchTypeMenu}). */
     private static int openPages;
 
@@ -2501,7 +2564,7 @@ public final class ValidationChecksFilterHook implements IStartup
      * <p>Таблица — {@code SWT.MULTI} (issue 467): множественное выделение строк
      * обеспечивает сам {@link FormTableInteraction} (уже умеет это для таблиц с
      * {@code CheckboxTableViewer}, ср. {@code RefactoringPreviewHook}), с
-     * деревом синхронизируется только первая выделенная строка. Пункт
+     * деревом синхронизируются все выделенные строки. Пункт
      * контекстного меню «Установить критичность» ({@link #installSeverityMenu})
      * применяет критичность разом ко всем выделенным.
      *
@@ -2878,7 +2941,11 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             if (table.isDisposed() || syncing || !tableMode)
                 return;
-            if (!(viewer.getStructuredSelection().getFirstElement() instanceof CheckRow row))
+            List<IChecksTreeNode> selected = new ArrayList<>();
+            for (Object element : viewer.getStructuredSelection().toList())
+                if (element instanceof CheckRow row)
+                    selected.add(row.node);
+            if (selected.isEmpty())
                 return;
             syncing = true;
             try
@@ -2886,8 +2953,9 @@ public final class ValidationChecksFilterHook implements IStartup
                 // Без раскрытия категории у проверки нет TreeItem, setSelection
                 // не находит элемент и выделение остаётся пустым — тогда панель
                 // параметров справа (она следует за выбором дерева) не обновляется.
-                expandAncestors(treeViewer, row.node);
-                treeViewer.setSelection(new StructuredSelection(row.node), true);
+                for (IChecksTreeNode node : selected)
+                    expandAncestors(treeViewer, node);
+                treeViewer.setSelection(new StructuredSelection(selected), true);
             }
             finally
             {
@@ -2901,22 +2969,19 @@ public final class ValidationChecksFilterHook implements IStartup
             // режима состав пересобирается и выделение проставляется в reload().
             if (syncing || !tableMode || table.isDisposed())
                 return;
-            Object selected = treeViewer.getStructuredSelection().getFirstElement();
-            CheckRow target = null;
+            List<?> selected = treeViewer.getStructuredSelection().toList();
+            List<CheckRow> targets = new ArrayList<>();
             for (CheckRow row : rows)
             {
-                if (row.node == selected)
-                {
-                    target = row;
-                    break;
-                }
+                if (selected.contains(row.node))
+                    targets.add(row);
             }
-            if (target == null)
+            if (targets.isEmpty())
                 return;
             syncing = true;
             try
             {
-                viewer.setSelection(new StructuredSelection(target), true);
+                viewer.setSelection(new StructuredSelection(targets), true);
                 if (interaction != null)
                     interaction.revealSelection();
             }
@@ -3262,9 +3327,14 @@ public final class ValidationChecksFilterHook implements IStartup
         {
             if (stack.isDisposed())
                 return;
+            if (tableMode && !value)
+                syncSelectionToTree();
             tableMode = value;
             if (value)
+            {
                 reload();
+                syncSelectionFromTree();
+            }
             stackLayout.topControl = value ? tableHost : treeViewer.getTree();
             stack.layout();
             updateResultActions();
