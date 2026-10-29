@@ -3274,6 +3274,12 @@ finishSyncCycle(popup);
     private static boolean syncLiteralArgPopupInPlace(ContentAssistant assistant,
         SourceViewer viewer, SmartContentAssistProcessor processor, int caret) throws Exception
     {
+        // Для выделения список строит computeSelectionProposals. База литерала
+        // и его префикс не должны подменять предложения генераторов для выделения.
+        if (SmartContentAssistProcessor.hasTextSelection(viewer))
+        {
+            return false;
+        }
         if (viewer == null || processor == null || caret < 0
             || !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret)
             || BslAssistSourceHeuristics.literalCallMethodName(viewer.getDocument(), caret) == null

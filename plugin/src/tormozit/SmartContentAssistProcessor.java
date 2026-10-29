@@ -1371,16 +1371,19 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return isIrOnlyManualMode();
     }
 
-    private static boolean hasTextSelection(ITextViewer viewer)
+    static boolean hasTextSelection(ITextViewer viewer)
     {
-        Point range = viewer != null ? viewer.getSelectedRange() : null;
+        Point range = (viewer != null ? viewer.getSelectedRange() : null);
         return ComfortSettings.isReplaceListFiltersEnabled() && range != null && range.y > 0;
     }
 
     /** Выделение: только перенесённые команды, без подключения ИР и списка EDT. */
     private ICompletionProposal[] computeSelectionProposals(ITextViewer viewer)
     {
-        if (RepeatedInvocationDetect.isActive())
+        // В литерале preExecute команды уже переключил фильтр. Выделение обрабатывается
+        // раньше общей ветки литерала, поэтому признак команды нужно потребить здесь.
+        if (RepeatedInvocationDetect.isActive()
+            && !ContentAssistSessionReloader.consumeLiteralRepeatFromCommand())
             applyRepeatedFilterToggleOnce();
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         if (assistant != null)
@@ -4730,8 +4733,7 @@ return EMPTY;
         int quote = BslAssistSourceHeuristics.literalCallOpenQuote(doc, caret);
         if (quote < 0)
         {
-            // Партиция EDT даёт начало и обычного литерала, например Текст = "".
-            // Аргумент вызова для такого литерала отсутствует, но список ему тоже нужен.
+            // Многострочный литерал состоит из нескольких партиций EDT.
             if (!(doc instanceof IXtextDocument) || caret <= 0 || caret > doc.getLength())
                 return -1;
             try
@@ -4740,7 +4742,9 @@ return EMPTY;
                 if (!org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper
                     .STRING_LITERAL_PARTITION.equals(partition.getType()))
                     return -1;
-                quote = partition.getOffset();
+                quote = BslQueryLiteralSupport.literalOpenQuoteBefore(doc, caret);
+                if (quote < 0)
+                    return -1;
             }
             catch (org.eclipse.jface.text.BadLocationException e)
             {
@@ -4751,8 +4755,15 @@ return EMPTY;
         {
             for (int i = caret - 1; i > quote; i--)
             {
-                if (doc.getChar(i) == '.')
+                char c = doc.getChar(i);
+                if (c == '.' || c == ',')
                     return i;
+                if (c == '|')
+                {
+                    int lineStart = doc.getLineOffset(doc.getLineOfOffset(i));
+                    if (doc.get(lineStart, i - lineStart).isBlank())
+                        return i;
+                }
             }
         }
         catch (org.eclipse.jface.text.BadLocationException e)
@@ -11183,8 +11194,23 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                               DocumentEvent event)
     {
         ICompletionProposal raw = unwrapProposal(proposal);
+        // Тот же режим выделения, что в proposalMatchesFilter: текст выделения —
+        // аргумент генератора, а не префикс его названия. Правило действует и без smart.
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (hasTextSelection(viewer))
+        {
+            return raw instanceof BslAddedWordProposal;
+        }
         if (raw instanceof IrCompletionProposal ir)
             return matchesIrStockPrefixFilter(ir, document, offset, event);
+        if (raw instanceof BslAddedWordProposal added)
+        {
+            // validate() этого предложения возвращается в proposalMatchesFilter: вызываем отбор напрямую.
+            boolean matches = matchesStockPrefixFilter(added.getWord(), document, offset, event);
+            Global.tempLog("assist-added-word-filter", "stockPrefix offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " matches=" + matches); //$NON-NLS-1$
+            return matches;
+        }
         if (raw instanceof SmartCompletionProposal)
             return true;
         if (raw instanceof ICompletionProposalExtension2)
@@ -11200,6 +11226,16 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (ir == null)
             return false;
+        String name = ir.getWordValue();
+        if (name == null || name.isEmpty())
+            name = ir.getFilterName();
+        return matchesStockPrefixFilter(name, document, offset, event);
+    }
+
+    /** Префиксный отбор собственных предложений без повторного вызова их validate. */
+    private static boolean matchesStockPrefixFilter(String name, IDocument document,
+        int offset, DocumentEvent event)
+    {
         int caret = resolveFilterCaret(document, offset, event);
         String prefix = document != null && caret >= 0
             ? computeIdentifierFilter(document, caret) : ""; //$NON-NLS-1$
@@ -11211,9 +11247,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         if (prefix.isEmpty())
             return true;
-        String name = ir.getWordValue();
-        if (name == null || name.isEmpty())
-            name = ir.getFilterName();
         if (name == null || name.isEmpty())
             return false;
         return name.regionMatches(true, 0, prefix, 0, prefix.length());

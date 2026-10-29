@@ -225,6 +225,8 @@ final class OccurrenceContextResolveJob
     private final Runnable onTypePendingChanged;
     /** Вызывается в UI-потоке после публикации порции строк тяжёлого/ИР-прохода (батч строк). */
     private volatile java.util.function.Consumer<java.util.List<Target>> onRowsPublished;
+    /** Однократно после быстрого прохода, в UI: позиции готовы для сортировки результатов. */
+    private volatile Runnable onFastCompleted;
 
     private final Object queueLock = new Object();
     private Deque<Target> fastQueue;
@@ -278,6 +280,11 @@ final class OccurrenceContextResolveJob
     void setRowsPublishedCallback(java.util.function.Consumer<java.util.List<Target>> callback)
     {
         this.onRowsPublished = callback;
+    }
+
+    void setFastCompletedCallback(Runnable callback)
+    {
+        this.onFastCompleted = callback;
     }
 
     /**
@@ -538,6 +545,11 @@ final class OccurrenceContextResolveJob
         }
         if (gen == generation && !monitor.isCanceled())
         {
+            runOnUi(() ->
+            {
+                if (gen == generation && onFastCompleted != null)
+                    onFastCompleted.run();
+            });
             startTypePass(forType, gen);
             startIrPass(forIr, gen);
         }

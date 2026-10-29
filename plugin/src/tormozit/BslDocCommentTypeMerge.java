@@ -866,6 +866,8 @@ public final class BslDocCommentTypeMerge
         if (envs != null)
             extended.setEnvironments(new Environments(envs.toArray()));
         extended.setCreatedByNewOperator(primary.isCreatedByNewOperator());
+        // Штатная проверка EDT запрещает обмен, если хотя бы один вариант непередаваем.
+        extended.setExchangeWithServer(contexts.stream().allMatch(Type::isExchangeWithServer));
         ContextDefWithRefItem ctx = McoreFactory.eINSTANCE.createContextDefWithRefItem();
         LinkedHashSet<Method> methods = new LinkedHashSet<>();
         LinkedHashSet<Property> properties = new LinkedHashSet<>();
@@ -898,6 +900,7 @@ public final class BslDocCommentTypeMerge
         else if (source.getEnvironments() != null)
             copy.setEnvironments(new Environments(source.getEnvironments().toArray()));
         copy.setCreatedByNewOperator(source.isCreatedByNewOperator());
+        copy.setExchangeWithServer(source.isExchangeWithServer());
         // Без признака копия таблицы/массива для проверки «Для каждого» — не коллекция
         copy.setIterable(source.isIterable());
         ContextDefWithRefItem ctx = McoreFactory.eINSTANCE.createContextDefWithRefItem();

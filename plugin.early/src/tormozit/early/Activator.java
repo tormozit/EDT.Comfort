@@ -39,6 +39,8 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        ApplicationResetDiagnostics.install(context);
+        ApplicationRestorationWeaving.install(context);
         QueryNullCastWeaving.install(context);
         FormDataWeaving.install(context);
         TypeComputationWeaving.install(context);
@@ -49,12 +51,460 @@ public final class Activator
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
         context.registerService(WeavingHook.class, new NaparnikWeaving(), null);
         TextSearchInvocationWeaving.install(context);
+        ReferenceSearchResultWeaving.install(context);
     }
 
     @Override
     public void stop(BundleContext context)
     {
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
+    }
+
+    /**
+     * EDT core 26.0.1.v202605050943: DtRestorationJob.attemptToRestore останавливает все проекты
+     * через DELETE, затем запускает CLEAN_IMPORT. Applications 6.0.0.v202605050943 воспринимает
+     * DELETE как настоящее удаление приложений. При восстановлении оставляем только cleanup:
+     * фоновой задаче сразу передаётся false, поэтому после перезапуска модели она не удалит привязки.
+     */
+    private static final class ApplicationRestorationWeaving implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.applicationRestoration.shouldDelete";
+        private static final String TARGET = "com.e1c.g5.dt.internal.applications.ApplicationManager";
+        private static final String CLEANER = TARGET.replace('.', '/') + "$AsynchronousApplicationCleaner";
+        private static final String CLEANUP_DESC = "(Lorg/eclipse/core/resources/IProject;Z)V";
+        private static final StackWalker WALKER = StackWalker.getInstance();
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (Function<Boolean, Boolean>) ApplicationRestorationWeaving::shouldDelete);
+            context.registerService(WeavingHook.class, new ApplicationRestorationWeaving(), null);
+        }
+
+        private static boolean shouldDelete(boolean requested)
+        {
+            if (!requested)
+                return false;
+            // stopProject -> stopContext -> onProjectStorageClosing выполняются синхронно.
+            // Проверяем инициатора до Job.schedule(): в фоновой задаче этого стека уже нет.
+            boolean restoration = WALKER.walk(frames -> frames.anyMatch(frame -> frame.getClassName()
+                .equals("com._1c.g5.v8.dt.core.lifecycle.DtRestorationJob")
+                && frame.getMethodName().equals("attemptToRestore")));
+            if (restoration)
+                diagnostic("preserve applications during DtRestorationJob; shouldDelete=false", null);
+            return !restoration;
+        }
+
+        private static void diagnostic(String text, Throwable failure)
+        {
+            Object callback = System.getProperties().get(ApplicationResetDiagnostics.CALLBACK);
+            if (callback instanceof Consumer<?> consumer)
+            {
+                @SuppressWarnings("unchecked")
+                Consumer<Object[]> sink = (Consumer<Object[]>) consumer;
+                sink.accept(new Object[] {"APPLICATION RESTORATION " + text, failure});
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] calls = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        if (!name.equals("onProjectStorageClosing") || !desc.equals(
+                            "(Lcom/_1c/g5/v8/dt/core/lifecycle/ProjectContext;)V"))
+                            return original;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                if (opcode == Opcodes.INVOKEVIRTUAL && owner.equals(CLEANER)
+                                    && method.equals("cleanupProjectApplications") && descriptor.equals(CLEANUP_DESC))
+                                {
+                                    // Стек cleaner, project, boolean; остальные аргументы сохраняются.
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                        "(Z)Ljava/lang/Boolean;", false);
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                        "()Ljava/util/Properties;", false);
+                                    super.visitLdcInsn(CALLBACK);
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                    calls[0]++;
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                            }
+                        };
+                    }
+                }, 0);
+                if (calls[0] == 2)
+                    woven.setBytes(writer.toByteArray());
+                diagnostic("weave cleanup calls=" + calls[0] + "/2; "
+                    + (calls[0] == 2 ? "OK" : "NOT APPLIED"), null);
+            }
+            catch (Throwable failure)
+            {
+                diagnostic("NOT APPLIED", failure);
+            }
+        }
+    }
+
+    /** Временная диагностика потери привязок; включена до активации проектов, переживает перезапуск. */
+    private static final class ApplicationResetDiagnostics implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.applicationReset.diagnostic";
+        private static final String CORE = "com._1c.g5.v8.dt.";
+        private static final String APPS = "com.e1c.g5.dt.internal.applications.ApplicationManager";
+        private static final String BASES = CORE + "internal.platform.services.core.infobases.";
+        private static final String LIFECYCLE = CORE + "internal.lifecycle.";
+        private static final String CRITICAL =
+            "com._1c.g5.v8.bm.core.internal.lifecycle.CriticalErrorHandler";
+        private static final String RECOVERY = CORE + "internal.core.platform.RecoveryOrchestrator";
+        // Не temp-logs: Global очищает эту папку при каждом запуске основного бандла.
+        private static final java.nio.file.Path FILE = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/application-reset/diagnostic.log");
+        private final FrameworkLog fallback;
+
+        private ApplicationResetDiagnostics(BundleContext context)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            fallback = reference == null ? null : context.getService(reference);
+        }
+
+        static void install(BundleContext context)
+        {
+            var diagnostics = new ApplicationResetDiagnostics(context);
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
+            diagnostics.write("SESSION pid=" + ProcessHandle.current().pid()
+                + " workspace=" + System.getProperty("osgi.instance.area"));
+            context.registerService(WeavingHook.class, diagnostics, null);
+            diagnostics.snapshot();
+        }
+
+        private void snapshot()
+        {
+            try
+            {
+                String area = System.getProperty("osgi.instance.area");
+                var projects = java.nio.file.Path.of(java.net.URI.create(area)).resolve(
+                    ".metadata/.plugins/org.eclipse.core.resources/.projects");
+                try (var directories = java.nio.file.Files.list(projects))
+                {
+                    for (var project : directories.toList())
+                    {
+                        var settings = project.resolve("com._1c.g5.v8.dt.platform.services.core");
+                        if (!java.nio.file.Files.isDirectory(settings))
+                            continue;
+                        try (var files = java.nio.file.Files.walk(settings))
+                        {
+                            for (var file : files.filter(path -> path.getFileName().toString()
+                                .equals("AssociationData.properties")).toList())
+                                write("SNAPSHOT " + projects.relativize(file) + " "
+                                    + java.nio.file.Files.readString(file).replace('\r', ' ').replace('\n', ' '));
+                        }
+                    }
+                }
+            }
+            catch (Exception failure)
+            {
+                write("SNAPSHOT FAILED " + failure);
+            }
+        }
+
+        private void record(Object[] args)
+        {
+            try
+            {
+                String event = String.valueOf(args[0]);
+                var text = new StringBuilder(event);
+                for (int i = 1; i < args.length; i++)
+                {
+                    text.append(" arg").append(i).append('=').append(args[i]);
+                    if (args[i] instanceof Throwable error)
+                    {
+                        var stack = new java.io.StringWriter();
+                        error.printStackTrace(new java.io.PrintWriter(stack));
+                        text.append('\n').append(stack);
+                    }
+                }
+                // Стек только редких запросов очистки/записи, а не каждого открытия проекта.
+                if (event.endsWith(" enter") && (event.contains("cleanupProjectApplications")
+                    || event.contains("dissociate") || event.contains("storeAssociationProperties")
+                    || event.contains("onProjectStorageClosing") || event.contains("reportFatalError")))
+                    for (var frame : Thread.currentThread().getStackTrace())
+                        if (!frame.getClassName().equals(Thread.class.getName())
+                            && !frame.getClassName().equals(ApplicationResetDiagnostics.class.getName()))
+                            text.append("\n  at ").append(frame);
+                write(text.toString());
+            }
+            catch (Throwable failure)
+            {
+                write("RECORD FAILED " + failure);
+            }
+        }
+
+        private synchronized void write(String text)
+        {
+            try
+            {
+                java.nio.file.Files.createDirectories(FILE.getParent());
+                // Два файла по ~4 МБ: не обнулять на старте, не накапливать журнал без границ.
+                if (java.nio.file.Files.exists(FILE) && java.nio.file.Files.size(FILE) >= 4 * 1024 * 1024)
+                    java.nio.file.Files.move(FILE, FILE.resolveSibling("diagnostic.previous.log"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                java.nio.file.Files.writeString(FILE, java.time.OffsetDateTime.now() + " ["
+                    + Thread.currentThread().getName() + "] " + text + "\r\n",
+                    java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception failure)
+            {
+                if (fallback != null)
+                    try
+                    {
+                        fallback.log(new FrameworkLogEntry("tormozit.comfort.early", FrameworkLogEntry.ERROR,
+                            0, "Application reset diagnostic write failed: " + text, 0, failure, null));
+                    }
+                    catch (Throwable ignored) { /* Отказ диагностики не прерывает EDT. */ }
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String owner = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING || !(owner.equals(APPS)
+                || owner.equals(APPS + "$AsynchronousApplicationCleaner")
+                || owner.equals(BASES + "InfobaseAssociationManager")
+                || owner.equals(BASES + "InfobaseProjectSettingsStore")
+                || owner.equals(LIFECYCLE + "ServicesOrchestrator")
+                || owner.equals(CORE + "lifecycle.LifecycleException")
+                || owner.equals(CRITICAL) || owner.equals(RECOVERY)
+                || owner.equals(LIFECYCLE + "LifecyclePlugin")))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] matches = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        String project = "Lorg/eclipse/core/resources/IProject;";
+                        String context = "L" + CORE.replace('.', '/') + "core/lifecycle/ProjectContext;";
+                        String association = "L" + BASES.replace('.', '/').replace("/internal/", "/")
+                            + "InfobaseAssociationContext;";
+                        String lifecycleContext = "Lcom/_1c/g5/v8/dt/lifecycle/ILifecycleContext;";
+                        boolean selected = owner.equals(APPS) && name.equals("onProjectStorageClosing")
+                            && desc.equals("(" + context + ")V")
+                            || owner.equals(APPS + "$AsynchronousApplicationCleaner")
+                                && name.equals("cleanupProjectApplications") && desc.equals("(" + project + "Z)V")
+                            || owner.equals(BASES + "InfobaseAssociationManager") && name.equals("dissociate")
+                                && desc.equals("(" + project
+                                    + "Lcom/_1c/g5/v8/dt/platform/services/model/InfobaseReference;" + association + ")V")
+                            || owner.equals(BASES + "InfobaseProjectSettingsStore")
+                                && name.equals("storeAssociationProperties")
+                                && desc.equals("(" + project + "Ljava/util/Map;" + association + ")V")
+                            || owner.equals(LIFECYCLE + "ServicesOrchestrator")
+                                && (name.equals("startServices") || name.equals("stopServices"))
+                                && desc.equals("(" + lifecycleContext + "Lorg/eclipse/core/runtime/IProgressMonitor;)V")
+                            || owner.equals(LIFECYCLE + "LifecyclePlugin") && name.equals("createErrorStatus")
+                                && desc.equals("(Ljava/lang/String;Ljava/lang/Throwable;)Lorg/eclipse/core/runtime/IStatus;")
+                            || owner.equals(CORE + "lifecycle.LifecycleException") && name.equals("<init>")
+                                && desc.equals("(Ljava/lang/String;Ljava/lang/Throwable;)V")
+                            || owner.equals(CRITICAL) && name.equals("handleCriticalError")
+                                && desc.equals("(Ljava/lang/Exception;)V")
+                            || owner.equals(RECOVERY) && name.equals("reportFatalError") && desc.equals("()V");
+                        if (!selected)
+                            return original;
+                        matches[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            private void emit(String phase)
+                            {
+                                var types = org.objectweb.asm.Type.getArgumentTypes(desc);
+                                boolean stop = name.equals("onProjectStorageClosing");
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                super.visitLdcInsn(types.length + (stop ? 2 : 1));
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitLdcInsn(owner.substring(owner.lastIndexOf('.') + 1) + "." + name + phase);
+                                super.visitInsn(Opcodes.AASTORE);
+                                int local = (access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+                                for (int i = 0; i < types.length; i++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(i + 1);
+                                    super.visitVarInsn(types[i].getOpcode(Opcodes.ILOAD), local);
+                                    if (types[i].getSort() == org.objectweb.asm.Type.BOOLEAN)
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                            "(Z)Ljava/lang/Boolean;", false);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    local += types[i].getSize();
+                                }
+                                if (stop)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(types.length + 1);
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                        CORE.replace('.', '/') + "core/lifecycle/ProjectContext", "getStopType",
+                                        "()Lcom/_1c/g5/v8/dt/core/lifecycle/ProjectStopType;", false);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer",
+                                    "accept", "(Ljava/lang/Object;)V", true);
+                            }
+
+                            @Override public void visitCode()
+                            {
+                                super.visitCode();
+                                emit(" enter");
+                            }
+
+                            @Override public void visitInsn(int opcode)
+                            {
+                                if ((opcode == Opcodes.RETURN || opcode == Opcodes.ARETURN)
+                                    && !name.equals("createErrorStatus") && !name.equals("<init>")
+                                    && !name.equals("handleCriticalError"))
+                                    emit(" returned");
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                }, 0);
+                int expected = owner.equals(LIFECYCLE + "ServicesOrchestrator") ? 2 : 1;
+                if (matches[0] == expected)
+                    woven.setBytes(writer.toByteArray());
+                write("WEAVE " + owner + " methods=" + matches[0] + "/" + expected
+                    + (matches[0] == expected ? " OK" : " NOT APPLIED"));
+            }
+            catch (Throwable failure)
+            {
+                record(new Object[] {"WEAVE FAILED " + owner, failure});
+            }
+        }
+    }
+
+    /**
+     * EDT 22.0.0.v202605050943, com._1c.g5.v8.dt.bsl.ui:
+     * BslReferenceSearchResult.accept убирает повторы только по URI источника.
+     * Полнотекстовые вхождения одного комментария различаются selection, а не URI.
+     * Основной бандл ставит функцию ключа; до его старта сохраняется штатный URI.
+     */
+    private static final class ReferenceSearchResultWeaving implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.bsl.ui.editor.findref.BslReferenceSearchResult"; //$NON-NLS-1$
+        private static final String REFERENCE = "org/eclipse/xtext/resource/IReferenceDescription"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.referenceSearch.occurrenceKey"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (Function<Object[], Object>) args -> args[1]);
+            System.setProperty(CALLBACK + ".status", "registered"); //$NON-NLS-1$ //$NON-NLS-2$
+            context.registerService(WeavingHook.class, new ReferenceSearchResultWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] transformed = transform(woven.getBytes());
+                if (transformed != null)
+                    woven.setBytes(transformed);
+                System.setProperty(CALLBACK + ".status", transformed == null ? "bytecode differs" : "woven"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                System.setProperty(CALLBACK + ".status", "error " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static byte[] transform(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] replacements = {0};
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor delegate = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"accept".equals(name) || !("(L" + REFERENCE + ";)V").equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        return delegate;
+                    return new MethodVisitor(Opcodes.ASM9, delegate)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method,
+                            String desc, boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                            if (opcode != Opcodes.INVOKEINTERFACE || !REFERENCE.equals(owner)
+                                || !"getSourceEObjectUri".equals(method) //$NON-NLS-1$
+                                || !"()Lorg/eclipse/emf/common/util/URI;".equals(desc)) //$NON-NLS-1$
+                                return;
+                            // Стек: Set, URI → Set, Object[]{reference, URI} → Set, key.
+                            super.visitInsn(Opcodes.ICONST_2);
+                            super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.DUP_X1);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitInsn(Opcodes.ICONST_1);
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitInsn(Opcodes.AASTORE);
+                            super.visitInsn(Opcodes.DUP);
+                            super.visitInsn(Opcodes.ICONST_0);
+                            super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitInsn(Opcodes.AASTORE);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            super.visitLdcInsn(CALLBACK);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            replacements[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            return replacements[0] == 1 ? writer.toByteArray() : null;
+        }
     }
 
     /** ContextDefImpl.allProperties в mcore 8.6.0.v202607090722 добавляет наследуемый Key вторым. */

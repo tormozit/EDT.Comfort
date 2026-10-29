@@ -1115,6 +1115,13 @@ final class BslQueryLiteralSupport
         return literal != null ? literal.text.substring(0, literal.probeIndex) : null;
     }
 
+    /** Открывающая кавычка всего BSL-литерала, а не однострочной партиции EDT. */
+    static int literalOpenQuoteBefore(IDocument doc, int offset)
+    {
+        Literal literal = parse(doc, offset, false);
+        return literal != null ? literal.openQuote : -1;
+    }
+
     /** Тип родителя в запросе сохранённого модуля; не требует редактора и подключения ИР. */
     static String occurrenceParentType(XtextResource module, String content, int offset)
     {

@@ -57,7 +57,6 @@ import tormozit.BslLiteralValues;
 import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
-import tormozit.Global;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -93,8 +92,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
     protected void check(Object object, ResultAcceptor acceptor, ICheckParameters parameters,
         IProgressMonitor monitor)
     {
-        Global.tempLog("parameter-type-check", "check.begin object=" + object //$NON-NLS-1$ //$NON-NLS-2$
-            + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
         if (!(object instanceof Module module) || !(module.eResource() instanceof XtextResource resource)
             || monitor.isCanceled())
             return;
@@ -106,8 +103,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         finally
         {
             BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
-            Global.tempLog("parameter-type-check", "check.end uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
         }
     }
 
@@ -240,8 +235,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
 
         private void checkInvocation(Invocation invocation, Environments envs)
         {
-            Global.tempLog("parameter-type-check", "invocation.begin uri=" + invocation.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " invocation=" + invocation + " envs=" + envs); //$NON-NLS-1$ //$NON-NLS-2$
             FeatureAccess access = invocation.getMethodAccess();
             if (access == null)
                 return;
@@ -256,8 +249,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             boolean methodFound = false;
             for (FeatureEntry entry : entries(access, envs))
             {
-                Global.tempLog("parameter-type-check", "invocation.entry feature=" + entry.getFeature() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " envs=" + entry.getEnvironments()); //$NON-NLS-1$
                 if (!envs.containsAny(entry.getEnvironments()))
                     continue;
                 if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Method local)
@@ -274,9 +265,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         var parameter = local.getFormalParams().get(i);
                         List<TypeItem> declared = BslMethodParameterTypes.fromComment(local, parameter);
                         List<TypeItem> resolved = declared != null ? resolve(declared, invocation) : null;
-                        Global.tempLog("parameter-type-check", "invocation.parameter method=" + local.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " parameter=" + parameter.getName() + " declared=" + declared //$NON-NLS-1$ //$NON-NLS-2$
-                            + " resolved=" + resolved); //$NON-NLS-1$
                         unrestricted[i] |= resolved == null || resolved.isEmpty()
                             || resolved.stream().allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
                         if (declared != null)
@@ -416,8 +404,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item)))) //$NON-NLS-1$
                 return;
             List<TypeItem> actual = resolve(types.computeTypes(value, envs), value);
-            Global.tempLog("parameter-type-check", "value expression=" + value + " envs=" + envs //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " expected=" + typeNames(resolvedExpected) + " actual=" + typeNames(actual)); //$NON-NLS-1$ //$NON-NLS-2$
             if (resolvedExpected == null || actual == null || actual.isEmpty())
                 return;
             List<TypeItem> concreteActual = new ArrayList<>(actual);
@@ -441,8 +427,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             if (!concreteExpected.isEmpty() && !concreteActual.isEmpty())
             {
                 boolean compatible = compatibleTypes(concreteExpected, concreteActual, value);
-                Global.tempLog("parameter-type-check", "value.compatible=" + compatible //$NON-NLS-1$ //$NON-NLS-2$
-                    + " expression=" + value); //$NON-NLS-1$
                 if (compatible)
                     return;
             }
@@ -489,11 +473,6 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                         return true;
                 }
             return false;
-        }
-
-        private static List<String> typeNames(List<TypeItem> types)
-        {
-            return types == null ? null : types.stream().map(McoreUtil::getTypeName).toList();
         }
 
         /** Ссылка или объект с именем метаданных: CatalogRef.Валюты, DocumentObject.Заказ и т.п. */

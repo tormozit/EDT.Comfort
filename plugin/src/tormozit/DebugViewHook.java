@@ -48,6 +48,7 @@ import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.debug.core.model.IDebugSession;
+import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
 import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugTargetThread;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
@@ -75,6 +76,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
     private static final String BASE_STALE = " (метаданные базы устарели)"; //$NON-NLS-1$
     private static final String SESSION_STALE = " (метаданные сеанса устарели)"; //$NON-NLS-1$
     private static final Map<IDebugSession, SessionStatus> STATES = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<IBslStackFrame, FrameLine> FRAME_LINES =
+        Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<Class<?>> REGISTERED_SESSION_TYPES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean DEBUG_DIAGNOSTICS_INSTALLED = new AtomicBoolean();
     private static final Set<UUID> DELETING_SESSIONS = ConcurrentHashMap.newKeySet();
@@ -89,7 +92,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
     @Override
     public <T> T getAdapter(Object adaptableObject, Class<T> adapterType)
     {
-        if (adapterType != IElementLabelProvider.class || !(adaptableObject instanceof IDebugSession))
+        if (adapterType != IElementLabelProvider.class
+            || (!(adaptableObject instanceof IDebugSession) && !(adaptableObject instanceof IBslStackFrame)))
             return null;
         installApplicationListener();
         return adapterType.cast(LABELS);
@@ -105,6 +109,12 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             for (DebugEvent event : events)
             {
                 Object source = event.getSource();
+                if (event.getKind() == DebugEvent.RESUME || event.getKind() == DebugEvent.TERMINATE)
+                    synchronized (FRAME_LINES)
+                    {
+                        FRAME_LINES.keySet().removeIf(frame -> frame.getThread() == source
+                            || frame.getDebugTarget() == source);
+                    }
                 if (source instanceof IDebugElement element
                     && element.getDebugTarget() instanceof IRuntimeDebugClientTarget target
                     && !target.isTerminated())
@@ -183,6 +193,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
                             if (status != null)
                                 synchronized (status)
                                 {
+                                    if (status.stale)
+                                        continue;
                                     status.revision++;
                                     status.signature = null;
                                     status.suffix = ""; //$NON-NLS-1$
@@ -211,6 +223,16 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         {
             Platform.getAdapterManager().registerAdapters(new DebugViewHook(), session.getClass());
         }
+        SessionStatus status;
+        synchronized (STATES)
+        {
+            status = STATES.computeIfAbsent(session, ignored -> new SessionStatus());
+        }
+        synchronized (status)
+        {
+            if (status.stale)
+                return;
+        }
         List<String> versions = new ArrayList<>();
         try
         {
@@ -227,16 +249,11 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         {
             return;
         }
-        SessionStatus status;
-        synchronized (STATES)
-        {
-            status = STATES.computeIfAbsent(session, ignored -> new SessionStatus());
-        }
         String signature = versions.toString();
         long revision;
         synchronized (status)
         {
-            if (status.pending || signature.equals(status.signature))
+            if (status.stale || status.pending || signature.equals(status.signature))
             {
                 return;
             }
@@ -286,17 +303,23 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             finally
             {
                 boolean current;
+                boolean stale;
                 synchronized (status)
                 {
                     status.pending = false;
                     current = revision == status.revision;
+                    stale = status.stale |= SESSION_STALE.equals(suffix);
+                    if (stale)
+                        status.suffix = SESSION_STALE;
                     if (current)
                     {
                         status.signature = signature;
-                        status.suffix = suffix;
+                        if (!stale)
+                            status.suffix = suffix;
                     }
                 }
-                if (!current)
+                Global.tempLog("debug-source", "session generation result stale=" + stale);
+                if (!current && !stale)
                     diagnoseGenerations(session, target);
                 else if (!target.isTerminated())
                     DebugPlugin.getDefault().fireDebugEventSet(new DebugEvent[] {
@@ -308,10 +331,44 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         job.schedule();
     }
 
+    /** Тот же результат проверки поколения, что используется для подписи сеанса. Без запроса к агенту. */
+    static boolean isSessionMetadataStale(IBslStackFrame frame)
+    {
+        if (!(frame.getThread().getThreadGroup() instanceof IDebugSession session))
+            return false;
+        SessionStatus status = STATES.get(session);
+        if (status == null)
+            return false;
+        synchronized (status)
+        {
+            return status.stale;
+        }
+    }
+
+    /** Факт устаревания необратим в пределах сеанса: дальнейшие запросы поколения не нужны. */
+    static void markSessionMetadataStale(IBslStackFrame frame)
+    {
+        if (!(frame.getThread().getThreadGroup() instanceof IDebugSession session))
+            return;
+        SessionStatus status = STATES.computeIfAbsent(session, ignored -> new SessionStatus());
+        boolean changed;
+        synchronized (status)
+        {
+            changed = !status.stale;
+            status.stale = true;
+            status.suffix = SESSION_STALE;
+        }
+        Global.tempLog("debug-source", "session stale latched changed=" + changed);
+        if (changed)
+            DebugPlugin.getDefault().fireDebugEventSet(new DebugEvent[] {
+                new DebugEvent(frame.getDebugTarget(), DebugEvent.CHANGE, DebugEvent.CONTENT) });
+    }
+
     private static final class SessionStatus
     {
         private long revision;
         private boolean pending;
+        private boolean stale;
         private String signature;
         private volatile String suffix = ""; //$NON-NLS-1$
     }
@@ -539,6 +596,39 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         return use.invoke(connection, action);
     }
 
+    /** Номера — 1-based, как в подписи EDT; меняется только подпись, не сам кадр. */
+    static void setCorrectedFrameLine(IBslStackFrame frame, int original, int corrected, boolean moduleChanged)
+    {
+        FrameLine replacement = moduleChanged ? new FrameLine(original, corrected) : null;
+        FrameLine previous;
+        synchronized (FRAME_LINES)
+        {
+            previous = replacement != null ? FRAME_LINES.put(frame, replacement) : FRAME_LINES.remove(frame);
+        }
+        if (java.util.Objects.equals(previous, replacement))
+            return;
+        Global.tempLog("debug-source", "stack line original=" + original + " corrected=" + corrected
+            + " moduleChanged=" + moduleChanged);
+        DebugPlugin.getDefault().fireDebugEventSet(new DebugEvent[] {
+            new DebugEvent(frame, DebugEvent.CHANGE, DebugEvent.STATE) });
+    }
+
+    static void clearCorrectedFrameLine(IBslStackFrame frame)
+    {
+        setCorrectedFrameLine(frame, 0, 0, false);
+    }
+
+    private static String correctedFrameLineSuffix(IBslStackFrame frame) throws CoreException
+    {
+        FrameLine line = FRAME_LINES.get(frame);
+        if (line == null || frame.isTerminated() || !frame.getThread().isSuspended()
+            || isSessionMetadataStale(frame) || frame.getLineNumber() != line.original)
+            return "";
+        return " (" + line.corrected + ")";
+    }
+
+    private record FrameLine(int original, int corrected) {}
+
     private static final class SessionLabels extends DebugElementLabelProvider
     {
         @Override
@@ -546,6 +636,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             throws CoreException
         {
             String label = super.getLabel(path, context, columnId);
+            if (label != null && path.getLastSegment() instanceof IBslStackFrame frame)
+                return label + correctedFrameLineSuffix(frame);
             if (label == null || !(path.getLastSegment() instanceof IDebugSession session)
                 || !(session.getDebugTarget() instanceof IRuntimeDebugClientTarget target))
                 return label;

@@ -496,20 +496,8 @@ lastCaretDocumentStamp = -1;
             @Override
             public void assistSessionRestarted(ContentAssistEvent event)
             {
-                int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
-                boolean inLiteral = caret >= 0
-                    && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
-                boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-                boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
-                    facade, viewer) != null;
-if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
-                    return;
-                if (!ComfortSettings.isReplaceListFiltersEnabled() || !popupVisible
-                    || !inLiteral)
-                    return;
-                if (event.isAutoActivated)
-                    return;
-                tryLiteralRepeatFilterToggle("assistSessionRestarted"); //$NON-NLS-1$
+                // Перезапуск при перефильтрации синхронизирует окно, но не переключает фильтр.
+                ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
             }
 
             @Override
@@ -7520,7 +7508,7 @@ LITERAL_REPEAT_FROM_COMMAND.set(Boolean.TRUE);
         ContentAssistPopupSync.seedStableDelegateFromVisiblePopup(assistant, processor, viewer, caret);
         ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
         SmartAssistFilterState.toggle();
-scheduleFilterToggleUiSync();
+        scheduleFilterToggleUiSync();
         return true;
     }
 

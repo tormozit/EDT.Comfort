@@ -15,6 +15,11 @@
   </extension>
   <extension point="org.eclipse.core.runtime.adapters">
     <factory
+        adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.BslStackFrame"
+        class="tormozit.DebugViewHook">
+      <adapter type="org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider"/>
+    </factory>
+    <factory
         adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.RuntimeSessionThreadGroup"
         class="tormozit.DebugViewHook">
       <adapter type="org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider"/>
@@ -66,6 +71,7 @@
     <startup class="tormozit.ComfortStartup"/>
   </extension>
   <extension point="tormozit.comfort.startup">
+    <startup class="tormozit.BslDebugSourceHook"/>
     <startup class="tormozit.DebugViewHook"/>
     <startup class="tormozit.WorkbenchTabsHook"/>
     <startup class="tormozit.ComfortShutdownHook"/>
@@ -1882,6 +1888,7 @@
     не попадал.
   -->
   <extension point="org.eclipse.ui.editors.annotationTypes">
+    <type name="tormozit.comfort.debug.uncertainIP"/>
     <!-- Подтипы Xtext: оформление и сводки свёрток наследуются, а AnnotationIssueProcessor
          не удаляет живые ошибки запросов при очередной проверке BSL-модуля. -->
     <type name="tormozit.queryLiteral.error" super="org.eclipse.xtext.ui.editor.error"/>
@@ -1892,6 +1899,25 @@
   </extension>
 
   <extension point="org.eclipse.ui.editors.markerAnnotationSpecification">
+    <specification
+        annotationType="tormozit.comfort.debug.uncertainIP"
+        label="Приблизительная позиция исполнения"
+        annotationImageProvider="org.eclipse.debug.internal.ui.InstructionPointerImageProvider"
+        presentationLayer="6"
+        colorPreferenceKey="comfort.debug.uncertainIP.color"
+        colorPreferenceValue="245,220,220"
+        highlightPreferenceKey="comfort.debug.uncertainIP.highlight"
+        highlightPreferenceValue="true"
+        textPreferenceKey="comfort.debug.uncertainIP.text"
+        textPreferenceValue="false"
+        textStylePreferenceKey="comfort.debug.uncertainIP.style"
+        textStylePreferenceValue="NONE"
+        overviewRulerPreferenceKey="comfort.debug.uncertainIP.overview"
+        overviewRulerPreferenceValue="true"
+        verticalRulerPreferenceKey="comfort.debug.uncertainIP.vertical"
+        verticalRulerPreferenceValue="true"
+        includeOnPreferencePage="true"
+        contributesToHeader="false"/>
     <specification
         annotationType="tormozit.bslParseTruncation"
         label="Обрыв разбора модуля (Комфорт)"

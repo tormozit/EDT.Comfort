@@ -15,10 +15,13 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.handlers.HandlerUtil;
 
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com.e1c.g5.v8.dt.check.settings.CheckUid;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
  * «Проверить» в панели «Ошибки конфигурации» — перезапускает проверки по текущей области отбора
- * панели (проект / объект / элемент), а не по последнему выделению редактора.
+ * панели (проект / объект / элемент). В области проекта учитывается выбранный вид проверки;
+ * объект и элемент перепроверяются всеми включёнными проверками.
  * <p>
  * Режим области берётся из настроек панели, а её источник — из {@code scopeSelection}.
  * Сам пересчёт — {@link ComfortCheckRecompute}.
@@ -64,12 +67,17 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         logScope(selectedObjects, selectedProjects);
         if ("CURRENT_PROJECT".equals(scopeName)) //$NON-NLS-1$
         {
+            CheckUid selectedCheck = ProblemViewHook.selectedCheck(part);
             Set<IProject> projects = new LinkedHashSet<>(selectedProjects);
             projects.addAll(selectedObjects.keySet());
             if (projects.isEmpty())
                 toast("Проверить", "В текущей области нет проекта для перепроверки."); //$NON-NLS-1$ //$NON-NLS-2$
             for (IProject project : projects)
-                ComfortCheckRecompute.recomputeProject(project);
+            {
+                Set<String> checkIds = selectedCheckIds(project, selectedCheck);
+                if (checkIds != null)
+                    ComfortCheckRecompute.recomputeProject(project, checkIds);
+            }
             return null;
         }
         if ("CURRENT_OBJECT".equals(scopeName)) //$NON-NLS-1$
@@ -94,6 +102,40 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         }
 
         return null;
+    }
+
+    /** Пустой набор — отбор снят; null — выбранную проверку запускать нельзя. */
+    private static Set<String> selectedCheckIds(IProject project, CheckUid uid)
+    {
+        if (uid == null)
+            return Set.of();
+        if (ValidationChecksFilterHook.isInternalBslCheckUid(uid))
+        {
+            toast("Проверить", "Выбранная внутренняя проверка BSL не поддерживает отдельный ручной запуск.");
+            return null;
+        }
+        ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+        if (repository == null)
+        {
+            toast("Проверить", "Каталог проверок недоступен.");
+            return null;
+        }
+        String id = uid.getCheckId();
+        // Планировщик принимает код без поставщика. Совпадение должно быть однозначным,
+        // иначе тот же код запустит ещё и проверку другого поставщика.
+        if (id == null || id.isBlank() || !Set.of(uid).equals(repository.toUid(id, project)))
+        {
+            toast("Проверить", "Не удалось однозначно определить выбранную проверку в проекте "
+                + project.getName() + ".");
+            return null;
+        }
+        var settings = repository.getSettings(uid, project);
+        if (settings == null || !settings.isEnabled())
+        {
+            toast("Проверить", "Для перепроверки включите выбранную проверку и примените настройки проекта.");
+            return null;
+        }
+        return Set.of(id);
     }
 
     private static Object problemFilters(IViewPart part)

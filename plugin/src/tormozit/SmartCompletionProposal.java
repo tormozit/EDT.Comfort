@@ -997,7 +997,13 @@ public class SmartCompletionProposal implements
         if (!(delegate instanceof SmartCompletionProposal)
             && delegate instanceof ICompletionProposalExtension2 ext2)
         {
-            ext2.selected(viewer, smartToggle);
+            // При smart-фильтрации Ctrl+Space переключает «Фильтр». Не передаём
+            // Xtext smart toggle: selected(true) выделяет контекст замены и запускает
+            // перефильтрацию JFace ещё до команды, сдвигая её filterOffset.
+            boolean delegateSmartToggle = smartToggle
+                && !(ComfortSettings.isReplaceListFiltersEnabled()
+                    && delegate instanceof ConfigurableCompletionProposal);
+            ext2.selected(viewer, delegateSmartToggle);
 
         }
 

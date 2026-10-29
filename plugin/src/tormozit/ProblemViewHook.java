@@ -574,6 +574,13 @@ public final class ProblemViewHook implements IStartup
         }
     }
 
+    /** Выбранный вид проверки для ручного запуска в текущей области панели. */
+    static CheckUid selectedCheck(IViewPart view)
+    {
+        UpdateWaitIndicator.State state = UpdateWaitIndicator.stateOf(view);
+        return state != null ? state.checkUid : null;
+    }
+
     /** Точный отбор нужен и потребителям currentFilter(), который EDT строит заново. */
     static MarkerFilter withCheckCode(IWorkbenchPart part, MarkerFilter filter)
     {

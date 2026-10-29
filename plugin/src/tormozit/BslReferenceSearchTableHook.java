@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -47,6 +48,7 @@ import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.xtext.resource.IReferenceDescription;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.findref.IReferenceFinderParticipant;
+import com._1c.g5.v8.dt.search.core.refs.ITextSearchReferenceResult;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
@@ -96,9 +98,49 @@ public final class BslReferenceSearchTableHook implements IStartup
     private static final int MAX_ATTEMPTS = 100;
     private static final Object[] NO_ELEMENTS = new Object[0];
 
+    /** Вплетение делает ранний бандл до загрузки BslReferenceSearchResult. */
+    static void installSearchResultCallbacks()
+    {
+        System.getProperties().put(SearchResultDeduplication.KEY_CALLBACK,
+            (Function<Object[], Object>) SearchResultDeduplication::occurrenceKey);
+        Global.tempLog("reference-occurrences", "callback installed; early=" //$NON-NLS-1$ //$NON-NLS-2$
+            + System.getProperties().get(SearchResultDeduplication.KEY_CALLBACK + ".status")); //$NON-NLS-1$
+    }
+
+    /** Ключ полнотекстового вхождения: общий URI комментария и точный диапазон в нём. */
+    private static final class SearchResultDeduplication
+    {
+        private static final String KEY_CALLBACK = "tormozit.referenceSearch.occurrenceKey"; //$NON-NLS-1$
+
+        private static Object occurrenceKey(Object[] args)
+        {
+            IReferenceDescription reference = (IReferenceDescription) args[0];
+            URI source = (URI) args[1];
+            Object key = source;
+            int offset = -1;
+            int length = 0;
+            if (reference instanceof ITextSearchReferenceResult textReference)
+            {
+                var selection = textReference.getSelection();
+                if (selection != null && selection.getOffset() >= 0 && selection.getLength() > 0)
+                {
+                    offset = selection.getOffset();
+                    length = selection.getLength();
+                    // Set<URI> в EDT используется только через add/clear (проверено по JAR).
+                    key = java.util.Arrays.asList(source, offset, length);
+                }
+            }
+            Global.tempLog("reference-occurrences", "source=" + source + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " length=" + length + " class=" + reference.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+            return key;
+        }
+
+    }
+
     @Override
     public void earlyStartup()
     {
+        installSearchResultCallbacks();
         // earlyStartup идёт НЕ в UI-потоке — вся работа с Display только через asyncExec.
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
@@ -419,6 +461,9 @@ public final class BslReferenceSearchTableHook implements IStartup
         private final Table table;
         private final TableViewer viewer;
         private final List<ReferenceRow> rows = new ArrayList<>();
+        /** Снимок входных ссылок: активация той же панели не сбрасывает рассчитанный контекст. */
+        private Object loadedResult;
+        private List<IReferenceDescription> loadedReferences;
 
         private FormTableInteraction interaction;
         private OccurrenceContextResolveJob contextResolver;
@@ -512,18 +557,7 @@ public final class BslReferenceSearchTableHook implements IStartup
                 @Override
                 public int compare(org.eclipse.jface.viewers.Viewer v, Object e1, Object e2)
                 {
-                    if (!(e1 instanceof ReferenceRow r1) || !(e2 instanceof ReferenceRow r2))
-                        return 0;
-                    int cmp = compareStr(r1.project, r2.project);
-                    if (cmp != 0)
-                        return cmp;
-                    cmp = compareStr(r1.module, r2.module);
-                    if (cmp != 0)
-                        return cmp;
-                    cmp = compareStr(r1.fileName, r2.fileName);
-                    if (cmp != 0)
-                        return cmp;
-                    return Integer.compare(r1.line, r2.line);
+                    return compareRows(e1, e2);
                 }
             });
             viewer.setInput(rows);
@@ -536,12 +570,18 @@ public final class BslReferenceSearchTableHook implements IStartup
             FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             interaction.install(
                 FormTableColumnState.hasSavedColumnWidths(settings, KEY_COLUMNS_FILL, WIDTH_KEYS));
+            interaction.setSortTieBreaker(ReferenceTablePane::compareRows);
             interaction.enableHeaderSort(settings);
             BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, parentColumn,
                 parentTypeColumn, syntaxColumn);
 
             contextResolver = new OccurrenceContextResolveJob(table, viewer, parentTypeColumn,
                 PARENT_TYPE_TITLE, TYPE_AUTO_THRESHOLD, this::refreshComputeTypesAction);
+            contextResolver.setFastCompletedCallback(() ->
+            {
+                viewer.refresh();
+                Global.tempLog("reference-occurrences", "sorted after position resolution; rows=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            });
             contextResolver.trackViewportScrolling();
             installComputeTypesAction();
         }
@@ -674,7 +714,6 @@ public final class BslReferenceSearchTableHook implements IStartup
         private void wireListeners()
         {
             table.addListener(SWT.DefaultSelection, event -> openSelected());
-            table.addListener(SWT.MouseDoubleClick, event -> openSelected());
             table.addDisposeListener(event ->
             {
                 contextResolver.cancel();
@@ -690,8 +729,8 @@ public final class BslReferenceSearchTableHook implements IStartup
 
         /**
          * Перечитывает вхождения из того же дерева результатов. Дебаунс — на случай нескольких
-         * событий подряд (переоткрытие результата, {@code partActivated}); сам поиск Xtext
-         * одноразовый, поэтому промежуточных перестроений во время поиска нет.
+         * событий подряд (переоткрытие результата, {@code partActivated}). Неизменившийся
+         * результат сохраняет строки, выделение и уже рассчитанный контекст.
          */
         void reload()
         {
@@ -710,9 +749,19 @@ public final class BslReferenceSearchTableHook implements IStartup
         {
             if (table.isDisposed())
                 return;
+            Object result = searchResult();
+            List<IReferenceDescription> references = matchingReferences(result);
+            boolean unchanged = result == loadedResult && loadedReferences != null
+                && references.size() == loadedReferences.size();
+            for (int i = 0; unchanged && i < references.size(); i++)
+                unchanged = references.get(i) == loadedReferences.get(i);
+            Global.tempLog("reference-occurrences", "reload rows=" + references.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " unchanged=" + unchanged); //$NON-NLS-1$
+            if (unchanged)
+                return;
             String targetName = searchTargetName();
             rows.clear();
-            for (IReferenceDescription reference : matchingReferences())
+            for (IReferenceDescription reference : references)
             {
                 ReferenceRow row = buildRow(reference);
                 if (row != null)
@@ -721,17 +770,23 @@ public final class BslReferenceSearchTableHook implements IStartup
                     rows.add(row);
                 }
             }
+            loadedResult = result;
+            loadedReferences = references;
             viewer.refresh();
             contextResolver.reschedule(rows);
         }
 
-        /** Плоский список вхождений напрямую из результата поиска (минуя дерево). */
-        @SuppressWarnings("unchecked")
-        private List<IReferenceDescription> matchingReferences()
+        private Object searchResult()
         {
             Object result = treeViewer.getInput();
             if (result == null)
                 result = Global.getField(page, "searchResult"); //$NON-NLS-1$
+            return result;
+        }
+
+        /** Плоский список вхождений напрямую из результата поиска (минуя дерево). */
+        private List<IReferenceDescription> matchingReferences(Object result)
+        {
             Object list = Global.invoke(result, "getMatchingReferences"); //$NON-NLS-1$
             if (!(list instanceof List<?> raw))
                 return List.of();
@@ -1069,7 +1124,7 @@ public final class BslReferenceSearchTableHook implements IStartup
 
         // ---- Открытие / выделение ----
 
-        /** Открыть вхождение в редакторе: xtext-опенер по URI источника ссылки (с фрагментом). */
+        /** Открыть точный диапазон вхождения; если он ещё неизвестен — URI источника ссылки. */
         private void openSelected()
         {
             ReferenceRow row = firstSelected();
@@ -1114,8 +1169,18 @@ public final class BslReferenceSearchTableHook implements IStartup
             }
             if (row.sourceUri == null)
                 return;
+            int[] region = row.region != null ? row.region : row.knownRegion;
             try
             {
+                if (region != null && region[0] >= 0 && BslModuleMethodResolver.isBslModule(row.file))
+                {
+                    // URI сохраняет контекст страницы модуля формы. Явное выделение заменяет
+                    // диапазон EObject (например, прагмы после комментария) в ContentUtil.
+                    org.eclipse.ui.IEditorPart editor = new OpenHelper().openEditor(row.sourceUri,
+                        new org.eclipse.jface.text.TextSelection(region[0], region[1]));
+                    if (editor != null)
+                        return;
+                }
                 URI moduleUri = row.sourceUri.trimFragment();
                 org.eclipse.xtext.resource.IResourceServiceProvider provider =
                     org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
@@ -1160,6 +1225,28 @@ public final class BslReferenceSearchTableHook implements IStartup
                 case 9 -> row.lineText;
                 default -> ""; //$NON-NLS-1$
             };
+        }
+
+        private static int compareRows(Object first, Object second)
+        {
+            if (!(first instanceof ReferenceRow r1) || !(second instanceof ReferenceRow r2))
+                return 0;
+            int cmp = compareStr(r1.project, r2.project);
+            if (cmp != 0)
+                return cmp;
+            cmp = compareStr(r1.module, r2.module);
+            if (cmp != 0)
+                return cmp;
+            cmp = compareStr(r1.fileName, r2.fileName);
+            if (cmp != 0)
+                return cmp;
+            cmp = Integer.compare(r1.line, r2.line);
+            if (cmp != 0)
+                return cmp;
+            int[] firstRegion = r1.region != null ? r1.region : r1.knownRegion;
+            int[] secondRegion = r2.region != null ? r2.region : r2.knownRegion;
+            return Integer.compare(firstRegion != null ? firstRegion[0] : -1,
+                secondRegion != null ? secondRegion[0] : -1);
         }
 
         private static int compareStr(String a, String b)

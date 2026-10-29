@@ -41,6 +41,7 @@ import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.Tuples;
 
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
+import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
@@ -199,9 +200,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         Map<String, List<String>> corrections)
     {
         if (!(literal.eResource() instanceof XtextResource resource))
-            return List.of();
-        String source = text(literal);
-        if (source.indexOf('\n') >= 0 || source.indexOf('\r') >= 0)
             return List.of();
         Analysis analysis = analyzeLiteral(resource, literal, "", canceled, pass); //$NON-NLS-1$
         // Анализ родителя пути только этого литерала: «Объект.Код, Объект.Наименование» — «Объект.» один раз.
@@ -458,9 +456,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 }
                 else
                 {
-                    Segment segment = Segment.of(name);
+                    // Регион — целое слово под указателем; хвост списка после него не участвует.
+                    String prefix = BslQueryLiteralSupport.literalTextBefore(document,
+                        region.getOffset() + region.getLength());
+                    if (prefix == null)
+                        return null;
+                    Segment segment = Segment.of(prefix);
                     Analysis analysis = new Analysis(resource, true, isRussian(resource),
-                        name.substring(0, segment.start), offsetOf(literal));
+                        prefix.substring(0, segment.start), offsetOf(literal));
                     if (target instanceof IndexAccess access && access.getIndex() == literal)
                         analysis.indexAccess(access);
                     else if (index >= 0)
@@ -468,7 +471,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     else
                         analysis.outside(literal);
                     analysis.finish();
-                    property = analysis.info(name.substring(segment.start));
+                    property = analysis.info(prefix.substring(segment.start));
                 }
                 if (property == null)
                     return null;
@@ -701,16 +704,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
     }
 
-    /** Открывающая кавычка литерала у каретки (партиция строкового литерала EDT). */
+    /** Открывающая кавычка всего литерала, включая строки продолжения. */
     private static int literalQuote(IDocument doc, int offset)
     {
         try
         {
-            var partition = doc.getPartition(offset - 1);
-            return org.eclipse.xtext.ui.editor.model.TerminalsTokenTypeToPartitionMapper.STRING_LITERAL_PARTITION
-                .equals(partition.getType()) ? partition.getOffset() : -1;
+            return BslQueryLiteralSupport.literalOpenQuoteBefore(doc, offset);
         }
-        catch (org.eclipse.jface.text.BadLocationException e)
+        catch (RuntimeException e)
         {
             return -1;
         }
@@ -725,10 +726,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         if (!(semantic instanceof StringLiteral literal))
             return null;
         EObject container = literal.eContainer();
-        // Аргумент вызова и индекс обслуживает провайдер точки расширения.
-        if (container instanceof Invocation || container instanceof OperatorStyleCreator
+        // Однострочный аргумент и индекс обслуживает провайдер точки расширения.
+        boolean call = container instanceof Invocation || container instanceof OperatorStyleCreator
             || container instanceof FunctionStyleCreator
-            || container instanceof IndexAccess access && access.getIndex() == literal)
+            || container instanceof IndexAccess access && access.getIndex() == literal;
+        if (call && text(literal).indexOf('\n') < 0 && text(literal).indexOf('\r') < 0)
             return null;
         int start = offsetOf(literal);
         if (start < 0 || start >= offset)
@@ -743,7 +745,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return null;
         }
         Analysis analysis = new Analysis(resource, request.manual, isRussian(resource), prefix, start);
-        analysis.outside(literal);
+        if (container instanceof IndexAccess access && access.getIndex() == literal)
+            analysis.indexAccess(access);
+        else if (call)
+        {
+            List<Expression> args = argumentsOf(container);
+            analysis.call(container, args, args.indexOf(literal), ""); //$NON-NLS-1$
+        }
+        else
+            analysis.outside(literal);
         analysis.finish();
         request.rememberFull(analysis, prefix.substring(0, Segment.of(prefix).start));
         List<String> names = new ArrayList<>(analysis.values.values());
@@ -863,6 +873,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     {
         static Segment of(String typed)
         {
+            // Пробелы вместо синтаксиса продолжения сохраняют смещения вставки в документе.
+            typed = Pattern.compile("(?m)^[\\t ]*(?:\\||//[^\\r\\n]*)") //$NON-NLS-1$
+                .matcher(typed).replaceAll(match -> " ".repeat(match.group().length())); //$NON-NLS-1$
             int comma = typed.lastIndexOf(',');
             int dot = typed.lastIndexOf('.');
             int start = Math.max(comma, dot) + 1;
@@ -3011,12 +3024,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     /** {@code ТекстИзВстроенногоЯзыкаЛкс}: значение строкового литерала; не литерал — пусто. */
     private static String literalText(Expression expression)
     {
-        if (!(expression instanceof StringLiteral))
+        if (!(expression instanceof StringLiteral literal))
             return ""; //$NON-NLS-1$
         String text = text(expression);
         if (text.length() < 2 || text.charAt(0) != '"' || text.charAt(text.length() - 1) != '"')
             return ""; //$NON-NLS-1$
-        return text.substring(1, text.length() - 1).replace("\"\"", "\"").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        return new DefaultStringLiteralTextProvider(literal).getText().trim();
     }
 
     private static int offsetOf(EObject object)
