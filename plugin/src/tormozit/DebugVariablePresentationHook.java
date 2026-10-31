@@ -118,7 +118,10 @@ public final class DebugVariablePresentationHook implements IStartup
                 @Override
                 public void launchAdded(org.eclipse.debug.core.ILaunch launch)
                 {
-                    scheduleInstall(0);
+                    // Уведомление приходит из фонового потока запуска (#938).
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                        display.asyncExec(() -> scheduleInstall(0));
                 }
 
                 @Override
