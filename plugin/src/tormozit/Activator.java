@@ -356,7 +356,7 @@ public class Activator extends AbstractUIPlugin
                     return;
                 var offer = ToastNotification.showStickyUntilToastHover("Перепроверить проект «" + project.getName() + "»?",
                     String.valueOf(event[1]),
-                    () -> ComfortCheckRecompute.recomputeProject(project, checks), "Запустить");
+                    () -> ComfortCheckRecompute.recomputeProject(project, withDeferred(project, checks)), "Запустить");
                 if (offer != null)
                     lastToastNs.put(projectKey, Long.valueOf(now));
                 return;
@@ -368,6 +368,24 @@ public class Activator extends AbstractUIPlugin
                 () -> LongOperationNotifyHook.openLogEntry(logMessage, timeMs), "Открыть запись журнала"); //$NON-NLS-1$
             if (toast != null)
                 lastToastNs.put(projectKey, Long.valueOf(now));
+        }
+
+        /** Предложения чаще раза в минуту не показываются: «Запустить» берёт все отложенные проверки проекта. */
+        @SuppressWarnings("unchecked")
+        private static java.util.Set<String> withDeferred(org.eclipse.core.resources.IProject project,
+            java.util.Set<String> checks)
+        {
+            java.util.Set<String> all = new java.util.LinkedHashSet<>(checks);
+            Object bridge = System.getProperties().get("tormozit.checkRecompute.event.results"); //$NON-NLS-1$
+            if (bridge instanceof java.util.function.Function<?, ?> function
+                && ((java.util.function.Function<Object[], Object>) function)
+                    .apply(new Object[] { "snapshot", String.valueOf(project) }) instanceof java.util.Map<?, ?> snapshot) //$NON-NLS-1$
+                for (Object key : snapshot.keySet())
+                {
+                    String entry = String.valueOf(key);
+                    all.add(entry.substring(entry.indexOf('\t') + 1));
+                }
+            return all;
         }
     }
 

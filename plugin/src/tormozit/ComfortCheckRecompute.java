@@ -40,11 +40,14 @@ import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
+import com._1c.g5.v8.dt.validation.ISubordinateObjectsProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
@@ -170,8 +173,8 @@ public final class ComfortCheckRecompute
 
         // Режим «Отключить массовые проверки» не должен глушить то, что запросил пользователь
         MassiveChecksExemptionHook.openManualWindow(project);
-        toast("Проверить", "Запущена проверка всех объектов проекта " + project.getName() //$NON-NLS-1$
-            + ". По окончании будет показано уведомление.");
+        toast("Проверить", "Запущен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
+            + project.getName() + ". По окончании будет показано уведомление.");
 
         IDtProjectManager projectManager = Global.getOsgiService(IDtProjectManager.class);
         // Менеджер хранит активные контексты; внешние библиотеки в число проектов РМ не входят.
@@ -186,7 +189,7 @@ public final class ComfortCheckRecompute
                 Debug.log("проверка проекта: планировщик вызван"); //$NON-NLS-1$
                 scheduler.scheduleValidation(project, checkIds, List.of(), monitor);
                 Debug.log("проверка проекта: планировщик отработал, ждём завершения"); //$NON-NLS-1$
-                if (notifyProjectComplete(manager, project, monitor))
+                if (notifyProjectComplete(manager, project, checkIds, monitor))
                     completeDeferredResults(project, resultTokens);
             }
             catch (RuntimeException e)
@@ -246,7 +249,7 @@ public final class ComfortCheckRecompute
      * пользователь должен мочь в любой момент.
      */
     private static boolean notifyProjectComplete(IDerivedDataManager manager, IProject project,
-        org.eclipse.core.runtime.IProgressMonitor monitor)
+        Set<String> checkIds, org.eclipse.core.runtime.IProgressMonitor monitor)
     {
         long deadline = System.currentTimeMillis() + PROJECT_WAIT_TIMEOUT_MS;
         try
@@ -279,9 +282,9 @@ public final class ComfortCheckRecompute
             return false;
         }
 
-        int[] counts = countProjectProblems(project);
-        toastWithAction("Проверить", "Завершена проверка всех объектов проекта " + project.getName() //$NON-NLS-1$
-            + ". Ошибок: " + counts[0] + ", Предупреждений: " + counts[1], //$NON-NLS-1$ //$NON-NLS-2$
+        int[] counts = countProjectProblems(project, checkIds);
+        toastWithAction("Проверить", "Завершен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
+            + project.getName() + ". Ошибок: " + counts[0] + ", Предупреждений: " + counts[1], //$NON-NLS-1$ //$NON-NLS-2$
             ProblemViewMarkers::show, "Показать результаты"); //$NON-NLS-1$
         return true;
     }
@@ -293,10 +296,48 @@ public final class ComfortCheckRecompute
      * маркеров есть готовый агрегат {@link IMarkerInfo} с количеством по каждой критичности —
      * именно из него {@code MarkerStats} панели строит «Ошибок / Предупреждений».
      */
-    private static int[] countProjectProblems(IProject project)
+    private static String checkCount(Set<String> checkIds)
     {
-        IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
-        IMarkerInfo info = markerManager != null ? markerManager.getMarkerInfo(project) : null;
+        return checkIds.isEmpty() ? "всех" : String.valueOf(checkIds.size()); //$NON-NLS-1$
+    }
+
+    /** Пустой набор — все проблемы проекта; иначе только маркеры указанных проверок (по их коду). */
+    private static int[] countProjectProblems(IProject project, Set<String> checkIds)
+    {
+        IMarkerInfo info;
+        if (checkIds.isEmpty())
+        {
+            IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
+            info = markerManager != null ? markerManager.getMarkerInfo(project) : null;
+        }
+        else
+        {
+            IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            if (markers == null || repository == null)
+                return new int[] { 0, 0 };
+            MarkerFilter filter = MarkerFilter.createProjectFilter(project);
+            for (String id : checkIds)
+            {
+                Set<CheckUid> uids = repository.toUid(id, project);
+                // Внутренние проверки BSL без CheckUid пишут в маркер свой код.
+                if (uids.isEmpty())
+                    filter.addValue(MarkerIndex.CHECK_ID, id);
+                for (CheckUid uid : uids)
+                {
+                    String code = repository.getShortUid(uid, project);
+                    if (code != null)
+                        filter.addValue(MarkerIndex.CHECK_ID, code);
+                }
+            }
+            info = markers.createReader(project).getMarkerInfo(filter);
+        }
+        return errorsAndWarnings(info);
+    }
+
+    /** Деление как в {@code MarkerStats} панели: ошибки — ERRORS, предупреждения — BLOCKER…TRIVIAL. */
+    private static int[] errorsAndWarnings(IMarkerInfo info)
+    {
         if (info == null)
             return new int[] { 0, 0 };
 
@@ -423,7 +464,7 @@ public final class ComfortCheckRecompute
 
         String objectsLabel = describeObjects(sources);
         toast("Проверить", //$NON-NLS-1$
-            "Запущена проверка объекта " + objectsLabel
+            "Запущен пересчет всех проверок объекта " + objectsLabel
                 + " с вложенными. По окончании будет показано уведомление.");
 
         // Проверки текста модулей живут в языковых сегментах и заводятся не на BM-объект, а на
@@ -562,7 +603,7 @@ public final class ComfortCheckRecompute
                 if (completed)
                 {
                     int[] counts = countProblems(project, targets, objects);
-                    toastWithAction("Проверить", "Завершена проверка объекта " + objectsLabel //$NON-NLS-1$
+                    toastWithAction("Проверить", "Завершен пересчет всех проверок объекта " + objectsLabel //$NON-NLS-1$
                         + " с вложенными. Ошибок: " + counts[0] //$NON-NLS-1$
                         + ", Предупреждений: " + counts[1], //$NON-NLS-1$
                         () -> showResults(objects), "Показать результаты"); //$NON-NLS-1$
@@ -596,62 +637,50 @@ public final class ComfortCheckRecompute
      * критичности от {@link MarkerSeverity#BLOCKER} до {@link MarkerSeverity#TRIVIAL} (группы
      * «Значительные», «Незначительные», «Тривиальные»).
      * <p>
-     * Берутся <b>все</b> маркеры проверенных объектов: {@code getNestedMarkers} отдаёт проблемы
-     * вложенных объектов (модуля, форм, команд), {@code getMarkers} — самого объекта. Никаких
-     * отборов по идентификаторам: попытка собрать «правильный» набор идентификаторов
-     * (top-объекты, подчинённые top-объекты) раз за разом теряла часть проблем.
+     * Отбор — как у области «Текущий объект» панели ({@code LazyProblemView.filterByScope}
+     * в ui.validation 11.0.100): {@link MarkerIndex#TOP_OBJECT_ID} из идентификаторов top-объектов
+     * и их подчинённых top-объектов ({@link ISubordinateObjectsProvider}). По BM-объекту
+     * ({@code getNestedMarkers}) не считать: проблемы текста модуля привязаны к файлу и теряются.
      *
      * @return массив из двух чисел: ошибки и предупреждения
      */
     private static int[] countProblems(IProject project, List<IBmObject> targets,
         Collection<? extends EObject> sources)
     {
-        int[] counts = { 0, 0 };
         IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
-        if (markerManager == null)
-            return counts;
+        IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
+        if (markerManager == null || markers == null)
+            return new int[] { 0, 0 };
 
         LinkedHashSet<Object> objectIds = new LinkedHashSet<>();
-        for (IBmObject bmObject : targets)
-            objectIds.add(Long.valueOf(bmObject.bmGetId()));
+        List<IBmObject> objects = new ArrayList<>(targets);
         if (sources != null)
         {
             for (EObject source : sources)
             {
                 if (source instanceof IBmObject bm)
-                    objectIds.add(Long.valueOf(bm.bmGetId()));
+                    objects.add(bm);
             }
         }
-
-        HashSet<String> seen = new HashSet<>();
-        for (Object objectId : objectIds)
+        LinkedHashSet<Object> topIds = new LinkedHashSet<>();
+        for (IBmObject bmObject : objects)
         {
-            // getNestedMarkers отдаёт и проблемы вложенных объектов — модуля, форм, команд
-            for (Marker[] batch : new Marker[][] { markerManager.getNestedMarkers(project, objectId),
-                markerManager.getMarkers(project, objectId) })
-            {
-                if (batch == null)
-                    continue;
-                for (Marker marker : batch)
-                {
-                    if (marker == null)
-                        continue;
-                    String markerId = marker.getMarkerId();
-                    if (!seen.add(markerId != null ? markerId //$NON-NLS-1$
-                        : "idhash:" + System.identityHashCode(marker))) //$NON-NLS-1$
-                        continue;
-
-                    MarkerSeverity severity = marker.getSeverity();
-                    if (severity == MarkerSeverity.ERRORS)
-                        counts[0]++;
-                    else if (severity != null && severity != MarkerSeverity.NONE)
-                        counts[1]++;
-                }
-            }
+            objectIds.add(Long.valueOf(bmObject.bmGetId()));
+            IBmObject top = bmObject.bmGetTopObject();
+            topIds.add(Long.valueOf((top != null ? top : bmObject).bmGetId()));
         }
-        Debug.log("счёт по объекту: объектов=" + objectIds.size() //$NON-NLS-1$
-            + ", маркеров=" + seen.size() + ", ошибок=" + counts[0] //$NON-NLS-1$ //$NON-NLS-2$
-            + ", предупреждений=" + counts[1] + ", идентификаторы=" + objectIds); //$NON-NLS-1$ //$NON-NLS-2$
+        ISubordinateObjectsProvider subordinates = Global.getOsgiService(ISubordinateObjectsProvider.class);
+        MarkerFilter filter = MarkerFilter.createProjectFilter(project);
+        for (Object topId : topIds)
+        {
+            filter.addValue(MarkerIndex.TOP_OBJECT_ID, topId);
+            if (subordinates != null)
+                for (Object id : subordinates.getSubordinateTopObjectIds(project, topId))
+                    filter.addValue(MarkerIndex.TOP_OBJECT_ID, id);
+        }
+        int[] counts = errorsAndWarnings(markers.createReader(project).getMarkerInfo(filter));
+        Debug.log("счёт по объекту: отбор=" + filter + ", ошибок=" + counts[0] //$NON-NLS-1$ //$NON-NLS-2$
+            + ", предупреждений=" + counts[1]); //$NON-NLS-1$
         logRelatedMarkers(markerManager, project, objectIds, sources);
         return counts;
     }

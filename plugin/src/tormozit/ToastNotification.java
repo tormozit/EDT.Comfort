@@ -183,6 +183,24 @@ public final class ToastNotification
                 ? new Shell(parent, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS)
                 : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS);
             holder[0] = shell;
+            if (inputChild)
+            {
+                // Владелец бывает коротким окном хода операции («Состояние» при «Применить»):
+                // его закрытие уничтожает и тост, поэтому живой тост показываем заново.
+                Shell owner = parent;
+                Listener ownerClosed = e ->
+                {
+                    if (!shell.isDisposed())
+                        display.asyncExec(() -> show(title, message, durationMs, action, actionLabel, null, true,
+                            stickyUntilToastHover));
+                };
+                owner.addListener(SWT.Dispose, ownerClosed);
+                shell.addDisposeListener(e ->
+                {
+                    if (!owner.isDisposed())
+                        owner.removeListener(SWT.Dispose, ownerClosed);
+                });
+            }
 
             Color bgColor     = display.getSystemColor(SWT.COLOR_INFO_BACKGROUND);
             Color fgColor     = display.getSystemColor(SWT.COLOR_INFO_FOREGROUND);

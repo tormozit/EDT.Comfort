@@ -1998,6 +1998,7 @@ public final class Activator
             if (results.load())
             {
                 System.getProperties().put(CALLBACK + ".defer", (Consumer<Object[]>) results::defer);
+                System.getProperties().put(CALLBACK + ".settings", (Consumer<Object[]>) results::deferSettings);
                 System.getProperties().put(CALLBACK + ".results", (Function<Object[], Object>) results::access);
             }
             context.registerService(WeavingHook.class, diagnostics, null);
@@ -2018,6 +2019,9 @@ public final class Activator
                 ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
                 int[] matches = {0};
                 int[] deferredCalls = {0};
+                int[] settingsCalls = {0};
+                boolean deferSettings = SCHEDULER.equals(name)
+                    && System.getProperties().containsKey(CALLBACK + ".settings"); //$NON-NLS-1$
                 boolean[] metadataField = {!METADATA.equals(name)};
                 reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
                 {
@@ -2036,6 +2040,43 @@ public final class Activator
                         String signature, String[] exceptions)
                     {
                         MethodVisitor visitor = super.visitMethod(access, method, descriptor, signature, exceptions);
+                        if (deferSettings && "onChange".equals(method) //$NON-NLS-1$
+                            && ("(" + PROJECT + "Ljava/util/Collection;)V").equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                            return new MethodVisitor(Opcodes.ASM9, visitor)
+                            {
+                                @Override
+                                public void visitMethodInsn(int opcode, String owner, String called,
+                                    String calledDescriptor, boolean isInterface)
+                                {
+                                    // Перепроверка по изменённым настройкам (CheckScheduler$1) — только с
+                                    // разрешения пользователя; снятие маркеров и смена важности штатные.
+                                    if (opcode == Opcodes.INVOKEINTERFACE
+                                        && "com/_1c/g5/v8/bm/integration/IBmModel".equals(owner) //$NON-NLS-1$
+                                        && "execute".equals(called) //$NON-NLS-1$
+                                        && "(Lcom/_1c/g5/v8/bm/integration/IBmTask;)Ljava/lang/Object;".equals(calledDescriptor)) //$NON-NLS-1$
+                                    {
+                                        settingsCalls[0]++;
+                                        super.visitVarInsn(Opcodes.ASTORE, 9);
+                                        super.visitVarInsn(Opcodes.ASTORE, 8);
+                                        EarlyWeaving.emitGetProperty(this, CALLBACK + ".settings", "java/util/function/Consumer"); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitLdcInsn(4);
+                                        super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                        int[] sources = {8, 9, 1, 3}; // модель, задача, проект, проверки
+                                        for (int i = 0; i < sources.length; i++)
+                                        {
+                                            super.visitInsn(Opcodes.DUP);
+                                            super.visitLdcInsn(i);
+                                            super.visitVarInsn(Opcodes.ALOAD, sources[i]);
+                                            super.visitInsn(Opcodes.AASTORE);
+                                        }
+                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", //$NON-NLS-1$
+                                            "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitInsn(Opcodes.ACONST_NULL); // результат execute снимает штатный pop
+                                        return;
+                                    }
+                                    super.visitMethodInsn(opcode, owner, called, calledDescriptor, isInterface);
+                                }
+                            };
                         String event = event(name, method, descriptor);
                         if (event == null || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
                             return visitor;
@@ -2114,7 +2155,8 @@ public final class Activator
                     + "; methods=" + matches[0] + "/" + expected; //$NON-NLS-1$ //$NON-NLS-2$
                 boolean deferCompatible = !METADATA.equals(name)
                     || !System.getProperties().containsKey(CALLBACK + ".defer") || deferredCalls[0] == 1;
-                status += "; deferredCalls=" + deferredCalls[0];
+                deferCompatible &= !deferSettings || settingsCalls[0] == 1;
+                status += "; deferredCalls=" + deferredCalls[0] + "; settingsCalls=" + settingsCalls[0]; //$NON-NLS-1$
                 if (matches[0] == expected && metadataField[0] && deferCompatible)
                 {
                     wovenClass.setBytes(writer.toByteArray());
@@ -2253,6 +2295,45 @@ public final class Activator
                     }
                 }
             }
+
+            /** CheckScheduler.onChange: {модель, задача перепроверки, проект, Set&lt;CheckUid&gt;}. */
+            synchronized void deferSettings(Object[] args)
+            {
+                try
+                {
+                    java.util.Properties next = new java.util.Properties();
+                    next.putAll(state);
+                    String token = java.util.UUID.randomUUID().toString();
+                    var checkIds = new java.util.LinkedHashSet<String>();
+                    for (Object uid : (Collection<?>) args[3])
+                    {
+                        String id = (String) uid.getClass().getMethod("getCheckId").invoke(uid);
+                        String contributor = (String) uid.getClass().getMethod("getContributorId").invoke(uid);
+                        next.setProperty(args[2] + "\n" + contributor + "\t" + id, token);
+                        checkIds.add(id);
+                    }
+                    save(next);
+                    diagnostics.publish(new Object[] { "deferred-checks",
+                        "Изменены настройки проверок (" + checkIds.size()
+                            + ").\nРезультаты неактуальны. Обновите их здесь или в списке «Проверки».",
+                        Long.valueOf(System.currentTimeMillis()), args[2], java.util.Set.copyOf(checkIds) });
+                }
+                catch (Exception error)
+                {
+                    // Штатный путь: IBmModel.execute(task); типы видны загрузчику бандла проверок.
+                    try
+                    {
+                        ClassLoader loader = args[1].getClass().getClassLoader();
+                        loader.loadClass("com._1c.g5.v8.bm.integration.IBmModel")
+                            .getMethod("execute", loader.loadClass("com._1c.g5.v8.bm.integration.IBmTask"))
+                            .invoke(args[0], args[1]);
+                    }
+                    catch (ReflectiveOperationException fallback)
+                    {
+                        throw new IllegalStateException(fallback);
+                    }
+                }
+            }
         }
 
         private static String event(String type, String method, String descriptor)
@@ -2330,7 +2411,8 @@ public final class Activator
                 {
                     Object[] notification = {PREFIX + text,
                         ("full-check-scope".equals(phase) //$NON-NLS-1$
-                            ? "Назначена полная перепроверка проекта " + event[1] //$NON-NLS-1$
+                            ? "Назначен пересчет " + checkCount(event[2]) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
+                                + projectName(event[1])
                             : "Запрошен полный пересчёт производных данных") + ".\nПричина: " + reason, //$NON-NLS-1$ //$NON-NLS-2$
                         Long.valueOf(System.currentTimeMillis()), event[1]};
                     publish(notification);
@@ -2369,6 +2451,20 @@ public final class Activator
             {
                 // Отказ уведомления не должен запускать уже отложенную перепроверку.
             }
+        }
+
+        /** Пустой набор в scheduleScopedFullRebuild — все проверки (CheckScheduler.internalScheduleValidation). */
+        private static String checkCount(Object checks)
+        {
+            return checks instanceof Collection<?> set && !set.isEmpty()
+                ? String.valueOf(set.size()) : "всех"; //$NON-NLS-1$
+        }
+
+        /** IProject.toString — «P/Имя»; типы ресурсов в раннем бандле не грузим. */
+        private static String projectName(Object project)
+        {
+            String text = String.valueOf(project);
+            return text.startsWith("P/") ? text.substring(2) : text; //$NON-NLS-1$
         }
 
         /** Только подтверждённые инициаторы; неизвестную причину не подменяем догадкой. null — ручная команда. */
