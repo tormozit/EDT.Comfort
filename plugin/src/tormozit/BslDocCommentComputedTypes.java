@@ -1160,24 +1160,6 @@ public final class BslDocCommentComputedTypes
      */
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
-        long started = System.nanoTime();
-        String method = context == null ? "null" : methodLabel(context); //$NON-NLS-1$
-        Global.tempLog("doc-return-hang", "merge enter method=" + method //$NON-NLS-1$ //$NON-NLS-2$
-            + " types=" + computed.size() + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-        try
-        {
-            fillReturnSectionTraced(comment, computed, context);
-        }
-        finally
-        {
-            Global.tempLog("doc-return-hang", "merge exit method=" + method //$NON-NLS-1$ //$NON-NLS-2$
-                + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        }
-    }
-
-    private static void fillReturnSectionTraced(Object comment, List<?> computed, EObject context) throws Exception
-    {
         if (!(comment instanceof BslDocumentationComment documentation))
             return;
         List<TypeItem> items = new ArrayList<>();

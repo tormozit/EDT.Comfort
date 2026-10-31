@@ -143,6 +143,7 @@ import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -499,7 +500,7 @@ public final class MdEditorTreeHook
         installInChildren(composite, 0);
     }
 
-    /** Начальное выделение реквизита применяется до отложенной навигации EDT. */
+    /** Начальное выделение реквизита или табличной части применяется до отложенной навигации EDT. */
     private static final class OpeningSelection
     {
         private static final String APPLIED = "tormozit.mdEditorOpeningSelection"; //$NON-NLS-1$
@@ -522,7 +523,7 @@ public final class MdEditorTreeHook
             for (EObject target = object; target != null && target != editor.getModel();
                 target = target.eContainer())
             {
-                if (target instanceof BasicFeature)
+                if (target instanceof BasicFeature || target instanceof BasicTabularSection)
                 {
                     if (select(root, target))
                         root.setData(APPLIED, Boolean.TRUE);
@@ -540,15 +541,18 @@ public final class MdEditorTreeHook
                 collectObjectRows(tree, tree.getItems(), List.of(target), rows);
                 if (!rows.isEmpty())
                 {
-                    // Поздняя попытка не должна отменять выбор другого реквизита пользователем.
+                    // Поздняя попытка не должна отменять выбор другого реквизита или табличной части пользователем.
                     for (TreeItem item : tree.getSelection())
                     {
                         EObject current = elementObject(tree, item.getData());
-                        if (current instanceof BasicFeature
+                        if ((current instanceof BasicFeature || current instanceof BasicTabularSection)
                             && !MdEditorAttributeMenuHook.sameObject(current, target))
                             return true;
                     }
-                    StructuredSelection desired = new StructuredSelection(rows.get(0));
+                    Object row = rows.get(0);
+                    if (target instanceof BasicTabularSection)
+                        viewer.setExpandedState(row, true);
+                    StructuredSelection desired = new StructuredSelection(row);
                     if (!desired.equals(viewer.getSelection()))
                         viewer.setSelection(desired, true);
                     return true;

@@ -179,6 +179,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private boolean headerSortEnabled;
     private TableColumn headerSortColumn;
     private boolean headerSortAscending = true;
+    /** Сортировка viewer до включения сортировки по заголовку — возвращается, когда её не выбрали. */
+    private ViewerComparator defaultComparator;
     /** Куда записывается сортировка по заголовку; {@code null} — не запоминается. */
     private IDialogSettings headerSortSettings;
     /** Сохранённая сортировка по колонке, которой в таблице пока нет; -1 — нет отложенной. */
@@ -573,6 +575,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         if (headerSortEnabled || multiSelectViewer == null || table == null || table.isDisposed())
             return;
         headerSortEnabled = true;
+        defaultComparator = multiSelectViewer.getComparator();
         for (TableColumn column : table.getColumns())
             installHeaderSortListener(column);
     }
@@ -834,7 +837,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             headerSortAscending = true;
             table.setSortColumn(null);
             table.setSortDirection(SWT.NONE);
-            multiSelectViewer.setComparator(null);
+            // Не null: у таблицы может быть своя сортировка по умолчанию (вхождения поиска — по пути).
+            multiSelectViewer.setComparator(defaultComparator);
             multiSelectViewer.refresh();
         }
         resyncSelectionTheme();

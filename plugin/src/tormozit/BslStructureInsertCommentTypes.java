@@ -49,6 +49,10 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.TagPart;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TextPart;
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Block;
+import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
+import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
+import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.BslFactory;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefMockProperty;
 import com._1c.g5.v8.dt.bsl.model.BslDerivedPropertySource;
 import com._1c.g5.v8.dt.bsl.model.DeclareStatement;
@@ -59,10 +63,12 @@ import com._1c.g5.v8.dt.bsl.model.ExtendedType;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.IndexAccess;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Statement;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.typesytem.ThreadSafeVariableTypeStateProvider;
@@ -74,6 +80,8 @@ import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import com._1c.g5.v8.dt.bsl.typesystem.BslTypeSystemProvider;
+import com._1c.g5.v8.dt.bsl.typesystem.ValueTableDynamicContextDefProvider;
+import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -85,6 +93,7 @@ import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeContainerRef;
+import com._1c.g5.v8.dt.mcore.TypeContainer;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
@@ -2895,6 +2904,13 @@ public final class BslStructureInsertCommentTypes
     /** Позиция обращения, переданная штатному вычислителю; используется и проверками закрытых модулей. */
     public static List<TypeItem> arrayExpressionTypes(List<TypeItem> types, EObject object, Environments environments)
     {
+        if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
+            return ColumnRenames.inferReturn(types, function, environments);
+        if (object instanceof DynamicFeatureAccess columnsAccess
+            && ("Колонки".equalsIgnoreCase(columnsAccess.getName()) || "Columns".equalsIgnoreCase(columnsAccess.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("column-renames-return", "dfa Колонки types=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (types == null ? "null" : types.stream().map(McoreUtil::getTypeName).toList()) //$NON-NLS-1$
+                + " source=" + NodeModelUtils.getTokenText(NodeModelUtils.findActualNodeFor(columnsAccess.getSource()))); //$NON-NLS-1$
         if (!(object instanceof StaticFeatureAccess access))
             return types;
         Variable variable = sourceVariable(access);
@@ -2908,10 +2924,403 @@ public final class BslStructureInsertCommentTypes
         Environments environments)
     {
         if (types == null || variable == null || offset < 0
-            || types.stream().noneMatch(type -> "Array".equals(McoreUtil.getTypeName(type))) //$NON-NLS-1$
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
             return types;
-        return ArrayElementTypes.infer(types, variable, offset, environments);
+        if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
+            types = ArrayElementTypes.infer(types, variable, offset, environments);
+        return ColumnRenames.infer(types, variable, offset, environments);
+    }
+
+    /**
+     * ИР: СобратьДинамическиеСвойстваОбъекта, ветка таблицы/дерева значений:
+     * Колонки.Ссылка.Имя = "Начало" и Колонки[Индекс].Имя = НовоеИмя.
+     * Как в ИР, собираем новые имена накопительно, не удаляя исходных.
+     */
+    private static final class ColumnRenames
+    {
+        private static final OnChangeEvictingCache PLANS = new OnChangeEvictingCache();
+        private static final ThreadLocal<Set<EObject>> RETURNING = ThreadLocal.withInitial(
+            () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+
+        /**
+         * Тип возврата функции берётся из готового состояния EDT, без переименований внутри неё:
+         * применяем те, что видны в точке каждого «Возврат Переменная».
+         */
+        static List<TypeItem> inferReturn(List<TypeItem> types, com._1c.g5.v8.dt.bsl.model.Function function,
+            Environments environments)
+        {
+            if (types == null || types.stream().noneMatch(ColumnRenames::isTable)
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(function))
+                return types;
+            Set<EObject> returning = RETURNING.get();
+            if (!returning.add(function))
+                return types;
+            try
+            {
+                for (com._1c.g5.v8.dt.bsl.model.ReturnStatement exit : EcoreUtil2.getAllContentsOfType(function,
+                    com._1c.g5.v8.dt.bsl.model.ReturnStatement.class))
+                {
+                    Variable variable = exit.getExpression() instanceof StaticFeatureAccess access
+                        ? sourceVariable(access) : null;
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(exit);
+                    if (variable != null && node != null)
+                        types = infer(types, variable, node.getOffset(), environments);
+                }
+            }
+            finally
+            {
+                returning.remove(function);
+                if (returning.isEmpty())
+                    RETURNING.remove();
+            }
+            return types;
+        }
+
+        /**
+         * Состояние переменной из «Перем = Функция(...)» EDT связывает прямо с финальным состоянием
+         * возврата функции (CreatorTreeState.getAllDependStateInv), мимо computeTypes.
+         */
+        private static List<TypeItem> calleeRenames(List<TypeItem> types, SimpleStatement assignment,
+            Environments environments)
+        {
+            if (assignment == null || !(assignment.getRight() instanceof com._1c.g5.v8.dt.bsl.model.Invocation call)
+                || call.getMethodAccess() == null)
+                return types;
+            List<com._1c.g5.v8.dt.bsl.model.FeatureEntry> features =
+                call.getMethodAccess() instanceof StaticFeatureAccess access ? access.getFeatureEntries()
+                    : call.getMethodAccess() instanceof DynamicFeatureAccess access ? access.getFeatureEntries()
+                    : List.of();
+            int entries = 0;
+            for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : features)
+                if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Function function)
+                {
+                    entries++;
+                    List<TypeItem> before = types;
+                    types = inferReturn(types, function, environments);
+                    Global.tempLog("column-renames-return", "callee=" + function.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " changed=" + (types != before)); //$NON-NLS-1$
+                }
+            if (entries == 0)
+                Global.tempLog("column-renames-return", "noFunctionEntry call=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + call.getMethodAccess().getName() + " entries=" + features.size()); //$NON-NLS-1$
+            return types;
+        }
+
+        /**
+         * Состояние параметра EDT связывает прямо с состоянием аргумента в точке вызова, мимо
+         * computeTypes: применяем переименования, видимые у аргумента в каждом вызове из модуля.
+         */
+        private static List<TypeItem> callerRenames(List<TypeItem> types, com._1c.g5.v8.dt.bsl.model.FormalParam param,
+            Method method, Environments environments)
+        {
+            int index = method.getFormalParams().indexOf(param);
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            if (index < 0 || module == null || module.eResource() == null)
+                return types;
+            Set<EObject> returning = RETURNING.get();
+            if (!returning.add(param))
+                return types;
+            try
+            {
+                List<com._1c.g5.v8.dt.bsl.model.Invocation> calls = PLANS.get(module, module.eResource(),
+                    () -> EcoreUtil2.getAllContentsOfType(module, com._1c.g5.v8.dt.bsl.model.Invocation.class));
+                int matched = 0;
+                for (com._1c.g5.v8.dt.bsl.model.Invocation call : calls)
+                {
+                    if (!(call.getMethodAccess() instanceof StaticFeatureAccess access)
+                        || !method.getName().equalsIgnoreCase(access.getName())
+                        || access.getFeatureEntries().stream().noneMatch(entry -> entry.getFeature() == method)
+                        || call.getParams().size() <= index)
+                        continue;
+                    Variable argument = call.getParams().get(index) instanceof StaticFeatureAccess value
+                        ? sourceVariable(value) : null;
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(call);
+                    if (argument == null || node == null)
+                        continue;
+                    matched++;
+                    List<TypeItem> before = types;
+                    types = infer(types, argument, node.getOffset(), environments);
+                    Global.tempLog("column-renames-return", "caller param=" + param.getName() + " method=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + method.getName() + " argument=" + argument.getName() + " at=" + node.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " changed=" + (types != before)); //$NON-NLS-1$
+                }
+                Global.tempLog("column-renames-return", "callers param=" + param.getName() + " method=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + method.getName() + " calls=" + calls.size() + " matched=" + matched); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            finally
+            {
+                returning.remove(param);
+                if (returning.isEmpty())
+                    RETURNING.remove();
+            }
+            return types;
+        }
+
+        static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
+        {
+            try
+            {
+                List<TypeItem> result = inferImpl(types, variable, offset, environments);
+                Global.tempLog("column-renames-return", "infer var=" + variable.getName() + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " env=" + environments + " in=" + describe(types) + " out=" + describe(result) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " same=" + (result == types) + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                return result;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                java.io.StringWriter trace = new java.io.StringWriter();
+                failure.printStackTrace(new java.io.PrintWriter(trace));
+                Global.tempLog("column-renames-return", "infer FAILED var=" + variable.getName() + " " + trace); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                throw failure;
+            }
+        }
+
+        /** Временная диагностика: тип, прокси/ресурс, колонки (есть ли «Значение»). */
+        private static String describe(List<TypeItem> types)
+        {
+            if (types == null)
+                return "null"; //$NON-NLS-1$
+            StringBuilder text = new StringBuilder("["); //$NON-NLS-1$
+            for (TypeItem item : types)
+            {
+                text.append(McoreUtil.getTypeName(item)).append(" proxy=").append(item.eIsProxy()) //$NON-NLS-1$
+                    .append(" res=").append(item.eResource() != null) //$NON-NLS-1$
+                    .append(" id=").append(System.identityHashCode(item)); //$NON-NLS-1$
+                if (isTable(item))
+                    try
+                    {
+                        TypeContainer columns = "ValueTree".equals(McoreUtil.getTypeName(item)) //$NON-NLS-1$
+                            ? ValueTreeDynamicContextDefProvider.getColumnCollectionType((Type)item)
+                            : ValueTableDynamicContextDefProvider.getColumnCollectionType((Type)item);
+                        text.append(" columns="); //$NON-NLS-1$
+                        if (columns == null)
+                            text.append("null"); //$NON-NLS-1$
+                        else
+                            for (TypeItem column : columns.allTypes())
+                            {
+                                text.append(McoreUtil.getTypeName(column)).append("/proxy=").append(column.eIsProxy()); //$NON-NLS-1$
+                                if (column instanceof Type type && type.getContextDef() != null)
+                                    text.append("/props=").append(type.getContextDef().allProperties().size()) //$NON-NLS-1$
+                                        .append("/Значение=").append(type.getContextDef().allProperties().stream() //$NON-NLS-1$
+                                            .anyMatch(property -> "Значение".equalsIgnoreCase(property.getName()))); //$NON-NLS-1$
+                                text.append(';');
+                            }
+                    }
+                    catch (RuntimeException failure)
+                    {
+                        text.append(" columnsFailed=").append(failure); //$NON-NLS-1$
+                    }
+                text.append(", "); //$NON-NLS-1$
+            }
+            return text.append(']').toString();
+        }
+
+        private static List<TypeItem> inferImpl(List<TypeItem> types, Variable variable, int offset,
+            Environments environments)
+        {
+            if (types.stream().noneMatch(ColumnRenames::isTable))
+                return types;
+            Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+            Module module = EcoreUtil2.getContainerOfType(variable, Module.class);
+            if (method == null && module != null)
+                for (Method candidate : module.allMethods())
+                {
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
+                    if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
+                    {
+                        method = candidate;
+                        break;
+                    }
+                }
+            if (method == null || method.eResource() == null)
+                return types;
+            Method owner = method;
+            List<SimpleStatement> statements = PLANS.get(owner, owner.eResource(),
+                () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class));
+            int from = 0;
+            SimpleStatement assignment = null;
+            for (SimpleStatement statement : statements)
+                if (statement.getLeft() instanceof StaticFeatureAccess access
+                    && sourceVariable(access) == variable && end(statement) <= offset && end(statement) > from)
+                {
+                    from = end(statement);
+                    assignment = statement;
+                }
+            types = assignment == null && variable instanceof com._1c.g5.v8.dt.bsl.model.FormalParam param
+                ? callerRenames(types, param, owner, environments)
+                : calleeRenames(types, assignment, environments);
+            List<SimpleStatement> renames = new ArrayList<>();
+            for (SimpleStatement statement : statements)
+            {
+                Environmental environment = EcoreUtil2.getContainerOfType(statement, Environmental.class);
+                if (end(statement) <= from || end(statement) > offset || environment == null
+                    || !environment.environments().containsAny(environments)
+                    || renameVariable(statement.getLeft()) != variable)
+                    continue;
+                renames.add(statement);
+            }
+            if (renames.isEmpty())
+                return types;
+            List<TypeItem> result = new ArrayList<>(types.size());
+            for (TypeItem item : types)
+            {
+                Type copy = null;
+                if (isTable(item))
+                    for (SimpleStatement rename : renames)
+                    {
+                        String name = stringValue(rename.getRight(), statements, environments);
+                        if (name == null || !name.matches("[\\p{L}_][\\p{L}\\p{N}_]*")) //$NON-NLS-1$
+                            continue;
+                        if (copy == null)
+                            copy = EcoreUtil2.cloneWithProxies((Type)EcoreUtil.resolve(item, variable));
+                        add(copy, name, unconditional(rename, owner) ? oldName(rename.getLeft()) : null, rename,
+                            owner);
+                    }
+                result.add(copy == null ? item : copy);
+            }
+            return result;
+        }
+
+        private static boolean isTable(TypeItem item)
+        {
+            String name = McoreUtil.getTypeName(item);
+            return item instanceof Type && ("ValueTable".equals(name) || "ValueTree".equals(name)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Строго одно обращение к колонке после Колонки; произвольные свойства Имя не подходят. */
+        private static Variable renameVariable(Expression expression)
+        {
+            if (!(expression instanceof DynamicFeatureAccess name)
+                || !("Имя".equalsIgnoreCase(name.getName()) || "Name".equalsIgnoreCase(name.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            Expression collection = name.getSource() instanceof DynamicFeatureAccess column ? column.getSource()
+                : name.getSource() instanceof IndexAccess index ? index.getSource() : null;
+            if (!(collection instanceof DynamicFeatureAccess columns)
+                || !("Колонки".equalsIgnoreCase(columns.getName()) || "Columns".equalsIgnoreCase(columns.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                || !(columns.getSource() instanceof StaticFeatureAccess))
+                return null;
+            return sourceVariable(columns.getSource());
+        }
+
+        /** Грубо и быстро: не вложено ни в ветвление, ни в цикл, ни в Попытку, ни в #Если. */
+        private static boolean unconditional(EObject statement, Method method)
+        {
+            for (EObject container = statement.eContainer(); container != null && container != method;
+                container = container.eContainer())
+                if (container instanceof com._1c.g5.v8.dt.bsl.model.IfStatement
+                    || container instanceof com._1c.g5.v8.dt.bsl.model.LoopStatement
+                    || container instanceof com._1c.g5.v8.dt.bsl.model.TryExceptStatement
+                    || container instanceof com._1c.g5.v8.dt.bsl.model.IfPreprocessor)
+                    return false;
+            return true;
+        }
+
+        /** Прежнее имя колонки: Колонки.Имя.Имя или Колонки["Имя"].Имя; иначе {@code null}. */
+        private static String oldName(Expression left)
+        {
+            if (!(left instanceof DynamicFeatureAccess name))
+                return null;
+            if (name.getSource() instanceof DynamicFeatureAccess column)
+                return column.getName();
+            return name.getSource() instanceof IndexAccess index && index.getIndex() instanceof StringLiteral literal
+                ? new DefaultStringLiteralTextProvider(literal).getText() : null;
+        }
+
+        /** Литерал, сложение строк или предшествующее присваивание переменной в том же методе. */
+        private static String stringValue(Expression expression, List<SimpleStatement> statements,
+            Environments environments)
+        {
+            if (expression instanceof StringLiteral literal)
+                return new DefaultStringLiteralTextProvider(literal).getText();
+            if (expression instanceof BinaryExpression binary && binary.getOperation() == BinaryOperation.PLUS)
+            {
+                String left = stringValue(binary.getLeft(), statements, environments);
+                String right = left == null ? null : stringValue(binary.getRight(), statements, environments);
+                return right == null ? null : left + right;
+            }
+            if (!(expression instanceof StaticFeatureAccess access))
+                return null;
+            Variable variable = sourceVariable(access);
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(expression);
+            if (variable == null || node == null)
+                return null;
+            SimpleStatement latest = null;
+            for (SimpleStatement statement : statements)
+            {
+                Environmental owner = EcoreUtil2.getContainerOfType(statement, Environmental.class);
+                if (statement.getLeft() instanceof StaticFeatureAccess target
+                    && sourceVariable(target) == variable && end(statement) < node.getOffset()
+                    && owner != null && owner.environments().containsAny(environments)
+                    && (latest == null || end(statement) > end(latest)))
+                    latest = statement;
+            }
+            return latest == null ? null : stringValue(latest.getRight(), statements, environments);
+        }
+
+        private static int end(EObject object)
+        {
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
+            return node == null ? Integer.MAX_VALUE : node.getEndOffset();
+        }
+
+        /** {@code oldName} — безусловное переименование: свойство прежнего имени переименовываем на месте. */
+        private static void add(Type table, String name, String oldName, SimpleStatement statement, Method method)
+        {
+            boolean tree = "ValueTree".equals(McoreUtil.getTypeName(table)); //$NON-NLS-1$
+            TypeContainer rows = tree ? ValueTreeDynamicContextDefProvider.getValueTreeCollectionElementType(table)
+                : table.getCollectionElementTypes();
+            TypeContainer columns = tree ? ValueTreeDynamicContextDefProvider.getColumnCollectionType(table)
+                : ValueTableDynamicContextDefProvider.getColumnCollectionType(table);
+            if (rows == null || columns == null)
+                return;
+            for (TypeItem row : rows.allTypes())
+                if (row instanceof Type type && !renameProperty(table, type, oldName, name))
+                    addProperty(type, name, statement, method, true, List.of());
+            Collection<TypeItem> columnTypes = TypeSystemUtil.getCollectionElementTypes(columns.allTypes(), statement);
+            for (TypeItem column : columns.allTypes())
+                if (column instanceof Type type && !renameProperty(table, type, oldName, name))
+                    addProperty(type, name, statement, method, false, columnTypes == null ? List.of() : columnTypes);
+        }
+
+        /** Только свойство внутри копии таблицы: общий тип EDT менять нельзя. */
+        private static boolean renameProperty(Type table, Type type, String oldName, String name)
+        {
+            if (oldName == null || type.getContextDef() == null)
+                return false;
+            for (com._1c.g5.v8.dt.mcore.Property property : type.getContextDef().getProperties())
+                if ((oldName.equalsIgnoreCase(property.getName()) || oldName.equalsIgnoreCase(property.getNameRu()))
+                    && EcoreUtil.isAncestor(table, property))
+                {
+                    property.setName(name);
+                    property.setNameRu(name);
+                    return true;
+                }
+            return false;
+        }
+
+        private static void addProperty(Type type, String name, SimpleStatement statement, Method method,
+            boolean writable, Collection<TypeItem> valueTypes)
+        {
+            if (type.getContextDef() == null || type.getContextDef().allProperties().stream()
+                .anyMatch(property -> name.equalsIgnoreCase(property.getName()) || name.equalsIgnoreCase(property.getNameRu())))
+                return;
+            DerivedProperty property = McoreFactory.eINSTANCE.createDerivedProperty();
+            property.setName(name);
+            property.setNameRu(name);
+            property.setReadable(true);
+            property.setWritable(writable);
+            property.setEnvironments(Environments.ALL);
+            TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+            container.getTypes().addAll(valueTypes);
+            property.setTypeContainer(container);
+            BslDerivedPropertySource source = BslFactory.eINSTANCE.createBslDerivedPropertySource();
+            source.setMethodName(method.getName());
+            source.setModuleUri(EcoreUtil.getURI(method.eResource().getContents().get(0)).trimFragment().toString());
+            source.setLocalOffset(NodeModelUtils.findActualNodeFor(statement.getRight()).getOffset()
+                - NodeModelUtils.findActualNodeFor(method).getTotalOffset());
+            property.setSource(source);
+            type.getContextDef().getProperties().add(property);
+        }
     }
 
     /** ИР: СобратьДинамическиеСвойстваОбъекта, ветка Массив — первые два Добавить/Вставить в диапазоне. */
@@ -3324,10 +3733,6 @@ public final class BslStructureInsertCommentTypes
             boolean scopeOwner = beginExportVarsScope();
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
-            long diagStarted = System.nanoTime();
-            String diagModule = String.valueOf(resource == null ? null : resource.getURI());
-            Global.tempLog("doc-return-hang", "install enter module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
             // #region agent log
             // Сторож на дефекты EDT вида «частичный расчёт стёр тип возврата непричастной
             // функции» (20.10.2026, bsl 28.0.1: сброс вызываемых). Только частичный расчёт:
@@ -3349,9 +3754,6 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
-                Global.tempLog("doc-return-hang", "install exit module=" + diagModule //$NON-NLS-1$ //$NON-NLS-2$
-                    + " complete=" + complete + " elapsedMs=" + (System.nanoTime() - diagStarted) / 1_000_000 //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
                 BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
                 if (diagTypedBefore != null)
                     logReturnLost(module, diagTypedBefore, complete);

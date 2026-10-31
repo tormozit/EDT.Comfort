@@ -206,6 +206,8 @@ public final class BslDocCommentTypeMerge
             return types;
         try
         {
+            // Единственная точка расчёта типов комментария, где есть объект модуля.
+            types = PlatformTemplateTypes.emptySetsToTemplates(types, context);
             // Поле без своей TypeSection EDT считает через getTypesFromLinkParts,
             // минуя computeTypes. Поэтому обрабатываем и готовые свойства формы.
             FormAttributeTypes.convertFormProperties(types, context);

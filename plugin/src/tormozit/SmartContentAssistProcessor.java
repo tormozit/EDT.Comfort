@@ -2737,7 +2737,8 @@ return;
                 }
             }
         }
-        result = NaparnikAssistRow.withRow(dropTemplateTypes(result));
+        result = NaparnikAssistRow.withRow(
+            dropTemplateTypesInLiteral(viewer, resolveInvocationCaret(viewer, offset), result));
         return result;
         }
         finally
@@ -4404,10 +4405,8 @@ return EMPTY;
             if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(resolveEditorForLiteralAudit(viewer),
                 viewer instanceof SourceViewer sv ? sv : null) != null)
                 return delegateStock;
-            // Штатный список EDT тоже содержит шаблонные типы («СправочникОбъектИмяСправочника»).
-            ICompletionProposal[] stock = delegateStock == null ? null : Arrays.stream(delegateStock)
-                .filter(p -> p == null || !isTemplateTypeName(String.valueOf(filterMatchName(p))))
-                .toArray(ICompletionProposal[]::new);
+            ICompletionProposal[] stock = comment ? delegateStock
+                : dropTemplateTypesInLiteral(viewer, caret, delegateStock);
             if (hasNativeVariants(stock))
                 return stock;
             try
@@ -4470,10 +4469,14 @@ return EMPTY;
                             // Тип CommonModule нужен для разрешения членов, но не как вторая строка списка.
                             if (isCommonModuleTypeName(type.getName()))
                                 continue;
-                            // Шаблонные типы платформы («СправочникОбъектИмяСправочника») — не имена.
                             // Полное имя вводится посекционно: в корне — только первый сегмент.
-                            if (name != null && !name.isBlank() && !isTemplateTypeName(name))
-                                names.put(MdTypeMapping.firstSegment(name), "Тип"); //$NON-NLS-1$
+                            // В литерале вводится имя реального типа: имя шаблона не его начало.
+                            if (name != null && !name.isBlank()
+                                && (comment || !PlatformTemplateTypes.isTemplateName(type.getName())))
+                            {
+                                String note = PlatformTemplateTypes.noteText(type.getName());
+                                names.put(MdTypeMapping.firstSegment(name), note != null ? "Тип. " + note : "Тип"); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
                         }
                     }
                     if (receiver == null)
@@ -4598,23 +4601,6 @@ return EMPTY;
                 || qualifiedName.indexOf('.', start) >= 0)
                 return null;
             return qualifiedName.substring(start);
-        }
-
-        /**
-         * {@code <Вид><Что>Имя<Вид>}: по виду метаданных платформа описывает все объекты сразу
-         * («СправочникОбъектИмяСправочника»). Начало — вид метаданных, чтобы не задеть
-         * переменные вроде «ТекущееИмяФайла».
-         */
-        static boolean isTemplateTypeName(String name)
-        {
-            if (name == null || name.indexOf('.') >= 0 || !name.matches(".+Имя[А-ЯЁ]\\p{L}*")) //$NON-NLS-1$
-                return false;
-            if (name.startsWith("БазовыеВидыРасчета") || name.startsWith("ТочкаМаршрута")) //$NON-NLS-1$ //$NON-NLS-2$
-                return true;
-            for (String kind : GoToDefinition.TYPE_TO_FOLDER.keySet())
-                if (name.startsWith(kind))
-                    return true;
-            return false;
         }
 
         private static boolean isCommonModuleTypeName(String name)
@@ -9324,7 +9310,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         BslLiteralValues.beginAssist(Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()));
         try
         {
-            raw = dropTemplateTypes(delegate.computeCompletionProposals(viewer, off));
+            raw = dropTemplateTypesInLiteral(viewer, off, delegate.computeCompletionProposals(viewer, off));
             FunctionReturnTypes.rememberVariableTargets(raw);
             delegateCompleted = true;
         }
@@ -11275,6 +11261,62 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return wrapProposal(proposal, -1);
     }
 
+    /**
+     * Обёртка строки, ставшей видимой без нашей обёртки: та же на каждой перефильтровке (сравнение порядка).
+     * Значение — слабая ссылка: обёртка держит свою строку, сильная ссылка не дала бы записи уйти.
+     */
+    private static final Map<ICompletionProposal, java.lang.ref.WeakReference<SmartCompletionProposal>> SIDE_HINT_WRAPPERS =
+        Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /**
+     * Боковую подсказку плагина (описание, «Приемник.Тип», замечание о типе) даёт только
+     * {@link SmartCompletionProposal}. При снятом флажке «Фильтр» строки штатного списка доходят до окна
+     * без обёртки — оборачиваем; фильтр обёртки при снятом флажке штатный ({@link #proposalMatchesFilter}).
+     */
+    static List<ICompletionProposal> wrapForSideHint(List<ICompletionProposal> list)
+    {
+        if (list == null || !ComfortSettings.isReplaceListFiltersEnabled())
+            return list;
+        List<ICompletionProposal> out = null;
+        for (int i = 0; i < list.size(); i++)
+        {
+            ICompletionProposal p = list.get(i);
+            ICompletionProposal wrapped = sideHintWrapper(p);
+            if (wrapped != p && out == null)
+                out = new ArrayList<>(list.subList(0, i));
+            if (out != null)
+                out.add(wrapped);
+        }
+        return out != null ? out : list;
+    }
+
+    static ICompletionProposal[] wrapForSideHint(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || !ComfortSettings.isReplaceListFiltersEnabled())
+            return proposals;
+        List<ICompletionProposal> list = Arrays.asList(proposals);
+        List<ICompletionProposal> out = wrapForSideHint(list);
+        return out == list ? proposals : out.toArray(new ICompletionProposal[0]);
+    }
+
+    private static ICompletionProposal sideHintWrapper(ICompletionProposal p)
+    {
+        if (p == null || p instanceof SmartCompletionProposal || p instanceof BslAddedWordProposal
+            || NaparnikAssistRow.isRow(p) || isEmptyPlaceholderProposal(p))
+            return p;
+        synchronized (SIDE_HINT_WRAPPERS)
+        {
+            java.lang.ref.WeakReference<SmartCompletionProposal> ref = SIDE_HINT_WRAPPERS.get(p);
+            SmartCompletionProposal wrapper = ref != null ? ref.get() : null;
+            if (wrapper == null)
+            {
+                wrapper = new SmartCompletionProposal(p, -1);
+                SIDE_HINT_WRAPPERS.put(p, new java.lang.ref.WeakReference<>(wrapper));
+            }
+            return wrapper;
+        }
+    }
+
     private static ICompletionProposal wrapProposal(ICompletionProposal proposal, int delegateOrder)
     {
         ICompletionProposal raw = unwrapProposal(proposal);
@@ -11336,7 +11378,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
-        raw = dropTemplateTypes(raw);
         if (raw == null || raw.length == 0)
         return EMPTY;
 
@@ -11855,23 +11896,20 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return proposal;
     }
 
-    /** Убирает шаблонные типы платформы («СправочникОбъектИмяСправочника») из любого списка. */
-    static ICompletionProposal[] dropTemplateTypes(ICompletionProposal[] proposals)
+    /**
+     * В литерале вводится имя реального типа, а имя шаблонного («ДокументОбъектИмяДокумента») не его
+     * начало — такие строки убираются. В комментарии шаблонный тип допустим.
+     */
+    static ICompletionProposal[] dropTemplateTypesInLiteral(ITextViewer viewer, int caret,
+        ICompletionProposal[] proposals)
     {
-        if (proposals == null)
-            return null;
-        boolean found = false;
-        for (ICompletionProposal proposal : proposals)
-            if (proposal != null && TextNameProposals.isTemplateTypeName(filterMatchName(proposal)))
-            {
-                found = true;
-                break;
-            }
-        if (!found)
+        if (proposals == null || proposals.length == 0 || caret < 0
+            || !isStringLiteralAssistContext(viewer, caret) || isCommentAssistContext(viewer, caret))
             return proposals;
-        return Arrays.stream(proposals)
-            .filter(p -> p == null || !TextNameProposals.isTemplateTypeName(filterMatchName(p)))
+        ICompletionProposal[] result = Arrays.stream(proposals)
+            .filter(p -> p == null || !PlatformTemplateTypes.isTemplateName(filterMatchName(p)))
             .toArray(ICompletionProposal[]::new);
+        return result.length == proposals.length ? proposals : result;
     }
 
     private static ICompletionProposal[] unwrapProposals(ICompletionProposal[] raw)

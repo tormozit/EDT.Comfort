@@ -143,7 +143,7 @@ public final class GcPressureToastHook implements IStartup
                 showToast("Острая нехватка памяти процессу EDT", //$NON-NLS-1$
                     "Сборка мусора заняла " + Math.round(gcShare * 100) + "% времени за " + seconds + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         + Global.russianPlural(seconds, "секунду", "секунды", "секунд") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + ". Процессу выделено " + formatBytes(max) + " " + limitSource() + "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + ". Процессу доступно " + formatBytes(max) + " " + limitSource() + "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
 

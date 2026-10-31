@@ -44,13 +44,16 @@ import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.Conditional;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.ForEachStatement;
+import com._1c.g5.v8.dt.bsl.model.ForStatement;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.FunctionStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.IfStatement;
 import com._1c.g5.v8.dt.bsl.model.IndexAccess;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
@@ -919,6 +922,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         final List<String> branches = new ArrayList<>();
         /** {@code ЛиНаборЗначенийПолный}. */
         boolean full;
+        /** Ограничивать полноту по веткам только при поиске роли в вызываемом методе. */
+        ParameterSearch parameterSearch;
         boolean sortDirection;
         /** ИР мРежимПроверкиМодуля: поиск существования и добавление ключа не ограничены текущими именами. */
         boolean validation;
@@ -1026,6 +1031,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         void finish()
         {
+            // Единственный шаблонный член не задаёт полный список допустимых имён.
+            if (values.size() == 1)
+            {
+                Property property = valueProperties.get(values.keySet().iterator().next());
+                if (property != null && BslDocCommentTypeMerge.isStructureKeyPlaceholder(property))
+                    full = false;
+            }
             if (!parent.isEmpty() && !pathAware)
             {
                 values.clear();
@@ -1751,13 +1763,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             boolean wasFull = full;
             full = false;
+            ParameterSearch savedSearch = parameterSearch;
+            parameterSearch = new ParameterSearch(callee, callee.getFormalParams().get(index).getName());
             try
             {
                 textValuesOfExpression(callee, callee.getFormalParams().get(index).getName(), structureType, false,
                     offsetOf(callee));
+                if (!full && !parameterSearch.branches.isEmpty())
+                    full = !hasUnknownParameterRead(parameterSearch);
             }
             finally
             {
+                parameterSearch = savedSearch;
                 bindings.clear();
                 bindings.putAll(saved);
                 full = full || wasFull;
@@ -1834,8 +1851,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     {
                         branch("structureFromFill"); //$NON-NLS-1$
                         addAll(names);
-                        Global.tempLog("unknown-literal-structure", "structureFromFill variable=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                            + " validation=" + validation + " full=" + full + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         return;
                     }
                 }
@@ -1850,8 +1865,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         {
                             branch("structureParameter"); //$NON-NLS-1$
                             addAll(names);
-                            Global.tempLog("unknown-literal-structure", "structureParameter variable=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                                + " validation=" + validation + " full=" + full + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                             return;
                         }
                     }
@@ -1926,6 +1939,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         continue;
                     calls.put(lower(callee), 1);
                     call(object, args, argument, structureType);
+                    if (full)
+                        full = isFullParameterRole(scope, object);
                     if (full || calls.size() > MAX_CALLS)
                         break;
                 }
@@ -1935,6 +1950,65 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 current = substitute;
                 start = substituteAt;
             }
+        }
+
+        private static record ConditionalBranch(EObject owner, EStructuralFeature feature)
+        {
+            boolean contains(EObject object)
+            {
+                while (object != null && object.eContainer() != owner)
+                    object = object.eContainer();
+                return object != null && object.eContainingFeature() == feature;
+            }
+        }
+
+        private static final class ParameterSearch
+        {
+            final Method method;
+            final String name;
+            final Set<ConditionalBranch> branches = new HashSet<>();
+
+            ParameterSearch(Method method, String name)
+            {
+                this.method = method;
+                this.name = name;
+            }
+        }
+
+        /** Условные роли собираются вместе; полноту подтверждаем после обхода всех мест использования. */
+        boolean isFullParameterRole(EObject scope, EObject role)
+        {
+            if (parameterSearch == null || parameterSearch.method != scope)
+                return true;
+            for (EObject child = role; child != null && child != scope; child = child.eContainer())
+            {
+                EObject owner = child.eContainer();
+                boolean branch = owner instanceof Conditional conditional
+                    && conditional.getStatements().contains(child)
+                    || owner instanceof IfStatement statement && statement.getElseStatements().contains(child);
+                if (branch)
+                {
+                    parameterSearch.branches.add(new ConditionalBranch(owner, child.eContainingFeature()));
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        boolean hasUnknownParameterRead(ParameterSearch search)
+        {
+            for (EObject object : contents(search.method))
+            {
+                if (!(object instanceof StaticFeatureAccess access) || !matches(access, search.name)
+                    || access.eContainer() instanceof SimpleStatement assignment && assignment.getLeft() == access
+                    || access.eContainer() instanceof ForEachStatement loop && loop.getVariableAccess() == access
+                    || access.eContainer() instanceof ForStatement forLoop && forLoop.getVariableAccess() == access
+                    || access.eContainer() instanceof Invocation invocation && invocation.getMethodAccess() == access)
+                    continue;
+                if (search.branches.stream().noneMatch(branch -> branch.contains(access)))
+                    return true;
+            }
+            return false;
         }
 
         /** {@code Объект[Имя]}, {@code Объект.Свойство(Имя)}: свойства объекта. */
@@ -1963,8 +2037,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 {
                     branch("objectProperties"); //$NON-NLS-1$
                     addAll(names);
-                    full = true;
-                    return;
+                    full = isFullParameterRole(scope, object);
+                    if (full)
+                        return;
                 }
             }
         }
@@ -1978,7 +2053,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     || invocation.getParams().size() < 3 || !matches(invocation.getParams().get(2), name))
                     continue;
                 fillPropertyValuesNames(invocation.getParams());
-                if (!values.isEmpty())
+                if (full)
+                    full = isFullParameterRole(scope, object);
+                if (full || parameterSearch == null && !values.isEmpty())
                     return;
             }
         }
@@ -2028,14 +2105,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (!matcher.matches())
                     continue;
                 Module target = commonModule(matcher.group(1));
-                full = true;
+                full = isFullParameterRole(scope, object);
                 if (target == null)
                     continue;
                 branch("dynamicCall"); //$NON-NLS-1$
                 for (Method method : target.allMethods())
                     if (method.isExport())
                         add(method.getName());
-                return;
+                if (full)
+                    return;
             }
         }
 
@@ -2137,6 +2215,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     if (en.isEmpty() || "Array".equals(en)) //$NON-NLS-1$
                         continue;
                     List<TypeItem> one = List.of(item);
+                    // У табличной части нужны свойства строки; mdOf(type) возвращает её владельца.
+                    if (hasTabularSection(one))
+                    {
+                        List<String> names = elementProperties(one);
+                        addAll(names);
+                        Global.tempLog("unknown-literal-tabular", "structureFilter type=" + en //$NON-NLS-1$ //$NON-NLS-2$
+                            + " validation=" + validation + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$
+                        continue;
+                    }
                     // ИР: метаданные типа — Структура (у структуры, выборки запроса и т. п.) → её ключи. В EDT —
                     // свойства, добавленные сверх платформенного типа, у типа с любым именем.
                     List<String> added = structureKeyNames(one);

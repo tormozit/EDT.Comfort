@@ -179,6 +179,8 @@ public final class NaparnikAssistRow
     {
         if (list == null)
             return null;
+        // Сюда сходятся все пути списка в окно: боковая подсказка — от обёртки, при любом флажке «Фильтр».
+        list = SmartContentAssistProcessor.wrapForSideHint(list);
         NaparnikAssistRow row = active;
         int rows = 0;
         int placeholders = 0;
@@ -213,6 +215,7 @@ public final class NaparnikAssistRow
 
     static ICompletionProposal[] withRow(ICompletionProposal[] proposals)
     {
+        proposals = SmartContentAssistProcessor.wrapForSideHint(proposals);
         NaparnikAssistRow row = active;
         if (row == null)
             return proposals;

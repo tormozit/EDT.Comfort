@@ -1299,7 +1299,7 @@ org.tukaani.xz,1.9.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pd
 org.yaml.snakeyaml,1.27.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.yaml.snakeyaml_1.27.0.jar,4,false
 tormozit.comfort,1.0.7.qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false
 tormozit.comfort.early,1.0.1.qualifier,file:/C:/VC/EDT.Comfort/plugin.early/,4,true
-tormozit.comfort.checks,1.0.55,file:/C:/VC/EDT.Comfort/plugin.checks/,4,false
+tormozit.comfort.checks,1.0.58,file:/C:/VC/EDT.Comfort/plugin.checks/,4,false
 org.eclipse.mylyn.wikitext,3.0.48.202308291007,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.eclipse.mylyn.wikitext_3.0.48.202308291007.jar,4,false
 org.eclipse.mylyn.wikitext.markdown,3.0.48.202308291007,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.eclipse.mylyn.wikitext.markdown_3.0.48.202308291007.jar,4,false
 org.eclipse.mylyn.wikitext.markdown.ui,3.0.48.202308291007,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.eclipse.mylyn.wikitext.markdown.ui_3.0.48.202308291007.jar,4,false

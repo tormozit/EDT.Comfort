@@ -1257,13 +1257,7 @@ public final class ConfigSearchResultsHook implements IStartup
             @Override
             public int compare(org.eclipse.jface.viewers.Viewer viewer, Object e1, Object e2)
             {
-                if (!(e1 instanceof MatchRow r1) || !(e2 instanceof MatchRow r2))
-                    return 0;
-                int cmp = compareStrings(r1.path, r2.path);
-                if (cmp != 0) return cmp;
-                cmp = compareStrings(matchPropertyDisplayText(r1), matchPropertyDisplayText(r2));
-                if (cmp != 0) return cmp;
-                return Long.compare(r1.lineNumber, r2.lineNumber);
+                return compareMatchRowsByPath(e1, e2);
             }
         });
 
@@ -1290,6 +1284,8 @@ public final class ConfigSearchResultsHook implements IStartup
         // таблицы (в т.ч. при перетаскивании разделителя SashForm). Ручной ресайз колонки в сессии
         // при этом работает как обычно.
         interaction.install(false);
+        // Сортировка по заголовку: «<колонка>, Путь, Свойство, Строка».
+        interaction.setSortTieBreaker(ConfigSearchResultsHook::compareMatchRowsByPath);
         interaction.enableHeaderSort(matchSortSettings());
         // Подсказки заголовков — через FormTableInteraction: если заголовок обрезан, первой строкой
         // подсказки идёт полный текст заголовка, затем описание (setToolTipText напрямую это правило
@@ -1508,6 +1504,18 @@ public final class ConfigSearchResultsHook implements IStartup
         ComfortSubmenuHelper.setMenuItemTooltip(item, tooltip);
         item.addListener(SWT.Selection, e -> action.run());
         return item;
+    }
+
+    /** Порядок вхождений «Путь, Свойство, Строка» — по умолчанию и при равенстве по колонке сортировки. */
+    private static int compareMatchRowsByPath(Object e1, Object e2)
+    {
+        if (!(e1 instanceof MatchRow r1) || !(e2 instanceof MatchRow r2))
+            return 0;
+        int cmp = compareStrings(r1.path, r2.path);
+        if (cmp != 0) return cmp;
+        cmp = compareStrings(matchPropertyDisplayText(r1), matchPropertyDisplayText(r2));
+        if (cmp != 0) return cmp;
+        return Long.compare(r1.lineNumber, r2.lineNumber);
     }
 
     private static int compareStrings(String a, String b)

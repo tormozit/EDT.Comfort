@@ -58,6 +58,7 @@ import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.hover.AbstractProblemHover;
 import org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
+import org.eclipse.xtext.ui.editor.hover.html.XtextBrowserInformationControlInput;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
@@ -596,7 +597,7 @@ public final class BslEditorHoverHook implements IStartup
             // EDT не всегда задаёт viewer предложения; используем контекст общего чтения описания.
             ITextViewer context = viewer != null ? viewer : proposalViewer;
             BslStructureInsertCommentTypes.completePropertyHover(info, object, context);
-            return decorateSideHint(info, object, context);
+            return PlatformTemplateTypes.withNote(decorateSideHint(info, object, context), object);
         }
 
         @Override
@@ -1361,7 +1362,9 @@ public final class BslEditorHoverHook implements IStartup
         {
             String html = IrBslHoverHtml.readHtml(info);
             String modified = applyHoverDecorations(html);
-            return modified.equals(html) ? info : IrBslHoverHtml.withHtml(info, modified);
+            Object decorated = modified.equals(html) ? info : IrBslHoverHtml.withHtml(info, modified);
+            return info instanceof XtextBrowserInformationControlInput input
+                ? PlatformTemplateTypes.withNote(decorated, input.getElement()) : decorated;
         }
 
         private String applyHoverDecorations(String html)

@@ -28,11 +28,12 @@ import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.EnumValue;
 import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 
 /**
- * Реквизит/измерение/ресурс/значение перечисления/метод HTTP-сервиса не имеет своего редактора: {@code OpenHelper} открывает
+ * Реквизит/табличная часть/измерение/ресурс/значение перечисления/метод HTTP-сервиса не имеет своего редактора: {@code OpenHelper} открывает
  * редактор владельца. Общая точка всех переходов — {@code openEditor}/{@code activateEditor}
  * (диалог «Открыть объект метаданных», переход к определению, навигатор, поиск и т.п.).
  * После успешного открытия панель «Свойства» активируется последней.
@@ -140,7 +141,8 @@ public final class OpenHelperAttributePropertiesHook implements IStartup
             String typeName = obj.eClass().getName();
             return typeName == null || !typeName.contains("CommonAttribute"); //$NON-NLS-1$
         }
-        if (obj instanceof EnumValue || obj instanceof com._1c.g5.v8.dt.metadata.mdclass.Method)
+        if (obj instanceof BasicTabularSection || obj instanceof EnumValue
+            || obj instanceof com._1c.g5.v8.dt.metadata.mdclass.Method)
             return true;
         return obj != null && "StandardAttribute".equals(obj.eClass().getName()); //$NON-NLS-1$
     }

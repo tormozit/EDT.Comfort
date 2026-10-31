@@ -1517,11 +1517,12 @@ public class SmartCompletionProposal implements
         if (isEdtIrOverlapRow())
             return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate));
-        // Строка без описания EDT получает от нас HTML («Приемник.Тип») — панель браузерная, как у слов ИР;
-        // штатная текстовая показала бы разметку текстом.
+        // Строка без описания EDT получает от нас HTML («Приемник.Тип», замечание о шаблонном типе) — панель
+        // браузерная, как у слов ИР; штатная текстовая показала бы разметку текстом.
         if (delegate instanceof ConfigurableCompletionProposal configurable
             && Global.getField(configurable, "additionalProposalInfo") == null //$NON-NLS-1$
-            && BslExpectedTypePremiums.hasReceiverLine())
+            && (BslExpectedTypePremiums.hasReceiverLine()
+                || PlatformTemplateTypes.noteText(SmartContentAssistProcessor.filterMatchName(delegate)) != null))
             return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate));
         if (delegate instanceof ICompletionProposalExtension3 ext3)
@@ -1634,8 +1635,13 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal ir)
             return resolveIrAdditionalProposalInfo(ir);
         Object baseInfo = readDelegateEdtAdditionalInfo(monitor);
-        return withComputedFunctionType(
-            BslExpectedTypePremiums.withReceiverType(withParentLine(resolveEdtAssistSideHint(baseInfo))));
+        // Строка типа штатного списка без обработчика подсказки: сам тип — в additionalProposalInfo.
+        Object element = SmartContentAssistProcessor.unwrapProposal(delegate) instanceof ConfigurableCompletionProposal configurable
+            ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
+        // Замечание о типе — до «Приемник.Тип»: та строка всегда первая.
+        Object described = PlatformTemplateTypes.withNote(withParentLine(resolveEdtAssistSideHint(baseInfo)), element,
+            SmartContentAssistProcessor.filterMatchName(delegate));
+        return withComputedFunctionType(BslExpectedTypePremiums.withReceiverType(described));
 
     }
 

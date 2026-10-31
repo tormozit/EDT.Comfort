@@ -386,14 +386,8 @@ final class FunctionReturnTypes
                         request = QUEUE.pollFirst();
                 }
             }
-            String phase = index != null ? "worker.index" : request != null ? "worker.native" : "worker.empty"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            String key = index != null ? index.target().key() : request != null ? request.key() : ""; //$NON-NLS-1$
-            long queuedAt = index != null ? index.queuedAt() : request != null ? request.queuedAt() : 0;
-            try (TypeLoadTrace.Span trace = TypeLoadTrace.start(phase, key))
+            try
             {
-                trace.detail = "queueUs=" + (queuedAt != 0 ? (System.nanoTime() - queuedAt) / 1000L : -1L) //$NON-NLS-1$
-                    + " priority=" + key.equals(priorityKey); //$NON-NLS-1$
-                TypeLoadTrace.begin(trace);
                 if (index != null)
                     computeIndex(index);
                 else if (request != null)
@@ -422,145 +416,6 @@ final class FunctionReturnTypes
 
     private FunctionReturnTypes()
     {
-    }
-
-    /** Временные безусловные замеры. Суммы разных этапов могут пересекаться: этапы вложены. */
-    private static final class TypeLoadTrace
-    {
-        private static final String TOPIC = "assist-type-load"; //$NON-NLS-1$
-        private static final long STARTED = System.nanoTime();
-        private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
-        private static final Map<String, Totals> TOTALS = new ConcurrentHashMap<>();
-        private static final java.lang.management.ThreadMXBean CPU = cpuBean();
-        private static final ThreadLocal<LoggingCost> LOG_COST = ThreadLocal.withInitial(LoggingCost::new);
-
-        private static final class LoggingCost
-        {
-            long wall;
-            long cpu;
-        }
-
-        private static void write(String text)
-        {
-            long wall = System.nanoTime();
-            long cpu = cpuNow();
-            try
-            {
-                Global.tempLog(TOPIC, text);
-            }
-            finally
-            {
-                long endCpu = cpuNow();
-                LoggingCost cost = LOG_COST.get();
-                cost.wall += System.nanoTime() - wall;
-                if (cpu >= 0 && endCpu >= cpu)
-                    cost.cpu += endCpu - cpu;
-            }
-        }
-
-        private static java.lang.management.ThreadMXBean cpuBean()
-        {
-            try
-            {
-                var bean = java.lang.management.ManagementFactory.getThreadMXBean();
-                if (!bean.isCurrentThreadCpuTimeSupported())
-                    return null;
-                if (!bean.isThreadCpuTimeEnabled())
-                    bean.setThreadCpuTimeEnabled(true);
-                return bean;
-            }
-            catch (UnsupportedOperationException | SecurityException error)
-            {
-                return null;
-            }
-        }
-
-        private static long cpuNow()
-        {
-            try
-            {
-                return CPU != null && CPU.isThreadCpuTimeEnabled() ? CPU.getCurrentThreadCpuTime() : -1L;
-            }
-            catch (UnsupportedOperationException | SecurityException error)
-            {
-                return -1L;
-            }
-        }
-
-        static Span start(String phase, String key)
-        {
-            return new Span(phase, key);
-        }
-
-        static void begin(Span span)
-        {
-            write("begin id=" + span.id + " phase=" + span.phase + " key=" + span.key //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " " + span.detail + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-            // Запись начала задания не включается в его время выполнения.
-            span.wall = System.nanoTime();
-            span.cpu = cpuNow();
-            span.loggingWall = LOG_COST.get().wall;
-            span.loggingCpu = LOG_COST.get().cpu;
-        }
-
-        private static final class Totals
-        {
-            final java.util.concurrent.atomic.AtomicLong count = new java.util.concurrent.atomic.AtomicLong();
-            final java.util.concurrent.atomic.AtomicLong wallUs = new java.util.concurrent.atomic.AtomicLong();
-            final java.util.concurrent.atomic.AtomicLong cpuUs = new java.util.concurrent.atomic.AtomicLong();
-            final java.util.concurrent.atomic.AtomicLong cpuSamples = new java.util.concurrent.atomic.AtomicLong();
-            final java.util.concurrent.atomic.AtomicLong maxUs = new java.util.concurrent.atomic.AtomicLong();
-            final java.util.concurrent.atomic.AtomicLong cacheHits = new java.util.concurrent.atomic.AtomicLong();
-        }
-
-        static final class Span implements AutoCloseable
-        {
-            final long id = IDS.incrementAndGet();
-            final String phase;
-            final String key;
-            long wall = System.nanoTime();
-            long cpu = cpuNow();
-            long loggingWall = LOG_COST.get().wall;
-            long loggingCpu = LOG_COST.get().cpu;
-            String detail = ""; //$NON-NLS-1$
-            boolean cacheHit;
-
-            Span(String phase, String key)
-            {
-                this.phase = phase;
-                this.key = key;
-            }
-
-            @Override
-            public void close()
-            {
-                long endWall = System.nanoTime();
-                long endCpu = cpuNow();
-                long logWall = LOG_COST.get().wall - loggingWall;
-                long logCpu = LOG_COST.get().cpu - loggingCpu;
-                long elapsedUs = Math.max(0L, endWall - wall - logWall) / 1000L;
-                long elapsedCpuUs = cpu >= 0 && endCpu >= cpu
-                    ? Math.max(0L, endCpu - cpu - logCpu) / 1000L : -1L;
-                Totals totals = TOTALS.computeIfAbsent(phase, ignored -> new Totals());
-                long count = totals.count.incrementAndGet();
-                long sumWall = totals.wallUs.addAndGet(elapsedUs);
-                if (elapsedCpuUs >= 0)
-                {
-                    totals.cpuUs.addAndGet(elapsedCpuUs);
-                    totals.cpuSamples.incrementAndGet();
-                }
-                long max = totals.maxUs.accumulateAndGet(elapsedUs, Math::max);
-                if (cacheHit)
-                    totals.cacheHits.incrementAndGet();
-                write("end id=" + id + " phase=" + phase + " key=" + key //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " wallUs=" + elapsedUs + " cpuUs=" + elapsedCpuUs + " cacheHit=" + cacheHit //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " traceLogUs=" + logWall / 1000L //$NON-NLS-1$
-                    + " phaseCount=" + count + " phaseWallUs=" + sumWall + " phaseCpuUs=" + totals.cpuUs.get() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " phaseCpuSamples=" + totals.cpuSamples.get() + " phaseMaxUs=" + max //$NON-NLS-1$ //$NON-NLS-2$
-                    + " phaseCacheHits=" + totals.cacheHits.get() + " windowMs=" + (endWall - STARTED) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
-                    + " " + detail + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
     }
 
     /** Перерисовка строки не запускает чтение типов: запросами управляет активный список. */
@@ -618,16 +473,13 @@ final class FunctionReturnTypes
 
         private void postpone()
         {
-            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.defer", "popup@" + System.identityHashCode(assistant)))
-            {
-                if (closed)
-                    return;
-                discardBackgroundRequests();
-                display.timerExec(-1, timer);
-                timerScheduled = false;
-                idleAt = System.nanoTime() + IDLE_MS * 1_000_000L;
-                ensureTimer();
-            }
+            if (closed)
+                return;
+            discardBackgroundRequests();
+            display.timerExec(-1, timer);
+            timerScheduled = false;
+            idleAt = System.nanoTime() + IDLE_MS * 1_000_000L;
+            ensureTimer();
         }
 
         /** Новый ввод отменяет ещё не начатые запросы остальных строк, сохраняя их готовый кэш. */
@@ -669,37 +521,33 @@ final class FunctionReturnTypes
 
         private void requestVisible()
         {
-            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.visible", "popup@" + System.identityHashCode(assistant)))
+            timerScheduled = false;
+            if (closed || table.isDisposed() || !ContentAssistPopupSync.isPopupVisible(assistant))
             {
-                timerScheduled = false;
-                if (closed || table.isDisposed() || !ContentAssistPopupSync.isPopupVisible(assistant))
-                {
-                    close();
-                    return;
-                }
-                List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
-                    ContentAssistPopupSync.visibleProposals(assistant);
-                if (rows == null)
-                    return;
-                var area = table.getClientArea();
-                int requested = 0;
-                for (int i = table.getTopIndex(); i < table.getItemCount() && i < rows.size(); i++)
-                {
-                    var bounds = table.getItem(i).getBounds();
-                    if (bounds.y >= area.y + area.height)
-                        break;
-                    if (bounds.y + bounds.height <= area.y || i == table.getSelectionIndex())
-                        continue;
-                    if (rows.get(i) instanceof SmartCompletionProposal proposal)
-                    {
-                        proposal.requestRowTypes(false);
-                        requested++;
-                    }
-                }
-                trace.detail = "rows=" + requested + " idleMs=" + IDLE_MS; //$NON-NLS-1$ //$NON-NLS-2$
-                log("visible.requests rows=" + requested + " idleMs=" + IDLE_MS); //$NON-NLS-1$ //$NON-NLS-2$
-                traceVisibleRows("idle"); //$NON-NLS-1$
+                close();
+                return;
             }
+            List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+                ContentAssistPopupSync.visibleProposals(assistant);
+            if (rows == null)
+                return;
+            var area = table.getClientArea();
+            int requested = 0;
+            for (int i = table.getTopIndex(); i < table.getItemCount() && i < rows.size(); i++)
+            {
+                var bounds = table.getItem(i).getBounds();
+                if (bounds.y >= area.y + area.height)
+                    break;
+                if (bounds.y + bounds.height <= area.y || i == table.getSelectionIndex())
+                    continue;
+                if (rows.get(i) instanceof SmartCompletionProposal proposal)
+                {
+                    proposal.requestRowTypes(false);
+                    requested++;
+                }
+            }
+            log("visible.requests rows=" + requested + " idleMs=" + IDLE_MS); //$NON-NLS-1$ //$NON-NLS-2$
+            traceVisibleRows("idle"); //$NON-NLS-1$
         }
 
         private void traceVisibleRows(String phase)
@@ -1031,28 +879,23 @@ final class FunctionReturnTypes
     {
         if (target == null)
             return;
-        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("request.variable", target.key()))
+        IFile file = ForeignModuleModel.fileOf(target.module());
+        String stamp = currentStamp(target.module());
+        if (file == null || stamp == null || stamp.isEmpty())
+            return;
+        if (first)
+            priorityKey = target.key();
+        VariableComputed computed = VARIABLE_RESULTS.get(target.key());
+        if (computed != null && computed.matches(stamp, target.offset()))
         {
-            IFile file = ForeignModuleModel.fileOf(target.module());
-            String stamp = currentStamp(target.module());
-            if (file == null || stamp == null || stamp.isEmpty())
-                return;
-            if (first)
-                priorityKey = target.key();
-            VariableComputed computed = VARIABLE_RESULTS.get(target.key());
-            trace.detail = "current=" + first; //$NON-NLS-1$
-            if (computed != null && computed.matches(stamp, target.offset()))
-            {
-                trace.cacheHit = true;
-                return;
-            }
-            Request request = new Request(target.module(), file, stamp, ForeignModuleModel.openDocument(file),
-                target.method(), target);
-            if (request.nativeDocument() == null)
-                finishUnknown(request);
-            else
-                enqueue(request, first);
+            return;
         }
+        Request request = new Request(target.module(), file, stamp, ForeignModuleModel.openDocument(file),
+            target.method(), target);
+        if (request.nativeDocument() == null)
+            finishUnknown(request);
+        else
+            enqueue(request, first);
     }
 
     /**
@@ -1386,72 +1229,64 @@ final class FunctionReturnTypes
         @Override
         public void documentAboutToBeChanged(org.eclipse.jface.text.DocumentEvent event)
         {
-            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("context.before-edit", module.toString()))
+            preserve = false;
+            beforeStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
+            try
             {
-                preserve = false;
-                beforeStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
-                try
-                {
-                    var line = event.getDocument().getLineInformationOfOffset(event.getOffset());
-                    lineStart = line.getOffset();
-                    lineEnd = lineStart + line.getLength();
-                    String inserted = event.getText();
-                    boolean singleLine = event.getOffset() + event.getLength() <= lineEnd
-                        && (inserted == null || inserted.indexOf('\n') < 0 && inserted.indexOf('\r') < 0);
-                    preserve = singleLine && lineStart == editingLine;
-                    editingLine = singleLine ? lineStart : -1;
-                }
-                catch (org.eclipse.jface.text.BadLocationException error)
-                {
-                    editingLine = -1;
-                    Global.tempLog("assist-local-context", "edit point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-                Global.tempLog("assist-local-context", "before module=" + module + " stamp=" + beforeStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " line=" + lineStart + " preserve=" + preserve); //$NON-NLS-1$ //$NON-NLS-2$
+                var line = event.getDocument().getLineInformationOfOffset(event.getOffset());
+                lineStart = line.getOffset();
+                lineEnd = lineStart + line.getLength();
+                String inserted = event.getText();
+                boolean singleLine = event.getOffset() + event.getLength() <= lineEnd
+                    && (inserted == null || inserted.indexOf('\n') < 0 && inserted.indexOf('\r') < 0);
+                preserve = singleLine && lineStart == editingLine;
+                editingLine = singleLine ? lineStart : -1;
             }
+            catch (org.eclipse.jface.text.BadLocationException error)
+            {
+                editingLine = -1;
+                Global.tempLog("assist-local-context", "edit point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Global.tempLog("assist-local-context", "before module=" + module + " stamp=" + beforeStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " line=" + lineStart + " preserve=" + preserve); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
         public void documentChanged(org.eclipse.jface.text.DocumentEvent event)
         {
-            try (TypeLoadTrace.Span trace = TypeLoadTrace.start("context.after-edit", module.toString()))
+            String afterStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
+            if (!LocalContextInvalidation.documents.containsKey(event.getDocument()))
+                otherModuleChanged(module);
+            STAMP_CHECKS.put(module, new StampCheck(afterStamp, System.nanoTime()));
+            int[] retained = { 0 };
+            if (!preserve)
+                LINE_CONTEXT_KEYS.remove(module);
+            if (preserve)
             {
-                String afterStamp = ForeignModuleModel.stamp(file, (IXtextDocument)event.getDocument());
-                if (!LocalContextInvalidation.documents.containsKey(event.getDocument()))
-                    otherModuleChanged(module);
-                STAMP_CHECKS.put(module, new StampCheck(afterStamp, System.nanoTime()));
-                int[] retained = { 0 };
-                if (!preserve)
-                    LINE_CONTEXT_KEYS.remove(module);
-                if (preserve)
+                int newEnd = lineEnd - event.getLength() + (event.getText() != null ? event.getText().length() : 0);
+                String prefix = module + "#"; //$NON-NLS-1$
+                VARIABLE_RESULTS.replaceAll((key, value) ->
                 {
-                    int newEnd = lineEnd - event.getLength() + (event.getText() != null ? event.getText().length() : 0);
-                    String prefix = module + "#"; //$NON-NLS-1$
-                    VARIABLE_RESULTS.replaceAll((key, value) ->
-                    {
-                        boolean sameLine = value.lineStart() >= 0 ? value.lineStart() == lineStart
-                            : value.offset() >= lineStart && value.offset() <= lineEnd;
-                        if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp) || !sameLine)
-                            return value;
-                        retained[0]++;
-                        return new VariableComputed(afterStamp, value.offset(), value.type(), lineStart, newEnd,
-                            value.returnsRevision());
-                    });
-                    RESULTS.replaceAll((key, value) ->
-                    {
-                        if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp))
-                            return value;
-                        retained[0]++;
-                        return new Computed(afterStamp, value.type(), true, value.typesGeneration());
-                    });
-                }
-                Global.tempLog("assist-local-context", "after module=" + module + " stamp=" + afterStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " preserve=" + preserve + " retained=" + retained[0]); //$NON-NLS-1$ //$NON-NLS-2$
-                trace.detail = "preserve=" + preserve + " retained=" + retained[0] //$NON-NLS-1$ //$NON-NLS-2$
-                    + " variableEntries=" + VARIABLE_RESULTS.size() + " functionEntries=" + RESULTS.size(); //$NON-NLS-1$ //$NON-NLS-2$
-                if (retained[0] > 0)
-                    publish();
+                    boolean sameLine = value.lineStart() >= 0 ? value.lineStart() == lineStart
+                        : value.offset() >= lineStart && value.offset() <= lineEnd;
+                    if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp) || !sameLine)
+                        return value;
+                    retained[0]++;
+                    return new VariableComputed(afterStamp, value.offset(), value.type(), lineStart, newEnd,
+                        value.returnsRevision());
+                });
+                RESULTS.replaceAll((key, value) ->
+                {
+                    if (!key.startsWith(prefix) || !value.stamp().equals(beforeStamp))
+                        return value;
+                    retained[0]++;
+                    return new Computed(afterStamp, value.type(), true, value.typesGeneration());
+                });
             }
+            Global.tempLog("assist-local-context", "after module=" + module + " stamp=" + afterStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " preserve=" + preserve + " retained=" + retained[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            if (retained[0] > 0)
+                publish();
         }
     }
 
@@ -1497,38 +1332,33 @@ final class FunctionReturnTypes
     {
         if (target == null)
             return;
-        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("request.function", target.key()))
+        String key = target.key();
+        if (first)
+            priorityKey = key;
+        IFile file = ForeignModuleModel.fileOf(target.module());
+        if (file == null)
         {
-            String key = target.key();
-            if (first)
-                priorityKey = key;
-            IFile file = ForeignModuleModel.fileOf(target.module());
-            if (file == null)
-            {
-                log("skip noFile key=" + key); //$NON-NLS-1$
-                RESULTS.putIfAbsent(key, new Computed("", "")); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            String stamp = currentStamp(target.module());
-            var known = KNOWN_DOCUMENTS.get(target.module());
-            IXtextDocument document = known != null ? known.get() : null;
-            Computed ready = RESULTS.get(key);
-            trace.detail = "current=" + first; //$NON-NLS-1$
-            if (functionCurrent(ready, stamp, target.module()))
-            {
-                trace.cacheHit = true;
-                return;
-            }
-            // Открытый редактор уже содержит типы после расчёта запросов; индекс их ещё не хранит.
-            if (document == null && requestIndex(target, stamp, first))
-                return;
-            if (document == null)
-            {
-                finishUnknown(new Request(target.module(), file, stamp, null, target.name(), null));
-                return;
-            }
-            activateModel(target, file, document, stamp, first);
+            log("skip noFile key=" + key); //$NON-NLS-1$
+            RESULTS.putIfAbsent(key, new Computed("", "")); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
+        String stamp = currentStamp(target.module());
+        var known = KNOWN_DOCUMENTS.get(target.module());
+        IXtextDocument document = known != null ? known.get() : null;
+        Computed ready = RESULTS.get(key);
+        if (functionCurrent(ready, stamp, target.module()))
+        {
+            return;
+        }
+        // Открытый редактор уже содержит типы после расчёта запросов; индекс их ещё не хранит.
+        if (document == null && requestIndex(target, stamp, first))
+            return;
+        if (document == null)
+        {
+            finishUnknown(new Request(target.module(), file, stamp, null, target.name(), null));
+            return;
+        }
+        activateModel(target, file, document, stamp, first);
     }
 
     /**
@@ -1872,7 +1702,6 @@ final class FunctionReturnTypes
             List<Pending> pending = new java.util.ArrayList<>();
             // #region temp timing #877: ожидание блокировки документа против работы под ней
             long[] entered = new long[1];
-            TypeLoadTrace.Span readTrace = TypeLoadTrace.start("native.read", request.key()); //$NON-NLS-1$
             try
             {
                 missing = request.nativeDocument().readOnly(resource ->
@@ -1892,9 +1721,6 @@ final class FunctionReturnTypes
                 log("error native module=" + request.module() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
             }
             long end = System.nanoTime();
-            readTrace.detail = "lockWaitUs=" + (entered[0] > 0 ? (entered[0] - readTrace.wall) / 1000L : -1L) //$NON-NLS-1$
-                + " lockedUs=" + (entered[0] > 0 ? (end - entered[0]) / 1000L : -1L) + " missing=" + missing; //$NON-NLS-1$ //$NON-NLS-2$
-            readTrace.close();
             log("native module=" + request.module() + " missing=" + missing //$NON-NLS-1$ //$NON-NLS-2$
                 + " ms=" + (end - start) / 1_000_000L //$NON-NLS-1$
                 + " waitMs=" + (entered[0] > 0 ? (entered[0] - start) / 1_000_000L : -1) //$NON-NLS-1$
@@ -2008,41 +1834,36 @@ final class FunctionReturnTypes
     private static void loadProxyNames(Set<URI> uris, URI module,
         org.eclipse.core.resources.IProject project)
     {
-        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("proxy.load", module.toString()))
+        uris.removeIf(PROXY_NAMES::containsKey);
+        if (uris.isEmpty())
+            return;
+        org.eclipse.emf.ecore.resource.ResourceSet set = null;
+        try
         {
-            trace.detail = "requestedUris=" + uris.size(); //$NON-NLS-1$
-            uris.removeIf(PROXY_NAMES::containsKey);
-            trace.detail += " loadUris=" + uris.size(); //$NON-NLS-1$
-            if (uris.isEmpty())
-                return;
-            org.eclipse.emf.ecore.resource.ResourceSet set = null;
-            try
+            IResourceServiceProvider rsp =
+                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(module);
+            set = rsp != null ? BslOccurrenceContextResolver.newLiveResourceSet(rsp, project) : null;
+            for (URI uri : uris)
             {
-                IResourceServiceProvider rsp =
-                    IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(module);
-                set = rsp != null ? BslOccurrenceContextResolver.newLiveResourceSet(rsp, project) : null;
-                for (URI uri : uris)
+                String name = null;
+                try
                 {
-                    String name = null;
-                    try
-                    {
-                        org.eclipse.emf.ecore.EObject object = set != null ? set.getEObject(uri, true) : null;
-                        name = object instanceof TypeItem type ? typeName(type) : null;
-                    }
-                    catch (RuntimeException error)
-                    {
-                        log("error proxy uri=" + uri + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
-                    if (name == null || name.isEmpty())
-                        log("proxy unresolved uri=" + uri); //$NON-NLS-1$
-                    PROXY_NAMES.put(uri, name != null ? name : ""); //$NON-NLS-1$
+                    org.eclipse.emf.ecore.EObject object = set != null ? set.getEObject(uri, true) : null;
+                    name = object instanceof TypeItem type ? typeName(type) : null;
                 }
+                catch (RuntimeException error)
+                {
+                    log("error proxy uri=" + uri + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (name == null || name.isEmpty())
+                    log("proxy unresolved uri=" + uri); //$NON-NLS-1$
+                PROXY_NAMES.put(uri, name != null ? name : ""); //$NON-NLS-1$
             }
-            finally
-            {
-                if (set != null)
-                    set.getResources().clear();
-            }
+        }
+        finally
+        {
+            if (set != null)
+                set.getResources().clear();
         }
     }
 
@@ -2446,33 +2267,29 @@ final class FunctionReturnTypes
 
     private static void refresh()
     {
-        try (TypeLoadTrace.Span trace = TypeLoadTrace.start("ui.refresh", ""))
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
+        log("refresh list=" + visible + " listeners=" + LISTENERS.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        if (visible)
         {
-            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-            boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
-            trace.detail = "visible=" + visible + " listeners=" + LISTENERS.size(); //$NON-NLS-1$ //$NON-NLS-2$
-            log("refresh list=" + visible + " listeners=" + LISTENERS.size()); //$NON-NLS-1$ //$NON-NLS-2$
-            if (visible)
-            {
-                ContentAssistPopupSync.refreshProposalTable(assistant);
-                var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
-                if (table != null && !table.isDisposed()
-                    && table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
-                    session.traceVisibleRows("refresh"); //$NON-NLS-1$
-            }
-            if (NATIVE_HINTS_CHANGED.getAndSet(false) && visible)
-            {
-                List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
-                    ContentAssistPopupSync.visibleProposals(assistant);
-                var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
-                int selected = table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
-                if (rows != null && selected >= 0 && selected < rows.size()
-                    && rows.get(selected) instanceof SmartCompletionProposal proposal)
-                    proposal.refreshNativeVariableSideHint(assistant);
-            }
-            IrBslHoverHtml.refreshComputedFunctionTypes();
-            LISTENERS.removeIf(listener -> !listener.getAsBoolean());
+            ContentAssistPopupSync.refreshProposalTable(assistant);
+            var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
+            if (table != null && !table.isDisposed()
+                && table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
+                session.traceVisibleRows("refresh"); //$NON-NLS-1$
         }
+        if (NATIVE_HINTS_CHANGED.getAndSet(false) && visible)
+        {
+            List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
+                ContentAssistPopupSync.visibleProposals(assistant);
+            var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
+            int selected = table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
+            if (rows != null && selected >= 0 && selected < rows.size()
+                && rows.get(selected) instanceof SmartCompletionProposal proposal)
+                proposal.refreshNativeVariableSideHint(assistant);
+        }
+        IrBslHoverHtml.refreshComputedFunctionTypes();
+        LISTENERS.removeIf(listener -> !listener.getAsBoolean());
     }
 
     private static com._1c.g5.v8.dt.bsl.model.Module moduleOf(Resource resource)

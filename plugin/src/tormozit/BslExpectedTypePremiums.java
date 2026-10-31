@@ -1020,8 +1020,10 @@ final class BslExpectedTypePremiums
         boolean insideExpression = insideExpression(context, site);
         Map<String, Integer> frequencies = context.parent().isEmpty() ? Collections.emptyMap()
             : memberFrequencies(resource, context);
+        // В комментарии слово — не выражение, приёмника у него нет.
+        boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret());
         return new Scene(expectation, statisticsContext, insideExpression, frequencies,
-            receiverTypeLine(expectation, resource), expectation.typeItems().isEmpty()
+            comment ? null : receiverTypeLine(expectation, resource), expectation == null || expectation.typeItems().isEmpty()
                 ? receiverTypes(expectation).isEmpty() ? "" //$NON-NLS-1$
                     : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 : FunctionReturnTypes.typeSetText(expectation.typeItems()),
@@ -2476,7 +2478,8 @@ final class BslExpectedTypePremiums
      */
     static String receiverTypeLineAt(IDocument document, int wordEnd)
     {
-        if (!(document instanceof IXtextDocument xtextDocument) || wordEnd < 0 || Display.getCurrent() != null)
+        if (!(document instanceof IXtextDocument xtextDocument) || wordEnd < 0 || Display.getCurrent() != null
+            || SmartContentAssistProcessor.isCommentAssistContext(document, wordEnd))
             return null;
         try
         {
