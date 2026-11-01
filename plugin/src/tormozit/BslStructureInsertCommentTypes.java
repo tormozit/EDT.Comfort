@@ -3719,11 +3719,6 @@ public final class BslStructureInsertCommentTypes
             java.util.Set<String> diagTypedBefore = module != null && partialParseResult(module) != null
                 ? BslDocCommentComputedTypes.diagTypedReturnFunctions(module) : null;
             // #endregion
-            // #region agent log
-            boolean diagPartial = module != null && partialParseResult(module) != null;
-            boolean diagIncomplete = resource != null && INCOMPLETE_RESOURCES.contains(resource);
-            long[] diagTiming = TypesTiming.begin();
-            // #endregion
             boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
             try
             {
@@ -3749,138 +3744,8 @@ public final class BslStructureInsertCommentTypes
                         INCOMPLETE_RESOURCES.add(resource);
                 }
                 endExportVarsScope(scopeOwner);
-                // #region agent log
-                TypesTiming.end(diagTiming, module, resource, diagPartial, diagIncomplete, complete);
-                // #endregion
             }
         }
-
-        // #region agent log
-        /**
-         * Замер полного расчёта типов модуля: штатный {@code super.installTypeSystem} отдельно от
-         * прохода Комфорта; вложенный расчёт чужого модуля — свой кадр, из родительского вычитается.
-         * Строка на каждый расчёт — в {@code check-timing.log} раннего бандла (вместе с расчётом
-         * контекста, к которому относится), без раннего бандла — в temp-лог {@code type-system-timing}.
-         */
-        private static final class TypesTiming
-        {
-            private static final int START = 0;
-            private static final int STOCK = 1;
-            private static final int STOCK_CALLS = 2;
-            private static final int NESTED = 3;
-            private static final int SECOND_PASS = 4;
-            private static final ThreadLocal<java.util.ArrayDeque<long[]>> FRAMES =
-                ThreadLocal.withInitial(java.util.ArrayDeque::new);
-            /** Сколько раз за сеанс считался модуль — номер повтора в строке. */
-            private static final java.util.Map<String, java.util.concurrent.atomic.AtomicInteger> RUNS =
-                new java.util.concurrent.ConcurrentHashMap<>();
-
-            static long[] begin()
-            {
-                long[] frame = new long[5];
-                frame[START] = System.nanoTime();
-                FRAMES.get().push(frame);
-                return frame;
-            }
-
-            /** Время вложенных расчётов текущего кадра — до штатного прохода, см. {@link #stock}. */
-            static long nested()
-            {
-                long[] frame = FRAMES.get().peek();
-                return frame != null ? frame[NESTED] : 0;
-            }
-
-            /** Штатный проход без вложенных расчётов, запущенных им самим (у них своя строка). */
-            static void stock(long nanos, long nestedBefore)
-            {
-                long[] frame = FRAMES.get().peek();
-                if (frame != null)
-                {
-                    frame[STOCK] += nanos - (frame[NESTED] - nestedBefore);
-                    frame[STOCK_CALLS]++;
-                }
-            }
-
-            static void secondPass(long nanos)
-            {
-                long[] frame = FRAMES.get().peek();
-                if (frame != null)
-                    frame[SECOND_PASS] += nanos;
-            }
-
-            /** Экземпляры прошлого расчёта модуля: {модуль, ресурс, набор ресурсов} — identityHashCode. */
-            private static final java.util.Map<String, int[]> INSTANCES = new java.util.concurrent.ConcurrentHashMap<>();
-
-            static void end(long[] frame, Module module, Resource resource, boolean partial, boolean incompleteBefore,
-                boolean complete)
-            {
-                try
-                {
-                    long total = System.nanoTime() - frame[START];
-                    var frames = FRAMES.get();
-                    frames.remove(frame);
-                    long[] parent = frames.peek();
-                    if (parent != null)
-                        parent[NESTED] += total;
-                    String uri = resource == null ? "null" : String.valueOf(resource.getURI()); //$NON-NLS-1$
-                    int run = RUNS.computeIfAbsent(uri, key -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
-                    Object resourceSet = resource == null ? null : resource.getResourceSet();
-                    int[] instances = {System.identityHashCode(module), System.identityHashCode(resource),
-                        System.identityHashCode(resourceSet)};
-                    int[] before = INSTANCES.put(uri, instances);
-                    String identity = " module@" + Integer.toHexString(instances[0]) //$NON-NLS-1$
-                        + " resource@" + Integer.toHexString(instances[1]) //$NON-NLS-1$
-                        + " resourceSet@" + Integer.toHexString(instances[2]) //$NON-NLS-1$
-                        + (resourceSet == null ? "" : "(" + resourceSet.getClass().getSimpleName() + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + (before == null ? " instances=first" //$NON-NLS-1$
-                            : " sameModule=" + (before[0] == instances[0]) //$NON-NLS-1$
-                                + " sameResource=" + (before[1] == instances[1]) //$NON-NLS-1$
-                                + " sameResourceSet=" + (before[2] == instances[2])); //$NON-NLS-1$
-                    String line = "types ms=" + ms(total) //$NON-NLS-1$
-                        + " stockMs=" + ms(frame[STOCK]) + " stockCalls=" + frame[STOCK_CALLS] //$NON-NLS-1$ //$NON-NLS-2$
-                        + " comfortMs=" + ms(total - frame[STOCK] - frame[NESTED]) //$NON-NLS-1$
-                        + " nestedMs=" + ms(frame[NESTED]) + " secondPassMs=" + ms(frame[SECOND_PASS]) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " run=" + run + " module=" + uri + identity //$NON-NLS-1$ //$NON-NLS-2$
-                        + " partial=" + partial + " incompleteBefore=" + incompleteBefore //$NON-NLS-1$ //$NON-NLS-2$
-                        + " complete=" + complete + " nested=" + (parent != null) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                        + " callers=" + callers(); //$NON-NLS-1$
-                    @SuppressWarnings("unchecked")
-                    var sink = (java.util.function.Function<Object[], Object>) System.getProperties()
-                        .get("tormozit.checkTiming.types"); //$NON-NLS-1$
-                    if (sink != null)
-                        // В сумму расчёта контекста — только верхний кадр: вложенный уже внутри него.
-                        sink.apply(new Object[] {line, parent == null ? total : 0L, parent == null ? frame[STOCK] : 0L});
-                    else
-                        Global.tempLog("type-system-timing", line); //$NON-NLS-1$
-                }
-                catch (Throwable e)
-                {
-                    Global.tempLogException("type-system-timing", "end", e); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-            }
-
-            /**
-             * Вызывающие вне самой системы типов и JDK: {@code Класс.метод<Класс.метод…}. Кадры
-             * tormozit (в том числе {@code installTypeSystemNonInterruptable}) остаются.
-             */
-            private static String callers()
-            {
-                return StackWalker.getInstance().walk(stack -> stack
-                    .filter(f -> !f.getClassName().startsWith("tormozit.BslStructureInsertCommentTypes$ComfortTreeTypeSystem") //$NON-NLS-1$
-                        && !f.getClassName().startsWith("java.") && !f.getClassName().startsWith("jdk.") //$NON-NLS-1$ //$NON-NLS-2$
-                        && !f.getClassName().startsWith("sun.")) //$NON-NLS-1$
-                    .limit(16)
-                    .map(f -> f.getClassName().substring(f.getClassName().lastIndexOf('.') + 1) + '.' + f.getMethodName())
-                    .collect(java.util.stream.Collectors.joining("<"))); //$NON-NLS-1$
-            }
-
-            private static String ms(long nanos)
-            {
-                return String.format(java.util.Locale.ROOT, "%.1f", nanos / 1e6); //$NON-NLS-1$
-            }
-        }
-        // #endregion
 
         /**
          * Ресурсы модулей, чей последний полный расчёт отменён или упал. Отменённый расчёт
@@ -3964,13 +3829,7 @@ public final class BslStructureInsertCommentTypes
             try
             {
                 installTypeSystemPass(module, cancelIndicator);
-                // #region agent log
-                long diagSecondStart = System.nanoTime();
-                // #endregion
                 secondPassIfNeeded(module, cancelIndicator);
-                // #region agent log
-                TypesTiming.secondPass(System.nanoTime() - diagSecondStart);
-                // #endregion
             }
             finally
             {
@@ -4453,20 +4312,7 @@ public final class BslStructureInsertCommentTypes
             try
             {
                 resetPartialMethodStates(module, cancelIndicator);
-                // #region agent log
-                long diagStockStart = System.nanoTime();
-                long diagNestedBefore = TypesTiming.nested();
-                // #endregion
-                try
-                {
-                    super.installTypeSystem(module, cancelIndicator);
-                }
-                // #region agent log
-                finally
-                {
-                    TypesTiming.stock(System.nanoTime() - diagStockStart, diagNestedBefore);
-                }
-                // #endregion
+                super.installTypeSystem(module, cancelIndicator);
             }
             finally
             {

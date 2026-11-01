@@ -3,6 +3,7 @@ package tormozit;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.eclipse.core.filebuffers.FileBuffers;
 import org.eclipse.core.filebuffers.LocationKind;
@@ -11,6 +12,7 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -23,6 +25,7 @@ import org.eclipse.core.commands.common.NotDefinedException;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.Region;
@@ -1100,8 +1103,90 @@ public final class BslEditorHyperlinkHook implements IStartup
             this.page = page;
         }
 
+        /** Ссылки, досчитанные в фоне для последнего положения указателя. */
+        private volatile DetectedLinks detected;
+        /** Только UI-поток. */
+        private Job pendingJob;
+
         @Override
         public IHyperlink[] detectHyperlinks(ITextViewer viewer, IRegion region, boolean multiple)
+        {
+            // Наведение с Ctrl идёт в UI-потоке, а блокировку документа секундами держат
+            // проверки и раскраска (и tryReadOnly её ждёт). Свои ссылки читают модель модуля —
+            // в UI берём только готовый результат, промах досчитываем в фоне.
+            if (region == null || Display.getCurrent() == null
+                || !(viewer.getDocument() instanceof IDocumentExtension4 document))
+                return detect(viewer, region, multiple, () -> delegate.detectHyperlinks(viewer, region, multiple));
+            long stamp = document.getModificationStamp();
+            DetectedLinks ready = detected;
+            if (ready != null && ready.stamp() == stamp && ready.offset() == region.getOffset()
+                && ready.multiple() == multiple)
+                return ready.links() == null ? null : ready.links().clone();
+            IHyperlink[] stock = delegate.detectHyperlinks(viewer, region, multiple);
+            scheduleDetect(viewer, region, multiple, stock, document, stamp);
+            if (stock == null)
+                return null;
+            IHyperlink[] result = stock.clone();
+            for (int i = 0; i < result.length; i++)
+                if (result[i] instanceof XtextHyperlink link)
+                    result[i] = new HistoryHyperlink(link, source, page);
+            return result;
+        }
+
+        private void scheduleDetect(ITextViewer viewer, IRegion region, boolean multiple, IHyperlink[] stock,
+            IDocumentExtension4 document, long stamp)
+        {
+            if (pendingJob != null)
+                pendingJob.cancel();
+            Job job = Job.create("Ссылки BSL-редактора", monitor -> //$NON-NLS-1$
+            {
+                if (monitor.isCanceled() || document.getModificationStamp() != stamp)
+                    return;
+                IHyperlink[] links;
+                try
+                {
+                    links = detect(viewer, region, multiple, () -> stock);
+                }
+                catch (RuntimeException | LinkageError failure)
+                {
+                    return;
+                }
+                if (monitor.isCanceled() || document.getModificationStamp() != stamp)
+                    return;
+                DetectedLinks result = new DetectedLinks(stamp, region.getOffset(), multiple, links);
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> publish(viewer, document, result));
+            });
+            job.setSystem(true);
+            pendingJob = job;
+            job.schedule();
+        }
+
+        /** Готовый результат — в кэш и синтетическое движение указателя, чтобы менеджер его показал. */
+        private void publish(ITextViewer viewer, IDocumentExtension4 document, DetectedLinks result)
+        {
+            if (document.getModificationStamp() != result.stamp())
+                return;
+            StyledText text = viewer.getTextWidget();
+            if (text == null || text.isDisposed())
+                return;
+            IHyperlink[] links = result.links();
+            if (links == null || links.length == 0)
+            {
+                // Разбор литерала-запроса идёт в скрытом редакторе запроса — только в UI-потоке
+                // (в фоне queryLink возвращает null), как и до досчёта в фоне.
+                IHyperlink query = BslQueryLiteralSupport.queryLink(source, viewer, result.offset());
+                if (query != null)
+                    result = new DetectedLinks(result.stamp(), result.offset(), result.multiple(),
+                        new IHyperlink[] { new HistoryHyperlink(query, source, page) });
+            }
+            detected = result;
+            TextEditorCtrlClickSelectWordHook.pokeHyperlinkManager(text);
+        }
+
+        private IHyperlink[] detect(ITextViewer viewer, IRegion region, boolean multiple,
+            Supplier<IHyperlink[]> stock)
         {
             IHyperlink property = region == null ? null : propertyLink(source, page, viewer, region.getOffset());
             if (property != null)
@@ -1109,8 +1194,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             // Штатные ссылки литерала («ПолучитьФорму») ведут на имя целиком: на «Обработка1»
             // в имени формы предложили бы форму.
             IHyperlink segment = region == null ? null : segmentLink(source, page, viewer, region.getOffset());
-            IHyperlink[] links = segment != null ? new IHyperlink[] { segment }
-                : delegate.detectHyperlinks(viewer, region, multiple);
+            IHyperlink[] links = segment != null ? new IHyperlink[] { segment } : stock.get();
             if (links == null || links.length == 0)
             {
                 IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());
@@ -1141,6 +1225,8 @@ public final class BslEditorHyperlinkHook implements IStartup
                 extension.dispose();
         }
     }
+
+    private record DetectedLinks(long stamp, int offset, boolean multiple, IHyperlink[] links) {}
 
     /** Подписи EDT обрезаны до 25 символов: восстанавливаем выражение из AST, issue 848. */
     private static void compactVariableLinks(ITextViewer viewer, IHyperlink[] links)

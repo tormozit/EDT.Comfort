@@ -212,8 +212,9 @@ public final class TextEditorCtrlClickSelectWordHook implements IStartup
      * пришло бы при малейшем сдвиге. Координаты берём с реального указателя
      * ({@code getOffsetForCursorLocation} смотрит туда, а не в {@code event.x/y}).
      * {@code stateMask} — Ctrl, иначе менеджер сразу {@code deactivate()}.
+     * Тем же способом {@code BslEditorHyperlinkHook} показывает ссылки, досчитанные в фоне.
      */
-    private static void pokeHyperlinkManager(StyledText text)
+    static void pokeHyperlinkManager(StyledText text)
     {
         if (!isCtrlOnlyPressed())
             return;

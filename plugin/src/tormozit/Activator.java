@@ -67,7 +67,6 @@ public class Activator extends AbstractUIPlugin
         // Отметка сборки: файл stale-markers.log обязан появиться сразу после старта плагина.
         if (ContentAssistSessionReloader.STALE_MARKERS_LOG)
             Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v4"); //$NON-NLS-1$ //$NON-NLS-2$
-        CheckTimingLog.install();
         // #endregion
         Global.cleanOrphanedFormNativeTempDirs();
 
@@ -246,9 +245,6 @@ public class Activator extends AbstractUIPlugin
         RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
         IRApplication.disconnectAll();
-        // #region agent log
-        CheckTimingLog.uninstall();
-        // #endregion
 
         ContentAssistManager mgr = ContentAssistManager.getInstance();
         if (mgr != null)

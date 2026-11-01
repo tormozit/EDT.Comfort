@@ -263,55 +263,24 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static Analysis analyzeLiteral(XtextResource resource, StringLiteral literal, String prefix,
         BooleanSupplier canceled, Pass pass)
     {
-        // #region agent log
-        long diagStart = System.nanoTime();
-        String diagKind = "?"; //$NON-NLS-1$
-        Analysis analysis = null;
-        Pass.subBegin("analysis"); //$NON-NLS-1$
-        try
-        {
-        // #endregion
-        analysis = new Analysis(resource, false, pass.russian(resource), prefix, offsetOf(literal), pass);
+        Analysis analysis = new Analysis(resource, false, pass.russian(resource), prefix, offsetOf(literal), pass);
         analysis.validation = true;
         analysis.canceled = canceled;
         analysis.checkCanceled();
         EObject container = literal.eContainer();
         if (container instanceof IndexAccess access && access.getIndex() == literal)
-        {
-            diagKind = "index"; //$NON-NLS-1$
             analysis.indexAccess(access);
-        }
         else
         {
             List<Expression> args = argumentsOf(container);
             int index = args.indexOf(literal);
             if (index >= 0)
-            {
-                diagKind = "call"; //$NON-NLS-1$
                 analysis.call(container, args, index, ""); //$NON-NLS-1$
-            }
             else
-            {
-                diagKind = "outside"; //$NON-NLS-1$
                 analysis.outside(literal);
-            }
         }
         analysis.finish();
         return analysis;
-        // #region agent log
-        }
-        finally
-        {
-            Pass.subEnd();
-            pass.time(literal, prefix, diagKind, analysis, System.nanoTime() - diagStart);
-            if (analysis != null && analysis.branches.stream().anyMatch(branch -> branch.endsWith(" module")))
-                Global.tempLog("literal-module-call", "literal=" + text(literal) + " prefix=" + prefix //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " validation=" + analysis.validation + " full=" + analysis.full //$NON-NLS-1$ //$NON-NLS-2$
-                    + " values=" + analysis.values.values() + " branches=" + analysis.branches //$NON-NLS-1$ //$NON-NLS-2$
-                    + " module=" + (resource.getURI() != null ? resource.getURI().lastSegment() : "?") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " path=" + resource.getURI() + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
     }
 
     /**
@@ -343,116 +312,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         public Pass()
         {
         }
-
-        // #region agent log
-        /**
-         * Сводка анализов литералов потока до запроса ранним бандлом после вызова проверки
-         * ({@link #takeTimingSummary}); без ссылок на AST — переживает проверку модуля без удержания модели.
-         */
-        private static final class TimingStats
-        {
-            /** Вид анализа → {нс, число, нс полных}. */
-            final Map<String, long[]> timing = new HashMap<>();
-            /** {нс, «строка:вид мс текст»} — три самых долгих. */
-            final List<Object[]> slowest = new ArrayList<>();
-            int analyses;
-            long nanos;
-            long fullNanos;
-            /** Подпроход поиска → {исключающие нс, число}; стек открытых подпроходов — {начало, нс вложенных}. */
-            final Map<String, long[]> sub = new HashMap<>();
-            final java.util.ArrayDeque<long[]> subFrames = new java.util.ArrayDeque<>();
-            final java.util.ArrayDeque<String> subLabels = new java.util.ArrayDeque<>();
-        }
-
-        /** Начало подпрохода анализа; время вложенных подпроходов в него не входит. Парный — {@link #subEnd}. */
-        static void subBegin(String label)
-        {
-            TimingStats stats = TIMING.get();
-            if (stats == null)
-                TIMING.set(stats = new TimingStats());
-            stats.subLabels.push(label);
-            stats.subFrames.push(new long[] {System.nanoTime(), 0});
-        }
-
-        static void subEnd()
-        {
-            TimingStats stats = TIMING.get();
-            if (stats == null || stats.subFrames.isEmpty())
-                return;
-            long[] frame = stats.subFrames.pop();
-            String label = stats.subLabels.pop();
-            long elapsed = System.nanoTime() - frame[0];
-            long[] total = stats.sub.computeIfAbsent(label, key -> new long[2]);
-            total[0] += elapsed - frame[1];
-            total[1]++;
-            if (!stats.subFrames.isEmpty())
-                stats.subFrames.peek()[1] += elapsed;
-        }
-
-        private static final ThreadLocal<TimingStats> TIMING = new ThreadLocal<>();
-
-        private void time(StringLiteral literal, String prefix, String kind, Analysis analysis, long elapsed)
-        {
-            TimingStats stats = TIMING.get();
-            // Вне проверки (автодополнение) сводку никто не забирает — не копим.
-            if (stats == null || stats.timing.size() > 2000 && stats.subFrames.isEmpty())
-                TIMING.set(stats = new TimingStats());
-            boolean full = analysis != null && analysis.full && !analysis.values.isEmpty();
-            String branch = analysis == null || analysis.branches.isEmpty() ? "" : analysis.branches.get(0); //$NON-NLS-1$
-            int at = branch.indexOf('@');
-            String label = kind + (prefix.isEmpty() ? "" : "+parent") + ":" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (at >= 0 ? branch.substring(0, at) : branch) + (branch.endsWith(" module") ? " module" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            long[] total = stats.timing.computeIfAbsent(label, key -> new long[3]);
-            total[0] += elapsed;
-            total[1]++;
-            if (full)
-                total[2] += elapsed;
-            stats.analyses++;
-            stats.nanos += elapsed;
-            if (full)
-                stats.fullNanos += elapsed;
-            if (stats.slowest.size() < 3 || elapsed > (Long) stats.slowest.get(2)[0])
-            {
-                var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(literal);
-                String text = node == null ? "?" : node.getText().strip(); //$NON-NLS-1$
-                if (text.length() > 40)
-                    text = text.substring(0, 40) + "…"; //$NON-NLS-1$
-                stats.slowest.add(new Object[] {elapsed, (node == null ? -1 : node.getStartLine()) + ":" + label + " " //$NON-NLS-1$ //$NON-NLS-2$
-                    + CheckTimingLog.ms(elapsed) + "ms " + text.replace(' ', '_').replace('\n', '_').replace('\r', '_')}); //$NON-NLS-1$
-                stats.slowest.sort((a, b) -> Long.compare((Long) b[0], (Long) a[0]));
-                if (stats.slowest.size() > 3)
-                    stats.slowest.remove(3);
-            }
-        }
-
-        /**
-         * Сводка потока с последнего запроса и её сброс:
-         * {@code analyses= analysisMs= fullMs= kinds=вид мс×число(full мс); … slowest=строка:вид мс текст; …};
-         * {@code null} — анализов не было.
-         */
-        static String takeTimingSummary()
-        {
-            TimingStats stats = TIMING.get();
-            TIMING.remove();
-            if (stats == null)
-                return null;
-            var line = new StringBuilder("analyses=").append(stats.analyses) //$NON-NLS-1$
-                .append(" analysisMs=").append(CheckTimingLog.ms(stats.nanos)) //$NON-NLS-1$
-                .append(" fullMs=").append(CheckTimingLog.ms(stats.fullNanos)).append(" kinds="); //$NON-NLS-1$ //$NON-NLS-2$
-            stats.timing.entrySet().stream().sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0])).limit(12)
-                .forEach(entry -> line.append(entry.getKey()).append(' ').append(CheckTimingLog.ms(entry.getValue()[0]))
-                    .append("ms×").append(entry.getValue()[1]).append("(full ") //$NON-NLS-1$ //$NON-NLS-2$
-                    .append(CheckTimingLog.ms(entry.getValue()[2])).append("); ")); //$NON-NLS-1$
-            line.append(" sub="); //$NON-NLS-1$
-            stats.sub.entrySet().stream().sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0])).limit(40)
-                .forEach(entry -> line.append(entry.getKey()).append(' ').append(CheckTimingLog.ms(entry.getValue()[0]))
-                    .append("ms×").append(entry.getValue()[1]).append("; ")); //$NON-NLS-1$ //$NON-NLS-2$
-            line.append(" slowest="); //$NON-NLS-1$
-            for (Object[] item : stats.slowest)
-                line.append(item[1]).append("; "); //$NON-NLS-1$
-            return line.toString();
-        }
-        // #endregion
 
         boolean russian(XtextResource resource)
         {
@@ -1293,27 +1152,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     indexAccess(access);
                 return;
             }
-            // #region agent log
-            Call call;
-            Pass.subBegin("describe"); //$NON-NLS-1$
-            try
-            {
-                call = describe(target, args, index);
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
+            Call call = describe(target, args, index);
             if (call == null)
                 return;
             branch(call.toString());
-            // #region agent log
             if (call.moduleMethod != null)
-                timed("moduleMethodCall", () -> moduleMethodCall(call, structureType)); //$NON-NLS-1$
+                moduleMethodCall(call, structureType);
             else if (structureType.isEmpty())
-                timed("platformCall", () -> platformCall(call)); //$NON-NLS-1$
-            // #endregion
+                platformCall(call);
         }
 
         /** ИР: ЗаполнитьТаблицуСлов, ветка Тип("…") с полным набором имён из внешнего вызова. */
@@ -1383,17 +1229,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             CallTarget resolved = known.get(target);
             if (resolved == null)
             {
-                // #region agent log
-                Pass.subBegin("describe.callTarget"); //$NON-NLS-1$
-                try
-                {
-                    resolved = callTarget(target);
-                }
-                finally
-                {
-                    Pass.subEnd();
-                }
-                // #endregion
+                resolved = callTarget(target);
                 known.put(target, resolved);
             }
             if (resolved == NO_CALL_TARGET)
@@ -1415,18 +1251,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 return new Call(target, args, index, nullToEmpty(moduleMethod.getName()), parameter, "", source, //$NON-NLS-1$
                     sourceTypes, moduleMethod, false);
             }
-            // #region agent log
-            Parameter parameter;
-            Pass.subBegin("describe.chooseParameter"); //$NON-NLS-1$
-            try
-            {
-                parameter = chooseParameter(resolved.variants(), args, index);
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
+            Parameter parameter = chooseParameter(resolved.variants(), args, index);
             String context = resolved.ownerName() != null ? resolved.ownerName()
                 : source == null ? GLOBAL_CONTEXT : firstTypeName(sourceTypes);
             return new Call(target, args, index, method, parameter != null ? dualName(parameter) : "", //$NON-NLS-1$
@@ -1438,35 +1263,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (target instanceof OperatorStyleCreator creator)
             {
-                // #region agent log
-                Pass.subBegin("describe.creatorType"); //$NON-NLS-1$
-                Type type;
-                try
-                {
-                    type = resolve(creator.getType());
-                }
-                finally
-                {
-                    Pass.subEnd();
-                }
-                // #endregion
+                Type type = resolve(creator.getType());
                 if (type == null)
                     return NO_CALL_TARGET;
                 List<List<Parameter>> variants = new ArrayList<>();
-                // #region agent log
-                Pass.subBegin("describe.typeConstructors"); //$NON-NLS-1$
-                try
-                {
-                // #endregion
                 for (Ctor ctor : Global.typeConstructors(type))
                     variants.add(ctor.getParams());
-                // #region agent log
-                }
-                finally
-                {
-                    Pass.subEnd();
-                }
-                // #endregion
                 return new CallTarget(type, typeName(type), variants, null);
             }
             if (!(target instanceof Invocation invocation) || invocation.getMethodAccess() == null)
@@ -1475,36 +1277,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 EObject feature = entry != null ? entry.getFeature() : null;
                 if (feature != null && feature.eIsProxy())
-                    // #region agent log
-                {
-                    Pass.subBegin("describe.resolveProxy"); //$NON-NLS-1$
-                    try
-                    {
-                        feature = EcoreUtil.resolve(feature, resource);
-                    }
-                    finally
-                    {
-                        Pass.subEnd();
-                    }
-                }
-                    // #endregion
+                    feature = EcoreUtil.resolve(feature, resource);
                 // Экспортный метод общего модуля приходит методом его контекста — нужен исходный метод модуля
                 // (как ParamHintHtmlModifier.sourceMethod).
                 if (feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported
                     && exported.getSourceUri() != null)
                 {
-                    // #region agent log
-                    EObject sourceMethod;
-                    Pass.subBegin("describe.sourceMethod"); //$NON-NLS-1$
-                    try
-                    {
-                        sourceMethod = sourceMethod(exported);
-                    }
-                    finally
-                    {
-                        Pass.subEnd();
-                    }
-                    // #endregion
+                    EObject sourceMethod = sourceMethod(exported);
                     if (sourceMethod instanceof Method && !sourceMethod.eIsProxy())
                         feature = sourceMethod;
                 }
@@ -1545,18 +1324,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 return cached;
             }
-            // #region agent log
-            Method shared;
-            Pass.subBegin("describe.sourceMethod.shared"); //$NON-NLS-1$
-            try
-            {
-                shared = sharedSourceMethod(sourceResourceUri, exported.getName());
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
+            Method shared = sharedSourceMethod(sourceResourceUri, exported.getName());
             if (shared != null)
             {
                 if (known != null)
@@ -1565,18 +1333,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
             ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(exported.getSourceUri());
-            // #region agent log
-            EObject sourceMethod;
-            Pass.subBegin("describe.sourceMethod.resolve"); //$NON-NLS-1$
-            try
-            {
-                sourceMethod = EcoreUtil.resolve(proxy, context);
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
+            EObject sourceMethod = EcoreUtil.resolve(proxy, context);
             if (known != null)
                 known.put(sourceUri, sourceMethod);
             return sourceMethod;
@@ -1596,40 +1353,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 || !"CommonModules".equals(segments.get(src + 1)) || configuration() == null) //$NON-NLS-1$
                 return null;
             String name = URI.decode(segments.get(src + 2));
-            // #region agent log
-            Pass.subBegin("shared.commonModules"); //$NON-NLS-1$
-            CommonModule common;
-            try
-            {
-            // #endregion
             // Не найденный после перестройки справочника в этом проходе не ищем снова: перестройка — полный перебор.
-            common = pass.missingCommonModules.contains(lower(name)) ? null : cachedCommonModule(configuration(), name);
+            CommonModule common = pass.missingCommonModules.contains(lower(name)) ? null : cachedCommonModule(configuration(), name);
             if (common == null)
                 pass.missingCommonModules.add(lower(name));
-            // #region agent log
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            Pass.subBegin("shared.getModule"); //$NON-NLS-1$
-            Module model;
-            try
-            {
-            // #endregion
-            model = common != null ? cachedModule(common) : null;
+            Module model = common != null ? cachedModule(common) : null;
             if (model == null || model.eIsProxy())
                 return null;
-            // #region agent log
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            Pass.subBegin("shared.methods"); //$NON-NLS-1$
-            try
-            {
-            // #endregion
             return pass.moduleMethods.computeIfAbsent(model, module ->
             {
                 // При совпадении имён — первый, как прежний перебор.
@@ -1639,13 +1369,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         byName.putIfAbsent(lower(method.getName()), method);
                 return byName;
             }).get(lower(methodName));
-            // #region agent log
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
         }
 
         /** {@code ПодобратьВариантСинтаксисаМетодаПоТипамПараметров}, как в {@link BslExpectedTypePremiums}. */
@@ -1783,10 +1506,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     textValuesOfExpression(methodOf(call.target), structureVariable, structureType, false,
                         endOf(call.target));
                 else if (!structureType.isEmpty() && call.constructor && call.index == 0)
-                    // #region agent log
-                    timedIf("constructorStructureKeys", () -> structureKeys(scopeOf(call.target), null, //$NON-NLS-1$
-                        (Expression)call.target, "", structureType, Integer.MAX_VALUE)); //$NON-NLS-1$
-                    // #endregion
+                    structureKeys(scopeOf(call.target), null, (Expression)call.target, "", structureType, //$NON-NLS-1$
+                        Integer.MAX_VALUE);
                 if (!values.isEmpty())
                     allowed = false;
             }
@@ -2171,16 +1892,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             int to = structureType.isEmpty() ? Integer.MAX_VALUE : reassignmentAfter(scope, name, from);
             if (structureType.isEmpty())
             {
-                // #region agent log
                 if (!full)
-                    timed("objectPropertyNames", () -> objectPropertyNames(scope, name)); //$NON-NLS-1$
+                    objectPropertyNames(scope, name);
                 if (!full)
-                    timed("fillPropertyValuesNames", () -> fillPropertyValuesNames(scope, name)); //$NON-NLS-1$
+                    fillPropertyValuesNames(scope, name);
                 if (!full)
-                    timed("dynamicCallNames", () -> dynamicCallNames(scope, name)); //$NON-NLS-1$
+                    dynamicCallNames(scope, name);
                 if (!full && manual)
-                    timed("comparedLiterals", () -> comparedLiterals(scope, name, collectAssignments)); //$NON-NLS-1$
-                // #endregion
+                    comparedLiterals(scope, name, collectAssignments);
                 if (full)
                     return;
             }
@@ -2191,11 +1910,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 full = false;
                 String formVariable = name;
                 String fromForm = ".Параметры"; //$NON-NLS-1$
-                // #region agent log
-                Pass.subBegin("structureFormSearch"); //$NON-NLS-1$
-                try
-                {
-                // #endregion
                 for (EObject object : contents(scope))
                 {
                     if (object instanceof Invocation invocation && in(invocation.getMethodAccess() != null
@@ -2218,21 +1932,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         break;
                     }
                 }
-                // #region agent log
-                }
-                finally
-                {
-                    Pass.subEnd();
-                }
-                String keysFromForm = fromForm;
-                String keysFormVariable = formVariable;
-                if (timedIf("structureKeys", //$NON-NLS-1$
-                    () -> structureKeys(scope, name, null, keysFromForm, structureType, from, to, keysFormVariable)))
+                if (structureKeys(scope, name, null, fromForm, structureType, from, to, formVariable))
                     return;
-                Pass.subBegin("structureFillAndParameter"); //$NON-NLS-1$
-                try
-                {
-                // #endregion
                 for (EObject object : contents(scope))
                 {
                     if (!(object instanceof Invocation invocation) || !isFillPropertyValues(invocation)
@@ -2265,13 +1966,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                             return;
                         }
                     }
-                // #region agent log
-                }
-                finally
-                {
-                    Pass.subEnd();
-                }
-                // #endregion
             }
             else if ("Массив".equalsIgnoreCase(structureType)) //$NON-NLS-1$
             {
@@ -2308,11 +2002,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 return;
             String current = name;
             int start = from;
-            // #region agent log
-            Pass.subBegin(structureType.isEmpty() ? "callDescent" : "callDescent:" + structureType); //$NON-NLS-1$ //$NON-NLS-2$
-            try
-            {
-            // #endregion
             while (true)
             {
                 String substitute = null;
@@ -2359,42 +2048,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 current = substitute;
                 start = substituteAt;
             }
-            // #region agent log
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-            // #endregion
         }
-
-        // #region agent log
-        private static void timed(String label, Runnable step)
-        {
-            Pass.subBegin(label);
-            try
-            {
-                step.run();
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-        }
-
-        private static boolean timedIf(String label, BooleanSupplier step)
-        {
-            Pass.subBegin(label);
-            try
-            {
-                return step.getAsBoolean();
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-        }
-        // #endregion
 
         private static record ConditionalBranch(EObject owner, EStructuralFeature feature)
         {
@@ -2471,16 +2125,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (owner == null)
                     continue;
                 List<TypeItem> ownerTypes = typesOf(owner);
-                // #region agent log
-                if (parameterSearch != null)
-                    Global.tempLog("literal-module-call", "  objectPropertyNames owner=" + text(owner) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ownerTypes=" + typeNames(ownerTypes) + " properties=" + properties(ownerTypes) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ownerResource=" + (owner.eResource() != null ? owner.eResource().getURI() : null) //$NON-NLS-1$
-                        + " ownerResourceClass=" + (owner.eResource() != null ? owner.eResource().getClass().getSimpleName() : null) //$NON-NLS-1$
-                        + " analysisResource=" + resource.getURI()); //$NON-NLS-1$
-                if (parameterSearch != null && ownerTypes.isEmpty())
-                    Global.tempLog("literal-module-call", "    ownerStages " + ownerTypeStages(owner)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 // Проверка существования допускает отсутствующий ключ, в том числе через обёртку.
                 // Для автодополнения сохраняем известные свойства; индексное обращение проверяем.
                 if (validation && object instanceof Invocation invocation
@@ -2735,22 +2379,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         // ---- Типы ----
 
-        // #region agent log
         List<TypeItem> typesOf(Expression expression)
-        {
-            Pass.subBegin("typesOf"); //$NON-NLS-1$
-            try
-            {
-                return typesOfTimed(expression);
-            }
-            finally
-            {
-                Pass.subEnd();
-            }
-        }
-        // #endregion
-
-        private List<TypeItem> typesOfTimed(Expression expression)
         {
             checkCanceled();
             if (expression == null)
@@ -2831,77 +2460,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             return result;
         }
-
-        // #region agent log
-        /** Почему {@link #typesOf} пуст: каждый шаг его расчёта отдельно. */
-        private String ownerTypeStages(Expression expression)
-        {
-            StringBuilder out = new StringBuilder();
-            try
-            {
-                EObject root = EcoreUtil2.getRootContainer(expression);
-                out.append("class=").append(expression.getClass().getSimpleName()) //$NON-NLS-1$
-                    .append(" root=").append(root == null ? null : System.identityHashCode(root)) //$NON-NLS-1$
-                    .append(" exprTypes=").append(expression.getTypes().size()); //$NON-NLS-1$
-                TypesComputer computer = resource.getResourceServiceProvider() != null
-                    ? resource.getResourceServiceProvider().get(TypesComputer.class) : null;
-                Method method = EcoreUtil2.getContainerOfType(expression, Method.class);
-                Environments environments = method != null ? method.environments()
-                    : module != null ? module.environments() : null;
-                out.append(" method=").append(method == null ? null : method.getName()) //$NON-NLS-1$
-                    .append(" env=").append(environments); //$NON-NLS-1$
-                if (computer != null && environments != null)
-                {
-                    List<TypeItem> computed = computer.computeTypes(expression, environments);
-                    out.append(" computer=").append(computed == null ? null : typeNames(computed)); //$NON-NLS-1$
-                }
-                else
-                    out.append(" computer=none"); //$NON-NLS-1$
-                if (expression instanceof StaticFeatureAccess access)
-                {
-                    out.append(" entries=").append(access.getFeatureEntries().size()); //$NON-NLS-1$
-                    if (method != null && access.getName() != null)
-                        for (EObject object : contents(method))
-                            if (object instanceof SimpleStatement statement
-                                && statement.getLeft() instanceof StaticFeatureAccess left
-                                && access.getName().equalsIgnoreCase(left.getName()) && statement.getRight() != null)
-                                out.append(" [assign at=").append(offsetOf(statement)) //$NON-NLS-1$
-                                    .append(" right=").append(statement.getRight().getClass().getSimpleName()) //$NON-NLS-1$
-                                    .append(" rightTypes=").append(typeNames(typesOf(statement.getRight()))).append(']'); //$NON-NLS-1$
-                    for (FeatureEntry entry : access.getFeatureEntries())
-                    {
-                        EObject feature = entry == null ? null : entry.getFeature();
-                        out.append(" [feature=").append(feature == null ? null : feature.getClass().getSimpleName()); //$NON-NLS-1$
-                        if (feature != null)
-                            out.append(" proxy=").append(feature.eIsProxy()) //$NON-NLS-1$
-                                .append(" featureRoot=").append(System.identityHashCode(EcoreUtil2.getRootContainer(feature))); //$NON-NLS-1$
-                        if (feature instanceof Variable variable)
-                        {
-                            out.append(" offset=").append(endOf(expression)); //$NON-NLS-1$
-                            try
-                            {
-                                Method variableMethod = EcoreUtil2.getContainerOfType(variable, Method.class);
-                                Environments variableEnvironments = variableMethod != null ? variableMethod.environments()
-                                    : module != null ? module.environments() : null;
-                                out.append(" atOffset=").append(typeNames(new ArrayList<>( //$NON-NLS-1$
-                                    TypeSystemUtil.getVariableTypesAtOffset(variable, endOf(expression), variableEnvironments))));
-                            }
-                            catch (RuntimeException e)
-                            {
-                                out.append(" atOffset=").append(e); //$NON-NLS-1$
-                            }
-                        }
-                        out.append(']');
-                    }
-                }
-            }
-            catch (RuntimeException e)
-            {
-                out.append(" failed=").append(e); //$NON-NLS-1$
-            }
-            return out.toString();
-        }
-        // #endregion
 
         List<TypeItem> variableTypesAt(Variable variable, int offset)
         {

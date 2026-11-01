@@ -214,25 +214,6 @@ public final class BslDocCommentTypeMerge
     {
         try
         {
-            // #region agent log
-            {
-                String targetUri = "?"; //$NON-NLS-1$
-                try
-                {
-                    targetUri = target == null ? "null" : String.valueOf(EcoreUtil.getURI(target)); //$NON-NLS-1$
-                }
-                catch (Throwable e)
-                {
-                }
-                String sourceUri = target instanceof com._1c.g5.v8.dt.bsl.model.SourceObjectLinkProvider provider
-                    ? String.valueOf(provider.getSourceUri()) : "-"; //$NON-NLS-1$
-                Global.tempLog("doc-link-target", "class=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (target == null ? "null" : target.getClass().getSimpleName()) //$NON-NLS-1$
-                    + " uri=" + targetUri + " source=" + sourceUri //$NON-NLS-1$ //$NON-NLS-2$
-                    + " visited=" + (visited == null ? "null" : visited.size() + " " + visited) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            }
-            // #endregion
             if (target == null || visited == null || visited.isEmpty())
                 return target;
             org.eclipse.emf.common.util.URI uri = null;
@@ -244,10 +225,6 @@ public final class BslDocCommentTypeMerge
                 uri = exported.getSourceUri();
             if (uri == null || !visited.contains(uri.toString()))
                 return target;
-            // #region agent log
-            Global.tempLog("doc-link-visited-skip", String.valueOf(uri.fragment()) //$NON-NLS-1$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            // #endregion
             return null;
         }
         catch (Throwable t)

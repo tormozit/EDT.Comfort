@@ -57,11 +57,7 @@ public final class Activator
         ReferenceSearchResultWeaving.install(context);
         DerivedProgressProjectNames.install(context);
         DerivedCheckCancellation.install(context);
-        // До временного замера: тот заменяет вызовы ICheck.check и в нашем методе-обёртке
         CheckDurations.install(context);
-        // #region agent log
-        CheckTimingDiagnostics.install(context);
-        // #endregion
     }
 
     @Override
@@ -241,745 +237,6 @@ public final class Activator
         }
     }
 
-    // #region agent log
-    /**
-     * Временные замеры пересчёта проверок. check 6.0.100.v202605050943 {@code CheckExecutor}: каждый
-     * {@code ICheck.check}; derived 17.0.200.v202605050943 {@code WorkerManager$TaskProcessor}:
-     * {@code IDerivedDataComputer.compute} — полный расчёт контекста. Строка на каждый расчёт с
-     * разбивкой по проверкам этого потока; вызовы проверок вне расчёта — отдельными строками.
-     * Основной бандл присылает расчёты типов модулей ({@code .types}): строка {@code types} и сумма
-     * в строке расчёта контекста. Пишет фоновый поток в {@code .tmp/temp-logs/check-timing.log}, без порогов.
-     */
-    private static final class CheckTimingDiagnostics implements WeavingHook
-    {
-        private static final String CALLBACK = "tormozit.checkTiming"; //$NON-NLS-1$
-        private static final String EXECUTOR = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
-        private static final String PROCESSOR = "com._1c.g5.v8.internal.derived.WorkerManager$TaskProcessor"; //$NON-NLS-1$
-        private static final String CHECK = "com.e1c.g5.v8.dt.check.ICheck"; //$NON-NLS-1$
-        private static final String CHECK_DESCRIPTOR = "(Ljava/lang/Object;Lcom/e1c/g5/v8/dt/check/ICheckResultAcceptor;" //$NON-NLS-1$
-            + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Ljava/lang/Object;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
-        private static final String COMPUTER = "com._1c.g5.v8.derived.computer.IDerivedDataComputer"; //$NON-NLS-1$
-        private static final String COMPUTE_DESCRIPTOR = "(Lcom/_1c/g5/v8/derived/context/IObjectDerivedDataContext;" //$NON-NLS-1$
-            + "Lcom/_1c/g5/v8/bm/integration/IBmModel;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
-        private static final java.io.File FILE =
-            new java.io.File("C:\\VC\\EDT.Comfort\\.tmp\\temp-logs\\check-timing.log"); //$NON-NLS-1$
-        private static final double SLOW_MS = 1000;
-
-        private final FrameworkLog log;
-        private final String bundleId;
-        private final java.util.concurrent.LinkedBlockingQueue<String> lines = new java.util.concurrent.LinkedBlockingQueue<>();
-        private final java.util.concurrent.atomic.AtomicLong sequence = new java.util.concurrent.atomic.AtomicLong();
-        /** Расчёт контекста, идущий в этом потоке: проверки складываются в него. */
-        private final ThreadLocal<Frame> frames = new ThreadLocal<>();
-        private final ThreadLocal<int[]> checkDepth = ThreadLocal.withInitial(() -> new int[1]);
-        private final Map<String, java.util.Optional<java.lang.reflect.Method>> getters =
-            new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<Class<?>, java.util.Optional<java.lang.reflect.Field>> checkIds =
-            new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<String, String> status = new java.util.concurrent.ConcurrentHashMap<>();
-        private volatile java.lang.reflect.Method checkMethod;
-        private volatile java.lang.reflect.Method computeMethod;
-
-        /** Сумма наносекунд и число вызовов по проверкам одного расчёта. */
-        private static final class Frame
-        {
-            final Map<String, long[]> checks = new java.util.HashMap<>();
-            String segment;
-            Object objectId;
-            /** Расчёт типов модулей внутри расчёта контекста: всего, штатный, число. */
-            long typesNanos;
-            long stockNanos;
-            int typesCalls;
-
-            void add(String check, long nanos)
-            {
-                long[] total = checks.computeIfAbsent(check, key -> new long[2]);
-                total[0] += nanos;
-                total[1]++;
-            }
-        }
-
-        private CheckTimingDiagnostics(FrameworkLog log, String bundleId)
-        {
-            this.log = log;
-            this.bundleId = bundleId;
-        }
-
-        static void install(BundleContext context)
-        {
-            var reference = context.getServiceReference(FrameworkLog.class);
-            FrameworkLog log = reference != null ? context.getService(reference) : null;
-            var diagnostics = new CheckTimingDiagnostics(log, context.getBundle().getSymbolicName());
-            System.getProperties().put(CALLBACK + ".check", (Function<Object[], Object>) diagnostics::check); //$NON-NLS-1$
-            System.getProperties().put(CALLBACK + ".compute", (Function<Object[], Object>) diagnostics::compute); //$NON-NLS-1$
-            // Основной бандл: {текст строки, всего нс, штатный нс}; ответ — «сегмент объект» текущего расчёта или null.
-            System.getProperties().put(CALLBACK + ".types", (Function<Object[], Object>) diagnostics::types); //$NON-NLS-1$
-            // Основной бандл: {текст строки} — замеры внутри проверок, с контекстом текущего расчёта.
-            System.getProperties().put(CALLBACK + ".note", (Function<Object[], Object>) diagnostics::note); //$NON-NLS-1$
-            // Вплетённые классы проверок Комфорта: этап ≥0 — вход, −1 — выход (см. weavePhases).
-            System.getProperties().put(CALLBACK + ".phase", (java.util.function.IntConsumer) diagnostics::phase); //$NON-NLS-1$
-            System.setProperty(CALLBACK + ".status", "installed"); //$NON-NLS-1$ //$NON-NLS-2$
-            Thread writer = new Thread(diagnostics::drain, "ComfortCheckTimingLog"); //$NON-NLS-1$
-            writer.setDaemon(true);
-            writer.start();
-            context.registerService(WeavingHook.class, diagnostics, null);
-            diagnostics.enqueue("installed; earlyBundle=" + context.getBundle().getVersion()); //$NON-NLS-1$
-            diagnostics.journal("installed; file=" + FILE); //$NON-NLS-1$
-        }
-
-        @Override
-        public void weave(WovenClass woven)
-        {
-            String name = woven.getClassName();
-            if (woven.getState() == WovenClass.TRANSFORMING && isPhaseClass(name))
-            {
-                weavePhases(woven);
-                return;
-            }
-            if (woven.getState() != WovenClass.TRANSFORMING || !(EXECUTOR.equals(name) || PROCESSOR.equals(name)))
-                return;
-            boolean executor = EXECUTOR.equals(name);
-            String owner = (executor ? CHECK : COMPUTER).replace('.', '/');
-            String method = executor ? "check" : "compute"; //$NON-NLS-1$ //$NON-NLS-2$
-            String descriptor = executor ? CHECK_DESCRIPTOR : COMPUTE_DESCRIPTOR;
-            int values = executor ? 6 : 4; // получатель и аргументы
-            String property = CALLBACK + "." + method; //$NON-NLS-1$
-            try
-            {
-                var reader = new ClassReader(woven.getBytes());
-                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-                int[] calls = {0};
-                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-                {
-                    @Override
-                    public MethodVisitor visitMethod(int access, String name, String desc,
-                        String signature, String[] exceptions)
-                    {
-                        return new MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, desc, signature, exceptions))
-                        {
-                            @Override
-                            public void visitMethodInsn(int opcode, String called, String calledName,
-                                String calledDescriptor, boolean isInterface)
-                            {
-                                if (opcode != Opcodes.INVOKEINTERFACE || !owner.equals(called)
-                                    || !method.equals(calledName) || !descriptor.equals(calledDescriptor))
-                                {
-                                    super.visitMethodInsn(opcode, called, calledName, calledDescriptor, isInterface);
-                                    return;
-                                }
-                                calls[0]++;
-                                // Стек: получатель, аргументы -> Object[] {получатель, аргументы}; без ветвлений.
-                                super.visitLdcInsn(values);
-                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
-                                for (int i = values - 1; i >= 0; i--)
-                                {
-                                    super.visitInsn(Opcodes.DUP_X1);
-                                    super.visitInsn(Opcodes.SWAP);
-                                    super.visitLdcInsn(i);
-                                    super.visitInsn(Opcodes.SWAP);
-                                    super.visitInsn(Opcodes.AASTORE);
-                                }
-                                EarlyWeaving.emitGetProperty(this, property, "java/util/function/Function"); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.SWAP);
-                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
-                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.POP);
-                            }
-                        };
-                    }
-                }, 0);
-                if (calls[0] > 0)
-                    woven.setBytes(writer.toByteArray());
-                String result = (calls[0] > 0 ? "woven" : "NOT WOVEN") + "; class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                    + woven.getBundleWiring().getBundle().getVersion() + "; " + method + "Calls=" + calls[0] //$NON-NLS-1$ //$NON-NLS-2$
-                    + (executor ? "/3" : "/1"); //$NON-NLS-1$ //$NON-NLS-2$
-                status.put(name, result);
-                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
-                journal(result);
-                enqueue(result);
-            }
-            catch (Throwable failure)
-            {
-                status.put(name, "weave failed: " + failure); //$NON-NLS-1$
-                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
-                journal("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        /**
-         * Этапы проверок Комфорта: вызовы внутри их классов (владелец, метод → этап). Бандл проверок
-         * не меняет версию при сборке, поэтому меряем отсюда, а не правкой его исходников.
-         */
-        private static final String[][] PHASE_CALLS = {
-            {"com/_1c/g5/v8/dt/bsl/validation/TypesChecker", "checkTypes", "legacyCheckTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/bsl/resource/TypesComputer", "computeTypes", "computeTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/bsl/resource/DynamicFeatureAccessComputer", "getLastObject", "dynamicEntries"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/bsl/common/IBslPreferences", "getLoadEnvs", "loadEnvs"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"org/eclipse/xtext/EcoreUtil2", "getContainerOfType", "containerOf"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"org/eclipse/emf/ecore/util/EcoreUtil", "resolve", "ecoreResolve"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/bsl/util/BslUtil", "intersectTypeItem", "intersectTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/bsl/util/BslUtil", "createTypesLineStr", "typesLineText"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"com/_1c/g5/v8/dt/mcore/util/McoreUtil", "flatTypes", "flatTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslMethodParameterTypes", "fromComment", "docParameters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslQueryResultTypes", "queryParameterTypesForCheck", "queryParameterTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslQueryResultTypes", "beginOpenModuleCalculation", "openModuleScope"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslLiteralValues", "dataLockFieldTypes", "dataLockTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslLiteralValues", "unknownLiteralValues", "unknownLiteralValues"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/BslDocCommentTypeMerge", "alternatives", "alternatives"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslForEachCollectionCheck", "isOutputArgument", "isOutputArgument"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/OpenModulesOnly", "skip", "openModulesOnly"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "check", "sessionWalk"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "environments", "environments"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "isStringConcatenation", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "canRecheckAssignment", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "isUndefinedAssignment", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "checkInvocation", "checkInvocation"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "checkQueryParameter", "checkQueryParameter"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "checkDataLockValue", "checkDataLock"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "checkAssignment", "checkAssignment"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "assignmentTypes", "assignmentTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "checkValue", "checkValue"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "compatibleTypes", "compatibleTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "resolve", "resolve"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "mismatchMessage", "message"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "typesLine", "message"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {"tormozit/checks/BslValueTypeCheck$Session", "issue", "issue"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        };
-        private static final String[] PHASE_CLASSES = {
-            "tormozit.checks.BslValueTypeCheck", "tormozit.checks.BslValueTypeCheck$Session", //$NON-NLS-1$ //$NON-NLS-2$
-            "tormozit.checks.BslUnknownLiteralCheck"}; //$NON-NLS-1$
-        /** Поле вплетённого класса: {@code IntConsumer} этапов (≥0 — вход в этап, −1 — выход). */
-        private static final String PHASE_FIELD = "tormozit$checkPhase"; //$NON-NLS-1$
-        private static final String[] PHASE_LABELS = java.util.Arrays.stream(PHASE_CALLS).map(call -> call[2])
-            .distinct().toArray(String[]::new);
-        private final ThreadLocal<PhaseFrame> phaseFrames = new ThreadLocal<>();
-
-        /** Исключающее время этапов одного верхнего вызова проверки: вложенный этап ставит внешний на паузу. */
-        private static final class PhaseFrame
-        {
-            final long[] self = new long[PHASE_LABELS.length];
-            final int[] calls = new int[PHASE_LABELS.length];
-            final int[] stack = new int[256];
-            int depth;
-            int overflow;
-            long mark;
-            int total;
-
-            void enter(int phase)
-            {
-                long now = System.nanoTime();
-                if (depth > 0 && depth <= stack.length)
-                    self[stack[depth - 1]] += now - mark;
-                if (depth < stack.length)
-                    stack[depth] = phase;
-                else
-                    overflow++;
-                depth++;
-                calls[phase]++;
-                total++;
-                mark = now;
-            }
-
-            void exit()
-            {
-                long now = System.nanoTime();
-                if (depth > 0 && depth <= stack.length)
-                    self[stack[depth - 1]] += now - mark;
-                if (depth > 0)
-                    depth--;
-                mark = now;
-            }
-
-            String summary(long nanos)
-            {
-                long inPhases = 0;
-                Integer[] order = new Integer[self.length];
-                for (int i = 0; i < self.length; i++)
-                {
-                    order[i] = i;
-                    inPhases += self[i];
-                }
-                java.util.Arrays.sort(order, (a, b) -> Long.compare(self[b], self[a]));
-                var line = new StringBuilder(" phases="); //$NON-NLS-1$
-                for (int i : order)
-                    if (calls[i] > 0)
-                        line.append(PHASE_LABELS[i]).append(' ').append(ms(self[i])).append("ms×") //$NON-NLS-1$
-                            .append(calls[i]).append("; "); //$NON-NLS-1$
-                line.append("other ").append(ms(nanos - inPhases)).append("ms"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (depth != 0 || overflow != 0)
-                    line.append(" unbalanced=").append(depth).append('/').append(overflow); //$NON-NLS-1$
-                return line.toString();
-            }
-        }
-
-        private void phase(int code)
-        {
-            PhaseFrame frame = phaseFrames.get();
-            if (frame == null)
-                return;
-            if (code >= 0)
-                frame.enter(code);
-            else
-                frame.exit();
-        }
-
-        private static boolean isPhaseClass(String name)
-        {
-            for (String phaseClass : PHASE_CLASSES)
-                if (phaseClass.equals(name))
-                    return true;
-            return false;
-        }
-
-        private static int phaseOf(String owner, String method)
-        {
-            for (String[] call : PHASE_CALLS)
-                if (call[0].equals(owner) && call[1].equals(method))
-                    return java.util.Arrays.asList(PHASE_LABELS).indexOf(call[2]);
-            return -1;
-        }
-
-        /**
-         * Вокруг каждого вызова из {@link #PHASE_CALLS}: {@code поле.accept(этап)} до и {@code поле.accept(-1)}
-         * после; поле заполняет {@code <clinit>}. Стек и ветвления метода не меняются.
-         */
-        private void weavePhases(WovenClass woven)
-        {
-            String name = woven.getClassName();
-            String internal = name.replace('.', '/');
-            try
-            {
-                var reader = new ClassReader(woven.getBytes());
-                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-                int[] calls = {0};
-                boolean[] clinit = {false};
-                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-                {
-                    @Override
-                    public MethodVisitor visitMethod(int access, String method, String desc,
-                        String signature, String[] exceptions)
-                    {
-                        MethodVisitor original = super.visitMethod(access, method, desc, signature, exceptions);
-                        boolean init = "<clinit>".equals(method); //$NON-NLS-1$
-                        clinit[0] |= init;
-                        return new MethodVisitor(Opcodes.ASM9, original)
-                        {
-                            @Override
-                            public void visitCode()
-                            {
-                                super.visitCode();
-                                if (init)
-                                    emitPhaseFieldInit(this, internal);
-                            }
-
-                            @Override
-                            public void visitMethodInsn(int opcode, String owner, String called,
-                                String calledDescriptor, boolean isInterface)
-                            {
-                                int phase = "<init>".equals(called) ? -1 : phaseOf(owner, called); //$NON-NLS-1$
-                                if (phase < 0)
-                                {
-                                    super.visitMethodInsn(opcode, owner, called, calledDescriptor, isInterface);
-                                    return;
-                                }
-                                calls[0]++;
-                                emitPhase(this, internal, phase);
-                                super.visitMethodInsn(opcode, owner, called, calledDescriptor, isInterface);
-                                emitPhase(this, internal, -1);
-                            }
-                        };
-                    }
-
-                    @Override
-                    public void visitEnd()
-                    {
-                        super.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC, PHASE_FIELD,
-                            "Ljava/util/function/IntConsumer;", null, null).visitEnd(); //$NON-NLS-1$
-                        if (!clinit[0])
-                        {
-                            MethodVisitor init = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null); //$NON-NLS-1$ //$NON-NLS-2$
-                            init.visitCode();
-                            emitPhaseFieldInit(init, internal);
-                            init.visitInsn(Opcodes.RETURN);
-                            init.visitMaxs(0, 0);
-                            init.visitEnd();
-                        }
-                        super.visitEnd();
-                    }
-                }, 0);
-                if (calls[0] > 0)
-                    woven.setBytes(writer.toByteArray());
-                String result = (calls[0] > 0 ? "woven" : "NOT WOVEN") + "; class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                    + woven.getBundleWiring().getBundle().getVersion() + "; phaseCalls=" + calls[0]; //$NON-NLS-1$
-                status.put(name, result);
-                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
-                journal(result);
-                enqueue(result);
-            }
-            catch (Throwable failure)
-            {
-                status.put(name, "weave failed: " + failure); //$NON-NLS-1$
-                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
-                journal("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
-                enqueue("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-
-        private static void emitPhaseFieldInit(MethodVisitor mv, String owner)
-        {
-            EarlyWeaving.emitGetProperty(mv, CALLBACK + ".phase", "java/util/function/IntConsumer"); //$NON-NLS-1$ //$NON-NLS-2$
-            mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, PHASE_FIELD, "Ljava/util/function/IntConsumer;"); //$NON-NLS-1$
-        }
-
-        private static void emitPhase(MethodVisitor mv, String owner, int phase)
-        {
-            mv.visitFieldInsn(Opcodes.GETSTATIC, owner, PHASE_FIELD, "Ljava/util/function/IntConsumer;"); //$NON-NLS-1$
-            mv.visitLdcInsn(phase);
-            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/IntConsumer", "accept", "(I)V", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-
-        /** {проверка, объект, приёмник, параметры, контекст, монитор}. */
-        private Object check(Object[] args)
-        {
-            Object check = args[0];
-            java.lang.reflect.Method method = checkMethod;
-            if (method == null)
-                checkMethod = method = interfaceMethod(check.getClass(), CHECK, "check", 5); //$NON-NLS-1$
-            int[] depth = checkDepth.get();
-            boolean nested = depth[0] > 0;
-            depth[0]++;
-            PhaseFrame phases = null;
-            if (!nested)
-            {
-                phases = new PhaseFrame();
-                phaseFrames.set(phases);
-            }
-            long start = System.nanoTime();
-            Throwable failure = null;
-            try
-            {
-                method.invoke(check, args[1], args[2], args[3], args[4], args[5]);
-            }
-            catch (java.lang.reflect.InvocationTargetException e)
-            {
-                failure = e.getCause();
-                throw sneaky(failure);
-            }
-            catch (IllegalAccessException e)
-            {
-                failure = e;
-                throw sneaky(e);
-            }
-            finally
-            {
-                depth[0]--;
-                long nanos = System.nanoTime() - start;
-                String name = (nested ? "↳" : "") + checkName(check); //$NON-NLS-1$ //$NON-NLS-2$
-                Frame frame = frames.get();
-                if (phases != null)
-                {
-                    phaseFrames.remove();
-                    if (phases.total > 0)
-                        enqueue(phasesLine(name, args[1], nanos, phases, frame, failure));
-                }
-                if (frame != null)
-                    frame.add(name, nanos);
-                else
-                    enqueue("check-outside ms=" + ms(nanos) + " slow=" + (nanos / 1e6 >= SLOW_MS) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " check=" + name + " object=" + typeName(args[1]) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                        + (failure != null ? " failure=" + failure : "")); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            return null;
-        }
-
-        /** Строка этапов вызова проверки Комфорта; сводку литералов добавляет основной бандл. */
-        private String phasesLine(String check, Object object, long nanos, PhaseFrame phases, Frame frame,
-            Throwable failure)
-        {
-            Object resource = get(object, "eResource"); //$NON-NLS-1$
-            var line = new StringBuilder("check-phases check=").append(check) //$NON-NLS-1$
-                .append(" ms=").append(ms(nanos)) //$NON-NLS-1$
-                .append(phases.summary(nanos));
-            try
-            {
-                @SuppressWarnings("unchecked")
-                var after = (Function<Object[], Object>) System.getProperties().get(CALLBACK + ".afterCheck"); //$NON-NLS-1$
-                Object extra = after != null ? after.apply(new Object[] {check}) : null;
-                if (extra != null)
-                    line.append(" literals: ").append(extra); //$NON-NLS-1$
-            }
-            catch (Throwable e)
-            {
-                line.append(" afterCheck failed: ").append(e); //$NON-NLS-1$
-            }
-            line.append(" module=").append(resource != null ? get(resource, "getURI") : typeName(object)) //$NON-NLS-1$ //$NON-NLS-2$
-                .append(" thread=").append(Thread.currentThread().getName()) //$NON-NLS-1$
-                .append(" context=").append(frame != null ? frame.segment + " " + frame.objectId : "-"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (failure != null)
-                line.append(" failure=").append(failure); //$NON-NLS-1$
-            return line.toString();
-        }
-
-        /** {вычислитель, контекст, модель, монитор}. */
-        private Object compute(Object[] args)
-        {
-            Object computer = args[0];
-            java.lang.reflect.Method method = computeMethod;
-            if (method == null)
-                computeMethod = method = interfaceMethod(computer.getClass(), COMPUTER, "compute", 3); //$NON-NLS-1$
-            Frame previous = frames.get();
-            Frame frame = new Frame();
-            frame.segment = String.valueOf(get(args[1], "getSegmentId")); //$NON-NLS-1$
-            frame.objectId = get(args[1], "getObjectId"); //$NON-NLS-1$
-            frames.set(frame);
-            long start = System.nanoTime();
-            Throwable failure = null;
-            try
-            {
-                method.invoke(computer, args[1], args[2], args[3]);
-            }
-            catch (java.lang.reflect.InvocationTargetException e)
-            {
-                failure = e.getCause();
-                throw sneaky(failure);
-            }
-            catch (IllegalAccessException e)
-            {
-                failure = e;
-                throw sneaky(e);
-            }
-            finally
-            {
-                long nanos = System.nanoTime() - start;
-                frames.set(previous);
-                enqueue(computeLine(computer, nanos, frame, previous != null, failure));
-            }
-            return null;
-        }
-
-        /** Расчёт типов модуля из основного бандла: строка в лог и сумма в текущий расчёт контекста. */
-        private Object types(Object[] args)
-        {
-            Frame frame = frames.get();
-            String context = frame != null ? frame.segment + " " + frame.objectId : null; //$NON-NLS-1$
-            if (frame != null)
-            {
-                frame.typesNanos += (Long) args[1];
-                frame.stockNanos += (Long) args[2];
-                frame.typesCalls++;
-            }
-            enqueue(args[0] + " context=" + (context != null ? context : "-")); //$NON-NLS-1$ //$NON-NLS-2$
-            return context;
-        }
-
-        private Object note(Object[] args)
-        {
-            Frame frame = frames.get();
-            enqueue(args[0] + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                + " context=" + (frame != null ? frame.segment + " " + frame.objectId : "-")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return null;
-        }
-
-        private String computeLine(Object computer, long nanos, Frame frame,
-            boolean nested, Throwable failure)
-        {
-            var line = new StringBuilder("compute ms=").append(ms(nanos)) //$NON-NLS-1$
-                .append(" slow=").append(nanos / 1e6 >= SLOW_MS) //$NON-NLS-1$
-                .append(" segment=").append(frame.segment) //$NON-NLS-1$
-                .append(" object=").append(frame.objectId) //$NON-NLS-1$
-                .append(" computer=").append(computer.getClass().getName()) //$NON-NLS-1$
-                .append(" thread=").append(Thread.currentThread().getName()); //$NON-NLS-1$
-            if (nested)
-                line.append(" nested=true"); //$NON-NLS-1$
-            long checked = 0;
-            int calls = 0;
-            for (var entry : frame.checks.entrySet())
-            {
-                if (!entry.getKey().startsWith("↳")) //$NON-NLS-1$
-                    checked += entry.getValue()[0];
-                calls += entry.getValue()[1];
-            }
-            line.append(" checksMs=").append(ms(checked)).append(" otherMs=").append(ms(nanos - checked)) //$NON-NLS-1$ //$NON-NLS-2$
-                .append(" checkCalls=").append(calls); //$NON-NLS-1$
-            if (frame.typesCalls > 0)
-                line.append(" typesMs=").append(ms(frame.typesNanos)) //$NON-NLS-1$
-                    .append(" typesStockMs=").append(ms(frame.stockNanos)) //$NON-NLS-1$
-                    .append(" typesComfortMs=").append(ms(frame.typesNanos - frame.stockNanos)) //$NON-NLS-1$
-                    .append(" typesCalls=").append(frame.typesCalls); //$NON-NLS-1$
-            if (failure != null)
-                line.append(" failure=").append(failure); //$NON-NLS-1$
-            if (!frame.checks.isEmpty())
-            {
-                line.append(" checks="); //$NON-NLS-1$
-                frame.checks.entrySet().stream()
-                    .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
-                    .forEach(entry -> line.append(entry.getKey()).append(' ').append(ms(entry.getValue()[0]))
-                        .append("ms×").append(entry.getValue()[1]).append("; ")); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            return line.toString();
-        }
-
-        /** Имя класса проверки; у адаптера устаревших проверок — с её идентификатором. */
-        private String checkName(Object check)
-        {
-            var field = checkIds.computeIfAbsent(check.getClass(), type ->
-            {
-                try
-                {
-                    var found = type.getDeclaredField("checkId"); //$NON-NLS-1$
-                    found.setAccessible(true);
-                    return java.util.Optional.of(found);
-                }
-                catch (ReflectiveOperationException | RuntimeException e)
-                {
-                    return java.util.Optional.empty();
-                }
-            });
-            String name = check.getClass().getName();
-            try
-            {
-                Object id = field.isPresent() ? field.get().get(check) : null;
-                return id != null ? name + "[" + id + "]" : name; //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            catch (ReflectiveOperationException | RuntimeException e)
-            {
-                return name;
-            }
-        }
-
-        private static String typeName(Object value)
-        {
-            return value != null ? value.getClass().getName() : "null"; //$NON-NLS-1$
-        }
-
-        /** Открытый метод без параметров; классы реализаций EDT бывают непубличными. */
-        private Object get(Object target, String name)
-        {
-            if (target == null)
-                return null;
-            var method = getters.computeIfAbsent(target.getClass().getName() + '#' + name, key ->
-            {
-                try
-                {
-                    var found = target.getClass().getMethod(name);
-                    found.setAccessible(true);
-                    return java.util.Optional.of(found);
-                }
-                catch (ReflectiveOperationException | RuntimeException e)
-                {
-                    return java.util.Optional.empty();
-                }
-            });
-            try
-            {
-                return method.isPresent() ? method.get().invoke(target) : "?"; //$NON-NLS-1$
-            }
-            catch (ReflectiveOperationException | RuntimeException e)
-            {
-                return "?" + e; //$NON-NLS-1$
-            }
-        }
-
-        /** Метод интерфейса по имени и числу параметров — из иерархии реализации. */
-        private static java.lang.reflect.Method interfaceMethod(Class<?> type, String api, String name, int parameters)
-        {
-            for (Class<?> current = type; current != null; current = current.getSuperclass())
-            {
-                for (Class<?> candidate : current.getInterfaces())
-                {
-                    Class<?> found = findInterface(candidate, api);
-                    if (found == null)
-                        continue;
-                    for (var method : found.getMethods())
-                    {
-                        if (method.getName().equals(name) && method.getParameterCount() == parameters)
-                        {
-                            method.setAccessible(true);
-                            return method;
-                        }
-                    }
-                }
-            }
-            throw new IllegalStateException(api + "." + name + " not found in " + type); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        private static Class<?> findInterface(Class<?> candidate, String api)
-        {
-            if (candidate.getName().equals(api))
-                return candidate;
-            for (Class<?> parent : candidate.getInterfaces())
-            {
-                Class<?> found = findInterface(parent, api);
-                if (found != null)
-                    return found;
-            }
-            return null;
-        }
-
-        @SuppressWarnings("unchecked")
-        private static <T extends Throwable> RuntimeException sneaky(Throwable failure) throws T
-        {
-            throw (T) failure;
-        }
-
-        private static String ms(long nanos)
-        {
-            return String.format(java.util.Locale.ROOT, "%.1f", nanos / 1e6); //$NON-NLS-1$
-        }
-
-        private void enqueue(String text)
-        {
-            lines.add(java.time.LocalDateTime.now() + " #" + sequence.incrementAndGet() + " " + text); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        /** Пачками раз в полсекунды; файл открывается на каждую пачку — основной бандл чистит папку при старте. */
-        private void drain()
-        {
-            var batch = new java.util.ArrayList<String>();
-            while (true)
-            {
-                try
-                {
-                    batch.add(lines.take());
-                    Thread.sleep(500);
-                    lines.drainTo(batch);
-                    var text = new StringBuilder();
-                    for (String line : batch)
-                        text.append(line).append(System.lineSeparator());
-                    batch.clear();
-                    FILE.getParentFile().mkdirs();
-                    java.nio.file.Files.writeString(FILE.toPath(), text, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-                }
-                catch (InterruptedException e)
-                {
-                    return;
-                }
-                catch (Throwable ignored)
-                {
-                    batch.clear();
-                }
-            }
-        }
-
-        private void journal(String message)
-        {
-            if (log == null)
-                return;
-            try
-            {
-                log.log(new FrameworkLogEntry(bundleId, FrameworkLogEntry.INFO, 0,
-                    "[ComfortCheckTiming] " + message, 0, null, null)); //$NON-NLS-1$
-            }
-            catch (Throwable ignored)
-            {
-                // Отказ журнала не должен мешать загрузке класса.
-            }
-        }
-    }
-    // #endregion
-
     /**
      * «Стоп» у задания производных данных в панели «Состояние» (derived 17.0.200.v202605050943,
      * check 6.0.100.v202605050943). Штатно {@code DerivedDataProgressReporter$ProgressIndicatingJob} —
@@ -1057,19 +314,12 @@ public final class Activator
             System.getProperties().put(CALLBACK + ".gate", (Function<Object[], Object>) hook::gate); //$NON-NLS-1$
             instance = hook;
             context.registerService(WeavingHook.class, hook, null);
-            // #region agent log
-            CancelLog.start();
-            CancelLog.write("installed; earlyBundle=" + context.getBundle().getVersion()); //$NON-NLS-1$
-            // #endregion
         }
 
         /** {индикатор, менеджер, сегмент}. */
         private void registerJob(Object[] args)
         {
             jobs.put(args[0], new Object[] {args[1], args[2]});
-            // #region agent log
-            CancelLog.write("indicator segment=" + args[2] + " job=" + System.identityHashCode(args[0])); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
         }
 
         /** {индикатор}: {@code canceling()} индикатора — из панели «Состояние» или из самого отчётчика. */
@@ -1080,11 +330,6 @@ public final class Activator
                 Object job = args[0];
                 String internal = reporterCaller();
                 Object[] info = jobs.get(job);
-                // #region agent log
-                CancelLog.write("canceling job=" + System.identityHashCode(job) //$NON-NLS-1$
-                    + " segment=" + (info != null ? info[1] : null) //$NON-NLS-1$
-                    + " byReporter=" + internal + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 if (internal != null || info == null)
                     return;
                 Object[] target = modelOf(info[0]);
@@ -1107,16 +352,9 @@ public final class Activator
                     }
                 for (Object monitor : monitors)
                     cancel(monitor);
-                // #region agent log
-                CancelLog.write("stopped segment=" + segment + " project=" + target[1] //$NON-NLS-1$ //$NON-NLS-2$
-                    + " runningMonitors=" + monitors.size()); //$NON-NLS-1$
-                // #endregion
             }
             catch (Throwable failure)
             {
-                // #region agent log
-                CancelLog.write("[!] canceling failed: " + failure); //$NON-NLS-1$
-                // #endregion
             }
         }
 
@@ -1147,10 +385,6 @@ public final class Activator
                             stop.total++;
                         }
                         stop.last = System.currentTimeMillis();
-                        // #region agent log
-                        CancelLog.write("skip segment=" + segment + " object=" + objectId //$NON-NLS-1$ //$NON-NLS-2$
-                            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                        // #endregion
                         return Boolean.TRUE;
                     }
                 }
@@ -1159,15 +393,9 @@ public final class Activator
                         key -> java.util.Collections.synchronizedSet(
                             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>())))
                     .add(args[2]);
-                // #region agent log
-                CancelLog.write("run segment=" + segment + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
             catch (Throwable failure)
             {
-                // #region agent log
-                CancelLog.write("[!] gate failed: " + failure); //$NON-NLS-1$
-                // #endregion
             }
             return Boolean.FALSE;
         }
@@ -1193,9 +421,6 @@ public final class Activator
         private void end(Stop stop, String reason)
         {
             flush(stop);
-            // #region agent log
-            CancelLog.write("stop ended by " + reason + " project=" + stop.project + " skipped=" + stop.total); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
         }
 
         private synchronized void startTimer()
@@ -1231,9 +456,6 @@ public final class Activator
             }
             catch (Throwable failure)
             {
-                // #region agent log
-                CancelLog.write("[!] tick failed: " + failure); //$NON-NLS-1$
-                // #endregion
             }
         }
 
@@ -1253,10 +475,6 @@ public final class Activator
                 notifications.publish(new Object[] {CheckRecomputeNotifications.PREFIX + "user-stop; project=" //$NON-NLS-1$
                     + stop.project + "; contexts=" + entries.size(), STOP_REASON, //$NON-NLS-1$
                     Long.valueOf(System.currentTimeMillis()), stop.project, entries, Boolean.FALSE});
-            // #region agent log
-            CancelLog.write("deferred contexts=" + entries.size() + " project=" + stop.project //$NON-NLS-1$ //$NON-NLS-2$
-                + " published=" + (notifications != null && stop.project != null)); //$NON-NLS-1$
-            // #endregion
         }
 
         /** Метод {@code DerivedDataProgressReporter}, из которого идёт отмена, или {@code null} — отменил пользователь. */
@@ -1303,9 +521,6 @@ public final class Activator
             var bmModels = context.getServiceReference("com._1c.g5.v8.dt.core.platform.IBmModelManager"); //$NON-NLS-1$
             if (projects == null || bmModels == null)
             {
-                // #region agent log
-                CancelLog.write("[!] modelOf: services unavailable"); //$NON-NLS-1$
-                // #endregion
                 return null;
             }
             try
@@ -1323,10 +538,6 @@ public final class Activator
                 Class<?> dtProject = Class.forName("com._1c.g5.v8.dt.core.platform.IDtProject", false, loader); //$NON-NLS-1$
                 Object model = modelApi.getMethod("getModel", dtProject).invoke(modelService, project); //$NON-NLS-1$
                 Object workspaceProject = dtProject.getMethod("getWorkspaceProject").invoke(project); //$NON-NLS-1$
-                // #region agent log
-                CancelLog.write("modelOf project=" + projectId + " model=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (model != null ? System.identityHashCode(model) : null) + " workspaceProject=" + workspaceProject); //$NON-NLS-1$
-                // #endregion
                 if (model == null)
                     return null;
                 Object[] target = {model, workspaceProject};
@@ -1335,9 +546,6 @@ public final class Activator
             }
             catch (ReflectiveOperationException | RuntimeException failure)
             {
-                // #region agent log
-                CancelLog.write("[!] modelOf failed: " + failure); //$NON-NLS-1$
-                // #endregion
                 return null;
             }
             finally
@@ -1463,70 +671,13 @@ public final class Activator
                 // В каждом классе — ровно одна точка: schedule() в scheduleJob, вход canceling(), вход compute.
                 if (points[0] == 1)
                     woven.setBytes(writer.toByteArray());
-                // #region agent log
-                CancelLog.write((points[0] == 1 ? "woven" : "NOT WOVEN") + "; class=" + name //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + "; bundle=" + woven.getBundleWiring().getBundle().getVersion() + "; points=" + points[0]); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
             catch (Throwable failure)
             {
-                // #region agent log
-                CancelLog.write("[!] NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
         }
     }
 
-    // #region agent log
-    /** Временный журнал отмены проверок: {@code .tmp/temp-logs/check-cancel.log}, фоновой записью, без порогов. */
-    private static final class CancelLog
-    {
-        private static final java.io.File FILE =
-            new java.io.File("C:\\VC\\EDT.Comfort\\.tmp\\temp-logs\\check-cancel.log"); //$NON-NLS-1$
-        private static final java.util.concurrent.LinkedBlockingQueue<String> LINES =
-            new java.util.concurrent.LinkedBlockingQueue<>();
-
-        static void start()
-        {
-            Thread writer = new Thread(CancelLog::drain, "ComfortCheckCancelLog"); //$NON-NLS-1$
-            writer.setDaemon(true);
-            writer.start();
-        }
-
-        static void write(String text)
-        {
-            LINES.add(java.time.LocalDateTime.now() + " " + text); //$NON-NLS-1$
-        }
-
-        private static void drain()
-        {
-            while (true)
-            {
-                try
-                {
-                    List<String> batch = new java.util.ArrayList<>();
-                    batch.add(LINES.take());
-                    LINES.drainTo(batch);
-                    FILE.getParentFile().mkdirs();
-                    try (var out = new java.io.OutputStreamWriter(new java.io.FileOutputStream(FILE, true),
-                        java.nio.charset.StandardCharsets.UTF_8))
-                    {
-                        for (String line : batch)
-                            out.write(line + "\r\n"); //$NON-NLS-1$
-                    }
-                }
-                catch (InterruptedException e)
-                {
-                    return;
-                }
-                catch (Throwable ignored)
-                {
-                    // Следующая партия попробует снова.
-                }
-            }
-        }
-    }
-    // #endregion
 
     /**
      * derived 17.0.200.v202605050943: scheduleJob берёт имя сегмента без проекта.
