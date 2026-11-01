@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.emf.common.util.EList;
@@ -81,9 +82,13 @@ public final class BslFormTypeContextEnrichment
     private static final Set<Module> INSTALLING_FORM_MODULE =
         Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
 
-    /** Модули формы, для которых полный расчёт уже делали в этой сессии JVM. */
+    /**
+     * Модули формы, для которых полный расчёт уже делали в этой сессии JVM. Ключи слабые: каждая
+     * перепроверка проекта даёт новые экземпляры модулей, и сильный набор удерживал все прежние вместе
+     * с деревом разбора и набором ресурсов (issue 948). {@code Module} равен только самому себе.
+     */
     private static final Set<Module> FORM_MODULE_INSTALLED =
-        Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
+        Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
 
     private static final String TARGET_GET_OR_OPEN =
         "com._1c.g5.v8.dt.bsl.typesystem.GetOrOpenFormInvocationTypesComputer"; //$NON-NLS-1$

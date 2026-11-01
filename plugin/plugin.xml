@@ -736,7 +736,12 @@
         id="tormozit.problemView.recomputeChecks"
         name="Проверить"
         categoryId="tormozit.commands.global"
-        description="Перепроверить объекты, попадающие под текущий отбор панели «Ошибки конфигурации» (Комфорт)"/>
+        description="Запустить проверки объектов, попадающих под текущий отбор панели «Ошибки конфигурации» (Комфорт)"/>
+    <command
+        id="tormozit.problemView.recomputeDeferred"
+        name="Запустить проверки отложенных"
+        categoryId="tormozit.commands.global"
+        description="Запустить проверки объектов, пересчет которых отложен после массового изменения (Комфорт)"/>
     <command
         id="tormozit.problemView.openCheckSettings"
         name="Открыть настройку проверки"
@@ -1284,6 +1289,26 @@
         commandId="tormozit.problemView.recomputeChecks">
     </handler>
     <handler
+        class="tormozit.ProblemViewRecomputeDeferredHandler"
+        commandId="tormozit.problemView.recomputeDeferred">
+    </handler>
+    <!-- Штатная «Запустить проверку» на проектах назначает проверки в потоке UI; у неё только
+         defaultHandler, поэтому этот обработчик заменяет его, пока выделены одни проекты -->
+    <handler
+        class="tormozit.StartCheckProjectsHandler"
+        commandId="com._1c.g5.v8.dt.ui.command.startCheck">
+      <activeWhen>
+        <with variable="selection">
+          <and>
+            <count value="+"/>
+            <iterate operator="and">
+              <instanceof value="org.eclipse.core.resources.IProject"/>
+            </iterate>
+          </and>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
         class="tormozit.ProblemViewUpdateGateHandler"
         commandId="tormozit.problemView.updateGate">
     </handler>
@@ -1534,9 +1559,9 @@
             tooltip="Открыть исходный файл объекта ошибки в редакторе XML (Комфорт)"/>
         <command
             commandId="tormozit.problemView.recomputeChecks"
-            label="Проверить"
+            label="Запустить проверки"
             style="push"
-            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+            tooltip="Запустить проверки объектов по текущему отбору панели (Комфорт)"/>
       </menuContribution>
       <menuContribution locationURI="toolbar:com._1c.g5.v8.dt.ui.problemView?after=com._1c.g5.v8.dt.ui.command.openCheck">
         <command
@@ -1549,10 +1574,10 @@
       <menuContribution locationURI="menu:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command
             commandId="tormozit.problemView.recomputeChecks"
-            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
-            label="Проверить"
+            icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/obj16/check.png"
+            label="Запустить проверки"
             style="push"
-            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+            tooltip="Запустить проверки объектов по текущему отбору панели (Комфорт)"/>
         <command
             commandId="tormozit.problemView.updateGate"
             icon="icons/etool16/comfort.png"
@@ -1562,11 +1587,18 @@
       </menuContribution>
       <menuContribution locationURI="toolbar:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command
-            commandId="tormozit.problemView.recomputeChecks"
-            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
-            label="Проверить"
+            commandId="tormozit.problemView.recomputeDeferred"
+            icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/obj16/check.png"
+            label="Отложенные"
+            mode="FORCE_TEXT"
             style="push"
-            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+            tooltip="Запустить проверки объектов, пересчет которых отложен после массового изменения (Комфорт)"/>
+        <command
+            commandId="tormozit.problemView.recomputeChecks"
+            icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/obj16/check.png"
+            label="Запустить проверки"
+            style="push"
+            tooltip="Запустить проверки объектов по текущему отбору панели (Комфорт)"/>
         <command
             commandId="tormozit.problemView.updateGate"
             icon="icons/etool16/comfort.png"

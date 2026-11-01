@@ -38,15 +38,17 @@ import org.eclipse.ui.navigator.CommonViewer;
 import com._1c.g5.v8.bm.core.IBmObject;
 
 /**
- * Добавляет «Запустить автопроверки» в подменю «Комфорт» навигатора EDT — точечно пересчитывает проверки
- * для одного выбранного объекта.
+ * Добавляет «Запустить проверки» в подменю «Комфорт» навигатора EDT — точечно пересчитывает проверки
+ * для выбранного объекта, на проекте — проверки всего проекта. Штатный пункт «Запустить проверку»
+ * из контекстного меню навигатора убирается: наш делает то же.
  */
 public final class NavigatorRecomputeChecksMenuHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.navigatorRecomputeChecksHook"; //$NON-NLS-1$
-    private static final String ITEM_TEXT = "Запустить автопроверки"; //$NON-NLS-1$
+    private static final String ITEM_TEXT = "Запустить проверки"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-            "Пересчитать все проверки по объекту с вложенными"; //$NON-NLS-1$
+            "Запустить все проверки объекта с вложенными, на проекте — всего проекта"; //$NON-NLS-1$
+    private static final String STOCK_START_CHECK_COMMAND_ID = "com._1c.g5.v8.dt.ui.command.startCheck"; //$NON-NLS-1$
     static final String UNREACHABLE_TOOLTIP =
             "Найти в папках выбранных узлов папки объектов, не связанные с конфигурацией, и показать в панели Поиск";
 
@@ -135,6 +137,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
+                removeStockStartCheck(menu);
                 hookComfortSubmenu(menu, viewer);
                 hookReferencesSubmenu(menu, viewer);
             }
@@ -145,6 +148,37 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             if (!menu.isDisposed())
                 menu.removeMenuListener(listener);
         });
+    }
+
+    /**
+     * Убирает штатный пункт «Запустить проверку»: наш «Запустить проверки» в подменю «Комфорт» делает
+     * всё то же (проекты, объекты, множественное выделение), но проверку проекта назначает в фоне —
+     * штатный обработчик назначает её в потоке UI и подвешивает EDT на десятки секунд. Два пункта
+     * с одним действием в одном меню только путают. Пункт пересоздаётся при каждом показе меню —
+     * убираем каждый раз.
+     */
+    private static void removeStockStartCheck(Menu menu)
+    {
+        for (MenuItem item : menu.getItems())
+            if (!item.isDisposed() && STOCK_START_CHECK_COMMAND_ID.equals(commandId(item.getData())))
+                item.dispose();
+    }
+
+    /** Команда пункта меню в обоих представлениях: JFace и E4. */
+    private static String commandId(Object data)
+    {
+        if (data instanceof org.eclipse.ui.menus.CommandContributionItem contribution)
+            return contribution.getCommand() != null ? contribution.getCommand().getId() : null;
+        if (data instanceof org.eclipse.e4.ui.workbench.renderers.swt.HandledContributionItem contribution)
+        {
+            var model = contribution.getModel();
+            if (model == null)
+                return null;
+            if (model.getWbCommand() != null)
+                return model.getWbCommand().getId();
+            return model.getCommand() != null ? model.getCommand().getElementId() : null;
+        }
+        return null;
     }
 
     private static void hookComfortSubmenu(Menu contextMenu, CommonViewer viewer)
@@ -172,6 +206,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
+                item.setImage(ComfortCheckRecompute.icon());
                 ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
@@ -474,61 +509,84 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
         return false;
     }
 
+    /**
+     * Всё выделение, как у штатной команды: объекты группируются по проектам и проверяются одним
+     * запуском на проект; проект или его конфигурация в выделении — проверка всего проекта.
+     */
     private static void recomputeChecks(IStructuredSelection selection)
     {
-        EObject model = NavigatorElementModels.resolveEObject(selection.getFirstElement());
-        IResource resource = NavigatorResourceResolver.resolveFirst(selection);
-        IProject project = resource != null ? resource.getProject() : null;
-        if (Global.isLogEnabled())
+        java.util.Map<IProject, List<EObject>> objectsByProject = new java.util.LinkedHashMap<>();
+        java.util.Set<IProject> wholeProjects = new java.util.LinkedHashSet<>();
+        int unresolved = 0;
+        int unsupported = 0;
+        for (Object element : selection.toList())
         {
-            Object firstElement = selection.getFirstElement();
-            Global.log("CheckCommand", "навигатор «Запустить автопроверки»: узел=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (firstElement == null ? "null" : firstElement.getClass().getName()) //$NON-NLS-1$
-                + ", модель=" + (model == null ? "null" : model.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + ", проект=" + (project == null ? "null" : project.getName())); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        if (project == null && selection.getFirstElement() instanceof IProject selected)
-            project = selected;
-        if (project == null)
-        {
-            toast("Не удалось определить проект выбранного объекта.");
-            return;
+            EObject model = NavigatorElementModels.resolveEObject(element);
+            IResource resource = NavigatorResourceResolver.resolve(element);
+            IProject project = resource != null ? resource.getProject() : null;
+            if (Global.isLogEnabled())
+                Global.log("CheckCommand", "навигатор «Запустить проверки»: узел=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (element == null ? "null" : element.getClass().getName()) //$NON-NLS-1$
+                    + ", модель=" + (model == null ? "null" : model.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", проект=" + (project == null ? "null" : project.getName())); //$NON-NLS-1$ //$NON-NLS-2$
+            if (project == null && element instanceof IProject selected)
+                project = selected;
+            if (project == null)
+            {
+                unresolved++;
+                continue;
+            }
+
+            // Корень навигатора — конфигурация или сам проект: точечная перепроверка такого узла
+            // отрабатывает мгновенно и не проверяет ничего, нужна полная проверка всех объектов
+            if (model instanceof com._1c.g5.v8.dt.metadata.mdclass.Configuration || element instanceof IProject)
+            {
+                wholeProjects.add(project);
+                continue;
+            }
+
+            if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
+            {
+                unsupported++;
+                continue;
+            }
+
+            if (resource != null)
+            {
+                try
+                {
+                    resource.refreshLocal(IResource.DEPTH_INFINITE, new NullProgressMonitor());
+                }
+                catch (CoreException ignored)
+                {
+                }
+            }
+            objectsByProject.computeIfAbsent(project, key -> new ArrayList<>()).add(model);
         }
 
-        // Корень навигатора — конфигурация или сам проект: точечная перепроверка такого узла
-        // отрабатывает мгновенно и не проверяет ничего, нужна полная проверка всех объектов
-        if (model instanceof com._1c.g5.v8.dt.metadata.mdclass.Configuration
-            || selection.getFirstElement() instanceof IProject)
-        {
+        for (IProject project : wholeProjects)
             ComfortCheckRecompute.recomputeProject(project);
-            return;
-        }
-
-        if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
-        {
-            toast("Выбранный элемент нельзя точечно перепроверить.");
-            return;
-        }
-
-        if (resource != null)
+        objectsByProject.keySet().removeAll(wholeProjects);
+        for (var entry : objectsByProject.entrySet())
         {
             try
             {
-                resource.refreshLocal(IResource.DEPTH_INFINITE, new NullProgressMonitor());
+                ComfortCheckRecompute.recomputeObjects(entry.getKey(), entry.getValue());
             }
-            catch (CoreException ignored)
+            catch (Throwable t)
             {
+                toast("Ошибка при запуске проверки: " + t.getClass().getSimpleName());
             }
         }
 
-        try
-        {
-            ComfortCheckRecompute.recomputeObjects(project, List.of(model));
-        }
-        catch (Throwable t)
-        {
-            toast("Ошибка при запуске проверки: " + t.getClass().getSimpleName());
-        }
+        if (unresolved > 0)
+            toast(unresolved == selection.size()
+                ? "Не удалось определить проект выбранного объекта."
+                : "Пропущено без проекта: " + unresolved + ".");
+        if (unsupported > 0)
+            toast(unsupported == selection.size()
+                ? "Выбранный элемент нельзя точечно перепроверить."
+                : "Пропущено элементов, которые нельзя точечно перепроверить: " + unsupported + ".");
     }
 
     private static void toast(String message)

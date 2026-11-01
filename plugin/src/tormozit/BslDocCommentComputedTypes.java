@@ -681,7 +681,19 @@ public final class BslDocCommentComputedTypes
             List<?> computed = docReturnTypesFor(methodObject);
             if (computed != null && !computed.isEmpty())
             {
+                // #region agent log
+                FillTrace.enter(methodObject);
+                try
+                {
+                // #endregion
                 fillReturnSection(comment, computed, methodObject);
+                // #region agent log
+                }
+                finally
+                {
+                    FillTrace.exit(methodObject, computed.size());
+                }
+                // #endregion
             }
         }
         catch (Throwable ignored)
@@ -689,6 +701,217 @@ public final class BslDocCommentComputedTypes
         }
         return comment;
     }
+
+    // #region agent log
+    /**
+     * Временная диагностика дорисовки возврата: одна строка на вызов {@code fillReturnSection} —
+     * вложенность того же метода в этом потоке (вложенные разборы или подряд), общая вложенность
+     * дорисовок, чем кончилась дорисовка и сколько длилась. Без обхода стека.
+     */
+    private static final class FillTrace
+    {
+        static final ThreadLocal<String> EXIT = new ThreadLocal<>();
+        private static final ThreadLocal<java.util.Map<EObject, int[]>> ACTIVE =
+            ThreadLocal.withInitial(java.util.IdentityHashMap::new);
+        private static final ThreadLocal<long[]> STARTED = ThreadLocal.withInitial(() -> new long[64]);
+        private static final ThreadLocal<int[]> DEPTH = ThreadLocal.withInitial(() -> new int[1]);
+        /** Этапы: до заполнения, штатный fill, места полей, описания полей, слияние и отсев. */
+        private static final String[] PHASE_NAMES = { "pre", "fill", "align", "descr", "merge" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        private static final ThreadLocal<long[]> PHASES = ThreadLocal.withInitial(() -> new long[PHASE_NAMES.length]);
+        private static final ThreadLocal<long[]> PHASE_MARK = ThreadLocal.withInitial(() -> new long[1]);
+
+        /** Время с прошлой отметки (или с начала дорисовки) — в этап {@code phase}. */
+        static void phase(int phase)
+        {
+            long now = System.nanoTime();
+            long[] mark = PHASE_MARK.get();
+            PHASES.get()[phase] += now - mark[0];
+            mark[0] = now;
+        }
+
+        static void enter(EObject method)
+        {
+            java.util.Arrays.fill(PHASES.get(), 0L);
+            PHASE_MARK.get()[0] = System.nanoTime();
+            ACTIVE.get().computeIfAbsent(method, key -> new int[1])[0]++;
+            int[] depth = DEPTH.get();
+            long[] started = STARTED.get();
+            if (depth[0] < started.length)
+                started[depth[0]] = System.nanoTime();
+            depth[0]++;
+            EXIT.set("?"); //$NON-NLS-1$
+        }
+
+        static void exit(EObject method, int computedCount)
+        {
+            int[] depth = DEPTH.get();
+            depth[0]--;
+            long[] started = STARTED.get();
+            long us = depth[0] < started.length ? (System.nanoTime() - started[depth[0]]) / 1000 : -1;
+            java.util.Map<EObject, int[]> active = ACTIVE.get();
+            int[] same = active.get(method);
+            int sameDepth = same != null ? same[0] : 0;
+            if (same != null && --same[0] == 0)
+                active.remove(method);
+            String exit = EXIT.get();
+            EXIT.remove();
+            String name;
+            try
+            {
+                name = String.valueOf(BslDocCommentDescriptionFix.invokeCommentGetter(method, "getName")); //$NON-NLS-1$
+            }
+            catch (Throwable e)
+            {
+                name = method.eClass().getName();
+            }
+            Resource resource = method.eResource();
+            String module = resource != null ? resource.getURI().lastSegment() : "?"; //$NON-NLS-1$
+            if (resource != null && resource.getURI().segmentCount() > 2)
+                module = resource.getURI().segment(resource.getURI().segmentCount() - 2) + "/" + module; //$NON-NLS-1$
+            Global.tempLog("doc-return-fill", "us=" + us //$NON-NLS-1$ //$NON-NLS-2$
+                + " exit=" + exit //$NON-NLS-1$
+                + " sameDepth=" + sameDepth //$NON-NLS-1$
+                + " depth=" + (depth[0] + 1) //$NON-NLS-1$
+                + " computed=" + computedCount //$NON-NLS-1$
+                + phasesText()
+                + " method=" + name + "@" + module //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
+
+        /**
+         * Одна строка на дорисованный раздел: сколько полей несут один и тот же тип
+         * несколько раз (по имени типа, на всех уровнях вложенности) и первые такие поля.
+         */
+        static void duplicateTypes(TypeSection section, EObject method)
+        {
+            int[] counts = new int[2]; // [полей всего, полей с повторами]
+            List<String> samples = new ArrayList<>();
+            collectDuplicateTypes(section, "", counts, samples, //$NON-NLS-1$
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), 0);
+            Global.tempLog("doc-return-dup-types", "fields=" + counts[0] //$NON-NLS-1$ //$NON-NLS-2$
+                + " withDuplicates=" + counts[1] //$NON-NLS-1$
+                + " method=" + methodLabel(method) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + (samples.isEmpty() ? "" : " samples=" + String.join("; ", samples))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static void collectDuplicateTypes(TypeSection section, String path, int[] counts,
+            List<String> samples, java.util.Set<Object> visited, int depth)
+        {
+            if (section == null || depth > 8 || !visited.add(section))
+                return;
+            for (TypeSection.TypeDefinition definition : section.getTypeDefinitions())
+                collectDuplicateTypes(definition, path, counts, samples, visited, depth);
+        }
+
+        private static void collectDuplicateTypes(TypeSection.TypeDefinition definition, String path,
+            int[] counts, List<String> samples, java.util.Set<Object> visited, int depth)
+        {
+            if (definition == null || !visited.add(definition))
+                return;
+            for (TypeSection.TypeDefinition contained : definition.getContainTypes())
+                collectDuplicateTypes(contained, path, counts, samples, visited, depth + 1);
+            for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+            {
+                counts[0]++;
+                String fieldPath = path.isEmpty() ? field.getName() : path + "." + field.getName(); //$NON-NLS-1$
+                java.util.Map<String, int[]> byType = new java.util.LinkedHashMap<>();
+                int total = 0;
+                for (TypeSection fieldSection : field.getTypeSections())
+                {
+                    for (TypeSection.TypeDefinition type : fieldSection.getTypeDefinitions())
+                    {
+                        total++;
+                        String name = String.valueOf(type.getTypeName());
+                        byType.computeIfAbsent(name.toLowerCase(java.util.Locale.ROOT), key -> new int[1])[0]++;
+                    }
+                }
+                if (total > byType.size())
+                {
+                    counts[1]++;
+                    if (samples.size() < 5)
+                    {
+                        StringBuilder sample = new StringBuilder(fieldPath).append(" sections=") //$NON-NLS-1$
+                            .append(field.getTypeSections().size()).append(" types=").append(total) //$NON-NLS-1$
+                            .append(" ["); //$NON-NLS-1$
+                        byType.forEach((name, count) -> sample.append(name).append('×').append(count[0]).append(' '));
+                        samples.add(sample.append(']').toString());
+                    }
+                }
+                for (TypeSection fieldSection : field.getTypeSections())
+                    collectDuplicateTypes(fieldSection, fieldPath, counts, samples, visited, depth + 1);
+            }
+        }
+
+        /**
+         * Одна строка на функцию при запоминании её рассчитанных типов: сколько свойств
+         * возвращаемых типов (первый уровень) несут один и тот же тип несколько раз, и для
+         * первых таких — одинаковы ли эти экземпляры и откуда они ({@code eResource}).
+         */
+        static void sourceDuplicates(String label, List<?> types)
+        {
+            int properties = 0;
+            int withDuplicates = 0;
+            List<String> samples = new ArrayList<>();
+            if (types != null)
+            {
+                for (Object raw : types)
+                {
+                    if (!(raw instanceof com._1c.g5.v8.dt.mcore.Type type) || type.getContextDef() == null)
+                        continue;
+                    for (com._1c.g5.v8.dt.mcore.Property property : type.getContextDef().allProperties())
+                    {
+                        properties++;
+                        List<TypeItem> items = property.getTypes();
+                        java.util.Map<String, int[]> byName = new java.util.LinkedHashMap<>();
+                        java.util.Set<TypeItem> identities =
+                            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                        for (TypeItem item : items)
+                        {
+                            identities.add(item);
+                            String name = item.eIsProxy()
+                                ? "proxy:" + ((org.eclipse.emf.ecore.InternalEObject)item).eProxyURI() //$NON-NLS-1$
+                                : String.valueOf(item.getName());
+                            byName.computeIfAbsent(name, key -> new int[1])[0]++;
+                        }
+                        if (items.size() <= byName.size())
+                            continue;
+                        withDuplicates++;
+                        if (samples.size() < 3)
+                        {
+                            TypeItem first = items.get(0);
+                            Resource resource = first.eResource();
+                            StringBuilder sample = new StringBuilder(String.valueOf(property.getName()))
+                                .append(" property=").append(property.getClass().getSimpleName()) //$NON-NLS-1$
+                                .append(" types=").append(items.size()) //$NON-NLS-1$
+                                .append(" names=").append(byName.size()) //$NON-NLS-1$
+                                .append(" instances=").append(identities.size()) //$NON-NLS-1$
+                                .append(" proxy=").append(first.eIsProxy()) //$NON-NLS-1$
+                                .append(" res=").append(resource == null ? "null" : resource.getURI()) //$NON-NLS-1$ //$NON-NLS-2$
+                                .append(" ["); //$NON-NLS-1$
+                            byName.forEach((name, count) -> sample.append(name).append('×').append(count[0]).append(' '));
+                            samples.add(sample.append(']').toString());
+                        }
+                    }
+                }
+            }
+            Global.tempLog("return-source-dup-types", "properties=" + properties //$NON-NLS-1$ //$NON-NLS-2$
+                + " withDuplicates=" + withDuplicates //$NON-NLS-1$
+                + " method=" + label //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + (samples.isEmpty() ? "" : " samples=" + String.join("; ", samples))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static String phasesText()
+        {
+            long[] phases = PHASES.get();
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < phases.length; i++)
+                text.append(' ').append(PHASE_NAMES[i]).append('=').append(phases[i] / 1000);
+            return text.toString();
+        }
+    }
+    // #endregion
 
     /**
      * Обход дефекта EDT (bsl 28.0.1, сборка 2026-07; без плагина тоже): частичный расчёт NORMAL
@@ -1011,21 +1234,18 @@ public final class BslDocCommentComputedTypes
         for (TypeItem item : items)
         {
             java.util.Set<String> names = null;
-            for (String method : new String[] { "getNameRu", "getName" }) //$NON-NLS-1$ //$NON-NLS-2$
-            {
-                Object name = Global.invoke(item, method);
-                if (names == null && name instanceof String text)
-                    names = declaredFields.get(text.toLowerCase(java.util.Locale.ROOT));
-            }
+            for (String name : new String[] { item.getNameRu(), item.getName() })
+                if (names == null && name != null)
+                    names = declaredFields.get(name.toLowerCase(java.util.Locale.ROOT));
             if (names == null)
                 return false;
             if (item instanceof com._1c.g5.v8.dt.mcore.Type type && !type.eIsProxy()
                 && type.getContextDef() != null && type.getContextDef().allProperties() != null)
                 // allProperties — как в TypeSection.fill: с унаследованными полями.
-                for (Object property : type.getContextDef().allProperties())
+                for (com._1c.g5.v8.dt.mcore.Property property : type.getContextDef().allProperties())
                 {
-                    Object name = Global.invoke(property, "getName"); //$NON-NLS-1$
-                    if (name instanceof String text && !names.contains(text.toLowerCase(java.util.Locale.ROOT)))
+                    String name = property.getName();
+                    if (name != null && !names.contains(name.toLowerCase(java.util.Locale.ROOT)))
                         return false;
                 }
         }
@@ -1161,7 +1381,10 @@ public final class BslDocCommentComputedTypes
     private static void fillReturnSection(Object comment, List<?> computed, EObject context) throws Exception
     {
         if (!(comment instanceof BslDocumentationComment documentation))
+        {
+            FillTrace.EXIT.set("notDocumentation"); // agent log //$NON-NLS-1$
             return;
+        }
         List<TypeItem> items = new ArrayList<>();
         for (Object raw : computed)
         {
@@ -1169,7 +1392,10 @@ public final class BslDocCommentComputedTypes
                 items.add(item);
         }
         if (items.isEmpty())
+        {
+            FillTrace.EXIT.set("noItems"); // agent log //$NON-NLS-1$
             return;
+        }
 
         // Объявленный возврат не замещаем, а дополняем: EDT объединяет все секции типов
         // возврата, поэтому своя секция просто встаёт рядом с написанной руками.
@@ -1178,15 +1404,29 @@ public final class BslDocCommentComputedTypes
         // слитый тип самоссылающейся структуры (ОписаниеУзла: поля «см. ОписаниеУзла») замкнут
         // сам на себя — сборка висела в рекурсии fill глубже 1000 кадров (дамп 18.10).
         if (existing != null && addsNothingToDeclared(items, existing))
+        {
+            FillTrace.EXIT.set("addsNothing"); // agent log //$NON-NLS-1$
             return;
+        }
+        String declared = existing != null ? declaredSignature(existing) : ""; //$NON-NLS-1$
+        if (FruitlessFills.known(context, computed, declared))
+        {
+            FillTrace.EXIT.set("knownFruitless"); // agent log //$NON-NLS-1$
+            return;
+        }
         if (isCyclicOrHuge(items))
+        {
+            FruitlessFills.remember(context, computed, declared);
+            FillTrace.EXIT.set("cyclicOrHuge"); // agent log //$NON-NLS-1$
             return;
+        }
         ReturnSection returnSection = existing != null ? existing : new ReturnSection(documentation, 0);
         TypeSection typeSection = new TypeSection(returnSection, 0);
 
         // EDT TypeSection.fill сохраняет поля только последнего контекстного типа.
         // Заполняем варианты отдельно в той же секции (родители определений остаются
         // правильными), затем собираем их вместе перед объединением одноимённых типов.
+        FillTrace.phase(0); // agent log
         List<TypeSection.TypeDefinition> definitions = new ArrayList<>();
         for (TypeItem item : items)
         {
@@ -1196,8 +1436,13 @@ public final class BslDocCommentComputedTypes
                 typeSection.fill(variant, "", false, context); //$NON-NLS-1$
             definitions.addAll(typeSection.getTypeDefinitions());
         }
+        FillTrace.phase(1); // agent log
         if (definitions.isEmpty())
+        {
+            FruitlessFills.remember(context, computed, declared);
+            FillTrace.EXIT.set("noDefinitions"); // agent log //$NON-NLS-1$
             return;
+        }
         // Каждый fill заменяет список определений, поэтому возвращаем все варианты
         // после последнего вызова, до выравнивания мест создания и описаний полей.
         typeSection.getTypeDefinitions().clear();
@@ -1212,10 +1457,13 @@ public final class BslDocCommentComputedTypes
         catch (Throwable ignored)
         {
         }
+        FillTrace.phase(2); // agent log
         // Описания полей — только текст для подсказок. Комментарий, разобранный сборкой, в
         // подсказки не попадает (EDT разбирает его заново на каждое обращение), а сборка
         // держит блокировку проекта, и первое нажатие клавиши после сохранения ждёт её конца.
-        boolean inBuild = isBuildThread();
+        // Так же в потоках проверок: там комментарий нужен только для типов, а описания
+        // стоили две трети всей дорисовки (замер БСП_3 01.11: 17,7 из 27,5 с).
+        boolean inBuild = isBuildThread() || isCheckThread();
         try
         {
             if (!inBuild)
@@ -1225,14 +1473,74 @@ public final class BslDocCommentComputedTypes
         catch (Throwable ignored)
         {
         }
+        FillTrace.phase(3); // agent log
         // Объединение и отсев — после выравнивания мест и описаний: они адресуют поля по
         // индексам и кэшируют эти пути по форме полной секции.
         mergeSameTypeDefinitions(typeSection);
-        if (existing != null && !dropDeclaredFields(typeSection, existing))
+        dropRepeatedFieldTypes(typeSection, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+        FillTrace.duplicateTypes(typeSection, context); // agent log
+        boolean addsFields = existing == null || dropDeclaredFields(typeSection, existing);
+        FillTrace.phase(4); // agent log
+        if (!addsFields)
+        {
+            FruitlessFills.remember(context, computed, declared);
+            FillTrace.EXIT.set("allDeclared"); // agent log //$NON-NLS-1$
             return;
+        }
         returnSection.addTypeSection(typeSection);
         if (existing == null)
             documentation.setReturnSection(returnSection);
+        FillTrace.EXIT.set(existing == null ? "added" : "extended"); // agent log //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Типы и поля объявленной секции возврата одной строкой — по ней {@link FruitlessFills}
+     * узнаёт тот же комментарий в новом разборе: EDT разбирает комментарий заново на каждое
+     * обращение, и объект секции каждый раз новый.
+     */
+    private static String declaredSignature(ReturnSection declared)
+    {
+        StringBuilder signature = new StringBuilder();
+        for (TypeSection section : declared.getReturnTypes())
+        {
+            for (TypeSection.TypeDefinition definition : section.getTypeDefinitions())
+            {
+                signature.append(definition.getTypeName()).append('(');
+                for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+                    signature.append(field.getName()).append(',');
+                signature.append(')');
+            }
+            signature.append(';');
+        }
+        return signature.toString();
+    }
+
+    /**
+     * Дорисовки возврата, которые ничего не добавили к комментарию. Разбор комментария EDT не
+     * кэширует, и ссылка «см.» на ту же функцию повторяет дорисовку при каждом обращении
+     * (самоссылающееся {@code ОписаниеУзла} в БСП — десятки тысяч раз за перепроверку).
+     * Запись верна, пока не изменились рассчитанные типы функции — тот же экземпляр списка,
+     * как у {@code BslStructureInsertCommentTypes.alignFieldSources}, — и объявленная секция.
+     */
+    private static final class FruitlessFills
+    {
+        private record Entry(List<?> computed, String declared)
+        {
+        }
+
+        private static final java.util.Map<EObject, Entry> BY_METHOD =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+        static boolean known(EObject method, List<?> computed, String declared)
+        {
+            Entry entry = BY_METHOD.get(method);
+            return entry != null && entry.computed() == computed && entry.declared().equals(declared);
+        }
+
+        static void remember(EObject method, List<?> computed, String declared)
+        {
+            BY_METHOD.put(method, new Entry(computed, declared));
+        }
     }
 
     /**
@@ -1269,6 +1577,55 @@ public final class BslDocCommentComputedTypes
         catch (UnsupportedOperationException e)
         {
             // Список EDT неизменяемый — оставляем секцию как есть.
+        }
+    }
+
+    /**
+     * Оставляет в типах каждого поля по одному экземпляру простого типа (без своих полей и
+     * вложенных типов). Тип поля, собранный из реквизитов нескольких объектов, несёт тип
+     * каждого из них: у {@code ДанныеФайла(...).Размер} — «Число» по разу на каждый справочник
+     * присоединённых файлов. Штатный {@code fill} переносит такой список в поле как есть, и
+     * подсказка при наведении выводила «Число | Число | …»; список автодополнения их сворачивает.
+     * Типы со своими полями не трогаются: их поля различаются.
+     */
+    private static void dropRepeatedFieldTypes(TypeSection section, java.util.Set<Object> visited)
+    {
+        if (section == null || !visited.add(section))
+            return;
+        for (TypeSection.TypeDefinition definition : section.getTypeDefinitions())
+            dropRepeatedFieldTypes(definition, visited);
+    }
+
+    private static void dropRepeatedFieldTypes(TypeSection.TypeDefinition definition, java.util.Set<Object> visited)
+    {
+        if (definition == null || !visited.add(definition))
+            return;
+        for (TypeSection.TypeDefinition contained : definition.getContainTypes())
+            dropRepeatedFieldTypes(contained, visited);
+        for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+        {
+            java.util.Set<String> simple = new java.util.HashSet<>();
+            try
+            {
+                for (var sections = field.getTypeSections().iterator(); sections.hasNext();)
+                {
+                    TypeSection fieldSection = sections.next();
+                    var types = fieldSection.getTypeDefinitions();
+                    boolean hadTypes = !types.isEmpty();
+                    types.removeIf(type -> type.getTypeName() != null && type.getContainTypes().isEmpty()
+                        && type.getFieldDefinitionExtension().isEmpty()
+                        && !simple.add(type.getTypeName().toLowerCase(java.util.Locale.ROOT)));
+                    // Раздел, в котором были только повторы, больше ничего не описывает.
+                    if (hadTypes && types.isEmpty())
+                        sections.remove();
+                }
+            }
+            catch (UnsupportedOperationException e)
+            {
+                // Список EDT неизменяемый — оставляем поле как есть.
+            }
+            for (TypeSection fieldSection : field.getTypeSections())
+                dropRepeatedFieldTypes(fieldSection, visited);
         }
     }
 
@@ -1342,6 +1699,15 @@ public final class BslDocCommentComputedTypes
     }
 
     /**
+     * Текущий поток — расчёт производных данных EDT (проверки, валидация). Задания у этих
+     * потоков нет, узнаются они только по имени.
+     */
+    private static boolean isCheckThread()
+    {
+        return Thread.currentThread().getName().startsWith("derived_data_executor_"); //$NON-NLS-1$
+    }
+
+    /**
      * Загрузчик классов бандла {@code com._1c.g5.v8.dt.bsl}.
      * <p>
      * Загрузчик самой модели ({@code target.getClass().getClassLoader()}) видит только
@@ -1400,6 +1766,7 @@ public final class BslDocCommentComputedTypes
                 {
                     remembering.remove();
                 }
+                FillTrace.sourceDuplicates(label, types); // agent log
                 // Пусто — не запоминаем и не считаем изменением: пустота бывает от недосчёта, а
                 // запись привязана к тексту функции, так что для другого текста она и так не найдётся.
                 if (types == null || types.isEmpty())
@@ -1510,10 +1877,10 @@ public final class BslDocCommentComputedTypes
                 // родительской части, и её ключи getProperties не видел (правка ключа в «Яйцо» не
                 // меняла сигнатуру «Новый123…», 18.10 09:32).
                 if (contextDef != null && !contextDef.eIsProxy() && contextDef.allProperties() != null)
-                    for (Object property : contextDef.allProperties())
-                        fields.add(String.valueOf(Global.invoke(property, "getName"))); //$NON-NLS-1$
+                    for (com._1c.g5.v8.dt.mcore.Property property : contextDef.allProperties())
+                        fields.add(String.valueOf(property.getName()));
             }
-            parts.add(Global.invoke(type, "getName") + "{" + String.join(",", fields) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            parts.add(type.getName() + "{" + String.join(",", fields) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         return String.join("", parts); //$NON-NLS-1$
     }

@@ -253,31 +253,26 @@ public final class Global
         Class<?> startClass = isStatic ? (Class<?>) obj : obj.getClass();
         Object targetInstance = isStatic ? null : obj;
 
-        for (Class<?> c = startClass; c != null; c = c.getSuperclass())
+        for (java.lang.reflect.Method m : invokeCandidates(startClass, methodName, argc))
         {
-            for (java.lang.reflect.Method m : c.getDeclaredMethods())
+            try
             {
-                if (!m.getName().equals(methodName) || m.getParameterCount() != argc)
-                    continue;
-                try
-                {
-                    m.setAccessible(true);
-                    return m.invoke(targetInstance, args);
-                }
-                catch (java.lang.reflect.InvocationTargetException e)
-                {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-                    throw new RuntimeException(cause);
-                }
-                catch (IllegalArgumentException typeMismatch)
-                {
-                    // Другая перегрузка с тем же именем/числом параметров, но другими типами
-                    // (напр. LightCombo.selectItem(int) и приватный selectItem(Item)) — пробуем
-                    // следующего кандидата, а не сдаёмся на первом несовпадении.
-                }
-                catch (Exception ignored) { return null; }
+                m.setAccessible(true);
+                return m.invoke(targetInstance, args);
             }
+            catch (java.lang.reflect.InvocationTargetException e)
+            {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                throw new RuntimeException(cause);
+            }
+            catch (IllegalArgumentException typeMismatch)
+            {
+                // Другая перегрузка с тем же именем/числом параметров, но другими типами
+                // (напр. LightCombo.selectItem(int) и приватный selectItem(Item)) — пробуем
+                // следующего кандидата, а не сдаёмся на первом несовпадении.
+            }
+            catch (Exception ignored) { return null; }
         }
         return null;
     }
@@ -287,33 +282,57 @@ public final class Global
     {
         if (obj == null || methodName == null) return false;
         int argc = args == null ? 0 : args.length;
-        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
+        for (java.lang.reflect.Method m : invokeCandidates(obj.getClass(), methodName, argc))
         {
-            for (java.lang.reflect.Method m : c.getDeclaredMethods())
+            try
             {
-                if (!m.getName().equals(methodName) || m.getParameterCount() != argc)
-                    continue;
-                try
-                {
-                    m.setAccessible(true);
-                    m.invoke(obj, args);
-                    return true;
-                }
-                catch (java.lang.reflect.InvocationTargetException e)
-                {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-                    throw new RuntimeException(cause);
-                }
-                catch (IllegalArgumentException typeMismatch)
-                {
-                    // См. комментарий в invoke() — другая перегрузка, пробуем дальше.
-                }
-                catch (Exception ignored) { return false; }
+                m.setAccessible(true);
+                m.invoke(obj, args);
+                return true;
             }
+            catch (java.lang.reflect.InvocationTargetException e)
+            {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                throw new RuntimeException(cause);
+            }
+            catch (IllegalArgumentException typeMismatch)
+            {
+                // См. комментарий в invoke() — другая перегрузка, пробуем дальше.
+            }
+            catch (Exception ignored) { return false; }
         }
         return false;
     }
+
+    /**
+     * Кандидаты {@link #invoke}/{@link #invokeVoid}: методы с этим именем и числом параметров по иерархии
+     * от {@code type} вверх, в порядке {@code getDeclaredMethods}. Запоминаются по классу: каждый вызов
+     * {@code getDeclaredMethods} копирует все методы класса — на горячем пути (свойства типов при
+     * разборе комментариев) это давало около миллиона мусорных {@code Method}.
+     */
+    private static java.lang.reflect.Method[] invokeCandidates(Class<?> type, String methodName, int argc)
+    {
+        return INVOKE_CANDIDATES.get(type).computeIfAbsent(methodName + '/' + argc, key ->
+        {
+            List<java.lang.reflect.Method> found = new java.util.ArrayList<>();
+            for (Class<?> c = type; c != null; c = c.getSuperclass())
+                for (java.lang.reflect.Method m : c.getDeclaredMethods())
+                    if (m.getName().equals(methodName) && m.getParameterCount() == argc)
+                        found.add(m);
+            return found.toArray(java.lang.reflect.Method[]::new);
+        });
+    }
+
+    private static final ClassValue<java.util.concurrent.ConcurrentHashMap<String, java.lang.reflect.Method[]>> INVOKE_CANDIDATES =
+        new ClassValue<>()
+        {
+            @Override
+            protected java.util.concurrent.ConcurrentHashMap<String, java.lang.reflect.Method[]> computeValue(Class<?> type)
+            {
+                return new java.util.concurrent.ConcurrentHashMap<>();
+            }
+        };
 
     /**
      * Внутренний слушатель {@link TypedListener} без прямого {@code getEventListener()}.

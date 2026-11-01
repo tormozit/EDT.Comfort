@@ -56,6 +56,12 @@ public final class Activator
         TextSearchInvocationWeaving.install(context);
         ReferenceSearchResultWeaving.install(context);
         DerivedProgressProjectNames.install(context);
+        DerivedCheckCancellation.install(context);
+        // До временного замера: тот заменяет вызовы ICheck.check и в нашем методе-обёртке
+        CheckDurations.install(context);
+        // #region agent log
+        CheckTimingDiagnostics.install(context);
+        // #endregion
     }
 
     @Override
@@ -64,7 +70,1463 @@ public final class Activator
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
         System.getProperties().put(DerivedProgressProjectNames.CALLBACK,
             (BiFunction<Object, String, String>) (manager, title) -> title);
+        System.getProperties().put(CheckDurations.CALLBACK + ".begin", (Consumer<Object>) check -> {}); //$NON-NLS-1$
+        System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
     }
+
+    /**
+     * check 6.0.100.v202605050943 {@code CheckExecutor}: собственное время каждой проверки, сумма по
+     * всем потокам. Три вызова {@code ICheck.check} заменены вызовом добавленного статического
+     * метода, который зовёт тот же {@code check} между {@code .begin} и {@code .end}. Основной бандл
+     * читает суммы из {@code .totals} ({проверка → нс}) до и после пересчёта.
+     */
+    private static final class CheckDurations implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.checkDuration"; //$NON-NLS-1$
+        private static final String TARGET = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
+        private static final String CHECK = "com/e1c/g5/v8/dt/check/ICheck"; //$NON-NLS-1$
+        private static final String CHECK_DESCRIPTOR = "(Ljava/lang/Object;Lcom/e1c/g5/v8/dt/check/ICheckResultAcceptor;" //$NON-NLS-1$
+            + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Ljava/lang/Object;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String WRAPPER = "tormozit$timedCheck"; //$NON-NLS-1$
+        private static final String WRAPPER_DESCRIPTOR = "(L" + CHECK + ";" + CHECK_DESCRIPTOR.substring(1); //$NON-NLS-1$ //$NON-NLS-2$
+        private static final int MAX_DEPTH = 64;
+
+        private final Map<Object, java.util.concurrent.atomic.LongAdder> totals =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final ThreadLocal<Calls> calls = ThreadLocal.withInitial(Calls::new);
+
+        /** Идущие вызовы потока: вложенная проверка вычитается из собственного времени внешней. */
+        private static final class Calls
+        {
+            final Object[] checks = new Object[MAX_DEPTH];
+            final long[] starts = new long[MAX_DEPTH];
+            final long[] nested = new long[MAX_DEPTH];
+            int depth;
+        }
+
+        static void install(BundleContext context)
+        {
+            var hook = new CheckDurations();
+            System.getProperties().put(CALLBACK + ".begin", (Consumer<Object>) hook::begin); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK + ".end", (Consumer<Object>) hook::end); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK + ".totals", //$NON-NLS-1$
+                (java.util.function.Supplier<Map<Object, Long>>) hook::totals);
+            context.registerService(WeavingHook.class, hook, null);
+        }
+
+        private void begin(Object check)
+        {
+            Calls stack = calls.get();
+            // Переполнение — только от исключений, пропустивших .end: начать заново
+            if (stack.depth >= MAX_DEPTH)
+                stack.depth = 0;
+            stack.checks[stack.depth] = check;
+            stack.nested[stack.depth] = 0;
+            stack.starts[stack.depth++] = System.nanoTime();
+        }
+
+        private void end(Object check)
+        {
+            long now = System.nanoTime();
+            Calls stack = calls.get();
+            while (stack.depth > 0)
+            {
+                int top = --stack.depth;
+                Object current = stack.checks[top];
+                stack.checks[top] = null;
+                if (current != check)
+                    continue;
+                long elapsed = now - stack.starts[top];
+                totals.computeIfAbsent(check, key -> new java.util.concurrent.atomic.LongAdder())
+                    .add(elapsed - stack.nested[top]);
+                if (top > 0)
+                    stack.nested[top - 1] += elapsed;
+                return;
+            }
+        }
+
+        private Map<Object, Long> totals()
+        {
+            Map<Object, Long> copy = new java.util.HashMap<>();
+            totals.forEach((check, nanos) -> copy.put(check, Long.valueOf(nanos.sum())));
+            return copy;
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            String owner = TARGET.replace('.', '/');
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] replaced = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        return new MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, desc, signature, exceptions))
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String called, String calledName,
+                                String calledDescriptor, boolean isInterface)
+                            {
+                                if (opcode != Opcodes.INVOKEINTERFACE || !CHECK.equals(called)
+                                    || !"check".equals(calledName) || !CHECK_DESCRIPTOR.equals(calledDescriptor)) //$NON-NLS-1$
+                                {
+                                    super.visitMethodInsn(opcode, called, calledName, calledDescriptor, isInterface);
+                                    return;
+                                }
+                                // Стек тот же: проверка и пять аргументов -> пусто
+                                replaced[0]++;
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, owner, WRAPPER, WRAPPER_DESCRIPTOR, false);
+                            }
+                        };
+                    }
+
+                    @Override
+                    public void visitEnd()
+                    {
+                        if (replaced[0] > 0)
+                            emitWrapper(super.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                                WRAPPER, WRAPPER_DESCRIPTOR, null, null));
+                        super.visitEnd();
+                    }
+                }, 0);
+                if (replaced[0] == 3)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", replaced[0] == 3 //$NON-NLS-1$
+                    ? "woven" : "skipped: check calls=" + replaced[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** {@code begin(check); try { check.check(…); } finally { end(check); }} */
+        private static void emitWrapper(MethodVisitor mv)
+        {
+            Label start = new Label();
+            Label done = new Label();
+            Label failed = new Label();
+            mv.visitCode();
+            mv.visitTryCatchBlock(start, done, failed, null);
+            emitCallback(mv, ".begin"); //$NON-NLS-1$
+            mv.visitLabel(start);
+            for (int i = 0; i < 6; i++)
+                mv.visitVarInsn(Opcodes.ALOAD, i);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, CHECK, "check", CHECK_DESCRIPTOR, true); //$NON-NLS-1$
+            mv.visitLabel(done);
+            emitCallback(mv, ".end"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.RETURN);
+            mv.visitLabel(failed);
+            mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] {"java/lang/Throwable"}); //$NON-NLS-1$
+            emitCallback(mv, ".end"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.ATHROW);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
+        }
+
+        private static void emitCallback(MethodVisitor mv, String suffix)
+        {
+            EarlyWeaving.emitGetProperty(mv, CALLBACK + suffix, "java/util/function/Consumer"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+        }
+    }
+
+    // #region agent log
+    /**
+     * Временные замеры пересчёта проверок. check 6.0.100.v202605050943 {@code CheckExecutor}: каждый
+     * {@code ICheck.check}; derived 17.0.200.v202605050943 {@code WorkerManager$TaskProcessor}:
+     * {@code IDerivedDataComputer.compute} — полный расчёт контекста. Строка на каждый расчёт с
+     * разбивкой по проверкам этого потока; вызовы проверок вне расчёта — отдельными строками.
+     * Основной бандл присылает расчёты типов модулей ({@code .types}): строка {@code types} и сумма
+     * в строке расчёта контекста. Пишет фоновый поток в {@code .tmp/temp-logs/check-timing.log}, без порогов.
+     */
+    private static final class CheckTimingDiagnostics implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.checkTiming"; //$NON-NLS-1$
+        private static final String EXECUTOR = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
+        private static final String PROCESSOR = "com._1c.g5.v8.internal.derived.WorkerManager$TaskProcessor"; //$NON-NLS-1$
+        private static final String CHECK = "com.e1c.g5.v8.dt.check.ICheck"; //$NON-NLS-1$
+        private static final String CHECK_DESCRIPTOR = "(Ljava/lang/Object;Lcom/e1c/g5/v8/dt/check/ICheckResultAcceptor;" //$NON-NLS-1$
+            + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Ljava/lang/Object;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String COMPUTER = "com._1c.g5.v8.derived.computer.IDerivedDataComputer"; //$NON-NLS-1$
+        private static final String COMPUTE_DESCRIPTOR = "(Lcom/_1c/g5/v8/derived/context/IObjectDerivedDataContext;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/bm/integration/IBmModel;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final java.io.File FILE =
+            new java.io.File("C:\\VC\\EDT.Comfort\\.tmp\\temp-logs\\check-timing.log"); //$NON-NLS-1$
+        private static final double SLOW_MS = 1000;
+
+        private final FrameworkLog log;
+        private final String bundleId;
+        private final java.util.concurrent.LinkedBlockingQueue<String> lines = new java.util.concurrent.LinkedBlockingQueue<>();
+        private final java.util.concurrent.atomic.AtomicLong sequence = new java.util.concurrent.atomic.AtomicLong();
+        /** Расчёт контекста, идущий в этом потоке: проверки складываются в него. */
+        private final ThreadLocal<Frame> frames = new ThreadLocal<>();
+        private final ThreadLocal<int[]> checkDepth = ThreadLocal.withInitial(() -> new int[1]);
+        private final Map<String, java.util.Optional<java.lang.reflect.Method>> getters =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<Class<?>, java.util.Optional<java.lang.reflect.Field>> checkIds =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private final Map<String, String> status = new java.util.concurrent.ConcurrentHashMap<>();
+        private volatile java.lang.reflect.Method checkMethod;
+        private volatile java.lang.reflect.Method computeMethod;
+
+        /** Сумма наносекунд и число вызовов по проверкам одного расчёта. */
+        private static final class Frame
+        {
+            final Map<String, long[]> checks = new java.util.HashMap<>();
+            String segment;
+            Object objectId;
+            /** Расчёт типов модулей внутри расчёта контекста: всего, штатный, число. */
+            long typesNanos;
+            long stockNanos;
+            int typesCalls;
+
+            void add(String check, long nanos)
+            {
+                long[] total = checks.computeIfAbsent(check, key -> new long[2]);
+                total[0] += nanos;
+                total[1]++;
+            }
+        }
+
+        private CheckTimingDiagnostics(FrameworkLog log, String bundleId)
+        {
+            this.log = log;
+            this.bundleId = bundleId;
+        }
+
+        static void install(BundleContext context)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            FrameworkLog log = reference != null ? context.getService(reference) : null;
+            var diagnostics = new CheckTimingDiagnostics(log, context.getBundle().getSymbolicName());
+            System.getProperties().put(CALLBACK + ".check", (Function<Object[], Object>) diagnostics::check); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK + ".compute", (Function<Object[], Object>) diagnostics::compute); //$NON-NLS-1$
+            // Основной бандл: {текст строки, всего нс, штатный нс}; ответ — «сегмент объект» текущего расчёта или null.
+            System.getProperties().put(CALLBACK + ".types", (Function<Object[], Object>) diagnostics::types); //$NON-NLS-1$
+            // Основной бандл: {текст строки} — замеры внутри проверок, с контекстом текущего расчёта.
+            System.getProperties().put(CALLBACK + ".note", (Function<Object[], Object>) diagnostics::note); //$NON-NLS-1$
+            // Вплетённые классы проверок Комфорта: этап ≥0 — вход, −1 — выход (см. weavePhases).
+            System.getProperties().put(CALLBACK + ".phase", (java.util.function.IntConsumer) diagnostics::phase); //$NON-NLS-1$
+            System.setProperty(CALLBACK + ".status", "installed"); //$NON-NLS-1$ //$NON-NLS-2$
+            Thread writer = new Thread(diagnostics::drain, "ComfortCheckTimingLog"); //$NON-NLS-1$
+            writer.setDaemon(true);
+            writer.start();
+            context.registerService(WeavingHook.class, diagnostics, null);
+            diagnostics.enqueue("installed; earlyBundle=" + context.getBundle().getVersion()); //$NON-NLS-1$
+            diagnostics.journal("installed; file=" + FILE); //$NON-NLS-1$
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            if (woven.getState() == WovenClass.TRANSFORMING && isPhaseClass(name))
+            {
+                weavePhases(woven);
+                return;
+            }
+            if (woven.getState() != WovenClass.TRANSFORMING || !(EXECUTOR.equals(name) || PROCESSOR.equals(name)))
+                return;
+            boolean executor = EXECUTOR.equals(name);
+            String owner = (executor ? CHECK : COMPUTER).replace('.', '/');
+            String method = executor ? "check" : "compute"; //$NON-NLS-1$ //$NON-NLS-2$
+            String descriptor = executor ? CHECK_DESCRIPTOR : COMPUTE_DESCRIPTOR;
+            int values = executor ? 6 : 4; // получатель и аргументы
+            String property = CALLBACK + "." + method; //$NON-NLS-1$
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] calls = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        return new MethodVisitor(Opcodes.ASM9, super.visitMethod(access, name, desc, signature, exceptions))
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String called, String calledName,
+                                String calledDescriptor, boolean isInterface)
+                            {
+                                if (opcode != Opcodes.INVOKEINTERFACE || !owner.equals(called)
+                                    || !method.equals(calledName) || !descriptor.equals(calledDescriptor))
+                                {
+                                    super.visitMethodInsn(opcode, called, calledName, calledDescriptor, isInterface);
+                                    return;
+                                }
+                                calls[0]++;
+                                // Стек: получатель, аргументы -> Object[] {получатель, аргументы}; без ветвлений.
+                                super.visitLdcInsn(values);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                for (int i = values - 1; i >= 0; i--)
+                                {
+                                    super.visitInsn(Opcodes.DUP_X1);
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitLdcInsn(i);
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                EarlyWeaving.emitGetProperty(this, property, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.POP);
+                            }
+                        };
+                    }
+                }, 0);
+                if (calls[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                String result = (calls[0] > 0 ? "woven" : "NOT WOVEN") + "; class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    + woven.getBundleWiring().getBundle().getVersion() + "; " + method + "Calls=" + calls[0] //$NON-NLS-1$ //$NON-NLS-2$
+                    + (executor ? "/3" : "/1"); //$NON-NLS-1$ //$NON-NLS-2$
+                status.put(name, result);
+                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
+                journal(result);
+                enqueue(result);
+            }
+            catch (Throwable failure)
+            {
+                status.put(name, "weave failed: " + failure); //$NON-NLS-1$
+                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
+                journal("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /**
+         * Этапы проверок Комфорта: вызовы внутри их классов (владелец, метод → этап). Бандл проверок
+         * не меняет версию при сборке, поэтому меряем отсюда, а не правкой его исходников.
+         */
+        private static final String[][] PHASE_CALLS = {
+            {"com/_1c/g5/v8/dt/bsl/validation/TypesChecker", "checkTypes", "legacyCheckTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/bsl/resource/TypesComputer", "computeTypes", "computeTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/bsl/resource/DynamicFeatureAccessComputer", "getLastObject", "dynamicEntries"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/bsl/common/IBslPreferences", "getLoadEnvs", "loadEnvs"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"org/eclipse/xtext/EcoreUtil2", "getContainerOfType", "containerOf"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"org/eclipse/emf/ecore/util/EcoreUtil", "resolve", "ecoreResolve"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/bsl/util/BslUtil", "intersectTypeItem", "intersectTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/bsl/util/BslUtil", "createTypesLineStr", "typesLineText"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"com/_1c/g5/v8/dt/mcore/util/McoreUtil", "flatTypes", "flatTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslMethodParameterTypes", "fromComment", "docParameters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslQueryResultTypes", "queryParameterTypesForCheck", "queryParameterTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslQueryResultTypes", "beginOpenModuleCalculation", "openModuleScope"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslLiteralValues", "dataLockFieldTypes", "dataLockTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslLiteralValues", "unknownLiteralValues", "unknownLiteralValues"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/BslDocCommentTypeMerge", "alternatives", "alternatives"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslForEachCollectionCheck", "isOutputArgument", "isOutputArgument"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/OpenModulesOnly", "skip", "openModulesOnly"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "check", "sessionWalk"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "environments", "environments"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "isStringConcatenation", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "canRecheckAssignment", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "isUndefinedAssignment", "legacyFilters"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "checkInvocation", "checkInvocation"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "checkQueryParameter", "checkQueryParameter"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "checkDataLockValue", "checkDataLock"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "checkAssignment", "checkAssignment"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "assignmentTypes", "assignmentTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "checkValue", "checkValue"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "compatibleTypes", "compatibleTypes"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "resolve", "resolve"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "mismatchMessage", "message"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "typesLine", "message"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            {"tormozit/checks/BslValueTypeCheck$Session", "issue", "issue"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        };
+        private static final String[] PHASE_CLASSES = {
+            "tormozit.checks.BslValueTypeCheck", "tormozit.checks.BslValueTypeCheck$Session", //$NON-NLS-1$ //$NON-NLS-2$
+            "tormozit.checks.BslUnknownLiteralCheck"}; //$NON-NLS-1$
+        /** Поле вплетённого класса: {@code IntConsumer} этапов (≥0 — вход в этап, −1 — выход). */
+        private static final String PHASE_FIELD = "tormozit$checkPhase"; //$NON-NLS-1$
+        private static final String[] PHASE_LABELS = java.util.Arrays.stream(PHASE_CALLS).map(call -> call[2])
+            .distinct().toArray(String[]::new);
+        private final ThreadLocal<PhaseFrame> phaseFrames = new ThreadLocal<>();
+
+        /** Исключающее время этапов одного верхнего вызова проверки: вложенный этап ставит внешний на паузу. */
+        private static final class PhaseFrame
+        {
+            final long[] self = new long[PHASE_LABELS.length];
+            final int[] calls = new int[PHASE_LABELS.length];
+            final int[] stack = new int[256];
+            int depth;
+            int overflow;
+            long mark;
+            int total;
+
+            void enter(int phase)
+            {
+                long now = System.nanoTime();
+                if (depth > 0 && depth <= stack.length)
+                    self[stack[depth - 1]] += now - mark;
+                if (depth < stack.length)
+                    stack[depth] = phase;
+                else
+                    overflow++;
+                depth++;
+                calls[phase]++;
+                total++;
+                mark = now;
+            }
+
+            void exit()
+            {
+                long now = System.nanoTime();
+                if (depth > 0 && depth <= stack.length)
+                    self[stack[depth - 1]] += now - mark;
+                if (depth > 0)
+                    depth--;
+                mark = now;
+            }
+
+            String summary(long nanos)
+            {
+                long inPhases = 0;
+                Integer[] order = new Integer[self.length];
+                for (int i = 0; i < self.length; i++)
+                {
+                    order[i] = i;
+                    inPhases += self[i];
+                }
+                java.util.Arrays.sort(order, (a, b) -> Long.compare(self[b], self[a]));
+                var line = new StringBuilder(" phases="); //$NON-NLS-1$
+                for (int i : order)
+                    if (calls[i] > 0)
+                        line.append(PHASE_LABELS[i]).append(' ').append(ms(self[i])).append("ms×") //$NON-NLS-1$
+                            .append(calls[i]).append("; "); //$NON-NLS-1$
+                line.append("other ").append(ms(nanos - inPhases)).append("ms"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (depth != 0 || overflow != 0)
+                    line.append(" unbalanced=").append(depth).append('/').append(overflow); //$NON-NLS-1$
+                return line.toString();
+            }
+        }
+
+        private void phase(int code)
+        {
+            PhaseFrame frame = phaseFrames.get();
+            if (frame == null)
+                return;
+            if (code >= 0)
+                frame.enter(code);
+            else
+                frame.exit();
+        }
+
+        private static boolean isPhaseClass(String name)
+        {
+            for (String phaseClass : PHASE_CLASSES)
+                if (phaseClass.equals(name))
+                    return true;
+            return false;
+        }
+
+        private static int phaseOf(String owner, String method)
+        {
+            for (String[] call : PHASE_CALLS)
+                if (call[0].equals(owner) && call[1].equals(method))
+                    return java.util.Arrays.asList(PHASE_LABELS).indexOf(call[2]);
+            return -1;
+        }
+
+        /**
+         * Вокруг каждого вызова из {@link #PHASE_CALLS}: {@code поле.accept(этап)} до и {@code поле.accept(-1)}
+         * после; поле заполняет {@code <clinit>}. Стек и ветвления метода не меняются.
+         */
+        private void weavePhases(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            String internal = name.replace('.', '/');
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] calls = {0};
+                boolean[] clinit = {false};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String method, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor original = super.visitMethod(access, method, desc, signature, exceptions);
+                        boolean init = "<clinit>".equals(method); //$NON-NLS-1$
+                        clinit[0] |= init;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                if (init)
+                                    emitPhaseFieldInit(this, internal);
+                            }
+
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String called,
+                                String calledDescriptor, boolean isInterface)
+                            {
+                                int phase = "<init>".equals(called) ? -1 : phaseOf(owner, called); //$NON-NLS-1$
+                                if (phase < 0)
+                                {
+                                    super.visitMethodInsn(opcode, owner, called, calledDescriptor, isInterface);
+                                    return;
+                                }
+                                calls[0]++;
+                                emitPhase(this, internal, phase);
+                                super.visitMethodInsn(opcode, owner, called, calledDescriptor, isInterface);
+                                emitPhase(this, internal, -1);
+                            }
+                        };
+                    }
+
+                    @Override
+                    public void visitEnd()
+                    {
+                        super.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC, PHASE_FIELD,
+                            "Ljava/util/function/IntConsumer;", null, null).visitEnd(); //$NON-NLS-1$
+                        if (!clinit[0])
+                        {
+                            MethodVisitor init = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null); //$NON-NLS-1$ //$NON-NLS-2$
+                            init.visitCode();
+                            emitPhaseFieldInit(init, internal);
+                            init.visitInsn(Opcodes.RETURN);
+                            init.visitMaxs(0, 0);
+                            init.visitEnd();
+                        }
+                        super.visitEnd();
+                    }
+                }, 0);
+                if (calls[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                String result = (calls[0] > 0 ? "woven" : "NOT WOVEN") + "; class=" + name + "; bundle=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    + woven.getBundleWiring().getBundle().getVersion() + "; phaseCalls=" + calls[0]; //$NON-NLS-1$
+                status.put(name, result);
+                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
+                journal(result);
+                enqueue(result);
+            }
+            catch (Throwable failure)
+            {
+                status.put(name, "weave failed: " + failure); //$NON-NLS-1$
+                System.setProperty(CALLBACK + ".status", String.join(" | ", status.values())); //$NON-NLS-1$ //$NON-NLS-2$
+                journal("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                enqueue("NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void emitPhaseFieldInit(MethodVisitor mv, String owner)
+        {
+            EarlyWeaving.emitGetProperty(mv, CALLBACK + ".phase", "java/util/function/IntConsumer"); //$NON-NLS-1$ //$NON-NLS-2$
+            mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, PHASE_FIELD, "Ljava/util/function/IntConsumer;"); //$NON-NLS-1$
+        }
+
+        private static void emitPhase(MethodVisitor mv, String owner, int phase)
+        {
+            mv.visitFieldInsn(Opcodes.GETSTATIC, owner, PHASE_FIELD, "Ljava/util/function/IntConsumer;"); //$NON-NLS-1$
+            mv.visitLdcInsn(phase);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/IntConsumer", "accept", "(I)V", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        /** {проверка, объект, приёмник, параметры, контекст, монитор}. */
+        private Object check(Object[] args)
+        {
+            Object check = args[0];
+            java.lang.reflect.Method method = checkMethod;
+            if (method == null)
+                checkMethod = method = interfaceMethod(check.getClass(), CHECK, "check", 5); //$NON-NLS-1$
+            int[] depth = checkDepth.get();
+            boolean nested = depth[0] > 0;
+            depth[0]++;
+            PhaseFrame phases = null;
+            if (!nested)
+            {
+                phases = new PhaseFrame();
+                phaseFrames.set(phases);
+            }
+            long start = System.nanoTime();
+            Throwable failure = null;
+            try
+            {
+                method.invoke(check, args[1], args[2], args[3], args[4], args[5]);
+            }
+            catch (java.lang.reflect.InvocationTargetException e)
+            {
+                failure = e.getCause();
+                throw sneaky(failure);
+            }
+            catch (IllegalAccessException e)
+            {
+                failure = e;
+                throw sneaky(e);
+            }
+            finally
+            {
+                depth[0]--;
+                long nanos = System.nanoTime() - start;
+                String name = (nested ? "↳" : "") + checkName(check); //$NON-NLS-1$ //$NON-NLS-2$
+                Frame frame = frames.get();
+                if (phases != null)
+                {
+                    phaseFrames.remove();
+                    if (phases.total > 0)
+                        enqueue(phasesLine(name, args[1], nanos, phases, frame, failure));
+                }
+                if (frame != null)
+                    frame.add(name, nanos);
+                else
+                    enqueue("check-outside ms=" + ms(nanos) + " slow=" + (nanos / 1e6 >= SLOW_MS) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " check=" + name + " object=" + typeName(args[1]) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                        + (failure != null ? " failure=" + failure : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return null;
+        }
+
+        /** Строка этапов вызова проверки Комфорта; сводку литералов добавляет основной бандл. */
+        private String phasesLine(String check, Object object, long nanos, PhaseFrame phases, Frame frame,
+            Throwable failure)
+        {
+            Object resource = get(object, "eResource"); //$NON-NLS-1$
+            var line = new StringBuilder("check-phases check=").append(check) //$NON-NLS-1$
+                .append(" ms=").append(ms(nanos)) //$NON-NLS-1$
+                .append(phases.summary(nanos));
+            try
+            {
+                @SuppressWarnings("unchecked")
+                var after = (Function<Object[], Object>) System.getProperties().get(CALLBACK + ".afterCheck"); //$NON-NLS-1$
+                Object extra = after != null ? after.apply(new Object[] {check}) : null;
+                if (extra != null)
+                    line.append(" literals: ").append(extra); //$NON-NLS-1$
+            }
+            catch (Throwable e)
+            {
+                line.append(" afterCheck failed: ").append(e); //$NON-NLS-1$
+            }
+            line.append(" module=").append(resource != null ? get(resource, "getURI") : typeName(object)) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" thread=").append(Thread.currentThread().getName()) //$NON-NLS-1$
+                .append(" context=").append(frame != null ? frame.segment + " " + frame.objectId : "-"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (failure != null)
+                line.append(" failure=").append(failure); //$NON-NLS-1$
+            return line.toString();
+        }
+
+        /** {вычислитель, контекст, модель, монитор}. */
+        private Object compute(Object[] args)
+        {
+            Object computer = args[0];
+            java.lang.reflect.Method method = computeMethod;
+            if (method == null)
+                computeMethod = method = interfaceMethod(computer.getClass(), COMPUTER, "compute", 3); //$NON-NLS-1$
+            Frame previous = frames.get();
+            Frame frame = new Frame();
+            frame.segment = String.valueOf(get(args[1], "getSegmentId")); //$NON-NLS-1$
+            frame.objectId = get(args[1], "getObjectId"); //$NON-NLS-1$
+            frames.set(frame);
+            long start = System.nanoTime();
+            Throwable failure = null;
+            try
+            {
+                method.invoke(computer, args[1], args[2], args[3]);
+            }
+            catch (java.lang.reflect.InvocationTargetException e)
+            {
+                failure = e.getCause();
+                throw sneaky(failure);
+            }
+            catch (IllegalAccessException e)
+            {
+                failure = e;
+                throw sneaky(e);
+            }
+            finally
+            {
+                long nanos = System.nanoTime() - start;
+                frames.set(previous);
+                enqueue(computeLine(computer, nanos, frame, previous != null, failure));
+            }
+            return null;
+        }
+
+        /** Расчёт типов модуля из основного бандла: строка в лог и сумма в текущий расчёт контекста. */
+        private Object types(Object[] args)
+        {
+            Frame frame = frames.get();
+            String context = frame != null ? frame.segment + " " + frame.objectId : null; //$NON-NLS-1$
+            if (frame != null)
+            {
+                frame.typesNanos += (Long) args[1];
+                frame.stockNanos += (Long) args[2];
+                frame.typesCalls++;
+            }
+            enqueue(args[0] + " context=" + (context != null ? context : "-")); //$NON-NLS-1$ //$NON-NLS-2$
+            return context;
+        }
+
+        private Object note(Object[] args)
+        {
+            Frame frame = frames.get();
+            enqueue(args[0] + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + " context=" + (frame != null ? frame.segment + " " + frame.objectId : "-")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return null;
+        }
+
+        private String computeLine(Object computer, long nanos, Frame frame,
+            boolean nested, Throwable failure)
+        {
+            var line = new StringBuilder("compute ms=").append(ms(nanos)) //$NON-NLS-1$
+                .append(" slow=").append(nanos / 1e6 >= SLOW_MS) //$NON-NLS-1$
+                .append(" segment=").append(frame.segment) //$NON-NLS-1$
+                .append(" object=").append(frame.objectId) //$NON-NLS-1$
+                .append(" computer=").append(computer.getClass().getName()) //$NON-NLS-1$
+                .append(" thread=").append(Thread.currentThread().getName()); //$NON-NLS-1$
+            if (nested)
+                line.append(" nested=true"); //$NON-NLS-1$
+            long checked = 0;
+            int calls = 0;
+            for (var entry : frame.checks.entrySet())
+            {
+                if (!entry.getKey().startsWith("↳")) //$NON-NLS-1$
+                    checked += entry.getValue()[0];
+                calls += entry.getValue()[1];
+            }
+            line.append(" checksMs=").append(ms(checked)).append(" otherMs=").append(ms(nanos - checked)) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" checkCalls=").append(calls); //$NON-NLS-1$
+            if (frame.typesCalls > 0)
+                line.append(" typesMs=").append(ms(frame.typesNanos)) //$NON-NLS-1$
+                    .append(" typesStockMs=").append(ms(frame.stockNanos)) //$NON-NLS-1$
+                    .append(" typesComfortMs=").append(ms(frame.typesNanos - frame.stockNanos)) //$NON-NLS-1$
+                    .append(" typesCalls=").append(frame.typesCalls); //$NON-NLS-1$
+            if (failure != null)
+                line.append(" failure=").append(failure); //$NON-NLS-1$
+            if (!frame.checks.isEmpty())
+            {
+                line.append(" checks="); //$NON-NLS-1$
+                frame.checks.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
+                    .forEach(entry -> line.append(entry.getKey()).append(' ').append(ms(entry.getValue()[0]))
+                        .append("ms×").append(entry.getValue()[1]).append("; ")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return line.toString();
+        }
+
+        /** Имя класса проверки; у адаптера устаревших проверок — с её идентификатором. */
+        private String checkName(Object check)
+        {
+            var field = checkIds.computeIfAbsent(check.getClass(), type ->
+            {
+                try
+                {
+                    var found = type.getDeclaredField("checkId"); //$NON-NLS-1$
+                    found.setAccessible(true);
+                    return java.util.Optional.of(found);
+                }
+                catch (ReflectiveOperationException | RuntimeException e)
+                {
+                    return java.util.Optional.empty();
+                }
+            });
+            String name = check.getClass().getName();
+            try
+            {
+                Object id = field.isPresent() ? field.get().get(check) : null;
+                return id != null ? name + "[" + id + "]" : name; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                return name;
+            }
+        }
+
+        private static String typeName(Object value)
+        {
+            return value != null ? value.getClass().getName() : "null"; //$NON-NLS-1$
+        }
+
+        /** Открытый метод без параметров; классы реализаций EDT бывают непубличными. */
+        private Object get(Object target, String name)
+        {
+            if (target == null)
+                return null;
+            var method = getters.computeIfAbsent(target.getClass().getName() + '#' + name, key ->
+            {
+                try
+                {
+                    var found = target.getClass().getMethod(name);
+                    found.setAccessible(true);
+                    return java.util.Optional.of(found);
+                }
+                catch (ReflectiveOperationException | RuntimeException e)
+                {
+                    return java.util.Optional.empty();
+                }
+            });
+            try
+            {
+                return method.isPresent() ? method.get().invoke(target) : "?"; //$NON-NLS-1$
+            }
+            catch (ReflectiveOperationException | RuntimeException e)
+            {
+                return "?" + e; //$NON-NLS-1$
+            }
+        }
+
+        /** Метод интерфейса по имени и числу параметров — из иерархии реализации. */
+        private static java.lang.reflect.Method interfaceMethod(Class<?> type, String api, String name, int parameters)
+        {
+            for (Class<?> current = type; current != null; current = current.getSuperclass())
+            {
+                for (Class<?> candidate : current.getInterfaces())
+                {
+                    Class<?> found = findInterface(candidate, api);
+                    if (found == null)
+                        continue;
+                    for (var method : found.getMethods())
+                    {
+                        if (method.getName().equals(name) && method.getParameterCount() == parameters)
+                        {
+                            method.setAccessible(true);
+                            return method;
+                        }
+                    }
+                }
+            }
+            throw new IllegalStateException(api + "." + name + " not found in " + type); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static Class<?> findInterface(Class<?> candidate, String api)
+        {
+            if (candidate.getName().equals(api))
+                return candidate;
+            for (Class<?> parent : candidate.getInterfaces())
+            {
+                Class<?> found = findInterface(parent, api);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static <T extends Throwable> RuntimeException sneaky(Throwable failure) throws T
+        {
+            throw (T) failure;
+        }
+
+        private static String ms(long nanos)
+        {
+            return String.format(java.util.Locale.ROOT, "%.1f", nanos / 1e6); //$NON-NLS-1$
+        }
+
+        private void enqueue(String text)
+        {
+            lines.add(java.time.LocalDateTime.now() + " #" + sequence.incrementAndGet() + " " + text); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Пачками раз в полсекунды; файл открывается на каждую пачку — основной бандл чистит папку при старте. */
+        private void drain()
+        {
+            var batch = new java.util.ArrayList<String>();
+            while (true)
+            {
+                try
+                {
+                    batch.add(lines.take());
+                    Thread.sleep(500);
+                    lines.drainTo(batch);
+                    var text = new StringBuilder();
+                    for (String line : batch)
+                        text.append(line).append(System.lineSeparator());
+                    batch.clear();
+                    FILE.getParentFile().mkdirs();
+                    java.nio.file.Files.writeString(FILE.toPath(), text, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                }
+                catch (InterruptedException e)
+                {
+                    return;
+                }
+                catch (Throwable ignored)
+                {
+                    batch.clear();
+                }
+            }
+        }
+
+        private void journal(String message)
+        {
+            if (log == null)
+                return;
+            try
+            {
+                log.log(new FrameworkLogEntry(bundleId, FrameworkLogEntry.INFO, 0,
+                    "[ComfortCheckTiming] " + message, 0, null, null)); //$NON-NLS-1$
+            }
+            catch (Throwable ignored)
+            {
+                // Отказ журнала не должен мешать загрузке класса.
+            }
+        }
+    }
+    // #endregion
+
+    /**
+     * «Стоп» у задания производных данных в панели «Состояние» (derived 17.0.200.v202605050943,
+     * check 6.0.100.v202605050943). Штатно {@code DerivedDataProgressReporter$ProgressIndicatingJob} —
+     * только индикатор: отмену он никому не передаёт, и очередь дорабатывает. Отмена индикатора
+     * пользователем (не из самого {@code DerivedDataProgressReporter}) останавливает его сегмент для
+     * модели проекта: идущим расчётам проверок отменяется монитор задачи (с ним — транзакция BM), а
+     * объекты, дошедшие до {@code compute}, не считаются и уходят в отложенные Комфорта — то же
+     * предложение «Запустить», что у шлюза {@code MassChanges}. Монитор пропущенного объекта не
+     * отменяется: отменённый {@code WorkerManager$TaskProcessor} не помечает рассчитанным, и конвейер
+     * ставит объект в очередь снова. Открытые в редакторах объекты считаются, как в шлюзе.
+     * Остановка снимается ручным запуском проекта, полным пересчётом и тишиной {@link #QUIET_END_MS}.
+     */
+    private static final class DerivedCheckCancellation implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.derivedCancel"; //$NON-NLS-1$
+        private static final String REPORTER = "com._1c.g5.v8.internal.derived.DerivedDataProgressReporter"; //$NON-NLS-1$
+        private static final String JOB = REPORTER + "$ProgressIndicatingJob"; //$NON-NLS-1$
+        private static final List<String> COMPUTERS = List.of(
+            "com.e1c.g5.v8.dt.internal.check.derived.LanguageCheckDerivedDataComputer", //$NON-NLS-1$
+            "com.e1c.g5.v8.dt.internal.check.derived.ModelCheckDerivedDataComputer"); //$NON-NLS-1$
+        private static final String COMPUTE_DESCRIPTOR = "(Lcom/_1c/g5/v8/derived/context/IObjectDerivedDataContext;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/bm/integration/IBmModel;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String SCHEDULE_JOB_DESCRIPTOR =
+            "(Ljava/lang/String;Lcom/_1c/g5/v8/derived/pipeline/PipelineSegmentStatus;)V"; //$NON-NLS-1$
+        /** Пропущенные объекты отдаются в отложенные, когда перестают приходить. */
+        private static final long QUIET_FLUSH_MS = 2_000L;
+        /**
+         * Остановка кончается, когда объекты сегмента долго не приходят: очередь иссякла. Отменённые
+         * идущие расчёты возвращаются в очередь не сразу — в первом прогоне через 11 с.
+         */
+        private static final long QUIET_END_MS = 30_000L;
+        private static final String STOP_REASON = "проверка остановлена пользователем"; //$NON-NLS-1$
+
+        static volatile DerivedCheckCancellation instance;
+
+        /** Остановленные сегменты модели и пропущенные объекты; под монитором самой записи. */
+        private static final class Stop
+        {
+            final Object project;
+            final java.util.Set<String> segments = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            /** «сегмент\nобъект» → {идентификатор объекта, EClass, сегмент, класс контекста}. */
+            final Map<String, Object[]> skipped = new java.util.LinkedHashMap<>();
+            volatile long last = System.currentTimeMillis();
+            int total;
+
+            Stop(Object project)
+            {
+                this.project = project;
+            }
+        }
+
+        private final BundleContext context;
+        /** Индикатор → {менеджер производных данных, сегмент}. */
+        private final Map<Object, Object[]> jobs = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        /** Модель проекта → остановка. */
+        private final Map<Object, Stop> stops = new java.util.concurrent.ConcurrentHashMap<>();
+        /** Менеджер производных данных → {модель, IProject} (находится при «Стоп»). */
+        private final Map<Object, Object[]> models = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        /** Модель → сегмент → мониторы начатых расчётов. Монитор свой у каждой задачи; ссылки слабые. */
+        private final Map<Object, Map<String, java.util.Set<Object>>> running =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        private final Map<String, java.lang.reflect.Method> methods = new java.util.concurrent.ConcurrentHashMap<>();
+        private java.util.concurrent.ScheduledExecutorService timer;
+
+        private DerivedCheckCancellation(BundleContext context)
+        {
+            this.context = context;
+        }
+
+        static void install(BundleContext context)
+        {
+            var hook = new DerivedCheckCancellation(context);
+            System.getProperties().put(CALLBACK + ".job", (Consumer<Object[]>) hook::registerJob); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK + ".canceling", (Consumer<Object[]>) hook::canceling); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK + ".gate", (Function<Object[], Object>) hook::gate); //$NON-NLS-1$
+            instance = hook;
+            context.registerService(WeavingHook.class, hook, null);
+            // #region agent log
+            CancelLog.start();
+            CancelLog.write("installed; earlyBundle=" + context.getBundle().getVersion()); //$NON-NLS-1$
+            // #endregion
+        }
+
+        /** {индикатор, менеджер, сегмент}. */
+        private void registerJob(Object[] args)
+        {
+            jobs.put(args[0], new Object[] {args[1], args[2]});
+            // #region agent log
+            CancelLog.write("indicator segment=" + args[2] + " job=" + System.identityHashCode(args[0])); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+        }
+
+        /** {индикатор}: {@code canceling()} индикатора — из панели «Состояние» или из самого отчётчика. */
+        private void canceling(Object[] args)
+        {
+            try
+            {
+                Object job = args[0];
+                String internal = reporterCaller();
+                Object[] info = jobs.get(job);
+                // #region agent log
+                CancelLog.write("canceling job=" + System.identityHashCode(job) //$NON-NLS-1$
+                    + " segment=" + (info != null ? info[1] : null) //$NON-NLS-1$
+                    + " byReporter=" + internal + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                if (internal != null || info == null)
+                    return;
+                Object[] target = modelOf(info[0]);
+                if (target == null)
+                    return;
+                Object model = target[0];
+                String segment = (String) info[1];
+                Stop stop = stops.computeIfAbsent(model, key -> new Stop(target[1]));
+                stop.segments.add(segment);
+                stop.last = System.currentTimeMillis();
+                startTimer();
+                List<Object> monitors = new java.util.ArrayList<>();
+                Map<String, java.util.Set<Object>> bySegment = running.get(model);
+                java.util.Set<Object> started = bySegment != null ? bySegment.get(segment) : null;
+                if (started != null)
+                    synchronized (started)
+                    {
+                        monitors.addAll(started);
+                        started.clear();
+                    }
+                for (Object monitor : monitors)
+                    cancel(monitor);
+                // #region agent log
+                CancelLog.write("stopped segment=" + segment + " project=" + target[1] //$NON-NLS-1$ //$NON-NLS-2$
+                    + " runningMonitors=" + monitors.size()); //$NON-NLS-1$
+                // #endregion
+            }
+            catch (Throwable failure)
+            {
+                // #region agent log
+                CancelLog.write("[!] canceling failed: " + failure); //$NON-NLS-1$
+                // #endregion
+            }
+        }
+
+        /**
+         * {контекст, модель, монитор} на входе {@code compute} вычислителя проверок.
+         *
+         * @return {@code TRUE} — сегмент остановлен: объект отложен, расчёт пропускается
+         */
+        private Object gate(Object[] args)
+        {
+            try
+            {
+                Object derivedContext = args[0];
+                Object model = args[1];
+                String segment = (String) call(derivedContext, "getSegmentId"); //$NON-NLS-1$
+                Stop stop = stops.get(model);
+                if (stop != null && stop.segments.contains(segment))
+                {
+                    Object objectId = call(derivedContext, "getObjectId"); //$NON-NLS-1$
+                    // Открытое в редакторе считается и при остановке — как в шлюзе MassChanges
+                    if (objectId != null && !CheckRecomputeNotifications.MassChanges.test(
+                        CheckRecomputeNotifications.MassChanges.OPEN, objectId))
+                    {
+                        synchronized (stop)
+                        {
+                            stop.skipped.putIfAbsent(segment + '\n' + objectId, new Object[] {objectId,
+                                call(derivedContext, "getEClass"), segment, derivedContext.getClass()}); //$NON-NLS-1$
+                            stop.total++;
+                        }
+                        stop.last = System.currentTimeMillis();
+                        // #region agent log
+                        CancelLog.write("skip segment=" + segment + " object=" + objectId //$NON-NLS-1$ //$NON-NLS-2$
+                            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+                        // #endregion
+                        return Boolean.TRUE;
+                    }
+                }
+                running.computeIfAbsent(model, key -> new java.util.concurrent.ConcurrentHashMap<>())
+                    .computeIfAbsent(segment,
+                        key -> java.util.Collections.synchronizedSet(
+                            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>())))
+                    .add(args[2]);
+                // #region agent log
+                CancelLog.write("run segment=" + segment + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+            catch (Throwable failure)
+            {
+                // #region agent log
+                CancelLog.write("[!] gate failed: " + failure); //$NON-NLS-1$
+                // #endregion
+            }
+            return Boolean.FALSE;
+        }
+
+        /** Ручной запуск проекта (шлюз {@code MassChanges}): остановка проекта снимается. */
+        void resume(Object project)
+        {
+            if (stops.isEmpty() || project == null)
+                return;
+            for (var entry : stops.entrySet())
+                if (project.equals(entry.getValue().project) && stops.remove(entry.getKey(), entry.getValue()))
+                    end(entry.getValue(), "manual"); //$NON-NLS-1$
+        }
+
+        /** Полный пересчёт: остановки больше не действуют. */
+        void reset(String reason)
+        {
+            for (var entry : stops.entrySet())
+                if (stops.remove(entry.getKey(), entry.getValue()))
+                    end(entry.getValue(), reason);
+        }
+
+        private void end(Stop stop, String reason)
+        {
+            flush(stop);
+            // #region agent log
+            CancelLog.write("stop ended by " + reason + " project=" + stop.project + " skipped=" + stop.total); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
+        }
+
+        private synchronized void startTimer()
+        {
+            if (timer != null)
+                return;
+            timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
+            {
+                Thread thread = new Thread(runnable, "Комфорт: остановленные проверки"); //$NON-NLS-1$
+                thread.setDaemon(true);
+                return thread;
+            });
+            timer.scheduleWithFixedDelay(this::tick, 1, 1, java.util.concurrent.TimeUnit.SECONDS);
+        }
+
+        private void tick()
+        {
+            try
+            {
+                long now = System.currentTimeMillis();
+                for (var entry : stops.entrySet())
+                {
+                    Stop stop = entry.getValue();
+                    long quiet = now - stop.last;
+                    if (quiet >= QUIET_END_MS)
+                    {
+                        if (stops.remove(entry.getKey(), stop))
+                            end(stop, "quiet"); //$NON-NLS-1$
+                    }
+                    else if (quiet >= QUIET_FLUSH_MS)
+                        flush(stop);
+                }
+            }
+            catch (Throwable failure)
+            {
+                // #region agent log
+                CancelLog.write("[!] tick failed: " + failure); //$NON-NLS-1$
+                // #endregion
+            }
+        }
+
+        /** Пропущенные объекты — в отложенные основного бандла с предложением «Запустить». */
+        private void flush(Stop stop)
+        {
+            List<Object[]> entries;
+            synchronized (stop)
+            {
+                if (stop.skipped.isEmpty())
+                    return;
+                entries = List.copyOf(stop.skipped.values());
+                stop.skipped.clear();
+            }
+            CheckRecomputeNotifications notifications = CheckRecomputeNotifications.instance;
+            if (notifications != null && stop.project != null)
+                notifications.publish(new Object[] {CheckRecomputeNotifications.PREFIX + "user-stop; project=" //$NON-NLS-1$
+                    + stop.project + "; contexts=" + entries.size(), STOP_REASON, //$NON-NLS-1$
+                    Long.valueOf(System.currentTimeMillis()), stop.project, entries, Boolean.FALSE});
+            // #region agent log
+            CancelLog.write("deferred contexts=" + entries.size() + " project=" + stop.project //$NON-NLS-1$ //$NON-NLS-2$
+                + " published=" + (notifications != null && stop.project != null)); //$NON-NLS-1$
+            // #endregion
+        }
+
+        /** Метод {@code DerivedDataProgressReporter}, из которого идёт отмена, или {@code null} — отменил пользователь. */
+        private static String reporterCaller()
+        {
+            return StackWalker.getInstance().walk(frames -> frames
+                .filter(frame -> REPORTER.equals(frame.getClassName()))
+                .map(StackWalker.StackFrame::getMethodName)
+                .findFirst().orElse(null));
+        }
+
+        private void cancel(Object monitor) throws ReflectiveOperationException
+        {
+            java.lang.reflect.Method method = method(monitor.getClass(), "setCanceled", boolean.class); //$NON-NLS-1$
+            method.invoke(monitor, Boolean.TRUE);
+        }
+
+        private Object call(Object target, String name) throws ReflectiveOperationException
+        {
+            return method(target.getClass(), name).invoke(target);
+        }
+
+        private java.lang.reflect.Method method(Class<?> type, String name, Class<?>... parameters)
+            throws ReflectiveOperationException
+        {
+            String key = type.getName() + '#' + name;
+            java.lang.reflect.Method method = methods.get(key);
+            if (method == null)
+            {
+                method = type.getMethod(name, parameters);
+                method.setAccessible(true);
+                methods.put(key, method);
+            }
+            return method;
+        }
+
+        /** {Модель BM, IProject} проекта менеджера производных данных: {@code getSupplierId} — ID проекта EDT. */
+        private Object[] modelOf(Object manager)
+        {
+            Object[] known = models.get(manager);
+            if (known != null)
+                return known;
+            var projects = context.getServiceReference("com._1c.g5.v8.dt.core.platform.IDtProjectManager"); //$NON-NLS-1$
+            var bmModels = context.getServiceReference("com._1c.g5.v8.dt.core.platform.IBmModelManager"); //$NON-NLS-1$
+            if (projects == null || bmModels == null)
+            {
+                // #region agent log
+                CancelLog.write("[!] modelOf: services unavailable"); //$NON-NLS-1$
+                // #endregion
+                return null;
+            }
+            try
+            {
+                Object projectService = context.getService(projects);
+                Object modelService = context.getService(bmModels);
+                String projectId = (String) call(manager, "getSupplierId"); //$NON-NLS-1$
+                ClassLoader loader = projectService.getClass().getClassLoader();
+                Class<?> projectApi = Class.forName("com._1c.g5.v8.dt.core.platform.IDtProjectManager", false, loader); //$NON-NLS-1$
+                Object project = projectApi.getMethod("getDtProject", String.class).invoke(projectService, projectId); //$NON-NLS-1$
+                if (project == null)
+                    return null;
+                Class<?> modelApi = Class.forName("com._1c.g5.v8.dt.core.platform.IBmModelManager", false, //$NON-NLS-1$
+                    modelService.getClass().getClassLoader());
+                Class<?> dtProject = Class.forName("com._1c.g5.v8.dt.core.platform.IDtProject", false, loader); //$NON-NLS-1$
+                Object model = modelApi.getMethod("getModel", dtProject).invoke(modelService, project); //$NON-NLS-1$
+                Object workspaceProject = dtProject.getMethod("getWorkspaceProject").invoke(project); //$NON-NLS-1$
+                // #region agent log
+                CancelLog.write("modelOf project=" + projectId + " model=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (model != null ? System.identityHashCode(model) : null) + " workspaceProject=" + workspaceProject); //$NON-NLS-1$
+                // #endregion
+                if (model == null)
+                    return null;
+                Object[] target = {model, workspaceProject};
+                models.put(manager, target);
+                return target;
+            }
+            catch (ReflectiveOperationException | RuntimeException failure)
+            {
+                // #region agent log
+                CancelLog.write("[!] modelOf failed: " + failure); //$NON-NLS-1$
+                // #endregion
+                return null;
+            }
+            finally
+            {
+                context.ungetService(projects);
+                context.ungetService(bmModels);
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || !(REPORTER.equals(name) || JOB.equals(name) || COMPUTERS.contains(name)))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] points = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String method, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor original = super.visitMethod(access, method, desc, signature, exceptions);
+                        if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0)
+                            return original;
+                        if (REPORTER.equals(name) && "scheduleJob".equals(method) && SCHEDULE_JOB_DESCRIPTOR.equals(desc)) //$NON-NLS-1$
+                            return new MethodVisitor(Opcodes.ASM9, original)
+                            {
+                                @Override
+                                public void visitMethodInsn(int opcode, String owner, String called, String descriptor,
+                                    boolean isInterface)
+                                {
+                                    if (opcode == Opcodes.INVOKEVIRTUAL && JOB.replace('.', '/').equals(owner)
+                                        && "schedule".equals(called) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                                    {
+                                        points[0]++;
+                                        // Стек: индикатор → индикатор, {индикатор, менеджер, сегмент} → accept.
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitLdcInsn(3);
+                                        super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                        super.visitInsn(Opcodes.DUP_X1);
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitLdcInsn(0);
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitLdcInsn(1);
+                                        super.visitVarInsn(Opcodes.ALOAD, 0);
+                                        super.visitFieldInsn(Opcodes.GETFIELD, REPORTER.replace('.', '/'),
+                                            "derivedDataStatusManager", "Lcom/_1c/g5/v8/derived/IDerivedDataManager;"); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitInsn(Opcodes.AASTORE);
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitLdcInsn(2);
+                                        super.visitVarInsn(Opcodes.ALOAD, 1);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                        EarlyWeaving.emitGetProperty(this, CALLBACK + ".job", "java/util/function/Consumer"); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", //$NON-NLS-1$
+                                            "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                    }
+                                    super.visitMethodInsn(opcode, owner, called, descriptor, isInterface);
+                                }
+                            };
+                        if (JOB.equals(name) && "canceling".equals(method) && "()V".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            return new MethodVisitor(Opcodes.ASM9, original)
+                            {
+                                @Override
+                                public void visitCode()
+                                {
+                                    super.visitCode();
+                                    points[0]++;
+                                    EarlyWeaving.emitGetProperty(this, CALLBACK + ".canceling", "java/util/function/Consumer"); //$NON-NLS-1$ //$NON-NLS-2$
+                                    super.visitLdcInsn(1);
+                                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(0);
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", //$NON-NLS-1$
+                                        "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                }
+                            };
+                        if (COMPUTERS.contains(name) && "compute".equals(method) && COMPUTE_DESCRIPTOR.equals(desc)) //$NON-NLS-1$
+                            return new MethodVisitor(Opcodes.ASM9, original)
+                            {
+                                @Override
+                                public void visitCode()
+                                {
+                                    super.visitCode();
+                                    points[0]++;
+                                    EarlyWeaving.emitGetProperty(this, CALLBACK + ".gate", "java/util/function/Function"); //$NON-NLS-1$ //$NON-NLS-2$
+                                    super.visitLdcInsn(3);
+                                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                    for (int i = 0; i < 3; i++)
+                                    {
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitLdcInsn(i);
+                                        super.visitVarInsn(Opcodes.ALOAD, i + 1);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                    }
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", //$NON-NLS-1$
+                                        "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "()Z", false); //$NON-NLS-1$
+                                    Label proceed = new Label();
+                                    super.visitJumpInsn(Opcodes.IFEQ, proceed);
+                                    super.visitInsn(Opcodes.RETURN);
+                                    super.visitLabel(proceed);
+                                    // Локальные — только параметры, как на входе; NOP не даёт кадру совпасть с кадром исходного кода.
+                                    super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                                    super.visitInsn(Opcodes.NOP);
+                                }
+                            };
+                        return original;
+                    }
+                }, 0);
+                // В каждом классе — ровно одна точка: schedule() в scheduleJob, вход canceling(), вход compute.
+                if (points[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                // #region agent log
+                CancelLog.write((points[0] == 1 ? "woven" : "NOT WOVEN") + "; class=" + name //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + "; bundle=" + woven.getBundleWiring().getBundle().getVersion() + "; points=" + points[0]); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+            catch (Throwable failure)
+            {
+                // #region agent log
+                CancelLog.write("[!] NOT WOVEN: " + name + "; " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+        }
+    }
+
+    // #region agent log
+    /** Временный журнал отмены проверок: {@code .tmp/temp-logs/check-cancel.log}, фоновой записью, без порогов. */
+    private static final class CancelLog
+    {
+        private static final java.io.File FILE =
+            new java.io.File("C:\\VC\\EDT.Comfort\\.tmp\\temp-logs\\check-cancel.log"); //$NON-NLS-1$
+        private static final java.util.concurrent.LinkedBlockingQueue<String> LINES =
+            new java.util.concurrent.LinkedBlockingQueue<>();
+
+        static void start()
+        {
+            Thread writer = new Thread(CancelLog::drain, "ComfortCheckCancelLog"); //$NON-NLS-1$
+            writer.setDaemon(true);
+            writer.start();
+        }
+
+        static void write(String text)
+        {
+            LINES.add(java.time.LocalDateTime.now() + " " + text); //$NON-NLS-1$
+        }
+
+        private static void drain()
+        {
+            while (true)
+            {
+                try
+                {
+                    List<String> batch = new java.util.ArrayList<>();
+                    batch.add(LINES.take());
+                    LINES.drainTo(batch);
+                    FILE.getParentFile().mkdirs();
+                    try (var out = new java.io.OutputStreamWriter(new java.io.FileOutputStream(FILE, true),
+                        java.nio.charset.StandardCharsets.UTF_8))
+                    {
+                        for (String line : batch)
+                            out.write(line + "\r\n"); //$NON-NLS-1$
+                    }
+                }
+                catch (InterruptedException e)
+                {
+                    return;
+                }
+                catch (Throwable ignored)
+                {
+                    // Следующая партия попробует снова.
+                }
+            }
+        }
+    }
+    // #endregion
 
     /**
      * derived 17.0.200.v202605050943: scheduleJob берёт имя сегмента без проекта.
@@ -1179,6 +2641,19 @@ public final class Activator
                     MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
                     if (visitor != null && COMMENT.equals(className)
                         && "computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
+                    {
+                        // Слот множества посещённых методов (единственный параметр Set) — третьим
+                        // аргументом колбэка: по нему основной бандл пропускает разбор
+                        // комментария уже посещённой функции.
+                        int slot = (access & Opcodes.ACC_STATIC) != 0 ? 0 : 1;
+                        int found = -1;
+                        for (org.objectweb.asm.Type arg : org.objectweb.asm.Type.getArgumentTypes(descriptor))
+                        {
+                            if ("Ljava/util/Set;".equals(arg.getDescriptor())) //$NON-NLS-1$
+                                found = found == -1 ? slot : -2;
+                            slot += arg.getSize();
+                        }
+                        final int visitedSlot = found;
                         return new MethodVisitor(Opcodes.ASM9, visitor)
                         {
                             @Override
@@ -1197,7 +2672,7 @@ public final class Activator
                                     "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
                                 super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
                                 super.visitInsn(Opcodes.SWAP);
-                                super.visitInsn(Opcodes.ICONST_2);
+                                super.visitInsn(visitedSlot >= 0 ? Opcodes.ICONST_3 : Opcodes.ICONST_2);
                                 super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
                                 super.visitInsn(Opcodes.DUP_X1);
                                 super.visitInsn(Opcodes.SWAP);
@@ -1208,12 +2683,20 @@ public final class Activator
                                 super.visitInsn(Opcodes.ICONST_1);
                                 super.visitVarInsn(Opcodes.ALOAD, 0);
                                 super.visitInsn(Opcodes.AASTORE);
+                                if (visitedSlot >= 0)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitInsn(Opcodes.ICONST_2);
+                                    super.visitVarInsn(Opcodes.ALOAD, visitedSlot);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
                                 super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
                                     "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
                                 super.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/emf/ecore/EObject"); //$NON-NLS-1$
                                 touched.set(true);
                             }
                         };
+                    }
                     if (visitor != null && DOCUMENTATION.equals(className)
                         && "getDocByNotDerivedProperty".equals(name) //$NON-NLS-1$
                         && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/Property;")) //$NON-NLS-1$
@@ -1967,6 +3450,9 @@ public final class Activator
         private static final String METADATA =
             "com.e1c.g5.v8.dt.internal.check.repository.ProjectCheckMetadataManager"; //$NON-NLS-1$
         private static final String DERIVED = "com._1c.g5.v8.internal.derived.DerivedDataManager"; //$NON-NLS-1$
+        /** Вызывается для каждого собранного контекста проверок с причиной изменения, при любом флажке режима. */
+        private static final String CONTROLLER =
+            "com.e1c.g5.v8.dt.internal.check.derived.CheckDerivedDataContributor$CheckDeactivationController"; //$NON-NLS-1$
         private static final String PROJECT = "Lorg/eclipse/core/resources/IProject;"; //$NON-NLS-1$
         private static final String TRANSACTION = "Lcom/_1c/g5/v8/bm/core/IBmTransaction;"; //$NON-NLS-1$
         private static final String MONITOR = "Lorg/eclipse/core/runtime/IProgressMonitor;"; //$NON-NLS-1$
@@ -1975,6 +3461,9 @@ public final class Activator
         private final FrameworkLog log;
         private final String bundleId;
         private final java.util.concurrent.atomic.AtomicLong eventIds = new java.util.concurrent.atomic.AtomicLong();
+        private final MassChanges massChanges = new MassChanges(this);
+        /** Отложенное остановкой пользователя ({@code DerivedCheckCancellation}) идёт тем же предложением. */
+        static volatile CheckRecomputeNotifications instance;
 
         private CheckRecomputeNotifications(FrameworkLog log, String bundleId)
         {
@@ -1993,7 +3482,9 @@ public final class Activator
             }
             CheckRecomputeNotifications diagnostics =
                 new CheckRecomputeNotifications(log, context.getBundle().getSymbolicName());
+            instance = diagnostics;
             System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
+            System.getProperties().put(CALLBACK + ".gate", (Function<Object[], Object>) diagnostics.massChanges::gate); //$NON-NLS-1$
             DeferredCheckResults results = new DeferredCheckResults(context, diagnostics);
             if (results.load())
             {
@@ -2003,7 +3494,7 @@ public final class Activator
             }
             context.registerService(WeavingHook.class, diagnostics, null);
             diagnostics.write("installed; earlyBundle=" + context.getBundle().getVersion() //$NON-NLS-1$
-                + "; waiting for CheckScheduler, ProjectCheckMetadataManager, DerivedDataManager", null); //$NON-NLS-1$
+                + "; waiting for CheckScheduler, ProjectCheckMetadataManager, DerivedDataManager, CheckDeactivationController", null); //$NON-NLS-1$
         }
 
         @Override
@@ -2011,7 +3502,7 @@ public final class Activator
         {
             String name = wovenClass.getClassName();
             if (wovenClass.getState() != WovenClass.TRANSFORMING
-                || !(SCHEDULER.equals(name) || METADATA.equals(name) || DERIVED.equals(name)))
+                || !(SCHEDULER.equals(name) || METADATA.equals(name) || DERIVED.equals(name) || CONTROLLER.equals(name)))
                 return;
             try
             {
@@ -2020,6 +3511,7 @@ public final class Activator
                 int[] matches = {0};
                 int[] deferredCalls = {0};
                 int[] settingsCalls = {0};
+                int[] gateCalls = {0};
                 boolean deferSettings = SCHEDULER.equals(name)
                     && System.getProperties().containsKey(CALLBACK + ".settings"); //$NON-NLS-1$
                 boolean[] metadataField = {!METADATA.equals(name)};
@@ -2081,6 +3573,47 @@ public final class Activator
                         if (event == null || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
                             return visitor;
                         matches[0]++;
+                        if (CONTROLLER.equals(name))
+                            return new MethodVisitor(Opcodes.ASM9, visitor)
+                            {
+                                /**
+                                 * Каждый ireturn: результат проходит через шлюз Комфорта —
+                                 * {исходный Boolean, контроллер, контекст, причина, контекст выполнения}.
+                                 * Без ветвлений: кадры стека метода не меняются.
+                                 */
+                                @Override
+                                public void visitInsn(int opcode)
+                                {
+                                    if (opcode == Opcodes.IRETURN)
+                                    {
+                                        gateCalls[0]++;
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                                        EarlyWeaving.emitGetProperty(this, CALLBACK + ".gate", "java/util/function/Function"); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitLdcInsn(5);
+                                        super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                        super.visitInsn(Opcodes.DUP_X1);
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitLdcInsn(0);
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                        for (int i = 1; i < 5; i++)
+                                        {
+                                            super.visitInsn(Opcodes.DUP);
+                                            super.visitLdcInsn(i);
+                                            super.visitVarInsn(Opcodes.ALOAD, i - 1);
+                                            super.visitInsn(Opcodes.AASTORE);
+                                        }
+                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", //$NON-NLS-1$
+                                            "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                        super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                                        super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "()Z", false); //$NON-NLS-1$
+                                    }
+                                    super.visitInsn(opcode);
+                                }
+                            };
                         return new MethodVisitor(Opcodes.ASM9, visitor)
                         {
                             @Override
@@ -2156,7 +3689,10 @@ public final class Activator
                 boolean deferCompatible = !METADATA.equals(name)
                     || !System.getProperties().containsKey(CALLBACK + ".defer") || deferredCalls[0] == 1;
                 deferCompatible &= !deferSettings || settingsCalls[0] == 1;
-                status += "; deferredCalls=" + deferredCalls[0] + "; settingsCalls=" + settingsCalls[0]; //$NON-NLS-1$
+                // В requiresDeactivation 6.0.100 четыре ireturn; без шлюза вплетать нечего
+                deferCompatible &= !CONTROLLER.equals(name) || gateCalls[0] > 0;
+                status += "; deferredCalls=" + deferredCalls[0] + "; settingsCalls=" + settingsCalls[0] //$NON-NLS-1$ //$NON-NLS-2$
+                    + "; gateCalls=" + gateCalls[0]; //$NON-NLS-1$
                 if (matches[0] == expected && metadataField[0] && deferCompatible)
                 {
                     wovenClass.setBytes(writer.toByteArray());
@@ -2354,6 +3890,10 @@ public final class Activator
                 return "check-contributors"; //$NON-NLS-1$
             if (DERIVED.equals(type) && "recomputeAll".equals(method) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
                 return "derived-recompute-all"; //$NON-NLS-1$
+            if (CONTROLLER.equals(type) && "requiresDeactivation".equals(method) //$NON-NLS-1$
+                && ("(Lcom/_1c/g5/v8/derived/context/IObjectDerivedDataContext;Ljava/lang/Object;" //$NON-NLS-1$
+                    + "Lcom/_1c/g5/v8/derived/IAsyncComputationExecutionContext;)Z").equals(descriptor)) //$NON-NLS-1$
+                return "changed-context"; //$NON-NLS-1$
             return null;
         }
 
@@ -2362,6 +3902,10 @@ public final class Activator
             try
             {
                 String phase = (String) event[0];
+                // Полный пересчёт — новая работа: «Стоп» прежней больше не действует.
+                if (DerivedCheckCancellation.instance != null
+                    && ("derived-recompute-all".equals(phase) || "full-check-scope".equals(phase))) //$NON-NLS-1$ //$NON-NLS-2$
+                    DerivedCheckCancellation.instance.reset(phase);
                 String text = phase + "; thread=" + Thread.currentThread().getName(); //$NON-NLS-1$
                 if ("validation-request".equals(phase) || "full-check-scope".equals(phase)) //$NON-NLS-1$ //$NON-NLS-2$
                 {
@@ -2371,6 +3915,7 @@ public final class Activator
                         Collection<?> objects = (Collection<?>) event[3];
                         text += "; objects=" + (objects == null ? "null" : objects.size()) //$NON-NLS-1$ //$NON-NLS-2$
                             + "; projectScope=" + (objects != null && objects.isEmpty()); //$NON-NLS-1$
+                        massChanges.schedulerInitiator(event[1], Thread.currentThread().getStackTrace());
                     }
                     else
                         text += "; complexity=" + event[3]; //$NON-NLS-1$
@@ -2440,8 +3985,11 @@ public final class Activator
                         @SuppressWarnings("unchecked")
                         Map<Object, Object[]> pending = (Map<Object, Object[]>) properties.computeIfAbsent(
                             CALLBACK + ".pending", key -> new java.util.LinkedHashMap<>()); //$NON-NLS-1$
-                        pending.compute(notification[3], (key, previous) -> previous != null
-                            && previous.length > 4 && notification.length <= 4 ? previous : notification);
+                        // Отложенные шлюзом контексты — своя очередь проекта, списки складываются
+                        boolean gate = notification.length > 4 && notification[4] instanceof List<?>;
+                        pending.compute(gate ? List.of(notification[3], "gate") : notification[3], (key, previous) -> //$NON-NLS-1$
+                            gate ? MassChanges.mergeOffers(previous, notification)
+                                : previous != null && previous.length > 4 && notification.length <= 4 ? previous : notification);
                     }
                 }
                 if (consumer != null)
@@ -2504,6 +4052,369 @@ public final class Activator
             catch (Throwable ignored)
             {
                 // Даже отказ журнала не должен прерывать расчёт EDT или загрузку класса.
+            }
+        }
+
+        /**
+         * Шлюз пересчёта проверок: ответ штатного {@code CheckDeactivationController.requiresDeactivation}
+         * проходит через {@link #gate}. Причина изменения не важна. Открытые в редакторах модули и
+         * объекты пересчитываются сразу и в объём не входят. Без ручного запуска пачка больше
+         * {@link #THRESHOLD} изменённых объектов пересчитывается только с согласия пользователя:
+         * первые объекты пачки идут штатно, контексты остальных отключаются, как при «Отключить
+         * массовые проверки», и запоминаются. Когда контексты перестают приходить, основной бандл
+         * сохраняет их в постоянный список и предлагает «Запустить» отложенное; пропущенный шлюзом
+         * контекст снимается со списка.
+         */
+        private static final class MassChanges
+        {
+            private static final int THRESHOLD = 100;
+            /** Сколько ждать следующих контекстов той же операции. */
+            private static final long QUIET_MS = 2_000L;
+            /** Основной бандл: идёт ли ручной запуск проверки проекта ({@code Predicate<IProject>}). */
+            private static final String MANUAL = CALLBACK + ".manual"; //$NON-NLS-1$
+            /** Основной бандл: открыт ли объект контекста в редакторе ({@code Predicate<путь | Long>}). */
+            private static final String OPEN = CALLBACK + ".open"; //$NON-NLS-1$
+            /** Основной бандл: контекст пропущен ({@code BiConsumer<IProject, «сегмент\nобъект»>}). */
+            private static final String PASSED = CALLBACK + ".passed"; //$NON-NLS-1$
+            /** Короткие названия служб-причин для текста уведомления. */
+            private static final Map<String, String> REASONS = Map.of(
+                "COMPARISON_MANAGER", "объединение", //$NON-NLS-1$
+                "REFACTORING_SERVICE", "рефакторинг", //$NON-NLS-1$
+                "SYNCHRONIZATION_MANAGER", "изменение файлов", //$NON-NLS-1$
+                "CHECK_SCHEDULER", "планировщик проверок", //$NON-NLS-1$
+                // DerivedDataContextManager: служба-причина — сам класс IDerivedDataManager
+                "class:com._1c.g5.v8.derived.IDerivedDataManager", "производные данные"); //$NON-NLS-1$
+
+            private final CheckRecomputeNotifications owner;
+            /** Контекст выполнения проекта → пачка; под монитором this. */
+            private final Map<Object, Batch> batches = new java.util.HashMap<>();
+            /** Контекст выполнения → IProject; контекстов по одному на проект. */
+            private final Map<Object, Object> projects = new java.util.concurrent.ConcurrentHashMap<>();
+            /** IProject → чем вызван последний запрос к планировщику проверок (CHECK_SCHEDULER). */
+            private final Map<Object, String> schedulerInitiators = new java.util.concurrent.ConcurrentHashMap<>();
+            private final Map<String, java.util.Optional<java.lang.reflect.Method>> methods =
+                new java.util.concurrent.ConcurrentHashMap<>();
+            private java.util.concurrent.ScheduledExecutorService timer;
+
+            MassChanges(CheckRecomputeNotifications owner)
+            {
+                this.owner = owner;
+            }
+
+            /**
+             * {@code {исходный ответ, контроллер, контекст, причина, контекст выполнения}} → итоговый
+             * {@code Boolean}; {@code true} — контекст отключён.
+             */
+            Object gate(Object[] args)
+            {
+                try
+                {
+                    Object result = decide(args);
+                    // Прошедший контекст основной бандл снимает с постоянного списка отложенных
+                    if (Boolean.FALSE.equals(result) && args[4] != null)
+                        passed(project(args[4]), args[2]);
+                    return result;
+                }
+                catch (Throwable error)
+                {
+                    owner.write("check gate failed; cause=" + args[3] + "; error=" + error, null); //$NON-NLS-1$ //$NON-NLS-2$
+                    return args[0];
+                }
+            }
+
+            private void passed(Object project, Object context) throws ReflectiveOperationException
+            {
+                @SuppressWarnings("unchecked")
+                var consumer = (java.util.function.BiConsumer<Object, Object>) System.getProperties().get(PASSED);
+                Object objectId = consumer != null && project != null ? call(context, "getObjectId") : null; //$NON-NLS-1$
+                if (objectId != null)
+                    consumer.accept(project, call(context, "getSegmentId") + "\n" + objectId); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            private Object decide(Object[] args) throws ReflectiveOperationException
+            {
+                Object original = args[0];
+                // Отключён штатным «Отключить массовые проверки» — тоже в предложение «Запустить»
+                boolean deactivated = Boolean.TRUE.equals(original);
+                if (args[4] == null)
+                    return original;
+                Object project = project(args[4]);
+                // Ручной запуск и открытое в редакторе пересчитываются сразу, в том числе вопреки
+                // штатному «Отключить массовые проверки», и в объём пачки не входят
+                if (isManual(project))
+                {
+                    // Ручной запуск («Запустить» отложенного тоже) снимает остановку пользователем
+                    if (DerivedCheckCancellation.instance != null)
+                        DerivedCheckCancellation.instance.resume(project);
+                    return Boolean.FALSE;
+                }
+                Object context = args[2];
+                Object objectId = call(context, "getObjectId"); //$NON-NLS-1$
+                if (objectId == null)
+                    return original;
+                if (test(OPEN, objectId))
+                    return Boolean.FALSE;
+                String segment = String.valueOf(call(context, "getSegmentId")); //$NON-NLS-1$
+                String cause = causeName(args[3]);
+                synchronized (this)
+                {
+                    Batch batch = batches.get(args[4]);
+                    if (batch == null)
+                    {
+                        batch = new Batch(project, args[1]);
+                        batches.put(args[4], batch);
+                        schedule(args[4], QUIET_MS);
+                    }
+                    batch.last = System.currentTimeMillis();
+                    batch.calls++;
+                    batch.causes.merge(cause, 1, Integer::sum);
+                    batch.segments.merge(segment, 1, Integer::sum);
+                    // Порог — по объектам: модули объекта или формы — один объект с его BM-объектом.
+                    // Сопоставить BM-идентификатор с путём здесь нечем, поэтому объём — большее из
+                    // двух чисел: верхних BM-объектов и объектов по путям модулей.
+                    boolean bm = !(objectId instanceof String);
+                    String key = bm ? "bm:" + objectId : objectKey((String) objectId); //$NON-NLS-1$
+                    if (!deactivated && batch.passed.contains(key))
+                        return original;
+                    if (!deactivated && !batch.blockedIds.contains(key)
+                        && Math.max(batch.passedBm + (bm ? 1 : 0), batch.passed.size() - batch.passedBm + (bm ? 0 : 1)) <= THRESHOLD)
+                    {
+                        batch.passed.add(key);
+                        if (bm)
+                            batch.passedBm++;
+                        return original;
+                    }
+                    batch.blockedIds.add(key);
+                    batch.blocked.putIfAbsent(segment + '\n' + objectId,
+                        new Object[] {objectId, call(context, "getEClass"), segment, context.getClass()}); //$NON-NLS-1$
+                    return Boolean.TRUE;
+                }
+            }
+
+            /**
+             * {@code /Проект/src/Тип/Имя/…} → папка объекта; форма — отдельный объект
+             * ({@code …/Имя/Forms/Форма}), корень конфигурации — {@code /Проект/src/Configuration}.
+             */
+            static String objectKey(String path)
+            {
+                String[] parts = path.split("/"); //$NON-NLS-1$
+                int depth = parts.length > 3 && "Configuration".equals(parts[3]) ? 4 //$NON-NLS-1$
+                    : parts.length > 7 && "Forms".equals(parts[5]) ? 7 : 5; //$NON-NLS-1$
+                return String.join("/", java.util.Arrays.copyOf(parts, Math.min(depth, parts.length))); //$NON-NLS-1$
+            }
+
+            /**
+             * Запрос к {@code CheckScheduler.scheduleValidation}: запоминает подтверждённый инициатор.
+             * Глубокий анализ модулей после сборки Xtext; неизвестный инициатор не угадываем.
+             */
+            void schedulerInitiator(Object project, StackTraceElement[] stack)
+            {
+                if (project == null)
+                    return;
+                boolean analysis = false;
+                boolean fullBuild = false;
+                for (StackTraceElement frame : stack)
+                {
+                    String type = frame.getClassName();
+                    analysis |= type.endsWith(".BslDeepAnalisysService") //$NON-NLS-1$
+                        && frame.getMethodName().equals("scheduleDeepAnalisys"); //$NON-NLS-1$
+                    fullBuild |= type.endsWith("XtextBuilder") && frame.getMethodName().equals("fullBuild"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (analysis)
+                    schedulerInitiators.put(project, fullBuild
+                        ? "полная сборка проекта" : "сборка изменённых модулей"); //$NON-NLS-1$ //$NON-NLS-2$
+                else
+                    schedulerInitiators.remove(project);
+            }
+
+            /** Отложенное до показа предложения складывается: {@code event[4]} — список контекстов. */
+            static Object[] mergeOffers(Object[] previous, Object[] next)
+            {
+                if (previous == null || previous.length <= 4 || !(previous[4] instanceof List<?> earlier))
+                    return next;
+                List<Object> all = new java.util.ArrayList<>(earlier);
+                all.addAll((List<?>) next[4]);
+                java.util.Set<String> reasons = new java.util.LinkedHashSet<>(List.of(String.valueOf(previous[1]).split(", "))); //$NON-NLS-1$
+                reasons.addAll(List.of(String.valueOf(next[1]).split(", "))); //$NON-NLS-1$
+                Object[] merged = next.clone();
+                merged[1] = String.join(", ", reasons); //$NON-NLS-1$
+                merged[4] = List.copyOf(all);
+                return merged;
+            }
+
+            private boolean isManual(Object project)
+            {
+                return test(MANUAL, project);
+            }
+
+            /** Предикат основного бандла; до его старта — {@code false}. */
+            private static boolean test(String property, Object value)
+            {
+                @SuppressWarnings("unchecked")
+                var predicate = (java.util.function.Predicate<Object>) System.getProperties().get(property);
+                return predicate != null && value != null && predicate.test(value);
+            }
+
+            private Object project(Object executionContext) throws ReflectiveOperationException
+            {
+                Object project = projects.get(executionContext);
+                if (project == null)
+                {
+                    project = call(call(executionContext, "getDtProject"), "getWorkspaceProject"); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (project != null)
+                        projects.put(executionContext, project);
+                }
+                return project;
+            }
+
+            private String causeName(Object cause) throws ReflectiveOperationException
+            {
+                Object service = serviceId(cause);
+                // Причиной бывает и класс службы (IDerivedDataManager.class)
+                return service instanceof String text ? text
+                    : service instanceof Class<?> type ? "class:" + type.getName() //$NON-NLS-1$
+                    : service == null ? "null" : "class:" + service.getClass().getName(); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            private synchronized void schedule(Object key, long delayMs)
+            {
+                if (timer == null)
+                    timer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
+                    {
+                        Thread thread = new Thread(runnable, "Комфорт: счёт изменённых объектов проверок"); //$NON-NLS-1$
+                        thread.setDaemon(true);
+                        return thread;
+                    });
+                timer.schedule(() ->
+                {
+                    try
+                    {
+                        check(key);
+                    }
+                    catch (Throwable error)
+                    {
+                        owner.write("mass-change check failed", error); //$NON-NLS-1$
+                    }
+                }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+
+            private void check(Object key)
+            {
+                Batch done;
+                synchronized (this)
+                {
+                    Batch batch = batches.get(key);
+                    if (batch == null)
+                        return;
+                    long wait = batch.last + QUIET_MS - System.currentTimeMillis();
+                    if (wait > 0)
+                    {
+                        schedule(key, wait);
+                        return;
+                    }
+                    batches.remove(key);
+                    done = batch;
+                }
+                report(done);
+            }
+
+            private void report(Batch batch)
+            {
+                int passed = batch.passed.size();
+                int blocked = batch.blockedIds.size();
+                String text = "check-gate-batch; project=" + batch.project + "; passed=" + passed //$NON-NLS-1$ //$NON-NLS-2$
+                    + "; blocked=" + blocked + "; calls=" + batch.calls + "; causes=" + batch.causes //$NON-NLS-1$ //$NON-NLS-2$
+                    + "; segments=" + batch.segments + "; durationMs=" + (batch.last - batch.first) //$NON-NLS-1$ //$NON-NLS-2$
+                    + "; thread=" + batch.thread; //$NON-NLS-1$
+                if (blocked == 0 || batch.project == null)
+                    return;
+                java.util.Set<String> reasons = new java.util.LinkedHashSet<>();
+                for (String cause : batch.causes.keySet())
+                {
+                    String initiator = "CHECK_SCHEDULER".equals(cause) //$NON-NLS-1$
+                        ? schedulerInitiators.get(batch.project) : null;
+                    reasons.add(initiator != null ? initiator
+                        : REASONS.getOrDefault(cause, cause.substring(cause.lastIndexOf('.') + 1)));
+                }
+                // Текст с числом объектов строит основной бандл: объект модуля и BM-объект — один объект.
+                // При «Отключить массовые проверки» откладывание ожидаемо — предложение скрывается само.
+                owner.publish(new Object[] {PREFIX + text, String.join(", ", reasons), //$NON-NLS-1$
+                    Long.valueOf(System.currentTimeMillis()), batch.project, List.copyOf(batch.blocked.values()),
+                    Boolean.valueOf(massiveChecksDisabled(batch.controller))});
+            }
+
+            /** Значение флажка, которое контроллер читает при первом вызове (поле {@code currentDeactivationModeValue}). */
+            private boolean massiveChecksDisabled(Object controller)
+            {
+                try
+                {
+                    var mode = controller.getClass().getDeclaredField("currentDeactivationModeValue"); //$NON-NLS-1$
+                    mode.setAccessible(true);
+                    return Boolean.TRUE.equals(mode.get(controller));
+                }
+                catch (ReflectiveOperationException | RuntimeException e)
+                {
+                    owner.write("massive checks mode unknown: " + e, null); //$NON-NLS-1$
+                    return false;
+                }
+            }
+
+            /** CheckDeactivationController.requiresDeactivation: BmEvent.getServiceId либо сама причина. */
+            private Object serviceId(Object cause) throws ReflectiveOperationException
+            {
+                if (cause == null || cause instanceof String)
+                    return cause;
+                java.lang.reflect.Method method = method(cause, "getServiceId"); //$NON-NLS-1$
+                return method != null ? method.invoke(cause) : cause;
+            }
+
+            private Object call(Object target, String name) throws ReflectiveOperationException
+            {
+                java.lang.reflect.Method method = target != null ? method(target, name) : null;
+                return method != null ? method.invoke(target) : null;
+            }
+
+            /** Открытый метод без параметров; классы реализаций EDT бывают непубличными. */
+            private java.lang.reflect.Method method(Object target, String name)
+            {
+                return methods.computeIfAbsent(target.getClass().getName() + '#' + name, key ->
+                {
+                    try
+                    {
+                        java.lang.reflect.Method method = target.getClass().getMethod(name);
+                        method.setAccessible(true);
+                        return java.util.Optional.of(method);
+                    }
+                    catch (ReflectiveOperationException | RuntimeException e)
+                    {
+                        return java.util.Optional.empty();
+                    }
+                }).orElse(null);
+            }
+
+            private static final class Batch
+            {
+                final Object project;
+                final Object controller;
+                /** Объекты ({@code bm:id} или папка объекта), пересчитанные штатно; их остальные контексты тоже. */
+                final java.util.Set<Object> passed = new java.util.HashSet<>();
+                /** Сколько из {@link #passed} — BM-объекты. */
+                int passedBm;
+                final java.util.Set<Object> blockedIds = new java.util.HashSet<>();
+                /** «сегмент\nобъект» → {объект, EClass, сегмент, класс контекста} для «Запустить». */
+                final Map<String, Object[]> blocked = new java.util.LinkedHashMap<>();
+                final Map<String, Integer> causes = new java.util.TreeMap<>();
+                final Map<String, Integer> segments = new java.util.TreeMap<>();
+                final long first = System.currentTimeMillis();
+                final String thread = Thread.currentThread().getName();
+                long last;
+                int calls;
+
+                Batch(Object project, Object controller)
+                {
+                    this.project = project;
+                    this.controller = controller;
+                }
             }
         }
     }

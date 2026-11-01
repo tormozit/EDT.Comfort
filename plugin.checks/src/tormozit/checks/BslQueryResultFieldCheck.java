@@ -32,7 +32,7 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
             .complexity(CheckComplexity.NORMAL)
             .severity(IssueSeverity.MAJOR)
             .issueType(IssueType.WARNING)
-            .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", "Только в открытых модулях") //$NON-NLS-1$
+            .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
             .module()
             .checkedObjectType(BslPackage.Literals.MODULE);
     }

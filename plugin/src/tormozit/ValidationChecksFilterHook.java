@@ -69,6 +69,7 @@ import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -310,7 +311,29 @@ public final class ValidationChecksFilterHook implements IStartup
 
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
+        display.addFilter(SWT.MouseEnter, ValidationChecksFilterHook::patchOpenModulesOnlyTooltip);
         Debug.log("install: installed"); //$NON-NLS-1$
+    }
+
+    /** Подпись параметра {@code onlyOpenModules} проверок Комфорта ({@code OpenModulesOnly.TITLE} бандла проверок). */
+    private static final String OPEN_MODULES_ONLY_TITLE = "Только открытые модули"; //$NON-NLS-1$
+
+    private static final String OPEN_MODULES_ONLY_TOOLTIP =
+        "Проверять только модули, принадлежащие объектам, открытым в редакторах. "
+            + "Не действует в команде «Запустить проверки» на странице проверок.";
+
+    /**
+     * Флажок параметра проверки штатно получает подсказкой своё значение («true»), а пересоздаётся при
+     * каждой смене выбранной проверки — подсказку ставим при наведении.
+     */
+    private static void patchOpenModulesOnlyTooltip(Event event)
+    {
+        if (openPages <= 0 || !(event.widget instanceof Button button) || button.isDisposed()
+            || (button.getStyle() & SWT.CHECK) == 0 || !OPEN_MODULES_ONLY_TITLE.equals(button.getText()))
+            return;
+        String tooltip = TooltipText.wrap(button, OPEN_MODULES_ONLY_TOOLTIP + Global.pluginSignForTooltip());
+        if (!tooltip.equals(button.getToolTipText()))
+            button.setToolTipText(tooltip);
     }
 
     /**
@@ -3084,10 +3107,10 @@ public final class ValidationChecksFilterHook implements IStartup
                 }
             });
             recomputeItem = new ToolItem(bar, SWT.PUSH);
-            recomputeItem.setImage(recomputeIcon());
+            recomputeItem.setImage(ComfortCheckRecompute.icon());
             recomputeItem.setToolTipText(TooltipText.wrap(bar,
-                "Запустить перепроверку: перепроверить весь проект только выбранными проверками"
-                    + Global.pluginSignForTooltip()));
+                "Запустить проверки всего проекта только выбранными проверками. "
+                    + "Флажок «Только открытые модули» не действует" + Global.pluginSignForTooltip()));
             recomputeItem.addListener(SWT.Selection, event -> recomputeSelection());
             installRecomputeMenu(table);
             installRecomputeMenu(treeViewer.getTree());
@@ -3113,25 +3136,6 @@ public final class ValidationChecksFilterHook implements IStartup
             table.getDisplay().timerExec(1000, poll);
         }
 
-        /** Тот же ресурс, что у tormozit.problemView.recomputeChecks в plugin.xml. */
-        private static Image recomputeIcon()
-        {
-            String key = "tormozit.checks.recompute";
-            var registry = Activator.getDefault().getImageRegistry();
-            Image image = registry.get(key);
-            if (image == null)
-            {
-                var descriptor = org.eclipse.ui.plugin.AbstractUIPlugin.imageDescriptorFromPlugin(
-                    "org.eclipse.ui", "icons/full/elcl16/refresh_nav.png");
-                if (descriptor != null)
-                {
-                    registry.put(key, descriptor);
-                    image = registry.get(key);
-                }
-            }
-            return image;
-        }
-
         private void installRecomputeMenu(Control widget)
         {
             widget.setData(RECOMPUTE_MENU_KEY, this);
@@ -3150,10 +3154,11 @@ public final class ValidationChecksFilterHook implements IStartup
             {
                 item = new MenuItem(menu, SWT.PUSH);
                 item.setData(RECOMPUTE_MENU_KEY, Boolean.TRUE);
-                item.setText("Запустить перепроверку");
-                item.setImage(recomputeIcon());
+                item.setText("Запустить проверки");
+                item.setImage(ComfortCheckRecompute.icon());
                 ComfortSubmenuHelper.setMenuItemTooltip(item,
-                    "Перепроверить весь проект только выбранными проверками");
+                    "Запустить проверки всего проекта только выбранными проверками. "
+                        + "Флажок «Только открытые модули» не действует");
                 item.addListener(SWT.Selection, event -> recomputeSelection());
             }
             Set<CheckUid> selected = selectedChecks();
@@ -3204,7 +3209,7 @@ public final class ValidationChecksFilterHook implements IStartup
             var manager = provider != null ? provider.get(project) : null;
             if (scheduler == null || manager == null)
             {
-                org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить перепроверку",
+                org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить проверки",
                     "Планировщик проверок недоступен для проекта.");
                 return;
             }
@@ -3219,7 +3224,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 if (id == null || id.isBlank() || resolved.isEmpty() || !resolved.contains(uid)
                     || !selected.containsAll(resolved))
                 {
-                    org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить перепроверку",
+                    org.eclipse.jface.dialogs.MessageDialog.openError(table.getShell(), "Запустить проверки",
                         "Не удалось определить код выбранной проверки: " + uid.getCheckId());
                     return;
                 }
@@ -3230,7 +3235,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 ICheckSettings settings = repository.getSettings(uid, project);
                 if (settings == null || !settings.isEnabled())
                 {
-                    org.eclipse.jface.dialogs.MessageDialog.openInformation(table.getShell(), "Запустить перепроверку",
+                    org.eclipse.jface.dialogs.MessageDialog.openInformation(table.getShell(), "Запустить проверки",
                         "Для перепроверки включите выбранные проверки и примените настройки проекта.");
                     return;
                 }
@@ -3246,6 +3251,7 @@ public final class ValidationChecksFilterHook implements IStartup
             recomputing = true;
             updateResultActions();
             MassiveChecksExemptionHook.openManualWindow(project);
+            MassiveChecksExemptionHook.openAllModulesWindow(project);
             Display display = table.getDisplay();
             org.eclipse.core.runtime.jobs.Job.create("Перепроверка выбранных проверок: " + project.getName(), monitor ->
             {
@@ -3257,6 +3263,7 @@ public final class ValidationChecksFilterHook implements IStartup
                     while (!monitor.isCanceled() && System.currentTimeMillis() < deadline)
                     {
                         MassiveChecksExemptionHook.openManualWindow(project);
+                        MassiveChecksExemptionHook.openAllModulesWindow(project);
                         if (!manager.waitAllComputations(1000))
                             continue;
                         Thread.sleep(3000);
@@ -3285,6 +3292,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 }
                 finally
                 {
+                    MassiveChecksExemptionHook.closeAllModulesWindow(project);
                     if (!display.isDisposed())
                         display.asyncExec(() ->
                     {

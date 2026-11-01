@@ -416,9 +416,12 @@ public final class BslStructureInsertCommentTypes
         return false;
     }
 
-    /** Один успешный проход (переносимый ExtendedType) на экземпляр модуля за сессию. */
+    /**
+     * Один успешный проход (переносимый ExtendedType) на экземпляр модуля за сессию. Ключи слабые:
+     * сильный набор удерживал прежние экземпляры модулей после каждой перепроверки (issue 948).
+     */
     private static final java.util.Set<Module> EXPORT_VARS_DONE = java.util.Collections
-        .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+        .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
 
     /**
      * Модули, у которых проход экспортных переменных уже сделан в текущем внешнем расчёте
@@ -2488,7 +2491,10 @@ public final class BslStructureInsertCommentTypes
                     || !key.equalsIgnoreCase(property.getName()))
                     continue;
                 if (property.getTypeContainer() instanceof TypeContainerRef ref)
+                {
+                    dropRepeatedTypes(ref.getTypes());
                     addMissing(ref.getTypes(), commentTypes);
+                }
                 Module module = EcoreUtil2.getContainerOfType(invocation, Module.class);
                 if (module != null)
                     PropertyDescriptions.of(module).put(property, description);
@@ -2505,6 +2511,56 @@ public final class BslStructureInsertCommentTypes
             return null;
         FeatureEntry entry = access.getFeatureEntries().get(0);
         return entry.getFeature() instanceof Variable variable ? variable : null;
+    }
+
+    /**
+     * Оставляет по одному экземпляру одинаковых типов значения ключа. Штатный расчёт
+     * {@code Вставить("Ключ", Объект.Реквизит)} при нескольких типах объекта кладёт тип реквизита
+     * от каждого: у {@code ДанныеФайла.ПодписанЭП} — «Булево» 13 раз, по справочнику
+     * присоединённых файлов, и так в подсказке при наведении и в разделе возврата «см.».
+     * Одинаковым считается тот же объект, та же ссылка-заглушка или то же имя у типа без
+     * выведенных свойств; структуры с полями различаются полями и не сворачиваются.
+     */
+    private static void dropRepeatedTypes(List<TypeItem> types)
+    {
+        if (types.size() < 2)
+            return;
+        Set<Object> seen = new HashSet<>();
+        try
+        {
+            types.removeIf(item -> !seen.add(sameTypeKey(item)));
+        }
+        catch (UnsupportedOperationException e)
+        {
+            // Список EDT неизменяемый — оставляем как есть.
+        }
+    }
+
+    private static Object sameTypeKey(TypeItem item)
+    {
+        if (item.eIsProxy())
+            return ((org.eclipse.emf.ecore.InternalEObject)item).eProxyURI();
+        String name = McoreUtil.getTypeName(item);
+        if (name == null || item instanceof Type type && type.getContextDef() != null
+            && type.getContextDef().getProperties().stream().anyMatch(DerivedProperty.class::isInstance))
+            return new IdentityKey(item);
+        return name;
+    }
+
+    /** Ключ по ссылке на объект: {@code TypeItem} может переопределять {@code equals}. */
+    private record IdentityKey(Object item)
+    {
+        @Override
+        public boolean equals(Object other)
+        {
+            return other instanceof IdentityKey key && key.item == item;
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return System.identityHashCode(item);
+        }
     }
 
     /**
@@ -2906,11 +2962,6 @@ public final class BslStructureInsertCommentTypes
     {
         if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
             return ColumnRenames.inferReturn(types, function, environments);
-        if (object instanceof DynamicFeatureAccess columnsAccess
-            && ("Колонки".equalsIgnoreCase(columnsAccess.getName()) || "Columns".equalsIgnoreCase(columnsAccess.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("column-renames-return", "dfa Колонки types=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (types == null ? "null" : types.stream().map(McoreUtil::getTypeName).toList()) //$NON-NLS-1$
-                + " source=" + NodeModelUtils.getTokenText(NodeModelUtils.findActualNodeFor(columnsAccess.getSource()))); //$NON-NLS-1$
         if (!(object instanceof StaticFeatureAccess access))
             return types;
         Variable variable = sourceVariable(access);
@@ -2990,19 +3041,9 @@ public final class BslStructureInsertCommentTypes
                 call.getMethodAccess() instanceof StaticFeatureAccess access ? access.getFeatureEntries()
                     : call.getMethodAccess() instanceof DynamicFeatureAccess access ? access.getFeatureEntries()
                     : List.of();
-            int entries = 0;
             for (com._1c.g5.v8.dt.bsl.model.FeatureEntry entry : features)
                 if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Function function)
-                {
-                    entries++;
-                    List<TypeItem> before = types;
                     types = inferReturn(types, function, environments);
-                    Global.tempLog("column-renames-return", "callee=" + function.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " changed=" + (types != before)); //$NON-NLS-1$
-                }
-            if (entries == 0)
-                Global.tempLog("column-renames-return", "noFunctionEntry call=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + call.getMethodAccess().getName() + " entries=" + features.size()); //$NON-NLS-1$
             return types;
         }
 
@@ -3024,7 +3065,6 @@ public final class BslStructureInsertCommentTypes
             {
                 List<com._1c.g5.v8.dt.bsl.model.Invocation> calls = PLANS.get(module, module.eResource(),
                     () -> EcoreUtil2.getAllContentsOfType(module, com._1c.g5.v8.dt.bsl.model.Invocation.class));
-                int matched = 0;
                 for (com._1c.g5.v8.dt.bsl.model.Invocation call : calls)
                 {
                     if (!(call.getMethodAccess() instanceof StaticFeatureAccess access)
@@ -3037,15 +3077,8 @@ public final class BslStructureInsertCommentTypes
                     ICompositeNode node = NodeModelUtils.findActualNodeFor(call);
                     if (argument == null || node == null)
                         continue;
-                    matched++;
-                    List<TypeItem> before = types;
                     types = infer(types, argument, node.getOffset(), environments);
-                    Global.tempLog("column-renames-return", "caller param=" + param.getName() + " method=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + method.getName() + " argument=" + argument.getName() + " at=" + node.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " changed=" + (types != before)); //$NON-NLS-1$
                 }
-                Global.tempLog("column-renames-return", "callers param=" + param.getName() + " method=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + method.getName() + " calls=" + calls.size() + " matched=" + matched); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
             {
@@ -3058,61 +3091,7 @@ public final class BslStructureInsertCommentTypes
 
         static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
         {
-            try
-            {
-                List<TypeItem> result = inferImpl(types, variable, offset, environments);
-                Global.tempLog("column-renames-return", "infer var=" + variable.getName() + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " env=" + environments + " in=" + describe(types) + " out=" + describe(result) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " same=" + (result == types) + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-                return result;
-            }
-            catch (RuntimeException | LinkageError failure)
-            {
-                java.io.StringWriter trace = new java.io.StringWriter();
-                failure.printStackTrace(new java.io.PrintWriter(trace));
-                Global.tempLog("column-renames-return", "infer FAILED var=" + variable.getName() + " " + trace); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                throw failure;
-            }
-        }
-
-        /** Временная диагностика: тип, прокси/ресурс, колонки (есть ли «Значение»). */
-        private static String describe(List<TypeItem> types)
-        {
-            if (types == null)
-                return "null"; //$NON-NLS-1$
-            StringBuilder text = new StringBuilder("["); //$NON-NLS-1$
-            for (TypeItem item : types)
-            {
-                text.append(McoreUtil.getTypeName(item)).append(" proxy=").append(item.eIsProxy()) //$NON-NLS-1$
-                    .append(" res=").append(item.eResource() != null) //$NON-NLS-1$
-                    .append(" id=").append(System.identityHashCode(item)); //$NON-NLS-1$
-                if (isTable(item))
-                    try
-                    {
-                        TypeContainer columns = "ValueTree".equals(McoreUtil.getTypeName(item)) //$NON-NLS-1$
-                            ? ValueTreeDynamicContextDefProvider.getColumnCollectionType((Type)item)
-                            : ValueTableDynamicContextDefProvider.getColumnCollectionType((Type)item);
-                        text.append(" columns="); //$NON-NLS-1$
-                        if (columns == null)
-                            text.append("null"); //$NON-NLS-1$
-                        else
-                            for (TypeItem column : columns.allTypes())
-                            {
-                                text.append(McoreUtil.getTypeName(column)).append("/proxy=").append(column.eIsProxy()); //$NON-NLS-1$
-                                if (column instanceof Type type && type.getContextDef() != null)
-                                    text.append("/props=").append(type.getContextDef().allProperties().size()) //$NON-NLS-1$
-                                        .append("/Значение=").append(type.getContextDef().allProperties().stream() //$NON-NLS-1$
-                                            .anyMatch(property -> "Значение".equalsIgnoreCase(property.getName()))); //$NON-NLS-1$
-                                text.append(';');
-                            }
-                    }
-                    catch (RuntimeException failure)
-                    {
-                        text.append(" columnsFailed=").append(failure); //$NON-NLS-1$
-                    }
-                text.append(", "); //$NON-NLS-1$
-            }
-            return text.append(']').toString();
+            return inferImpl(types, variable, offset, environments);
         }
 
         private static List<TypeItem> inferImpl(List<TypeItem> types, Variable variable, int offset,
@@ -3740,6 +3719,11 @@ public final class BslStructureInsertCommentTypes
             java.util.Set<String> diagTypedBefore = module != null && partialParseResult(module) != null
                 ? BslDocCommentComputedTypes.diagTypedReturnFunctions(module) : null;
             // #endregion
+            // #region agent log
+            boolean diagPartial = module != null && partialParseResult(module) != null;
+            boolean diagIncomplete = resource != null && INCOMPLETE_RESOURCES.contains(resource);
+            long[] diagTiming = TypesTiming.begin();
+            // #endregion
             boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
             try
             {
@@ -3765,8 +3749,138 @@ public final class BslStructureInsertCommentTypes
                         INCOMPLETE_RESOURCES.add(resource);
                 }
                 endExportVarsScope(scopeOwner);
+                // #region agent log
+                TypesTiming.end(diagTiming, module, resource, diagPartial, diagIncomplete, complete);
+                // #endregion
             }
         }
+
+        // #region agent log
+        /**
+         * Замер полного расчёта типов модуля: штатный {@code super.installTypeSystem} отдельно от
+         * прохода Комфорта; вложенный расчёт чужого модуля — свой кадр, из родительского вычитается.
+         * Строка на каждый расчёт — в {@code check-timing.log} раннего бандла (вместе с расчётом
+         * контекста, к которому относится), без раннего бандла — в temp-лог {@code type-system-timing}.
+         */
+        private static final class TypesTiming
+        {
+            private static final int START = 0;
+            private static final int STOCK = 1;
+            private static final int STOCK_CALLS = 2;
+            private static final int NESTED = 3;
+            private static final int SECOND_PASS = 4;
+            private static final ThreadLocal<java.util.ArrayDeque<long[]>> FRAMES =
+                ThreadLocal.withInitial(java.util.ArrayDeque::new);
+            /** Сколько раз за сеанс считался модуль — номер повтора в строке. */
+            private static final java.util.Map<String, java.util.concurrent.atomic.AtomicInteger> RUNS =
+                new java.util.concurrent.ConcurrentHashMap<>();
+
+            static long[] begin()
+            {
+                long[] frame = new long[5];
+                frame[START] = System.nanoTime();
+                FRAMES.get().push(frame);
+                return frame;
+            }
+
+            /** Время вложенных расчётов текущего кадра — до штатного прохода, см. {@link #stock}. */
+            static long nested()
+            {
+                long[] frame = FRAMES.get().peek();
+                return frame != null ? frame[NESTED] : 0;
+            }
+
+            /** Штатный проход без вложенных расчётов, запущенных им самим (у них своя строка). */
+            static void stock(long nanos, long nestedBefore)
+            {
+                long[] frame = FRAMES.get().peek();
+                if (frame != null)
+                {
+                    frame[STOCK] += nanos - (frame[NESTED] - nestedBefore);
+                    frame[STOCK_CALLS]++;
+                }
+            }
+
+            static void secondPass(long nanos)
+            {
+                long[] frame = FRAMES.get().peek();
+                if (frame != null)
+                    frame[SECOND_PASS] += nanos;
+            }
+
+            /** Экземпляры прошлого расчёта модуля: {модуль, ресурс, набор ресурсов} — identityHashCode. */
+            private static final java.util.Map<String, int[]> INSTANCES = new java.util.concurrent.ConcurrentHashMap<>();
+
+            static void end(long[] frame, Module module, Resource resource, boolean partial, boolean incompleteBefore,
+                boolean complete)
+            {
+                try
+                {
+                    long total = System.nanoTime() - frame[START];
+                    var frames = FRAMES.get();
+                    frames.remove(frame);
+                    long[] parent = frames.peek();
+                    if (parent != null)
+                        parent[NESTED] += total;
+                    String uri = resource == null ? "null" : String.valueOf(resource.getURI()); //$NON-NLS-1$
+                    int run = RUNS.computeIfAbsent(uri, key -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
+                    Object resourceSet = resource == null ? null : resource.getResourceSet();
+                    int[] instances = {System.identityHashCode(module), System.identityHashCode(resource),
+                        System.identityHashCode(resourceSet)};
+                    int[] before = INSTANCES.put(uri, instances);
+                    String identity = " module@" + Integer.toHexString(instances[0]) //$NON-NLS-1$
+                        + " resource@" + Integer.toHexString(instances[1]) //$NON-NLS-1$
+                        + " resourceSet@" + Integer.toHexString(instances[2]) //$NON-NLS-1$
+                        + (resourceSet == null ? "" : "(" + resourceSet.getClass().getSimpleName() + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + (before == null ? " instances=first" //$NON-NLS-1$
+                            : " sameModule=" + (before[0] == instances[0]) //$NON-NLS-1$
+                                + " sameResource=" + (before[1] == instances[1]) //$NON-NLS-1$
+                                + " sameResourceSet=" + (before[2] == instances[2])); //$NON-NLS-1$
+                    String line = "types ms=" + ms(total) //$NON-NLS-1$
+                        + " stockMs=" + ms(frame[STOCK]) + " stockCalls=" + frame[STOCK_CALLS] //$NON-NLS-1$ //$NON-NLS-2$
+                        + " comfortMs=" + ms(total - frame[STOCK] - frame[NESTED]) //$NON-NLS-1$
+                        + " nestedMs=" + ms(frame[NESTED]) + " secondPassMs=" + ms(frame[SECOND_PASS]) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " run=" + run + " module=" + uri + identity //$NON-NLS-1$ //$NON-NLS-2$
+                        + " partial=" + partial + " incompleteBefore=" + incompleteBefore //$NON-NLS-1$ //$NON-NLS-2$
+                        + " complete=" + complete + " nested=" + (parent != null) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                        + " callers=" + callers(); //$NON-NLS-1$
+                    @SuppressWarnings("unchecked")
+                    var sink = (java.util.function.Function<Object[], Object>) System.getProperties()
+                        .get("tormozit.checkTiming.types"); //$NON-NLS-1$
+                    if (sink != null)
+                        // В сумму расчёта контекста — только верхний кадр: вложенный уже внутри него.
+                        sink.apply(new Object[] {line, parent == null ? total : 0L, parent == null ? frame[STOCK] : 0L});
+                    else
+                        Global.tempLog("type-system-timing", line); //$NON-NLS-1$
+                }
+                catch (Throwable e)
+                {
+                    Global.tempLogException("type-system-timing", "end", e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+
+            /**
+             * Вызывающие вне самой системы типов и JDK: {@code Класс.метод<Класс.метод…}. Кадры
+             * tormozit (в том числе {@code installTypeSystemNonInterruptable}) остаются.
+             */
+            private static String callers()
+            {
+                return StackWalker.getInstance().walk(stack -> stack
+                    .filter(f -> !f.getClassName().startsWith("tormozit.BslStructureInsertCommentTypes$ComfortTreeTypeSystem") //$NON-NLS-1$
+                        && !f.getClassName().startsWith("java.") && !f.getClassName().startsWith("jdk.") //$NON-NLS-1$ //$NON-NLS-2$
+                        && !f.getClassName().startsWith("sun.")) //$NON-NLS-1$
+                    .limit(16)
+                    .map(f -> f.getClassName().substring(f.getClassName().lastIndexOf('.') + 1) + '.' + f.getMethodName())
+                    .collect(java.util.stream.Collectors.joining("<"))); //$NON-NLS-1$
+            }
+
+            private static String ms(long nanos)
+            {
+                return String.format(java.util.Locale.ROOT, "%.1f", nanos / 1e6); //$NON-NLS-1$
+            }
+        }
+        // #endregion
 
         /**
          * Ресурсы модулей, чей последний полный расчёт отменён или упал. Отменённый расчёт
@@ -3850,7 +3964,13 @@ public final class BslStructureInsertCommentTypes
             try
             {
                 installTypeSystemPass(module, cancelIndicator);
+                // #region agent log
+                long diagSecondStart = System.nanoTime();
+                // #endregion
                 secondPassIfNeeded(module, cancelIndicator);
+                // #region agent log
+                TypesTiming.secondPass(System.nanoTime() - diagSecondStart);
+                // #endregion
             }
             finally
             {
@@ -4333,7 +4453,20 @@ public final class BslStructureInsertCommentTypes
             try
             {
                 resetPartialMethodStates(module, cancelIndicator);
-                super.installTypeSystem(module, cancelIndicator);
+                // #region agent log
+                long diagStockStart = System.nanoTime();
+                long diagNestedBefore = TypesTiming.nested();
+                // #endregion
+                try
+                {
+                    super.installTypeSystem(module, cancelIndicator);
+                }
+                // #region agent log
+                finally
+                {
+                    TypesTiming.stock(System.nanoTime() - diagStockStart, diagNestedBefore);
+                }
+                // #endregion
             }
             finally
             {

@@ -15,23 +15,24 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchWindow;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.derived.IDerivedDataUpdate;
 import com._1c.g5.v8.derived.context.IContextCollectingSession;
 import com._1c.g5.v8.derived.context.IObjectDerivedDataContext;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
@@ -39,7 +40,6 @@ import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
-import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.validation.ISubordinateObjectsProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
@@ -48,6 +48,7 @@ import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
+import com.e1c.g5.v8.dt.check.ICheck;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
@@ -112,6 +113,25 @@ public final class ComfortCheckRecompute
 
     private ComfortCheckRecompute() {}
 
+    /** Значок «Запустить проверки» — тот же, что у штатной команды запуска проверок EDT. */
+    public static org.eclipse.swt.graphics.Image icon()
+    {
+        String key = "tormozit.checks.recompute"; //$NON-NLS-1$
+        var registry = Activator.getDefault().getImageRegistry();
+        org.eclipse.swt.graphics.Image image = registry.get(key);
+        if (image == null)
+        {
+            var descriptor = org.eclipse.ui.plugin.AbstractUIPlugin.imageDescriptorFromPlugin(
+                "com._1c.g5.v8.dt.ui", "icons/obj16/check.png"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (descriptor != null)
+            {
+                registry.put(key, descriptor);
+                image = registry.get(key);
+            }
+        }
+        return image;
+    }
+
     /**
      * Полная проверка всех объектов проекта — то, что должно происходить на корневом узле.
      * <p>
@@ -137,7 +157,7 @@ public final class ComfortCheckRecompute
             + (project == null ? "null" : project.getName())); //$NON-NLS-1$
         if (project == null || !project.isAccessible())
         {
-            toast("Проверить", "Проект недоступен."); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Запустить проверки", "Проект недоступен."); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ICheckScheduler scheduler = Global.getOsgiService(ICheckScheduler.class);
@@ -145,7 +165,7 @@ public final class ComfortCheckRecompute
         IDerivedDataManager manager = provider != null ? provider.get(project) : null;
         if (scheduler == null || manager == null)
         {
-            toast("Проверить", "Планировщик проверок недоступен для проекта " + project.getName() + "."); //$NON-NLS-1$
+            toast("Запустить проверки", "Планировщик проверок недоступен для проекта " + project.getName() + "."); //$NON-NLS-1$
             return;
         }
 
@@ -154,7 +174,7 @@ public final class ComfortCheckRecompute
             ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
             if (repository == null)
             {
-                toast("Проверить", "Каталог проверок недоступен.");
+                toast("Запустить проверки", "Каталог проверок недоступен.");
                 return;
             }
             // Планировщик не выполняет выключенные проверки. Не превращаем пустой итог в «все».
@@ -165,7 +185,7 @@ public final class ComfortCheckRecompute
             }));
             if (checkIds.isEmpty())
             {
-                toast("Проверить", "Нет включённых обновлённых проверок. Их можно включить в списке «Проверки».");
+                toast("Запустить проверки", "Нет включённых обновлённых проверок. Их можно включить в списке «Проверки».");
                 return;
             }
         }
@@ -173,7 +193,9 @@ public final class ComfortCheckRecompute
 
         // Режим «Отключить массовые проверки» не должен глушить то, что запросил пользователь
         MassiveChecksExemptionHook.openManualWindow(project);
-        toast("Проверить", "Запущен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
+        long startMs = System.currentTimeMillis();
+        Map<Object, Long> durationsBefore = CheckDurations.snapshot();
+        toast("Запустить проверки", "Запущен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
             + project.getName() + ". По окончании будет показано уведомление.");
 
         IDtProjectManager projectManager = Global.getOsgiService(IDtProjectManager.class);
@@ -189,17 +211,236 @@ public final class ComfortCheckRecompute
                 Debug.log("проверка проекта: планировщик вызван"); //$NON-NLS-1$
                 scheduler.scheduleValidation(project, checkIds, List.of(), monitor);
                 Debug.log("проверка проекта: планировщик отработал, ждём завершения"); //$NON-NLS-1$
-                if (notifyProjectComplete(manager, project, checkIds, monitor))
-                    completeDeferredResults(project, resultTokens);
+                // Ход расчёта показывает штатный индикатор EDT; ожидание конца — ради уведомления, в «Состоянии» его не видно
+                Job wait = Job.create(jobTitle + ": ожидание завершения", waitMonitor -> //$NON-NLS-1$
+                {
+                    if (notifyProjectComplete(manager, project, checkIds, startMs, durationsBefore, waitMonitor))
+                        completeDeferredResults(project, resultTokens);
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                });
+                wait.setSystem(true);
+                wait.schedule();
             }
             catch (RuntimeException e)
             {
-                toast("Проверить", "Не удалось запустить проверку проекта " + project.getName() //$NON-NLS-1$
+                toast("Запустить проверки", "Не удалось запустить проверку проекта " + project.getName() //$NON-NLS-1$
                     + ": " + e.getClass().getSimpleName()); //$NON-NLS-1$
             }
             return org.eclipse.core.runtime.Status.OK_STATUS;
         });
         job.schedule();
+    }
+
+    /**
+     * Пересчёт контекстов, отложенных шлюзом раннего бандла (большая пачка без ручного запуска).
+     * Элемент — {@code {идентификатор объекта, EClass, сегмент, класс контекста}}; контекст заводится
+     * заново той же перегрузкой {@code getTypedObjectContext}, что и у языковых проверок.
+     *
+     * @param quiet без уведомлений и без окна ручного запуска — для объектов, открытых в редакторах:
+     *     шлюз пропускает их и так, а окно пропустило бы и чужую массовую пачку
+     * @param settled ровно один раз: {@code true} — расчёт завершён или ни один контекст не удалось
+     *     завести (повторять нечего), {@code false} — пересчёт не состоялся или прерван
+     */
+    public static void recomputeContexts(IProject project, List<?> contexts, boolean quiet,
+        java.util.function.Consumer<Boolean> settled)
+    {
+        if (project == null || !project.isAccessible() || contexts == null || contexts.isEmpty())
+        {
+            if (!quiet)
+                toast("Запустить проверки", "Нечего перепроверять: проект недоступен или список пуст."); //$NON-NLS-1$
+            settled.accept(Boolean.FALSE);
+            return;
+        }
+        Set<String> checkIds = enabledCheckIds(project);
+        IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+        IDerivedDataManager manager = provider != null ? provider.get(project) : null;
+        if (checkIds.isEmpty() || manager == null)
+        {
+            if (!quiet)
+                toast("Запустить проверки", "Менеджер проверок недоступен или в профиле проекта " + project.getName() //$NON-NLS-1$
+                    + " нет включённых проверок."); //$NON-NLS-1$
+            settled.accept(Boolean.FALSE);
+            return;
+        }
+
+        // Шлюз пропускает ручной запуск; окно держит цикл ожидания ниже
+        if (!quiet)
+            MassiveChecksExemptionHook.openManualWindow(project);
+        int[] marked = { 0 };
+        boolean scheduled = manager.updateDerivedData(new IDerivedDataUpdate()
+        {
+            @Override
+            public void update(IContextCollectingSession session, IBmModel model)
+            {
+                for (Object item : contexts)
+                {
+                    if (item instanceof Object[] entry && entry.length == 4 && markStoredContext(session, entry, checkIds))
+                        marked[0]++;
+                }
+            }
+        }, 0L, "comfort-recompute-checks"); //$NON-NLS-1$
+        Debug.log("отложенные контексты: всего=" + contexts.size() + ", помечено=" + marked[0] //$NON-NLS-1$ //$NON-NLS-2$
+            + (quiet ? ", открытые" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!scheduled || marked[0] == 0)
+        {
+            if (!quiet)
+                toast("Запустить проверки", "Не удалось запланировать пересчет отложенных проверок проекта " //$NON-NLS-1$
+                    + project.getName() + "."); //$NON-NLS-1$
+            settled.accept(Boolean.valueOf(scheduled));
+            return;
+        }
+        Map<Object, Long> durationsBefore = CheckDurations.snapshot();
+        manager.applyForcedUpdates();
+        long startMs = System.currentTimeMillis();
+        if (!quiet)
+            toast("Запустить проверки", "Запущен пересчет отложенных проверок проекта " + project.getName() //$NON-NLS-1$
+                + ". По окончании будет показано уведомление.");
+
+        Job job = Job.create("Комфорт: пересчет отложенных проверок", monitor -> //$NON-NLS-1$
+        {
+            // Счёт объектов читает модель — здесь, а не в потоке UI нажатия «Запустить»
+            int count = quiet ? 0 : countContextObjects(project, contexts);
+            String label = count + " " + Global.russianPlural(count, "объекта", "объектов", "объектов") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " проекта " + project.getName(); //$NON-NLS-1$
+            long deadline = System.currentTimeMillis() + PROJECT_WAIT_TIMEOUT_MS;
+            boolean completed = false;
+            try
+            {
+                while (!monitor.isCanceled() && System.currentTimeMillis() < deadline)
+                {
+                    if (!quiet)
+                        MassiveChecksExemptionHook.openManualWindow(project);
+                    if (!manager.waitAllComputations(WAIT_COMPLETION_TIMEOUT_MS))
+                        continue;
+                    // Конец расчёта — до паузы проверки затишья
+                    long endMs = System.currentTimeMillis();
+                    Thread.sleep(SETTLE_PAUSE_MS);
+                    if (manager.isIdle())
+                    {
+                        completed = true;
+                        settled.accept(Boolean.TRUE);
+                        if (quiet)
+                            break;
+                        int[] counts = countProjectProblems(project, Set.of());
+                        toastWithAction("Запустить проверки", "Завершен пересчет проверок " + label //$NON-NLS-1$
+                            + " за " + LongOperationNotifyHook.formatDuration(endMs - startMs) //$NON-NLS-1$
+                            + ". В проекте ошибок: " + counts[0] + ", предупреждений: " + counts[1] //$NON-NLS-1$ //$NON-NLS-2$
+                            + CheckDurations.top(durationsBefore, project, endMs - startMs),
+                            () -> ProblemViewMarkers.showChecked(project, List.of(), Set.of()),
+                            "Показать результаты"); //$NON-NLS-1$
+                        break;
+                    }
+                }
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
+            finally
+            {
+                if (!completed)
+                    settled.accept(Boolean.FALSE);
+            }
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        job.setSystem(quiet);
+        job.schedule();
+    }
+
+    /**
+     * Сколько объектов метаданных за отложенными контекстами: сам объект и его модули — один объект,
+     * форма — отдельный. Ключ — папка объекта или формы; модель читается, поэтому не в потоке UI.
+     */
+    public static int countContextObjects(IProject project, List<?> contexts)
+    {
+        Set<String> objects = new HashSet<>();
+        List<Long> bmIds = new ArrayList<>();
+        for (Object item : contexts)
+        {
+            if (!(item instanceof Object[] entry) || entry.length == 0)
+                continue;
+            if (entry[0] instanceof String path)
+                objects.add(objectKey(path));
+            else if (entry[0] instanceof Long id)
+                bmIds.add(id);
+        }
+        if (!bmIds.isEmpty())
+            objects.addAll(bmObjectKeys(project, bmIds).values());
+        return objects.size();
+    }
+
+    /**
+     * {@code /Проект/src/Тип/Имя/…} → {@code /Проект/src/Тип/Имя}; форма — отдельный объект
+     * ({@code …/Имя/Forms/Форма}), корень конфигурации — {@code /Проект/src/Configuration}. Тот же
+     * ключ у порога шлюза в раннем бандле.
+     */
+    static String objectKey(String path)
+    {
+        String[] parts = path.split("/"); //$NON-NLS-1$
+        int depth = parts.length > 3 && "Configuration".equals(parts[3]) ? 4 //$NON-NLS-1$
+            : parts.length > 7 && "Forms".equals(parts[5]) ? 7 : 5; //$NON-NLS-1$
+        return String.join("/", java.util.Arrays.copyOf(parts, Math.min(depth, parts.length))); //$NON-NLS-1$
+    }
+
+    /** Ключи объектов по BM-идентификаторам: верхний объект → его файл → папка объекта. */
+    static Map<Long, String> bmObjectKeys(IProject project, List<Long> ids)
+    {
+        Map<Long, String> keys = new java.util.HashMap<>();
+        IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+        IBmModel model = models != null ? models.getModel(project) : null;
+        IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+        try
+        {
+            if (model != null && lookup != null)
+            {
+                model.executeReadonlyTask(new AbstractBmTask<Void>("comfort.countDeferredObjects") //$NON-NLS-1$
+                {
+                    @Override
+                    public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        for (Long id : ids)
+                        {
+                            IBmObject object = transaction.getObjectById(id.longValue());
+                            IBmObject top = object == null || object.bmIsTop() ? object : object.bmGetTopObject();
+                            IFile file = top instanceof EObject eObject ? lookup.getPlatformResource(eObject) : null;
+                            keys.put(id, file != null
+                                ? objectKey(URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                                    .toPlatformString(false))
+                                : "bm:" + (top != null ? top.bmGetId() : id)); //$NON-NLS-1$
+                        }
+                        return null;
+                    }
+                }, true);
+                return keys;
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Debug.log("счёт отложенных объектов: " + e); //$NON-NLS-1$
+        }
+        keys.clear();
+        ids.forEach(id -> keys.put(id, "bm:" + id)); //$NON-NLS-1$
+        return keys;
+    }
+
+    /** Отложенный контекст заново: BM-объект — по числовому идентификатору, модуль — по пути файла. */
+    private static boolean markStoredContext(IContextCollectingSession session, Object[] entry, Set<String> checkIds)
+    {
+        try
+        {
+            Method method = entry[0] instanceof Long
+                ? IContextCollectingSession.class.getMethod("getTypedObjectContext", //$NON-NLS-1$
+                    long.class, EClass.class, String.class, Class.class)
+                : IContextCollectingSession.class.getMethod("getTypedObjectContext", //$NON-NLS-1$
+                    Object.class, EClass.class, String.class, Class.class);
+            Object ctx = method.invoke(session, entry[0], entry[1], entry[2], entry[3]);
+            return markContextFullRebuild(ctx, checkIds);
+        }
+        catch (Exception e)
+        {
+            Debug.log("отложенный контекст " + entry[2] + " " + entry[0] + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -249,9 +490,11 @@ public final class ComfortCheckRecompute
      * пользователь должен мочь в любой момент.
      */
     private static boolean notifyProjectComplete(IDerivedDataManager manager, IProject project,
-        Set<String> checkIds, org.eclipse.core.runtime.IProgressMonitor monitor)
+        Set<String> checkIds, long startMs, Map<Object, Long> durationsBefore,
+        org.eclipse.core.runtime.IProgressMonitor monitor)
     {
         long deadline = System.currentTimeMillis() + PROJECT_WAIT_TIMEOUT_MS;
+        long endMs;
         try
         {
             while (true)
@@ -261,12 +504,13 @@ public final class ComfortCheckRecompute
                     return false;
                 if (System.currentTimeMillis() > deadline)
                 {
-                    toast("Проверить", "Проверка проекта " + project.getName() //$NON-NLS-1$
+                    toast("Запустить проверки", "Проверка проекта " + project.getName() //$NON-NLS-1$
                         + " не завершилась за " + (PROJECT_WAIT_TIMEOUT_MS / 60_000) + " мин."); //$NON-NLS-1$ //$NON-NLS-2$
                     return false;
                 }
                 if (!manager.waitAllComputations(WAIT_COMPLETION_TIMEOUT_MS))
                     continue;
+                endMs = System.currentTimeMillis();
                 // Проверка идёт волнами: за паузой приходит следующая пачка объектов, и счёт
                 // сразу после первого затишья выходит заниженным
                 Thread.sleep(SETTLE_PAUSE_MS);
@@ -283,9 +527,11 @@ public final class ComfortCheckRecompute
         }
 
         int[] counts = countProjectProblems(project, checkIds);
-        toastWithAction("Проверить", "Завершен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
-            + project.getName() + ". Ошибок: " + counts[0] + ", Предупреждений: " + counts[1], //$NON-NLS-1$ //$NON-NLS-2$
-            ProblemViewMarkers::show, "Показать результаты"); //$NON-NLS-1$
+        toastWithAction("Запустить проверки", "Завершен пересчет " + checkCount(checkIds) + " проверок проекта " //$NON-NLS-1$ //$NON-NLS-2$
+            + project.getName() + " за " + LongOperationNotifyHook.formatDuration(endMs - startMs) //$NON-NLS-1$
+            + ". Ошибок: " + counts[0] + ", Предупреждений: " + counts[1] //$NON-NLS-1$ //$NON-NLS-2$
+            + CheckDurations.top(durationsBefore, project, endMs - startMs),
+            () -> ProblemViewMarkers.showChecked(project, List.of(), Set.of()), "Показать результаты"); //$NON-NLS-1$
         return true;
     }
 
@@ -364,7 +610,7 @@ public final class ComfortCheckRecompute
         }
         catch (Throwable t)
         {
-            toast("Проверить", "Ошибка при запуске проверки: " + t.getClass().getSimpleName() //$NON-NLS-1$
+            toast("Запустить проверки", "Ошибка при запуске проверки: " + t.getClass().getSimpleName() //$NON-NLS-1$
                 + (t.getMessage() != null ? " — " + t.getMessage() : "")); //$NON-NLS-1$
         }
     }
@@ -419,14 +665,14 @@ public final class ComfortCheckRecompute
     {
         if (project == null || objects == null || objects.isEmpty())
         {
-            toast("Проверить", "Не выбран объект для проверки."); //$NON-NLS-1$
+            toast("Запустить проверки", "Не выбран объект для проверки."); //$NON-NLS-1$
             return;
         }
 
         Set<String> checkIds = enabledCheckIds(project);
         if (checkIds.isEmpty())
         {
-            toast("Проверить", //$NON-NLS-1$
+            toast("Запустить проверки", //$NON-NLS-1$
                 "В профиле проекта нет включённых проверок — перепроверять нечего.");
             return;
         }
@@ -435,13 +681,13 @@ public final class ComfortCheckRecompute
         IDerivedDataManager manager = provider != null ? provider.get(project) : null;
         if (manager == null)
         {
-            toast("Проверить", "Менеджер проверок недоступен для проекта " + project.getName() + "."); //$NON-NLS-1$
+            toast("Запустить проверки", "Менеджер проверок недоступен для проекта " + project.getName() + "."); //$NON-NLS-1$
             return;
         }
 
         if (!manager.isIdle())
         {
-            toast("Проверить", //$NON-NLS-1$
+            toast("Запустить проверки", //$NON-NLS-1$
                 "Предыдущая перепроверка ещё выполняется. Повторите через несколько секунд.");
             return;
         }
@@ -458,12 +704,12 @@ public final class ComfortCheckRecompute
         }
         if (sources.isEmpty())
         {
-            toast("Проверить", "Выбранный элемент нельзя точечно перепроверить."); //$NON-NLS-1$
+            toast("Запустить проверки", "Выбранный элемент нельзя точечно перепроверить."); //$NON-NLS-1$
             return;
         }
 
         String objectsLabel = describeObjects(sources);
-        toast("Проверить", //$NON-NLS-1$
+        toast("Запустить проверки", //$NON-NLS-1$
             "Запущен пересчет всех проверок объекта " + objectsLabel
                 + " с вложенными. По окончании будет показано уведомление.");
 
@@ -511,22 +757,23 @@ public final class ComfortCheckRecompute
         }, 0L, "comfort-recompute-checks"); //$NON-NLS-1$
         if (!scheduled)
         {
-            toast("Проверить", "Не удалось запланировать перепроверку объекта " + objectsLabel + "."); //$NON-NLS-1$
+            toast("Запустить проверки", "Не удалось запланировать перепроверку объекта " + objectsLabel + "."); //$NON-NLS-1$
             return;
         }
         if (targets.isEmpty())
         {
-            toast("Проверить", "Не удалось определить объект проверки для " + objectsLabel + "."); //$NON-NLS-1$
+            toast("Запустить проверки", "Не удалось определить объект проверки для " + objectsLabel + "."); //$NON-NLS-1$
             return;
         }
         if (marked[0] == 0)
         {
-            toast("Проверить", //$NON-NLS-1$
+            toast("Запустить проверки", //$NON-NLS-1$
                 "Не удалось пометить проверки для " + objectsLabel + " — перепроверка не запущена.");
             return;
         }
+        Map<Object, Long> durationsBefore = CheckDurations.snapshot();
         manager.applyForcedUpdates();
-        notifyWhenComplete(manager, project, objectsLabel, sources, targets);
+        notifyWhenComplete(manager, project, objectsLabel, sources, targets, durationsBefore);
     }
 
     /**
@@ -592,8 +839,9 @@ public final class ComfortCheckRecompute
      * пользователь не видит, когда можно смотреть на обновлённый результат в панели.
      */
     private static void notifyWhenComplete(IDerivedDataManager manager, IProject project, String objectsLabel,
-        Collection<? extends EObject> objects, List<IBmObject> targets)
+        Collection<? extends EObject> objects, List<IBmObject> targets, Map<Object, Long> durationsBefore)
     {
+        long startMs = System.currentTimeMillis();
         Job waitJob = Job.create("Комфорт: перепроверка конфигурации", monitor -> //$NON-NLS-1$
         {
             monitor.beginTask("Перепроверка конфигурации", org.eclipse.core.runtime.IProgressMonitor.UNKNOWN); //$NON-NLS-1$
@@ -602,15 +850,19 @@ public final class ComfortCheckRecompute
                 boolean completed = manager.waitAllComputations(WAIT_COMPLETION_TIMEOUT_MS);
                 if (completed)
                 {
-                    int[] counts = countProblems(project, targets, objects);
-                    toastWithAction("Проверить", "Завершен пересчет всех проверок объекта " + objectsLabel //$NON-NLS-1$
-                        + " с вложенными. Ошибок: " + counts[0] //$NON-NLS-1$
-                        + ", Предупреждений: " + counts[1], //$NON-NLS-1$
-                        () -> showResults(objects), "Показать результаты"); //$NON-NLS-1$
+                    long durationMs = System.currentTimeMillis() - startMs;
+                    Set<Object> topIds = checkedTopIds(project, targets, objects);
+                    int[] counts = countProblems(project, targets, objects, topIds);
+                    toastWithAction("Запустить проверки", "Завершен пересчет всех проверок объекта " + objectsLabel //$NON-NLS-1$
+                        + " с вложенными за " + LongOperationNotifyHook.formatDuration(durationMs) //$NON-NLS-1$
+                        + ". Ошибок: " + counts[0] //$NON-NLS-1$
+                        + ", Предупреждений: " + counts[1] //$NON-NLS-1$
+                        + CheckDurations.top(durationsBefore, project, durationMs),
+                        () -> ProblemViewMarkers.showChecked(project, objects, topIds), "Показать результаты"); //$NON-NLS-1$
                 }
                 else
                 {
-                    toast("Проверить", "Перепроверка объекта " + objectsLabel //$NON-NLS-1$
+                    toast("Запустить проверки", "Перепроверка объекта " + objectsLabel //$NON-NLS-1$
                         + " с вложенными не завершилась за " //$NON-NLS-1$
                         + (WAIT_COMPLETION_TIMEOUT_MS / 1000) + " с.");
                 }
@@ -642,10 +894,11 @@ public final class ComfortCheckRecompute
      * и их подчинённых top-объектов ({@link ISubordinateObjectsProvider}). По BM-объекту
      * ({@code getNestedMarkers}) не считать: проблемы текста модуля привязаны к файлу и теряются.
      *
+     * @param topIds проверенные top-объекты с подчинёнными — {@link #checkedTopIds}
      * @return массив из двух чисел: ошибки и предупреждения
      */
     private static int[] countProblems(IProject project, List<IBmObject> targets,
-        Collection<? extends EObject> sources)
+        Collection<? extends EObject> sources, Set<Object> topIds)
     {
         IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
         IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
@@ -653,6 +906,44 @@ public final class ComfortCheckRecompute
             return new int[] { 0, 0 };
 
         LinkedHashSet<Object> objectIds = new LinkedHashSet<>();
+        for (IBmObject bmObject : checkedBmObjects(targets, sources))
+            objectIds.add(Long.valueOf(bmObject.bmGetId()));
+        MarkerFilter filter = MarkerFilter.createProjectFilter(project);
+        for (Object topId : topIds)
+            filter.addValue(MarkerIndex.TOP_OBJECT_ID, topId);
+        int[] counts = errorsAndWarnings(markers.createReader(project).getMarkerInfo(filter));
+        Debug.log("счёт по объекту: отбор=" + filter + ", ошибок=" + counts[0] //$NON-NLS-1$ //$NON-NLS-2$
+            + ", предупреждений=" + counts[1]); //$NON-NLS-1$
+        logRelatedMarkers(markerManager, project, objectIds, sources);
+        return counts;
+    }
+
+    /**
+     * Идентификаторы top-объектов проверенного набора вместе с их подчинёнными top-объектами
+     * ({@link ISubordinateObjectsProvider}) — по ним панель отбирает область «Текущий объект».
+     */
+    private static Set<Object> checkedTopIds(IProject project, List<IBmObject> targets,
+        Collection<? extends EObject> sources)
+    {
+        LinkedHashSet<Object> ownTopIds = new LinkedHashSet<>();
+        for (IBmObject bmObject : checkedBmObjects(targets, sources))
+        {
+            IBmObject top = bmObject.bmGetTopObject();
+            ownTopIds.add(Long.valueOf((top != null ? top : bmObject).bmGetId()));
+        }
+        LinkedHashSet<Object> topIds = new LinkedHashSet<>();
+        ISubordinateObjectsProvider subordinates = Global.getOsgiService(ISubordinateObjectsProvider.class);
+        for (Object topId : ownTopIds)
+        {
+            topIds.add(topId);
+            if (subordinates != null)
+                topIds.addAll(subordinates.getSubordinateTopObjectIds(project, topId));
+        }
+        return topIds;
+    }
+
+    private static List<IBmObject> checkedBmObjects(List<IBmObject> targets, Collection<? extends EObject> sources)
+    {
         List<IBmObject> objects = new ArrayList<>(targets);
         if (sources != null)
         {
@@ -662,56 +953,7 @@ public final class ComfortCheckRecompute
                     objects.add(bm);
             }
         }
-        LinkedHashSet<Object> topIds = new LinkedHashSet<>();
-        for (IBmObject bmObject : objects)
-        {
-            objectIds.add(Long.valueOf(bmObject.bmGetId()));
-            IBmObject top = bmObject.bmGetTopObject();
-            topIds.add(Long.valueOf((top != null ? top : bmObject).bmGetId()));
-        }
-        ISubordinateObjectsProvider subordinates = Global.getOsgiService(ISubordinateObjectsProvider.class);
-        MarkerFilter filter = MarkerFilter.createProjectFilter(project);
-        for (Object topId : topIds)
-        {
-            filter.addValue(MarkerIndex.TOP_OBJECT_ID, topId);
-            if (subordinates != null)
-                for (Object id : subordinates.getSubordinateTopObjectIds(project, topId))
-                    filter.addValue(MarkerIndex.TOP_OBJECT_ID, id);
-        }
-        int[] counts = errorsAndWarnings(markers.createReader(project).getMarkerInfo(filter));
-        Debug.log("счёт по объекту: отбор=" + filter + ", ошибок=" + counts[0] //$NON-NLS-1$ //$NON-NLS-2$
-            + ", предупреждений=" + counts[1]); //$NON-NLS-1$
-        logRelatedMarkers(markerManager, project, objectIds, sources);
-        return counts;
-    }
-
-    /**
-     * По клику на тост: для одного проверенного объекта — активирует его редактор и открывает
-     * панель «Ошибки конфигурации» с отбором «Текущий объект». Для нескольких объектов
-     * «текущий объект» не имеет смысла — просто показывает панель как есть.
-     */
-    private static void showResults(Collection<? extends EObject> objects)
-    {
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        IWorkbenchPage page = window != null ? window.getActivePage() : null;
-        if (page == null)
-            return;
-
-        if (objects != null && objects.size() == 1)
-        {
-            EObject object = objects.iterator().next();
-            try
-            {
-                new OpenHelper(page).openEditor(object);
-            }
-            catch (RuntimeException ignored)
-            {
-            }
-            ProblemViewMarkers.showForCurrentObject();
-            return;
-        }
-
-        ProblemViewMarkers.show();
+        return objects;
     }
 
     /**
@@ -1005,11 +1247,94 @@ public final class ComfortCheckRecompute
         return files;
     }
 
-    private static void toast(String title, String message)
+    static void toast(String title, String message)
     {
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
             display.asyncExec(() -> ToastNotification.show(title, message, 5_000));
+    }
+
+    /**
+     * Самые долгие проверки пересчёта по суммам раннего бандла ({@code tormozit.checkDuration.totals}):
+     * собственное время проверки, сложенное по всем потокам. Туда попадают и проверки, параллельно
+     * шедшие по другим поводам.
+     */
+    private static final class CheckDurations
+    {
+        /** Короче — список не нужен. */
+        private static final long MIN_WALL_MS = 20_000L;
+        private static final int TOP = 3;
+
+        private CheckDurations()
+        {
+        }
+
+        /** Суммы на этот момент; пусто — ранний бандл замер не поставил. */
+        @SuppressWarnings("unchecked")
+        static Map<Object, Long> snapshot()
+        {
+            Object totals = System.getProperties().get("tormozit.checkDuration.totals"); //$NON-NLS-1$
+            return totals instanceof java.util.function.Supplier<?> supplier
+                ? (Map<Object, Long>)supplier.get() : Map.of();
+        }
+
+        /**
+         * Строка для уведомления: три самые долгие проверки с названиями и их доли в общем однопоточном
+         * времени всех проверок — столько сэкономит отключение проверки. Пусто, если пересчёт был
+         * короче 20 с.
+         */
+        static String top(Map<Object, Long> before, IProject project, long wallMs)
+        {
+            if (wallMs <= MIN_WALL_MS)
+                return ""; //$NON-NLS-1$
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            Map<String, Long> byTitle = new java.util.HashMap<>();
+            long total = 0;
+            for (var entry : snapshot().entrySet())
+            {
+                long nanos = entry.getValue().longValue() - before.getOrDefault(entry.getKey(), Long.valueOf(0)).longValue();
+                if (nanos > 0 && entry.getKey() instanceof ICheck<?> check)
+                {
+                    byTitle.merge(title(repository, check, project), Long.valueOf(nanos), Long::sum);
+                    total += nanos;
+                }
+            }
+            if (total <= 0)
+                return ""; //$NON-NLS-1$
+            long all = total;
+            String list = byTitle.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .limit(TOP)
+                .map(entry -> percent(entry.getValue().longValue(), all) + " - " + entry.getKey()) //$NON-NLS-1$
+                .collect(Collectors.joining("\n")); //$NON-NLS-1$
+            return ".\nСамые долгие:\n" + list; //$NON-NLS-1$
+        }
+
+        private static String percent(long part, long total)
+        {
+            long value = Math.round(part * 100.0 / total);
+            return value < 1 ? "<1%" : value + "%"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /**
+         * Название проверки, как в списке «Проверки»; без него — идентификатор. Короткий код
+         * {@code SU…} не показывать: его назначает реестр проекта, человеку он ничего не говорит.
+         */
+        private static String title(ICheckRepository repository, ICheck<?> check, IProject project)
+        {
+            String id = check.getCheckId();
+            if (repository != null && id != null)
+            {
+                for (CheckUid uid : repository.toUid(id, project))
+                {
+                    var settings = repository.getSettings(uid, project);
+                    String title = settings != null ? settings.getTitle() : null;
+                    if (title != null && !title.isBlank())
+                        return title;
+                }
+            }
+            return id != null ? id : check.getClass().getSimpleName();
+        }
     }
 
     /** Журнал «Комфорт» — при включённом флажке «Вести журнал». */

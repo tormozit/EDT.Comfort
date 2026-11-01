@@ -9,6 +9,7 @@ import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
 import org.osgi.framework.Bundle;
@@ -66,6 +67,7 @@ public class Activator extends AbstractUIPlugin
         // Отметка сборки: файл stale-markers.log обязан появиться сразу после старта плагина.
         if (ContentAssistSessionReloader.STALE_MARKERS_LOG)
             Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v4"); //$NON-NLS-1$ //$NON-NLS-2$
+        CheckTimingLog.install();
         // #endregion
         Global.cleanOrphanedFormNativeTempDirs();
 
@@ -75,6 +77,7 @@ public class Activator extends AbstractUIPlugin
         BuiltinCheckReplacements.start(context);
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
+        CheckThreadPriority.start();
         FunctionReturnTypes.installLocalContextInvalidation();
         TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
@@ -243,6 +246,9 @@ public class Activator extends AbstractUIPlugin
         RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
         IRApplication.disconnectAll();
+        // #region agent log
+        CheckTimingLog.uninstall();
+        // #endregion
 
         ContentAssistManager mgr = ContentAssistManager.getInstance();
         if (mgr != null)
@@ -259,6 +265,14 @@ public class Activator extends AbstractUIPlugin
     {
         private static final String CALLBACK = "tormozit.checkRecompute.event.notify"; //$NON-NLS-1$
         private static final String PENDING = "tormozit.checkRecompute.event.pending"; //$NON-NLS-1$
+        /** Шлюз раннего бандла пропускает ручной запуск без вопроса. */
+        private static final String MANUAL = "tormozit.checkRecompute.event.manual"; //$NON-NLS-1$
+        /** И объекты, открытые в редакторах. */
+        private static final String OPEN = "tormozit.checkRecompute.event.open"; //$NON-NLS-1$
+        /** Шлюз пропустил контекст ({@code BiConsumer<IProject, «сегмент\nобъект»>}) — снять с отложенных. */
+        private static final String PASSED = "tormozit.checkRecompute.event.passed"; //$NON-NLS-1$
+        /** Суффикс ключа очереди: отложенные шлюзом контексты не вытесняют прочие уведомления проекта. */
+        private static final String GATE_KEY = "\tgate"; //$NON-NLS-1$
         private static final long INTERVAL_NS = 60_000_000_000L;
         private static final java.util.concurrent.ConcurrentMap<String, Object[]> pending =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -275,6 +289,9 @@ public class Activator extends AbstractUIPlugin
             var properties = System.getProperties();
             synchronized (properties)
             {
+                properties.put(MANUAL, (java.util.function.Predicate<Object>) MassiveChecksExemptionHook::isManual);
+                properties.put(OPEN, (java.util.function.Predicate<Object>) MassiveChecksExemptionHook::isOpenObject);
+                properties.put(PASSED, (java.util.function.BiConsumer<Object, Object>) DeferredCheckContexts::passed);
                 properties.put(CALLBACK, (java.util.function.Consumer<Object[]>) CheckRecomputeNotifications::accept);
                 saved = properties.remove(PENDING);
             }
@@ -288,6 +305,9 @@ public class Activator extends AbstractUIPlugin
         {
             running = false;
             System.getProperties().remove(CALLBACK);
+            System.getProperties().remove(MANUAL);
+            System.getProperties().remove(OPEN);
+            System.getProperties().remove(PASSED);
             pending.clear();
             lastToastNs.clear();
         }
@@ -296,10 +316,12 @@ public class Activator extends AbstractUIPlugin
         {
             if (!running)
                 return;
-            String key = projectKey(event[3]);
-            // Предложение отложенной проверки важнее сопутствующей диагностики того же проекта.
-            pending.compute(key, (ignored, previous) -> previous != null
-                && previous.length > 4 && event.length <= 4 ? previous : event);
+            boolean gate = isGateOffer(event);
+            String key = projectKey(event[3]) + (gate ? GATE_KEY : ""); //$NON-NLS-1$
+            // Предложение отложенной проверки важнее сопутствующей диагностики того же проекта;
+            // отложенные шлюзом контексты складываются, пока предложение не показано.
+            pending.compute(key, (ignored, previous) -> gate ? mergeGateOffers(previous, event)
+                : previous != null && previous.length > 4 && event.length <= 4 ? previous : event);
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed() && posted.compareAndSet(false, true))
                 display.asyncExec(() -> showPending(display));
@@ -340,8 +362,74 @@ public class Activator extends AbstractUIPlugin
             return source.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(source)); //$NON-NLS-1$
         }
 
+        /** {@code event[4]} — список контекстов, отложенных шлюзом раннего бандла. */
+        private static boolean isGateOffer(Object[] event)
+        {
+            return event.length > 4 && event[4] instanceof java.util.List<?>;
+        }
+
+        private static Object[] mergeGateOffers(Object[] previous, Object[] next)
+        {
+            if (previous == null || !isGateOffer(previous))
+                return next;
+            java.util.List<Object> all = new java.util.ArrayList<>((java.util.List<?>) previous[4]);
+            all.addAll((java.util.List<?>) next[4]);
+            // event[1] — причины через запятую
+            java.util.Set<String> reasons = new java.util.LinkedHashSet<>(
+                java.util.List.of(String.valueOf(previous[1]).split(", "))); //$NON-NLS-1$
+            reasons.addAll(java.util.List.of(String.valueOf(next[1]).split(", "))); //$NON-NLS-1$
+            Object[] merged = next.clone();
+            merged[1] = String.join(", ", reasons); //$NON-NLS-1$
+            merged[4] = java.util.List.copyOf(all);
+            return merged;
+        }
+
+        /** {@code objects} — все отложенные объекты проекта, «Запустить» пересчитывает их все. */
+        private static void showGateOffer(org.eclipse.core.resources.IProject project, int objects, String reasons,
+            boolean autoHide)
+        {
+            String title = "Запустить проверки проекта «" + project.getName() + "»?";
+            String message = "Отложен пересчет проверок " + objects + " " //$NON-NLS-1$
+                + Global.russianPlural(objects, "объекта", "объектов", "объектов") + ".\nПричина запуска: " + reasons; //$NON-NLS-1$
+            Runnable run = () -> DeferredCheckContexts.recompute(project);
+            // Число в предложении — весь список проекта: прежнее предложение проекта устарело
+            Shell previous = gateOffers.remove(project.getName());
+            if (previous != null && !previous.isDisposed())
+                ToastNotification.close(previous);
+            // Включён «Отключить массовые проверки»: откладывание ожидаемо, предложение скрывается само
+            Shell shell = autoHide
+                ? ToastNotification.show(title, message, 15_000, run, "Запустить проверки")
+                : ToastNotification.showStickyUntilToastHover(title, message, run, "Запустить проверки");
+            if (shell != null)
+                gateOffers.put(project.getName(), shell);
+        }
+
+        /** Имя проекта → показанное предложение «Запустить» отложенного; только поток UI. */
+        private static final java.util.Map<String, Shell> gateOffers = new java.util.HashMap<>();
+
         private static void showEvent(String projectKey, Object[] event)
         {
+            // Предложение по отложенным контекстам не прореживается: без него они не пересчитаются
+            if (isGateOffer(event) && event[3] instanceof org.eclipse.core.resources.IProject project)
+            {
+                java.util.List<?> contexts = (java.util.List<?>) event[4];
+                boolean autoHide = event.length > 5 && Boolean.TRUE.equals(event[5]);
+                // Ключи объектов читают модель — не в потоке UI
+                org.eclipse.core.runtime.jobs.Job job = org.eclipse.core.runtime.jobs.Job.create(
+                    "Комфорт: подсчёт отложенных объектов", monitor -> //$NON-NLS-1$
+                    {
+                        DeferredCheckContexts.add(project, contexts);
+                        int objects = DeferredCheckContexts.objectCount(project);
+                        Display display = Display.getDefault();
+                        // Всё отложенное уже прошло шлюз (например, объект открыли) — предлагать нечего
+                        if (objects > 0 && display != null && !display.isDisposed())
+                            display.asyncExec(() -> showGateOffer(project, objects, String.valueOf(event[1]), autoHide));
+                        return org.eclipse.core.runtime.Status.OK_STATUS;
+                    });
+                job.setSystem(true);
+                job.schedule();
+                return;
+            }
             long now = System.nanoTime();
             lastToastNs.entrySet().removeIf(entry -> now - entry.getValue().longValue() >= INTERVAL_NS);
             Long last = lastToastNs.get(projectKey);
@@ -354,9 +442,10 @@ public class Activator extends AbstractUIPlugin
                     .map(String.class::cast).collect(java.util.stream.Collectors.toUnmodifiableSet());
                 if (checks.isEmpty())
                     return;
-                var offer = ToastNotification.showStickyUntilToastHover("Перепроверить проект «" + project.getName() + "»?",
+                var offer = ToastNotification.showStickyUntilToastHover("Запустить проверки проекта «" + project.getName() + "»?",
                     String.valueOf(event[1]),
-                    () -> ComfortCheckRecompute.recomputeProject(project, withDeferred(project, checks)), "Запустить");
+                    () -> ComfortCheckRecompute.recomputeProject(project, withDeferred(project, checks)),
+                    "Запустить проверки");
                 if (offer != null)
                     lastToastNs.put(projectKey, Long.valueOf(now));
                 return;
@@ -710,6 +799,68 @@ public class Activator extends AbstractUIPlugin
                     return false;
                 return original.isInsertClosingBracket(doc, offset);
             };
+        }
+    }
+
+    /**
+     * Потоки расчёта производных данных EDT ({@code derived_data_executor_N}: проверки, валидация
+     * метаданных) — с приоритетом ниже обычного. Сторож перегрузки EDT ({@code HostResourceManager}
+     * бандла {@code com._1c.g5.resourcemanagement}) засыпает на 50 мс и по запаздыванию пробуждения
+     * объявляет перегрузку: при занятых всех ядрах он урезает потоки проверок вдвое или до одного
+     * ({@code DerivedDataManagerProvider$1.gatherPermissions} в {@code com._1c.g5.v8.dt.core}
+     * 26.0.1.v202605050943) и зовёт {@code System.gc()}. С пониженным приоритетом проверки отдают
+     * ядро потоку UI и сторожу и при этом занимают все свободные ядра.
+     * <p>
+     * Пул EDT заводит потоки сам, точки подключения к их созданию нет, поэтому потоки находятся
+     * обходом группы потоков раз в {@link #PERIOD_MS}. На Windows приоритет Java переходит в ОС
+     * ({@code THREAD_PRIORITY_BELOW_NORMAL}); на Linux JVM по умолчанию приоритеты не применяет.
+     */
+    private static final class CheckThreadPriority
+    {
+        private static final String THREAD_PREFIX = "derived_data_executor_"; //$NON-NLS-1$
+        private static final int PRIORITY = Thread.NORM_PRIORITY - 2;
+        private static final long PERIOD_MS = 2_000L;
+        private static final String TAG = "CheckThreadPriority"; //$NON-NLS-1$
+
+        static void start()
+        {
+            java.util.concurrent.ScheduledExecutorService timer =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
+                {
+                    Thread thread = new Thread(runnable, "Комфорт: приоритет потоков проверок"); //$NON-NLS-1$
+                    thread.setDaemon(true);
+                    return thread;
+                });
+            timer.scheduleWithFixedDelay(CheckThreadPriority::lowerPriorities, 0L, PERIOD_MS,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+
+        private static void lowerPriorities()
+        {
+            try
+            {
+                ThreadGroup root = Thread.currentThread().getThreadGroup();
+                while (root.getParent() != null)
+                    root = root.getParent();
+                Thread[] threads = new Thread[root.activeCount() + 16];
+                int count = root.enumerate(threads, true);
+                for (int i = 0; i < count; i++)
+                {
+                    Thread thread = threads[i];
+                    if (thread == null || thread.getPriority() <= PRIORITY
+                        || !thread.getName().startsWith(THREAD_PREFIX))
+                        continue;
+                    int previous = thread.getPriority();
+                    thread.setPriority(PRIORITY);
+                    if (Global.isLogEnabled())
+                        Global.log(TAG, "приоритет потока " + thread.getName() + ": " + previous + " -> " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + thread.getPriority());
+                }
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError(TAG, "понижение приоритета потоков проверок", e); //$NON-NLS-1$
+            }
         }
     }
 }

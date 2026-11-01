@@ -2264,6 +2264,54 @@ public final class ProblemViewHook implements IStartup
     }
 
     /**
+     * Пересекается ли текущая область панели с проверенным набором: проектом целиком
+     * ({@code topIds == null}) или объектами с этими идентификаторами top-объектов.
+     * <p>
+     * Источник областей «Текущий проект/объект/элемент» — последнее выделение в редакторе или
+     * навигаторе ({@code scopeSelection}), области Комфорта — активный проект. Области без
+     * источника («Все», «Показывать все», отбор по подсистемам) пересекаются с любым набором:
+     * сменой активной части их не поправить.
+     */
+    static boolean scopeIntersectsChecked(IViewPart view, IProject project, Set<Object> topIds)
+    {
+        ClassLoader loader = view.getClass().getClassLoader();
+        Object filters = problemFilters(loader);
+        Object selection = Global.getField(view, "scopeSelection"); //$NON-NLS-1$
+        if (filters == null || selection == null || project == null
+            || Boolean.TRUE.equals(Global.invoke(filters, "isShowAll"))) //$NON-NLS-1$
+            return true;
+        if (ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE
+            && ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            IProject applied = comfortAppliedProject.get(view);
+            return applied == null || applied.equals(project);
+        }
+        String scopeName = scopeName(Global.invoke(filters, "getScope")); //$NON-NLS-1$
+        boolean byProject = SCOPE_CURRENT_PROJECT.equals(scopeName);
+        if (!byProject && !SCOPE_CURRENT_OBJECT.equals(scopeName) && !SCOPE_CURRENT_ELEMENT.equals(scopeName))
+            return true;
+        if (!projectNames(selection).contains(project.getName()))
+            return false;
+        if (byProject || topIds == null)
+            return true;
+        Collection<?> items = Global.invoke(selection, "getSelectedObjects") instanceof Map<?, ?> byProjectMap //$NON-NLS-1$
+            && byProjectMap.get(project) instanceof Collection<?> objects ? objects : List.of();
+        // Выделен сам узел проекта — панель показывает весь проект
+        if (items.isEmpty())
+            return true;
+        for (Object item : items)
+        {
+            if (item instanceof IBmObject bmObject)
+            {
+                IBmObject top = bmObject.bmGetTopObject();
+                if (topIds.contains(Long.valueOf((top != null ? top : bmObject).bmGetId())))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Проекты отбора: как в штатном {@code ScopeSelectionManager.getCurrentProject} —
      * и явно выделенные проекты, и проекты выделенных объектов (при выделении
      * объекта список проектов пуст, а отбор всё равно работает).

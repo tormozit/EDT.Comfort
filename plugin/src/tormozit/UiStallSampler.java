@@ -136,6 +136,9 @@ public final class UiStallSampler implements IStartup
             {
                 try
                 {
+                    // #region agent log
+                    sampleCheckSchedule();
+                    // #endregion
                     if (ComfortSettings.isRecordStallStacks())
                         tick();
                     else
@@ -350,6 +353,61 @@ public final class UiStallSampler implements IStartup
             for (LockInfo s : info.getLockedSynchronizers())
                 sb.append('\n').append(indent).append("- захвачен синхронизатор ").append(s); //$NON-NLS-1$
         }
+
+        // #region agent log
+        /** Начало текущего ожидания UI в {@code CheckScheduler}, 0 — не ждёт. */
+        private long checkScheduleSinceNs;
+
+        /**
+         * Временная диагностика зависания при запуске пересчёта проверок: UI-поток в
+         * {@code CheckScheduler.scheduleModelScopedFullRebuild} ждёт {@code CompletableFuture.runAsync(...).get()}.
+         * Пока он там — каждый тик пишутся кадр UI и стеки занятых рабочих потоков общего пула,
+         * где выполняется ожидаемая задача. Без флажка и порогов.
+         */
+        private void sampleCheckSchedule()
+        {
+            ThreadInfo ui = threadMx.getThreadInfo(uiThread.getId(), 40);
+            String uiFrame = null;
+            if (ui != null)
+                for (StackTraceElement frame : ui.getStackTrace())
+                    if (frame.getClassName().startsWith("com.e1c.g5.v8.dt.internal.check.CheckScheduler")) //$NON-NLS-1$
+                    {
+                        uiFrame = frame.toString();
+                        break;
+                    }
+            long now = System.nanoTime();
+            if (uiFrame == null)
+            {
+                if (checkScheduleSinceNs != 0)
+                    Global.tempLog("check-schedule-stall", "UI свободен; ждал мс=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (now - checkScheduleSinceNs) / 1_000_000);
+                checkScheduleSinceNs = 0;
+                return;
+            }
+            if (checkScheduleSinceNs == 0)
+                checkScheduleSinceNs = now;
+            StringBuilder sb = new StringBuilder("UI ждёт мс=").append((now - checkScheduleSinceNs) / 1_000_000) //$NON-NLS-1$
+                .append(" в ").append(uiFrame).append(" gcMs=").append(gcMillis()); //$NON-NLS-1$ //$NON-NLS-2$
+            for (ThreadInfo info : threadMx.dumpAllThreads(true, true, STACK_DEPTH))
+            {
+                if (info.getThreadId() == uiThread.getId())
+                    continue;
+                boolean busyPool = info.getThreadName().startsWith("ForkJoinPool.commonPool") //$NON-NLS-1$
+                    && info.getThreadState() != Thread.State.WAITING && info.getThreadState() != Thread.State.TIMED_WAITING;
+                boolean scheduler = false;
+                for (StackTraceElement frame : info.getStackTrace())
+                    scheduler |= frame.getClassName().startsWith("com.e1c.g5.v8.dt.internal.check.CheckScheduler"); //$NON-NLS-1$
+                if (!busyPool && !scheduler)
+                    continue;
+                sb.append("\n  \"").append(info.getThreadName()).append("\" ").append(info.getThreadState()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (info.getLockOwnerName() != null)
+                    sb.append(" ждёт ").append(info.getLockInfo()).append(" у \"").append(info.getLockOwnerName()).append('"'); //$NON-NLS-1$ //$NON-NLS-2$
+                for (StackTraceElement frame : info.getStackTrace())
+                    sb.append("\n    ").append(frame); //$NON-NLS-1$
+            }
+            Global.tempLog("check-schedule-stall", sb.toString()); //$NON-NLS-1$
+        }
+        // #endregion
 
         private long gcMillis()
         {

@@ -204,6 +204,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     {
         if (!(literal.eResource() instanceof XtextResource resource))
             return List.of();
+        String value = literalText(literal);
+        // Пустые части не проверяются: без непустой части список допустимых значений не нужен.
+        if (value.replace(',', ' ').isBlank())
+            return List.of();
         Analysis analysis = analyzeLiteral(resource, literal, "", canceled, pass); //$NON-NLS-1$
         // Анализ родителя пути только этого литерала: «Объект.Код, Объект.Наименование» — «Объект.» один раз.
         Map<String, Analysis> byParent = new HashMap<>();
@@ -211,7 +215,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<String> unknown = new ArrayList<>();
         if (!analysis.full || analysis.values.isEmpty())
             return unknown;
-        String value = literalText(literal);
         String[] parts = value.split(",", -1); //$NON-NLS-1$
         for (String part : parts)
         {
@@ -260,24 +263,55 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static Analysis analyzeLiteral(XtextResource resource, StringLiteral literal, String prefix,
         BooleanSupplier canceled, Pass pass)
     {
-        Analysis analysis = new Analysis(resource, false, pass.russian(resource), prefix, offsetOf(literal), pass);
+        // #region agent log
+        long diagStart = System.nanoTime();
+        String diagKind = "?"; //$NON-NLS-1$
+        Analysis analysis = null;
+        Pass.subBegin("analysis"); //$NON-NLS-1$
+        try
+        {
+        // #endregion
+        analysis = new Analysis(resource, false, pass.russian(resource), prefix, offsetOf(literal), pass);
         analysis.validation = true;
         analysis.canceled = canceled;
         analysis.checkCanceled();
         EObject container = literal.eContainer();
         if (container instanceof IndexAccess access && access.getIndex() == literal)
+        {
+            diagKind = "index"; //$NON-NLS-1$
             analysis.indexAccess(access);
+        }
         else
         {
             List<Expression> args = argumentsOf(container);
             int index = args.indexOf(literal);
             if (index >= 0)
+            {
+                diagKind = "call"; //$NON-NLS-1$
                 analysis.call(container, args, index, ""); //$NON-NLS-1$
+            }
             else
+            {
+                diagKind = "outside"; //$NON-NLS-1$
                 analysis.outside(literal);
+            }
         }
         analysis.finish();
         return analysis;
+        // #region agent log
+        }
+        finally
+        {
+            Pass.subEnd();
+            pass.time(literal, prefix, diagKind, analysis, System.nanoTime() - diagStart);
+            if (analysis != null && analysis.branches.stream().anyMatch(branch -> branch.endsWith(" module")))
+                Global.tempLog("literal-module-call", "literal=" + text(literal) + " prefix=" + prefix //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " validation=" + analysis.validation + " full=" + analysis.full //$NON-NLS-1$ //$NON-NLS-2$
+                    + " values=" + analysis.values.values() + " branches=" + analysis.branches //$NON-NLS-1$ //$NON-NLS-2$
+                    + " module=" + (resource.getURI() != null ? resource.getURI().lastSegment() : "?") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " path=" + resource.getURI() + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
     }
 
     /**
@@ -293,10 +327,132 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private final Map<Object, Map<URI, EObject>> sourceMethods = new IdentityHashMap<>();
         private final Map<XtextResource, Boolean> russian = new IdentityHashMap<>();
         private final Map<XtextResource, Configuration> configurations = new IdentityHashMap<>();
+        /**
+         * Разрешённый вызываемый метод или тип конструктора ({@link Analysis#describe}) по ресурсу анализа и узлу
+         * вызова: при спуске по вызовам одни и те же вызовы разбирались заново для каждого литерала.
+         */
+        private final Map<XtextResource, Map<EObject, CallTarget>> callTargets = new IdentityHashMap<>();
+        /**
+         * Методы модуля по имени в нижнем регистре ({@link Analysis#sharedSourceMethod}): перебор всех методов
+         * модуля на каждый экспортный метод. Только на проход — значения держат модель модуля.
+         */
+        private final Map<Module, Map<String, Method>> moduleMethods = new IdentityHashMap<>();
+        /** Имена общих модулей (нижний регистр), не найденные и после перестройки справочника. */
+        private final Set<String> missingCommonModules = new HashSet<>();
 
         public Pass()
         {
         }
+
+        // #region agent log
+        /**
+         * Сводка анализов литералов потока до запроса ранним бандлом после вызова проверки
+         * ({@link #takeTimingSummary}); без ссылок на AST — переживает проверку модуля без удержания модели.
+         */
+        private static final class TimingStats
+        {
+            /** Вид анализа → {нс, число, нс полных}. */
+            final Map<String, long[]> timing = new HashMap<>();
+            /** {нс, «строка:вид мс текст»} — три самых долгих. */
+            final List<Object[]> slowest = new ArrayList<>();
+            int analyses;
+            long nanos;
+            long fullNanos;
+            /** Подпроход поиска → {исключающие нс, число}; стек открытых подпроходов — {начало, нс вложенных}. */
+            final Map<String, long[]> sub = new HashMap<>();
+            final java.util.ArrayDeque<long[]> subFrames = new java.util.ArrayDeque<>();
+            final java.util.ArrayDeque<String> subLabels = new java.util.ArrayDeque<>();
+        }
+
+        /** Начало подпрохода анализа; время вложенных подпроходов в него не входит. Парный — {@link #subEnd}. */
+        static void subBegin(String label)
+        {
+            TimingStats stats = TIMING.get();
+            if (stats == null)
+                TIMING.set(stats = new TimingStats());
+            stats.subLabels.push(label);
+            stats.subFrames.push(new long[] {System.nanoTime(), 0});
+        }
+
+        static void subEnd()
+        {
+            TimingStats stats = TIMING.get();
+            if (stats == null || stats.subFrames.isEmpty())
+                return;
+            long[] frame = stats.subFrames.pop();
+            String label = stats.subLabels.pop();
+            long elapsed = System.nanoTime() - frame[0];
+            long[] total = stats.sub.computeIfAbsent(label, key -> new long[2]);
+            total[0] += elapsed - frame[1];
+            total[1]++;
+            if (!stats.subFrames.isEmpty())
+                stats.subFrames.peek()[1] += elapsed;
+        }
+
+        private static final ThreadLocal<TimingStats> TIMING = new ThreadLocal<>();
+
+        private void time(StringLiteral literal, String prefix, String kind, Analysis analysis, long elapsed)
+        {
+            TimingStats stats = TIMING.get();
+            // Вне проверки (автодополнение) сводку никто не забирает — не копим.
+            if (stats == null || stats.timing.size() > 2000 && stats.subFrames.isEmpty())
+                TIMING.set(stats = new TimingStats());
+            boolean full = analysis != null && analysis.full && !analysis.values.isEmpty();
+            String branch = analysis == null || analysis.branches.isEmpty() ? "" : analysis.branches.get(0); //$NON-NLS-1$
+            int at = branch.indexOf('@');
+            String label = kind + (prefix.isEmpty() ? "" : "+parent") + ":" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (at >= 0 ? branch.substring(0, at) : branch) + (branch.endsWith(" module") ? " module" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            long[] total = stats.timing.computeIfAbsent(label, key -> new long[3]);
+            total[0] += elapsed;
+            total[1]++;
+            if (full)
+                total[2] += elapsed;
+            stats.analyses++;
+            stats.nanos += elapsed;
+            if (full)
+                stats.fullNanos += elapsed;
+            if (stats.slowest.size() < 3 || elapsed > (Long) stats.slowest.get(2)[0])
+            {
+                var node = org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(literal);
+                String text = node == null ? "?" : node.getText().strip(); //$NON-NLS-1$
+                if (text.length() > 40)
+                    text = text.substring(0, 40) + "…"; //$NON-NLS-1$
+                stats.slowest.add(new Object[] {elapsed, (node == null ? -1 : node.getStartLine()) + ":" + label + " " //$NON-NLS-1$ //$NON-NLS-2$
+                    + CheckTimingLog.ms(elapsed) + "ms " + text.replace(' ', '_').replace('\n', '_').replace('\r', '_')}); //$NON-NLS-1$
+                stats.slowest.sort((a, b) -> Long.compare((Long) b[0], (Long) a[0]));
+                if (stats.slowest.size() > 3)
+                    stats.slowest.remove(3);
+            }
+        }
+
+        /**
+         * Сводка потока с последнего запроса и её сброс:
+         * {@code analyses= analysisMs= fullMs= kinds=вид мс×число(full мс); … slowest=строка:вид мс текст; …};
+         * {@code null} — анализов не было.
+         */
+        static String takeTimingSummary()
+        {
+            TimingStats stats = TIMING.get();
+            TIMING.remove();
+            if (stats == null)
+                return null;
+            var line = new StringBuilder("analyses=").append(stats.analyses) //$NON-NLS-1$
+                .append(" analysisMs=").append(CheckTimingLog.ms(stats.nanos)) //$NON-NLS-1$
+                .append(" fullMs=").append(CheckTimingLog.ms(stats.fullNanos)).append(" kinds="); //$NON-NLS-1$ //$NON-NLS-2$
+            stats.timing.entrySet().stream().sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0])).limit(12)
+                .forEach(entry -> line.append(entry.getKey()).append(' ').append(CheckTimingLog.ms(entry.getValue()[0]))
+                    .append("ms×").append(entry.getValue()[1]).append("(full ") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(CheckTimingLog.ms(entry.getValue()[2])).append("); ")); //$NON-NLS-1$
+            line.append(" sub="); //$NON-NLS-1$
+            stats.sub.entrySet().stream().sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0])).limit(40)
+                .forEach(entry -> line.append(entry.getKey()).append(' ').append(CheckTimingLog.ms(entry.getValue()[0]))
+                    .append("ms×").append(entry.getValue()[1]).append("; ")); //$NON-NLS-1$ //$NON-NLS-2$
+            line.append(" slowest="); //$NON-NLS-1$
+            for (Object[] item : stats.slowest)
+                line.append(item[1]).append("; "); //$NON-NLS-1$
+            return line.toString();
+        }
+        // #endregion
 
         boolean russian(XtextResource resource)
         {
@@ -906,6 +1062,67 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
     }
 
+    /**
+     * Часть разбора вызова, не зависящая от типов фактических параметров: метод модуля, метод платформы
+     * с вариантами параметров и типом-владельцем или тип конструктора с вариантами конструкторов.
+     */
+    private record CallTarget(EObject feature, String name, List<List<Parameter>> variants, String ownerName)
+    {
+    }
+
+    /**
+     * Общие модули конфигурации по имени в нижнем регистре — между проверками модулей: перебор всех общих
+     * модулей на каждую проверку стоил ~0,85 мс на поиск. Слабые ссылки не держат ни модули, ни конфигурацию
+     * ключа. Найденный модуль при выдаче сверяется по имени; не сошлось или нет имени — справочник строится заново.
+     */
+    private static final Map<Configuration, Map<String, java.lang.ref.WeakReference<CommonModule>>> COMMON_MODULES =
+        Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static CommonModule cachedCommonModule(Configuration configuration, String name)
+    {
+        String key = lower(name);
+        var byName = COMMON_MODULES.get(configuration);
+        CommonModule found = byName != null ? validCommonModule(byName.get(key), key) : null;
+        if (found != null)
+            return found;
+        // При совпадении имён — последний, как прежний перебор.
+        Map<String, java.lang.ref.WeakReference<CommonModule>> rebuilt = new HashMap<>();
+        for (CommonModule candidate : configuration.getCommonModules())
+            if (candidate.getName() != null)
+                rebuilt.put(lower(candidate.getName()), new java.lang.ref.WeakReference<>(candidate));
+        COMMON_MODULES.put(configuration, rebuilt);
+        return validCommonModule(rebuilt.get(key), key);
+    }
+
+    /**
+     * Модель общего модуля ({@code CommonModule.getModule()}, ~1,6 мс) — между проверками модулей. Слабая ссылка:
+     * модель освобождается первой же сборкой мусора, когда EDT её больше не держит; тогда берётся заново.
+     * Сохранённая используется, только пока привязана к ресурсу и не стала заглушкой.
+     */
+    private static final Map<CommonModule, java.lang.ref.WeakReference<Module>> COMMON_MODULE_MODELS =
+        Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private static Module cachedModule(CommonModule common)
+    {
+        var reference = COMMON_MODULE_MODELS.get(common);
+        Module model = reference != null ? reference.get() : null;
+        if (model != null && !model.eIsProxy() && model.eResource() != null)
+            return model;
+        model = common.getModule();
+        if (model != null && !model.eIsProxy())
+            COMMON_MODULE_MODELS.put(common, new java.lang.ref.WeakReference<>(model));
+        return model;
+    }
+
+    private static CommonModule validCommonModule(java.lang.ref.WeakReference<CommonModule> reference, String key)
+    {
+        CommonModule module = reference != null ? reference.get() : null;
+        return module != null && !module.eIsProxy() && module.getName() != null && key.equals(lower(module.getName()))
+            ? module : null;
+    }
+
+    private static final CallTarget NO_CALL_TARGET = new CallTarget(null, null, List.of(), null);
+
     private static final class Analysis
     {
         final XtextResource resource;
@@ -1076,14 +1293,27 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     indexAccess(access);
                 return;
             }
-            Call call = describe(target, args, index);
+            // #region agent log
+            Call call;
+            Pass.subBegin("describe"); //$NON-NLS-1$
+            try
+            {
+                call = describe(target, args, index);
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
             if (call == null)
                 return;
             branch(call.toString());
+            // #region agent log
             if (call.moduleMethod != null)
-                moduleMethodCall(call, structureType);
+                timed("moduleMethodCall", () -> moduleMethodCall(call, structureType)); //$NON-NLS-1$
             else if (structureType.isEmpty())
-                platformCall(call);
+                timed("platformCall", () -> platformCall(call)); //$NON-NLS-1$
+            // #endregion
         }
 
         /** ИР: ЗаполнитьТаблицуСлов, ветка Тип("…") с полным набором имён из внешнего вызова. */
@@ -1149,60 +1379,147 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             checkCanceled();
             if (index < 0)
                 return null;
-            if (target instanceof OperatorStyleCreator creator)
+            Map<EObject, CallTarget> known = pass.callTargets.computeIfAbsent(resource, key -> new IdentityHashMap<>());
+            CallTarget resolved = known.get(target);
+            if (resolved == null)
             {
-                Type type = resolve(creator.getType());
-                if (type == null)
-                    return null;
-                String name = typeName(type);
-                List<List<Parameter>> variants = new ArrayList<>();
-                for (Ctor ctor : Global.typeConstructors(type))
-                    variants.add(ctor.getParams());
-                Parameter parameter = chooseParameter(variants, args, index);
-                return new Call(target, args, index, name, parameter != null ? dualName(parameter) : "", name, //$NON-NLS-1$
-                    null, List.of(), null, true);
+                // #region agent log
+                Pass.subBegin("describe.callTarget"); //$NON-NLS-1$
+                try
+                {
+                    resolved = callTarget(target);
+                }
+                finally
+                {
+                    Pass.subEnd();
+                }
+                // #endregion
+                known.put(target, resolved);
             }
-            if (!(target instanceof Invocation invocation) || invocation.getMethodAccess() == null)
+            if (resolved == NO_CALL_TARGET)
                 return null;
-            FeatureAccess access = invocation.getMethodAccess();
+            if (target instanceof OperatorStyleCreator)
+            {
+                Parameter parameter = chooseParameter(resolved.variants(), args, index);
+                return new Call(target, args, index, resolved.name(), parameter != null ? dualName(parameter) : "", //$NON-NLS-1$
+                    resolved.name(), null, List.of(), null, true);
+            }
+            FeatureAccess access = ((Invocation)target).getMethodAccess();
             String method = access.getName() != null ? access.getName() : ""; //$NON-NLS-1$
             Expression source = access instanceof DynamicFeatureAccess dynamic ? dynamic.getSource() : null;
             List<TypeItem> sourceTypes = source != null ? typesOf(source) : List.of();
-            for (FeatureEntry entry : featureEntries(access))
+            if (resolved.feature() instanceof Method moduleMethod)
+            {
+                String parameter = index < moduleMethod.getFormalParams().size()
+                    ? nullToEmpty(moduleMethod.getFormalParams().get(index).getName()) : ""; //$NON-NLS-1$
+                return new Call(target, args, index, nullToEmpty(moduleMethod.getName()), parameter, "", source, //$NON-NLS-1$
+                    sourceTypes, moduleMethod, false);
+            }
+            // #region agent log
+            Parameter parameter;
+            Pass.subBegin("describe.chooseParameter"); //$NON-NLS-1$
+            try
+            {
+                parameter = chooseParameter(resolved.variants(), args, index);
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
+            String context = resolved.ownerName() != null ? resolved.ownerName()
+                : source == null ? GLOBAL_CONTEXT : firstTypeName(sourceTypes);
+            return new Call(target, args, index, method, parameter != null ? dualName(parameter) : "", //$NON-NLS-1$
+                context, source, sourceTypes, null, false);
+        }
+
+        /** Вызываемый метод или тип конструктора; {@code NO_CALL_TARGET} — не разрешился. */
+        private CallTarget callTarget(EObject target)
+        {
+            if (target instanceof OperatorStyleCreator creator)
+            {
+                // #region agent log
+                Pass.subBegin("describe.creatorType"); //$NON-NLS-1$
+                Type type;
+                try
+                {
+                    type = resolve(creator.getType());
+                }
+                finally
+                {
+                    Pass.subEnd();
+                }
+                // #endregion
+                if (type == null)
+                    return NO_CALL_TARGET;
+                List<List<Parameter>> variants = new ArrayList<>();
+                // #region agent log
+                Pass.subBegin("describe.typeConstructors"); //$NON-NLS-1$
+                try
+                {
+                // #endregion
+                for (Ctor ctor : Global.typeConstructors(type))
+                    variants.add(ctor.getParams());
+                // #region agent log
+                }
+                finally
+                {
+                    Pass.subEnd();
+                }
+                // #endregion
+                return new CallTarget(type, typeName(type), variants, null);
+            }
+            if (!(target instanceof Invocation invocation) || invocation.getMethodAccess() == null)
+                return NO_CALL_TARGET;
+            for (FeatureEntry entry : featureEntries(invocation.getMethodAccess()))
             {
                 EObject feature = entry != null ? entry.getFeature() : null;
                 if (feature != null && feature.eIsProxy())
-                    feature = EcoreUtil.resolve(feature, resource);
+                    // #region agent log
+                {
+                    Pass.subBegin("describe.resolveProxy"); //$NON-NLS-1$
+                    try
+                    {
+                        feature = EcoreUtil.resolve(feature, resource);
+                    }
+                    finally
+                    {
+                        Pass.subEnd();
+                    }
+                }
+                    // #endregion
                 // Экспортный метод общего модуля приходит методом его контекста — нужен исходный метод модуля
                 // (как ParamHintHtmlModifier.sourceMethod).
                 if (feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported
                     && exported.getSourceUri() != null)
                 {
-                    EObject sourceMethod = sourceMethod(exported);
+                    // #region agent log
+                    EObject sourceMethod;
+                    Pass.subBegin("describe.sourceMethod"); //$NON-NLS-1$
+                    try
+                    {
+                        sourceMethod = sourceMethod(exported);
+                    }
+                    finally
+                    {
+                        Pass.subEnd();
+                    }
+                    // #endregion
                     if (sourceMethod instanceof Method && !sourceMethod.eIsProxy())
                         feature = sourceMethod;
                 }
                 if (feature instanceof Method moduleMethod && !feature.eIsProxy())
-                {
-                    String parameter = index < moduleMethod.getFormalParams().size()
-                        ? nullToEmpty(moduleMethod.getFormalParams().get(index).getName()) : ""; //$NON-NLS-1$
-                    return new Call(target, args, index, nullToEmpty(moduleMethod.getName()), parameter, "", source, //$NON-NLS-1$
-                        sourceTypes, moduleMethod, false);
-                }
+                    return new CallTarget(moduleMethod, null, List.of(), null);
                 if (feature instanceof com._1c.g5.v8.dt.mcore.Method platformMethod && !feature.eIsProxy())
                 {
                     List<List<Parameter>> variants = new ArrayList<>();
                     for (ParamSet set : platformMethod.getParamSet())
                         variants.add(set.getParams());
-                    Parameter parameter = chooseParameter(variants, args, index);
                     Type owner = EcoreUtil2.getContainerOfType(platformMethod, Type.class);
-                    String context = owner != null ? typeName(owner)
-                        : source == null ? GLOBAL_CONTEXT : firstTypeName(sourceTypes);
-                    return new Call(target, args, index, method, parameter != null ? dualName(parameter) : "", //$NON-NLS-1$
-                        context, source, sourceTypes, null, false);
+                    return new CallTarget(platformMethod, null, variants, owner != null ? typeName(owner) : null);
                 }
             }
-            return null;
+            return NO_CALL_TARGET;
         }
 
         /**
@@ -1228,7 +1545,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 return cached;
             }
-            Method shared = sharedSourceMethod(sourceResourceUri, exported.getName());
+            // #region agent log
+            Method shared;
+            Pass.subBegin("describe.sourceMethod.shared"); //$NON-NLS-1$
+            try
+            {
+                shared = sharedSourceMethod(sourceResourceUri, exported.getName());
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
             if (shared != null)
             {
                 if (known != null)
@@ -1237,7 +1565,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
             ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(exported.getSourceUri());
-            EObject sourceMethod = EcoreUtil.resolve(proxy, context);
+            // #region agent log
+            EObject sourceMethod;
+            Pass.subBegin("describe.sourceMethod.resolve"); //$NON-NLS-1$
+            try
+            {
+                sourceMethod = EcoreUtil.resolve(proxy, context);
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
             if (known != null)
                 known.put(sourceUri, sourceMethod);
             return sourceMethod;
@@ -1257,20 +1596,56 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 || !"CommonModules".equals(segments.get(src + 1)) || configuration() == null) //$NON-NLS-1$
                 return null;
             String name = URI.decode(segments.get(src + 2));
-            CommonModule common = null;
-            for (CommonModule candidate : configuration().getCommonModules())
-                if (name.equalsIgnoreCase(candidate.getName()))
-                    common = candidate;
-            Module model = common != null ? common.getModule() : null;
-            Method found = null;
-            if (model != null && !model.eIsProxy())
-                for (Method method : model.allMethods())
-                    if (methodName.equalsIgnoreCase(method.getName()))
-                    {
-                        found = method;
-                        break;
-                    }
-            return found;
+            // #region agent log
+            Pass.subBegin("shared.commonModules"); //$NON-NLS-1$
+            CommonModule common;
+            try
+            {
+            // #endregion
+            // Не найденный после перестройки справочника в этом проходе не ищем снова: перестройка — полный перебор.
+            common = pass.missingCommonModules.contains(lower(name)) ? null : cachedCommonModule(configuration(), name);
+            if (common == null)
+                pass.missingCommonModules.add(lower(name));
+            // #region agent log
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            Pass.subBegin("shared.getModule"); //$NON-NLS-1$
+            Module model;
+            try
+            {
+            // #endregion
+            model = common != null ? cachedModule(common) : null;
+            if (model == null || model.eIsProxy())
+                return null;
+            // #region agent log
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            Pass.subBegin("shared.methods"); //$NON-NLS-1$
+            try
+            {
+            // #endregion
+            return pass.moduleMethods.computeIfAbsent(model, module ->
+            {
+                // При совпадении имён — первый, как прежний перебор.
+                Map<String, Method> byName = new HashMap<>();
+                for (Method method : module.allMethods())
+                    if (method.getName() != null)
+                        byName.putIfAbsent(lower(method.getName()), method);
+                return byName;
+            }).get(lower(methodName));
+            // #region agent log
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
         }
 
         /** {@code ПодобратьВариантСинтаксисаМетодаПоТипамПараметров}, как в {@link BslExpectedTypePremiums}. */
@@ -1408,8 +1783,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     textValuesOfExpression(methodOf(call.target), structureVariable, structureType, false,
                         endOf(call.target));
                 else if (!structureType.isEmpty() && call.constructor && call.index == 0)
-                    structureKeys(scopeOf(call.target), null, (Expression)call.target, "", structureType, //$NON-NLS-1$
-                        Integer.MAX_VALUE);
+                    // #region agent log
+                    timedIf("constructorStructureKeys", () -> structureKeys(scopeOf(call.target), null, //$NON-NLS-1$
+                        (Expression)call.target, "", structureType, Integer.MAX_VALUE)); //$NON-NLS-1$
+                    // #endregion
                 if (!values.isEmpty())
                     allowed = false;
             }
@@ -1794,14 +2171,16 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             int to = structureType.isEmpty() ? Integer.MAX_VALUE : reassignmentAfter(scope, name, from);
             if (structureType.isEmpty())
             {
+                // #region agent log
                 if (!full)
-                    objectPropertyNames(scope, name);
+                    timed("objectPropertyNames", () -> objectPropertyNames(scope, name)); //$NON-NLS-1$
                 if (!full)
-                    fillPropertyValuesNames(scope, name);
+                    timed("fillPropertyValuesNames", () -> fillPropertyValuesNames(scope, name)); //$NON-NLS-1$
                 if (!full)
-                    dynamicCallNames(scope, name);
+                    timed("dynamicCallNames", () -> dynamicCallNames(scope, name)); //$NON-NLS-1$
                 if (!full && manual)
-                    comparedLiterals(scope, name, collectAssignments);
+                    timed("comparedLiterals", () -> comparedLiterals(scope, name, collectAssignments)); //$NON-NLS-1$
+                // #endregion
                 if (full)
                     return;
             }
@@ -1812,6 +2191,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 full = false;
                 String formVariable = name;
                 String fromForm = ".Параметры"; //$NON-NLS-1$
+                // #region agent log
+                Pass.subBegin("structureFormSearch"); //$NON-NLS-1$
+                try
+                {
+                // #endregion
                 for (EObject object : contents(scope))
                 {
                     if (object instanceof Invocation invocation && in(invocation.getMethodAccess() != null
@@ -1834,8 +2218,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         break;
                     }
                 }
-                if (structureKeys(scope, name, null, fromForm, structureType, from, to, formVariable))
+                // #region agent log
+                }
+                finally
+                {
+                    Pass.subEnd();
+                }
+                String keysFromForm = fromForm;
+                String keysFormVariable = formVariable;
+                if (timedIf("structureKeys", //$NON-NLS-1$
+                    () -> structureKeys(scope, name, null, keysFromForm, structureType, from, to, keysFormVariable)))
                     return;
+                Pass.subBegin("structureFillAndParameter"); //$NON-NLS-1$
+                try
+                {
+                // #endregion
                 for (EObject object : contents(scope))
                 {
                     if (!(object instanceof Invocation invocation) || !isFillPropertyValues(invocation)
@@ -1868,6 +2265,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                             return;
                         }
                     }
+                // #region agent log
+                }
+                finally
+                {
+                    Pass.subEnd();
+                }
+                // #endregion
             }
             else if ("Массив".equalsIgnoreCase(structureType)) //$NON-NLS-1$
             {
@@ -1904,6 +2308,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 return;
             String current = name;
             int start = from;
+            // #region agent log
+            Pass.subBegin(structureType.isEmpty() ? "callDescent" : "callDescent:" + structureType); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+            // #endregion
             while (true)
             {
                 String substitute = null;
@@ -1950,7 +2359,42 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 current = substitute;
                 start = substituteAt;
             }
+            // #region agent log
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+            // #endregion
         }
+
+        // #region agent log
+        private static void timed(String label, Runnable step)
+        {
+            Pass.subBegin(label);
+            try
+            {
+                step.run();
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+        }
+
+        private static boolean timedIf(String label, BooleanSupplier step)
+        {
+            Pass.subBegin(label);
+            try
+            {
+                return step.getAsBoolean();
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+        }
+        // #endregion
 
         private static record ConditionalBranch(EObject owner, EStructuralFeature feature)
         {
@@ -2027,12 +2471,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (owner == null)
                     continue;
                 List<TypeItem> ownerTypes = typesOf(owner);
+                // #region agent log
+                if (parameterSearch != null)
+                    Global.tempLog("literal-module-call", "  objectPropertyNames owner=" + text(owner) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ownerTypes=" + typeNames(ownerTypes) + " properties=" + properties(ownerTypes) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ownerResource=" + (owner.eResource() != null ? owner.eResource().getURI() : null) //$NON-NLS-1$
+                        + " ownerResourceClass=" + (owner.eResource() != null ? owner.eResource().getClass().getSimpleName() : null) //$NON-NLS-1$
+                        + " analysisResource=" + resource.getURI()); //$NON-NLS-1$
+                if (parameterSearch != null && ownerTypes.isEmpty())
+                    Global.tempLog("literal-module-call", "    ownerStages " + ownerTypeStages(owner)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 // Проверка существования допускает отсутствующий ключ, в том числе через обёртку.
                 // Для автодополнения сохраняем известные свойства; индексное обращение проверяем.
                 if (validation && object instanceof Invocation invocation
                     && isStructurePropertyProbe(invocation.getMethodAccess().getName(), ownerTypes))
                     continue;
-                List<String> names = properties(ownerTypes);
+                List<String> names = objectProperties(ownerTypes);
                 if (!names.isEmpty())
                 {
                     branch("objectProperties"); //$NON-NLS-1$
@@ -2245,6 +2699,20 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return false;
         }
 
+        /** Свойства объекта; у структуры — только её ключи, без шаблонного «ИмяКлюча». */
+        List<String> objectProperties(List<TypeItem> types)
+        {
+            List<String> names = new ArrayList<>();
+            for (TypeItem item : types)
+            {
+                List<TypeItem> one = List.of(item);
+                for (String name : hasType(one, "Structure", "FixedStructure") //$NON-NLS-1$ //$NON-NLS-2$
+                    ? structureKeyNames(one) : properties(one))
+                    addUnique(names, name);
+            }
+            return names;
+        }
+
         /** Ключи структуры: её свойства без шаблонных свойств платформенного типа («ИмяКлюча»). */
         List<String> structureKeyNames(List<TypeItem> types)
         {
@@ -2267,7 +2735,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         // ---- Типы ----
 
+        // #region agent log
         List<TypeItem> typesOf(Expression expression)
+        {
+            Pass.subBegin("typesOf"); //$NON-NLS-1$
+            try
+            {
+                return typesOfTimed(expression);
+            }
+            finally
+            {
+                Pass.subEnd();
+            }
+        }
+        // #endregion
+
+        private List<TypeItem> typesOfTimed(Expression expression)
         {
             checkCanceled();
             if (expression == null)
@@ -2298,6 +2781,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (computed != null && !computed.isEmpty())
                     return new ArrayList<>(computed);
             }
+            // Общая модель вызываемого модуля не связана: у локальной переменной нет FeatureEntries,
+            // и штатный вычислитель её не знает. Как в ИР — типы правых частей её присваиваний выше по методу.
+            if (expression instanceof StaticFeatureAccess access && access.getFeatureEntries().isEmpty()
+                && method != null && access.getName() != null)
+            {
+                List<TypeItem> assigned = assignedTypes(method, access);
+                if (!assigned.isEmpty())
+                    return assigned;
+            }
             if (expression instanceof StaticFeatureAccess access)
                 for (FeatureEntry entry : access.getFeatureEntries())
                     if (entry != null && entry.getFeature() instanceof Variable variable)
@@ -2310,6 +2802,106 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 return new ArrayList<>(expression.getTypes());
             return List.of();
         }
+
+        /** Присваивания, правые части которых сейчас считаются: {@code Данные = Данные + 1} не зацикливает. */
+        private final Set<SimpleStatement> assigning = Collections.newSetFromMap(new IdentityHashMap<>());
+
+        /** Типы правых частей присваиваний {@code access} выше него в {@code method}. */
+        private List<TypeItem> assignedTypes(Method method, StaticFeatureAccess access)
+        {
+            int at = offsetOf(access);
+            List<TypeItem> result = new ArrayList<>();
+            for (EObject object : contents(method))
+            {
+                if (!(object instanceof SimpleStatement statement)
+                    || !(statement.getLeft() instanceof StaticFeatureAccess left) || left == access
+                    || !access.getName().equalsIgnoreCase(left.getName()) || statement.getRight() == null
+                    || offsetOf(statement) >= at || !assigning.add(statement))
+                    continue;
+                try
+                {
+                    for (TypeItem item : typesOf(statement.getRight()))
+                        if (!result.contains(item))
+                            result.add(item);
+                }
+                finally
+                {
+                    assigning.remove(statement);
+                }
+            }
+            return result;
+        }
+
+        // #region agent log
+        /** Почему {@link #typesOf} пуст: каждый шаг его расчёта отдельно. */
+        private String ownerTypeStages(Expression expression)
+        {
+            StringBuilder out = new StringBuilder();
+            try
+            {
+                EObject root = EcoreUtil2.getRootContainer(expression);
+                out.append("class=").append(expression.getClass().getSimpleName()) //$NON-NLS-1$
+                    .append(" root=").append(root == null ? null : System.identityHashCode(root)) //$NON-NLS-1$
+                    .append(" exprTypes=").append(expression.getTypes().size()); //$NON-NLS-1$
+                TypesComputer computer = resource.getResourceServiceProvider() != null
+                    ? resource.getResourceServiceProvider().get(TypesComputer.class) : null;
+                Method method = EcoreUtil2.getContainerOfType(expression, Method.class);
+                Environments environments = method != null ? method.environments()
+                    : module != null ? module.environments() : null;
+                out.append(" method=").append(method == null ? null : method.getName()) //$NON-NLS-1$
+                    .append(" env=").append(environments); //$NON-NLS-1$
+                if (computer != null && environments != null)
+                {
+                    List<TypeItem> computed = computer.computeTypes(expression, environments);
+                    out.append(" computer=").append(computed == null ? null : typeNames(computed)); //$NON-NLS-1$
+                }
+                else
+                    out.append(" computer=none"); //$NON-NLS-1$
+                if (expression instanceof StaticFeatureAccess access)
+                {
+                    out.append(" entries=").append(access.getFeatureEntries().size()); //$NON-NLS-1$
+                    if (method != null && access.getName() != null)
+                        for (EObject object : contents(method))
+                            if (object instanceof SimpleStatement statement
+                                && statement.getLeft() instanceof StaticFeatureAccess left
+                                && access.getName().equalsIgnoreCase(left.getName()) && statement.getRight() != null)
+                                out.append(" [assign at=").append(offsetOf(statement)) //$NON-NLS-1$
+                                    .append(" right=").append(statement.getRight().getClass().getSimpleName()) //$NON-NLS-1$
+                                    .append(" rightTypes=").append(typeNames(typesOf(statement.getRight()))).append(']'); //$NON-NLS-1$
+                    for (FeatureEntry entry : access.getFeatureEntries())
+                    {
+                        EObject feature = entry == null ? null : entry.getFeature();
+                        out.append(" [feature=").append(feature == null ? null : feature.getClass().getSimpleName()); //$NON-NLS-1$
+                        if (feature != null)
+                            out.append(" proxy=").append(feature.eIsProxy()) //$NON-NLS-1$
+                                .append(" featureRoot=").append(System.identityHashCode(EcoreUtil2.getRootContainer(feature))); //$NON-NLS-1$
+                        if (feature instanceof Variable variable)
+                        {
+                            out.append(" offset=").append(endOf(expression)); //$NON-NLS-1$
+                            try
+                            {
+                                Method variableMethod = EcoreUtil2.getContainerOfType(variable, Method.class);
+                                Environments variableEnvironments = variableMethod != null ? variableMethod.environments()
+                                    : module != null ? module.environments() : null;
+                                out.append(" atOffset=").append(typeNames(new ArrayList<>( //$NON-NLS-1$
+                                    TypeSystemUtil.getVariableTypesAtOffset(variable, endOf(expression), variableEnvironments))));
+                            }
+                            catch (RuntimeException e)
+                            {
+                                out.append(" atOffset=").append(e); //$NON-NLS-1$
+                            }
+                        }
+                        out.append(']');
+                    }
+                }
+            }
+            catch (RuntimeException e)
+            {
+                out.append(" failed=").append(e); //$NON-NLS-1$
+            }
+            return out.toString();
+        }
+        // #endregion
 
         List<TypeItem> variableTypesAt(Variable variable, int offset)
         {

@@ -1,11 +1,18 @@
 package tormozit;
 
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ParameterizedCommand;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -13,7 +20,9 @@ import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.handlers.IHandlerService;
+import org.eclipse.ui.navigator.CommonNavigator;
 
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.validation.marker.Marker;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 
@@ -66,6 +75,74 @@ public final class ProblemViewMarkers
         catch (PartInitException ignored)
         {
         }
+    }
+
+    /**
+     * Открывает панель с результатом пересчёта проверок. Для одного объекта — активирует его
+     * редактор и включает область «Текущий объект». Иначе область не меняет, а если её источник
+     * (активный редактор или выделение навигатора) не пересекается с проверенным набором —
+     * подставляет подходящий: для объектов открывает редактор первого из них, для проекта
+     * активирует навигатор и, если в нём выделен другой проект, ставит строку на нужный.
+     *
+     * @param objects проверенные объекты; пусто — проверялся проект целиком
+     * @param topIds их top-объекты с подчинёнными; для проекта не используются
+     */
+    public static void showChecked(IProject project, Collection<? extends EObject> objects, Set<Object> topIds)
+    {
+        IWorkbenchPage page = Global.getActivePage();
+        if (page == null)
+            return;
+        if (objects != null && objects.size() == 1)
+        {
+            openEditor(page, objects.iterator().next());
+            showForCurrentObject();
+            return;
+        }
+        // Закрытая панель берёт область из навигатора при создании — сверять уже её
+        IViewPart view = page.findView(PROBLEM_VIEW_ID);
+        if (view == null)
+        {
+            show();
+            view = page.findView(PROBLEM_VIEW_ID);
+        }
+        boolean wholeProject = objects == null || objects.isEmpty();
+        if (view == null || ProblemViewHook.scopeIntersectsChecked(view, project, wholeProject ? null : topIds))
+        {
+            show();
+            return;
+        }
+        if (wholeProject)
+            selectProjectInNavigator(page, project);
+        else
+            openEditor(page, objects.iterator().next());
+        // Панель берёт область из выделения активированной части — выводить её после
+        Display.getDefault().asyncExec(ProblemViewMarkers::show);
+    }
+
+    private static void openEditor(IWorkbenchPage page, EObject object)
+    {
+        try
+        {
+            new OpenHelper(page).openEditor(object);
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+    }
+
+    private static void selectProjectInNavigator(IWorkbenchPage page, IProject project)
+    {
+        IViewPart navigator;
+        try
+        {
+            navigator = page.showView(Global.NAVIGATOR_VIEW_ID);
+        }
+        catch (PartInitException e)
+        {
+            return;
+        }
+        if (navigator instanceof CommonNavigator common && !project.equals(ActiveProjectTracker.getNavigatorProject(page)))
+            common.selectReveal(new StructuredSelection(project));
     }
 
     private static void switchScopeToCurrentObject()

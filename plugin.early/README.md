@@ -69,6 +69,10 @@
 
 `BslTextSearchSupplier.filterMatcherForSemanticObject` первой проверкой `semantic.eContainer() instanceof Invocation && !isMethod` отбрасывал не только вызов `X.Имя()`, но и аргумент вызова `Ф(X.Имя)` — такие вхождения не попадали ни в мастер переименования, ни в «Найти ссылки на объект». Единственная инструкция `instanceof Invocation` (после `aload_3; eContainer()`) заменена функцией `tormozit.bslTextSearch.dropAsCall`: «родитель — вызов, и обращение — сам вызываемый метод». Функцию ставит этот бандл (рефлексия, без типов модели BSL). Аргумент вызова проходит к остальным правилам того же фильтра EDT. Ветвлений вставка не добавляет. Итог — в системном свойстве `tormozit.bslTextSearch.invocationPatch` (`woven`; `skipped: bytecode differs` — метод не тот, класс оставлен штатным).
 
+### Длительность проверок
+
+`CheckExecutor` (check 6.0.100) времени проверок не замеряет. Три вызова `ICheck.check` заменены вызовом добавленного в класс статического метода `tormozit$timedCheck`: тот же `check` между функциями `tormozit.checkDuration.begin` и `.end` (по исключению `.end` тоже зовётся). Копится собственное время каждой проверки (вложенная вычитается из внешней), сумма по всем потокам; снимок сумм — `tormozit.checkDuration.totals`. По нему `ComfortCheckRecompute` показывает в уведомлении о завершении пересчёта дольше 20 с три самые долгие проверки с их долями в общем однопоточном времени проверок. Итог — в системном свойстве `tormozit.checkDuration.status` (`woven`; `skipped: check calls=N` — класс оставлен штатным). Хук регистрируется до временного замера `CheckTimingDiagnostics`, который заменяет вызов `check` уже внутри добавленного метода.
+
 ## Системный журнал и уведомления о полном пересчёте проверок (#832)
 
 `Activator.CheckRecomputeNotifications` безусловно пишет в штатный журнал EDT (`.metadata/.log`)

@@ -906,94 +906,8 @@ public final class BslEditorHoverHook implements IStartup
                 : HoverAffordanceText.wrapCreator(delegateExt.getHoverControlCreator());
         }
 
-        // #region temp #877: подсказка в редакторе перестала открываться — вход, ранние выходы, исключения
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
-        {
-            int entryOffset = hoverRegion == null ? -1 : hoverRegion.getOffset();
-            functionTypeLog("enter offset=" + entryOffset + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-            try
-            {
-                Object info = hoverInfo2(textViewer, hoverRegion);
-                functionTypeLog("exit offset=" + entryOffset + " info=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (info == null ? "null" : info.getClass().getSimpleName()) //$NON-NLS-1$
-                    + (info instanceof String text ? " text=" + text.substring(0, Math.min(400, text.length())) : "") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " queryHover=" + (lastQueryHover != null) //$NON-NLS-1$
-                    + " delegate=" + delegate.getClass().getName() //$NON-NLS-1$
-                    + " current=" + hoverClass(Global.getField(delegate, "currentHover")) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " hovers=" + hoverClasses(Global.getField(delegate, "hovers"))); //$NON-NLS-1$ //$NON-NLS-2$
-                return info;
-            }
-            catch (Throwable error)
-            {
-                java.io.StringWriter trace = new java.io.StringWriter();
-                error.printStackTrace(new java.io.PrintWriter(trace));
-                functionTypeLog("error offset=" + entryOffset + " " + trace); //$NON-NLS-1$ //$NON-NLS-2$
-                throw error;
-            }
-        }
-        /** Состояние модели документа в точке — тем же доступом, что у штатной подсказки. */
-        private static String describeDocumentModel(ITextViewer textViewer, int offset)
-        {
-            try
-            {
-                if (!(textViewer.getDocument() instanceof IXtextDocument document))
-                    return "noXtextDocument"; //$NON-NLS-1$
-                String reconcile = String.valueOf(Global.invoke(document, "needsReconciling")); //$NON-NLS-1$
-                int docLength = document.getLength();
-                return "needsReconciling=" + reconcile + " docLength=" + docLength + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + document.readOnly((IUnitOfWork<String, XtextResource>) resource ->
-                    {
-                        if (resource == null)
-                            return "resource=null"; //$NON-NLS-1$
-                        StringBuilder sb = new StringBuilder();
-                        sb.append("uri=").append(resource.getURI()) //$NON-NLS-1$
-                            .append(" loaded=").append(resource.isLoaded()) //$NON-NLS-1$
-                            .append(" contents=").append(resource.getContents().size()); //$NON-NLS-1$
-                        IParseResult parse = resource.getParseResult();
-                        sb.append(" parse=").append(parse != null); //$NON-NLS-1$
-                        if (parse != null && parse.getRootNode() != null)
-                        {
-                            sb.append(" rootLength=").append(parse.getRootNode().getTotalLength()) //$NON-NLS-1$
-                                .append(" syntaxErrors=").append(parse.hasSyntaxErrors()); //$NON-NLS-1$
-                            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parse.getRootNode(), offset);
-                            sb.append(" leaf=").append(leaf == null ? null : "'" + leaf.getText() + "' hidden=" + leaf.isHidden()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        }
-                        EObject element = new EObjectAtOffsetHelper().resolveElementAt(resource, offset);
-                        sb.append(" element=").append(element == null ? null : element.eClass().getName() //$NON-NLS-1$
-                            + (element.eIsProxy() ? "(proxy)" : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                        EObject crossRef = new EObjectAtOffsetHelper().resolveCrossReferencedElementAt(resource, offset);
-                        sb.append(" crossRef=").append(crossRef == null ? null : crossRef.eClass().getName() //$NON-NLS-1$
-                            + (crossRef.eIsProxy() ? "(proxy " + ((org.eclipse.emf.ecore.InternalEObject)crossRef).eProxyURI() + ")" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        return sb.toString();
-                    });
-            }
-            catch (Throwable error)
-            {
-                return "describeError=" + error; //$NON-NLS-1$
-            }
-        }
-
-        private static String hoverClass(Object hover)
-        {
-            if (hover == null)
-                return "null"; //$NON-NLS-1$
-            Object inner = Global.getField(hover, "delegate"); //$NON-NLS-1$
-            return hover.getClass().getName() + (inner != null ? "(" + inner.getClass().getName() + ")" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-
-        private static String hoverClasses(Object hovers)
-        {
-            if (!(hovers instanceof Iterable<?> list))
-                return String.valueOf(hovers);
-            StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
-            for (Object hover : list)
-                sb.append(hoverClass(hover)).append(' ');
-            return sb.append(']').toString();
-        }
-        // #endregion
-
-        private Object hoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
             lastQueryHover = null;
             lastFunctionTarget = null;
@@ -1007,7 +921,6 @@ public final class BslEditorHoverHook implements IStartup
                 {
                     cancelIrEnrichment();
                     lastQueryHover = queryHover;
-                    functionTypeLog("return queryHover"); //$NON-NLS-1$
                     return queryHover.info();
                 }
             }
@@ -1018,49 +931,23 @@ public final class BslEditorHoverHook implements IStartup
                 {
                     IrBslHoverDebug.step("hover", "suppressed reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
                         + " offset=" + (hoverRegion == null ? -1 : hoverRegion.getOffset())); //$NON-NLS-1$
-                    functionTypeLog("return suppressed reason=" + reason); //$NON-NLS-1$
                     return null;
                 }
             }
-            else
-            {
-            }
-            // #region temp timing #877: долгое первое открытие подсказки
-            long t0 = System.nanoTime();
             // Подсказка читает готовые типы; пересчёт цепочки зависимостей здесь не запускается — только
             // план результатов запросов метода (поля выборки), как перед списком.
             refreshQueryTypesBeforeHover(textViewer, hoverRegion);
-            long t1 = System.nanoTime();
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : delegate.getHoverInfo(textViewer, hoverRegion);
-            long t2 = System.nanoTime();
             if (info == null || hoverRegion == null || editor == null)
-            {
-                functionTypeLog("timing noInfo staleMs=" + (t1 - t0) / 1_000_000L //$NON-NLS-1$
-                    + " edtMs=" + (t2 - t1) / 1_000_000L); //$NON-NLS-1$
                 return info;
-            }
             if (!IrBslHoverHtml.isBslBrowserInput(info))
-            {
-                // #region temp #877: EDT не нашла объект под указателем (BslDispatchingEObjectTextHover → "")
-                if ("".equals(info)) //$NON-NLS-1$
-                    functionTypeLog("emptyInfo " + describeDocumentModel(textViewer, hoverRegion.getOffset())); //$NON-NLS-1$
-                // #endregion
                 return info;
-            }
             final int offset = hoverRegion.getOffset();
             info = recoverMemberDocumentation(textViewer, offset, info);
-            long t3 = System.nanoTime();
             BslStructureInsertCommentTypes.completePropertyHover(info, textViewer, offset);
-            long t4 = System.nanoTime();
             prepareHoverDecorations(textViewer, hoverRegion, info);
-            long t5 = System.nanoTime();
-            functionTypeLog("timing offset=" + offset + " staleMs=" + (t1 - t0) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
-                + " edtMs=" + (t2 - t1) / 1_000_000L + " recoverMs=" + (t3 - t2) / 1_000_000L //$NON-NLS-1$ //$NON-NLS-2$
-                + " propertyMs=" + (t4 - t3) / 1_000_000L + " decorationsMs=" + (t5 - t4) / 1_000_000L); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            functionTypeLog("hover offset=" + offset + " target=" + lastFunctionTarget); //$NON-NLS-1$ //$NON-NLS-2$
             scheduleFunctionTypeSync(info, offset);
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
@@ -1276,10 +1163,7 @@ public final class BslEditorHoverHook implements IStartup
             display.asyncExec(() ->
             {
                 if (offset != lastHoverOffset)
-                {
-                    functionTypeLog("sync skip offset=" + offset + " now=" + lastHoverOffset); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
-                }
                 FunctionReturnTypes.activate(lastFunctionTarget);
                 refreshFunctionType();
             });
@@ -1290,19 +1174,13 @@ public final class BslEditorHoverHook implements IStartup
         {
             Object base = lastHoverBaseInput;
             if (lastFunctionTarget == null || base == null)
-            {
-                functionTypeLog("refresh skip target=" + lastFunctionTarget + " base=" + (base != null)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             String baseHtml = lastBaseHtml;
             String irHtml = lastIrHtml;
             String html = baseHtml != null && irHtml != null
                 ? IrBslHoverHtml.mergeHtml(baseHtml, irHtml) : IrBslHoverHtml.readHtml(base);
             if (html == null)
-            {
-                functionTypeLog("refresh skip noHtml"); //$NON-NLS-1$
                 return;
-            }
             // Поколение типов могло смениться без правки текста (досчитан результат запроса).
             // Повторное чтение — только для показанной подсказки; модель не пересчитывается.
             if (IrBslHoverControlAccess.resolve(editor) != null)
@@ -1310,37 +1188,12 @@ public final class BslEditorHoverHook implements IStartup
             String decorated = applyHoverDecorations(html);
             // Публикации идут по всем модулям; перерисовка без изменений сбивала бы прокрутку.
             if (base == lastFunctionTypeBase && decorated.equals(lastFunctionTypeHtml))
-            {
-                functionTypeLog("refresh skip unchanged"); //$NON-NLS-1$
                 return;
-            }
-            boolean applied = tryApplyToCurrentControl(decorated);
-            functionTypeLog("refresh applied=" + applied + " ir=" + (irHtml != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " heading=" + headingSnippet(decorated)); //$NON-NLS-1$
-            if (applied)
+            if (tryApplyToCurrentControl(decorated))
             {
                 lastFunctionTypeBase = base;
                 lastFunctionTypeHtml = decorated;
             }
-        }
-
-        /** Временный лог типа функции в подсказке (#877; снять после подтверждения). */
-        private static void functionTypeLog(String text)
-        {
-            Global.tempLog("hover-function-type", text); //$NON-NLS-1$
-        }
-
-        private static String headingSnippet(String html)
-        {
-            if (html == null)
-                return null;
-            int heading = html.indexOf("infocontrol-heading"); //$NON-NLS-1$
-            if (heading < 0)
-                return "noHeading len=" + html.length() //$NON-NLS-1$
-                    + " start=" + html.substring(0, Math.min(400, html.length())); //$NON-NLS-1$
-            int end = html.indexOf("</div>", heading); //$NON-NLS-1$
-            return html.substring(heading, end > heading ? Math.min(end + 6, heading + 1200)
-                : Math.min(html.length(), heading + 600));
         }
 
         /**

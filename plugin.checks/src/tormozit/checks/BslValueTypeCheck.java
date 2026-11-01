@@ -77,7 +77,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
     @Override
     protected void configureCheck(CheckConfigurer configurer)
     {
-        configurer.title("Несовместимость типа значения")
+        configurer.title("Несовместимость типа значения (тяжелая)")
             .description("Проверяет типы выражений, аргументов вызова и значений, присваиваемых свойствам платформы. "
                 + "Единственный ожидаемый тип Неопределено допускает любое значение; "
                 + "вместе с конкретными типами он разрешает также значение Неопределено. "
@@ -85,6 +85,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 + "Значение Неопределено можно присваивать и передавать параметрам любого типа."
                 + "<br><br>Динамически замещает штатную проверку bsl-legacy-check-expression-type.")
             .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
+            .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
             .module().checkedObjectType(BslPackage.Literals.MODULE);
     }
 
@@ -94,6 +95,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
     {
         if (!(object instanceof Module module) || !(module.eResource() instanceof XtextResource resource)
             || monitor.isCanceled())
+            return;
+        if (OpenModulesOnly.skip(module, parameters))
             return;
         boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
         try
@@ -115,6 +118,12 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private final ResultAcceptor acceptor;
         private final Set<IssueKey> reported = new HashSet<>();
         private final Map<EObject, Environments> typeIssues = new IdentityHashMap<>();
+        /**
+         * Типы параметров из комментария вызываемого метода: на каждый вызов комментарий заново разбирался
+         * и типы считались заново. Живёт одну проверку модуля; null — описания нет.
+         */
+        private final Map<com._1c.g5.v8.dt.bsl.model.FormalParam, List<TypeItem>> documentedParameters =
+            new IdentityHashMap<>();
 
         Session(XtextResource resource, ResultAcceptor acceptor)
         {
@@ -233,6 +242,18 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             return List.of();
         }
 
+        private List<TypeItem> documentedParameterTypes(com._1c.g5.v8.dt.bsl.model.Method method,
+            com._1c.g5.v8.dt.bsl.model.FormalParam parameter)
+        {
+            if (documentedParameters.containsKey(parameter))
+                return documentedParameters.get(parameter);
+            List<TypeItem> declared = BslMethodParameterTypes.fromComment(method, parameter);
+            if (declared != null)
+                declared = declared.isEmpty() ? List.of() : new ArrayList<>(declared);
+            documentedParameters.put(parameter, declared);
+            return declared;
+        }
+
         private void checkInvocation(Invocation invocation, Environments envs)
         {
             FeatureAccess access = invocation.getMethodAccess();
@@ -263,7 +284,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     for (int i = 0; i < count; i++)
                     {
                         var parameter = local.getFormalParams().get(i);
-                        List<TypeItem> declared = BslMethodParameterTypes.fromComment(local, parameter);
+                        List<TypeItem> declared = documentedParameterTypes(local, parameter);
                         List<TypeItem> resolved = declared != null ? resolve(declared, invocation) : null;
                         unrestricted[i] |= resolved == null || resolved.isEmpty()
                             || resolved.stream().allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$

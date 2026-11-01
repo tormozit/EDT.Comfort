@@ -958,7 +958,7 @@ public final class LongOperationNotifyHook implements IStartup
     }
 
     /** Человекочитаемая длительность: {@code 15с}, {@code 5м 30с}, {@code 1ч 5м}. */
-    private static String formatDuration(long durationMs)
+    static String formatDuration(long durationMs)
     {
         long totalSec = Math.max(0L, durationMs / 1000L);
         if (totalSec < 60)

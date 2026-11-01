@@ -204,6 +204,11 @@ public class BslInvocationTypeRules
             List<TypeItem> types = call.compute(entry.rule());
             return types == null ? List.of() : types;
         }
+        // Отмена транзакции BM (BmTransactionCancelledException) и задачи — не ошибка: отдаём её EDT.
+        catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
         catch (RuntimeException | LinkageError failure)
         {
             Global.logError("BslInvocationTypeRules", access.getName(), failure); //$NON-NLS-1$

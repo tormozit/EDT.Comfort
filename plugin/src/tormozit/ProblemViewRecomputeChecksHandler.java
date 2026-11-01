@@ -51,13 +51,13 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             + ", область=" + (scopeSelection == null ? "null" : scopeSelection.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
         if (filters == null || scopeName == null || scopeSelection == null)
         {
-            toast("Проверить", "Не удалось определить область отбора панели."); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Запустить проверки", "Не удалось определить область отбора панели."); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
 
         if (showAll || "ALL".equals(scopeName) || "SUBSYSTEM_FILTER".equals(scopeName)) //$NON-NLS-1$ //$NON-NLS-2$
         {
-            toast("Проверить", //$NON-NLS-1$
+            toast("Запустить проверки", //$NON-NLS-1$
                 "Для перепроверки выберите область «Текущий проект», «Текущий объект» или «Текущий элемент»."); //$NON-NLS-1$
             return null;
         }
@@ -71,7 +71,7 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             Set<IProject> projects = new LinkedHashSet<>(selectedProjects);
             projects.addAll(selectedObjects.keySet());
             if (projects.isEmpty())
-                toast("Проверить", "В текущей области нет проекта для перепроверки."); //$NON-NLS-1$ //$NON-NLS-2$
+                toast("Запустить проверки", "В текущей области нет проекта для перепроверки."); //$NON-NLS-1$ //$NON-NLS-2$
             for (IProject project : projects)
             {
                 Set<String> checkIds = selectedCheckIds(project, selectedCheck);
@@ -84,12 +84,12 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             selectedObjects = topObjects(part, scopeSelection, selectedObjects);
         else if (!"CURRENT_ELEMENT".equals(scopeName)) //$NON-NLS-1$
         {
-            toast("Проверить", "Неизвестная область отбора панели: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Запустить проверки", "Неизвестная область отбора панели: " + scopeName); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         if (selectedObjects.isEmpty())
         {
-            toast("Проверить", //$NON-NLS-1$
+            toast("Запустить проверки", //$NON-NLS-1$
                 "В текущей области отбора панели нет объектов для перепроверки.");
             return null;
         }
@@ -111,13 +111,13 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             return Set.of();
         if (ValidationChecksFilterHook.isInternalBslCheckUid(uid))
         {
-            toast("Проверить", "Выбранная внутренняя проверка BSL не поддерживает отдельный ручной запуск.");
+            toast("Запустить проверки", "Выбранная внутренняя проверка BSL не поддерживает отдельный ручной запуск.");
             return null;
         }
         ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
         if (repository == null)
         {
-            toast("Проверить", "Каталог проверок недоступен.");
+            toast("Запустить проверки", "Каталог проверок недоступен.");
             return null;
         }
         String id = uid.getCheckId();
@@ -125,14 +125,14 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         // иначе тот же код запустит ещё и проверку другого поставщика.
         if (id == null || id.isBlank() || !Set.of(uid).equals(repository.toUid(id, project)))
         {
-            toast("Проверить", "Не удалось однозначно определить выбранную проверку в проекте "
+            toast("Запустить проверки", "Не удалось однозначно определить выбранную проверку в проекте "
                 + project.getName() + ".");
             return null;
         }
         var settings = repository.getSettings(uid, project);
         if (settings == null || !settings.isEnabled())
         {
-            toast("Проверить", "Для перепроверки включите выбранную проверку и примените настройки проекта.");
+            toast("Запустить проверки", "Для перепроверки включите выбранную проверку и примените настройки проекта.");
             return null;
         }
         return Set.of(id);

@@ -102,7 +102,10 @@ public final class BslDocCommentTypeMerge
         System.getProperties().put("tormozit.formData.docDependency", //$NON-NLS-1$
             (java.util.function.Function<Object[], Object>) args -> {
                 BslDocCommentComputedTypes.rememberDocReturnDependency(args[0], args[1]);
-                return args[0];
+                // Третий аргумент — посещённые методы (ранний бандл новее 01.11.2026).
+                return args.length > 2 && args[2] instanceof Set<?> visited
+                    ? skipVisitedLinkTarget(args[0] instanceof EObject target ? target : null, visited)
+                    : args[0];
             });
 
         Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
@@ -195,6 +198,61 @@ public final class BslDocCommentTypeMerge
         catch (Throwable t)
         {
             return types;
+        }
+    }
+
+    /**
+     * Цель ссылки «см.» для {@code computeTypesByLinkPart}: {@code null}, если это функция модуля,
+     * уже посещённая в этом обходе ссылок. EDT разбирает комментарий цели до проверки
+     * {@code visited} и при посещённом методе выбрасывает разбор — на {@code null} штатный код
+     * сам приходит к пустому списку, минуя разбор. Самоссылающееся {@code ОписаниеУзла} в БСП
+     * (~25 полей «см. ОписаниеУзла») давало так десятки тысяч разборов при открытии модуля.
+     * Для {@code BslContextDefMethod} — только с текстом комментария: тогда URI метода в
+     * разборе — {@code getSourceUri()}, иначе он берётся у разрешённого прокси.
+     */
+    public static EObject skipVisitedLinkTarget(EObject target, Set<?> visited)
+    {
+        try
+        {
+            // #region agent log
+            {
+                String targetUri = "?"; //$NON-NLS-1$
+                try
+                {
+                    targetUri = target == null ? "null" : String.valueOf(EcoreUtil.getURI(target)); //$NON-NLS-1$
+                }
+                catch (Throwable e)
+                {
+                }
+                String sourceUri = target instanceof com._1c.g5.v8.dt.bsl.model.SourceObjectLinkProvider provider
+                    ? String.valueOf(provider.getSourceUri()) : "-"; //$NON-NLS-1$
+                Global.tempLog("doc-link-target", "class=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (target == null ? "null" : target.getClass().getSimpleName()) //$NON-NLS-1$
+                    + " uri=" + targetUri + " source=" + sourceUri //$NON-NLS-1$ //$NON-NLS-2$
+                    + " visited=" + (visited == null ? "null" : visited.size() + " " + visited) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            }
+            // #endregion
+            if (target == null || visited == null || visited.isEmpty())
+                return target;
+            org.eclipse.emf.common.util.URI uri = null;
+            if (target instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                uri = EcoreUtil.getURI(method);
+            else if (target instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported
+                && exported.isSetCommentLineLocalOffsets() && exported.isSetCommentLines()
+                && exported.eResource() != null)
+                uri = exported.getSourceUri();
+            if (uri == null || !visited.contains(uri.toString()))
+                return target;
+            // #region agent log
+            Global.tempLog("doc-link-visited-skip", String.valueOf(uri.fragment()) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // #endregion
+            return null;
+        }
+        catch (Throwable t)
+        {
+            return target;
         }
     }
 
@@ -1049,6 +1107,8 @@ public final class BslDocCommentTypeMerge
                 if (mv == null)
                     return null;
                 if ("computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
+                {
+                    final int visitedSlot = singleSetArgumentSlot(descriptor, (access & Opcodes.ACC_STATIC) != 0);
                     return new MethodVisitor(Opcodes.ASM9, mv)
                     {
                         @Override
@@ -1064,10 +1124,18 @@ public final class BslDocCommentTypeMerge
                                 visitVarInsn(Opcodes.ALOAD, 0);
                                 visitMethodInsn(Opcodes.INVOKESTATIC, "tormozit/BslDocCommentComputedTypes", //$NON-NLS-1$
                                     "rememberDocReturnDependency", "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                if (visitedSlot >= 0)
+                                {
+                                    // Без переходов: цель подменяется на null, дальше — штатные instanceof.
+                                    visitVarInsn(Opcodes.ALOAD, visitedSlot);
+                                    visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "skipVisitedLinkTarget", //$NON-NLS-1$
+                                        "(Lorg/eclipse/emf/ecore/EObject;Ljava/util/Set;)Lorg/eclipse/emf/ecore/EObject;", false); //$NON-NLS-1$
+                                }
                                 touched.set(true);
                             }
                         }
                     };
+                }
                 if (!isComputeTypesMethod(name, descriptor))
                     return mv;
                 return new MethodVisitor(Opcodes.ASM9, mv)
@@ -1096,6 +1164,24 @@ public final class BslDocCommentTypeMerge
             }
         }, 0);
         return touched.get() ? writer.toByteArray() : null;
+    }
+
+    /** Слот единственного параметра {@code java.util.Set} (посещённые методы) либо -1. */
+    private static int singleSetArgumentSlot(String descriptor, boolean isStatic)
+    {
+        int slot = isStatic ? 0 : 1;
+        int found = -1;
+        for (org.objectweb.asm.Type arg : org.objectweb.asm.Type.getArgumentTypes(descriptor))
+        {
+            if ("Ljava/util/Set;".equals(arg.getDescriptor())) //$NON-NLS-1$
+            {
+                if (found >= 0)
+                    return -1;
+                found = slot;
+            }
+            slot += arg.getSize();
+        }
+        return found;
     }
 
     private static boolean isComputeTypesMethod(String name, String descriptor)
