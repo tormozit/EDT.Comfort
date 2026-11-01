@@ -307,7 +307,6 @@ public class BSLEditorMenuHook implements IStartup
     private static final class BreakpointRulerMenu
     {
         private static final String HOOKED = "tormozit.breakpointRulerMenu"; //$NON-NLS-1$
-        private static final String LOG_TOPIC = "bp-copy-paste"; //$NON-NLS-1$
         // Только настройки: расположение, сигнатура метода, регистрация и текущий
         // счётчик попаданий принадлежат целевой остановке и сюда не входят.
         private static final String[] SETTINGS = {
@@ -339,7 +338,6 @@ public class BSLEditorMenuHook implements IStartup
             IMenuListener listener = menu -> populate(editor, menu);
             editor.addRulerContextMenuListener(listener);
             text.addDisposeListener(e -> editor.removeRulerContextMenuListener(listener));
-            Global.tempLog(LOG_TOPIC, "attach editor=" + editor.getEditorInput()); //$NON-NLS-1$
         }
 
         private static void populate(BslXtextEditor editor, IMenuManager menu)
@@ -356,8 +354,6 @@ public class BSLEditorMenuHook implements IStartup
             try
             {
                 IBslLineBreakpoint breakpoint = findBreakpoint(viewer, line);
-                Global.tempLog(LOG_TOPIC, "menu file=" + file.getFullPath() + " line=" + (line + 1) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " breakpoint=" + (breakpoint != null) + " copied=" + (copiedSettings != null)); //$NON-NLS-1$ //$NON-NLS-2$
                 addCommand(menu, "copy", "Скопировать точку остановка", //$NON-NLS-1$
                     "Запомнить настройки остановки для вставки в другую строку модуля.",
                     breakpoint != null, () -> copy(breakpoint));
@@ -429,7 +425,6 @@ public class BSLEditorMenuHook implements IStartup
                 for (String key : SETTINGS)
                     snapshot.put(key, attributes.get(key));
                 copiedSettings = Collections.unmodifiableMap(snapshot);
-                Global.tempLog(LOG_TOPIC, "copy marker=" + breakpoint.getMarker().getId()); //$NON-NLS-1$
             }
             catch (CoreException e)
             {
@@ -451,7 +446,6 @@ public class BSLEditorMenuHook implements IStartup
                     IBslBreakpointFactory factory = CreateDebuggerBreakpoints.resolveFactory();
                     if (factory == null)
                     {
-                        Global.tempLog(LOG_TOPIC, "paste: breakpoint factory unavailable"); //$NON-NLS-1$
                         ToastNotification.show("Точки останова", "Не удалось получить службу создания остановок EDT.");
                         return;
                     }
@@ -464,8 +458,6 @@ public class BSLEditorMenuHook implements IStartup
                 marker.setAttributes(SETTINGS, snapshot.values().toArray());
                 if (created != null)
                     DebugPlugin.getDefault().getBreakpointManager().addBreakpoint(created);
-                Global.tempLog(LOG_TOPIC, "paste file=" + file.getFullPath() + " line=" + line //$NON-NLS-1$ //$NON-NLS-2$
-                    + " created=" + (created != null)); //$NON-NLS-1$
             }
             catch (CoreException e)
             {
@@ -486,7 +478,6 @@ public class BSLEditorMenuHook implements IStartup
 
         private static void reportFailure(Exception error)
         {
-            Global.tempLog(LOG_TOPIC, "failure: " + error); //$NON-NLS-1$
             ToastNotification.show("Точки останова", "Не удалось скопировать или вставить остановку: "
                 + error.getMessage());
         }

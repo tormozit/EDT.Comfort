@@ -546,7 +546,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         catch (RuntimeException | LinkageError failure)
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
-            Global.tempLog("query-value-table", "prepare failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             session.plans.remove(method);
         }
     }
@@ -1012,8 +1011,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                                 proposals.add(Tuples.create(before + name, name,
                                     IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
                         }
-            Global.tempLog("query-value-table", "columnProposals parameter=" + context.getThird() //$NON-NLS-1$ //$NON-NLS-2$
-                + " prefix=" + prefix + " names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
             return proposals;
         }
 
@@ -1764,14 +1761,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     column.setTypeContainer(types);
                     columns.getContextDef().getProperties().add(column);
                 }
-            Global.tempLog("query-value-table", "method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " fields=" + result.fields.stream().map(Field::name).toList() //$NON-NLS-1$
-                + " rowMethods=" + table.getContextDef().allMethods().stream() //$NON-NLS-1$
-                    .filter(candidate -> candidate.getRetValType().contains(row))
-                    .map(com._1c.g5.v8.dt.mcore.Method::getName).toList()
-                + " tableMethods=" + table.getContextDef().allMethods().stream() //$NON-NLS-1$
-                    .filter(candidate -> candidate.getRetValType().contains(table))
-                    .map(com._1c.g5.v8.dt.mcore.Method::getName).toList());
             return table;
         }
 

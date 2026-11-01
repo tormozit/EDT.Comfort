@@ -1401,6 +1401,48 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 && in(method, "Свойство", "Property"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
+        /**
+         * В области вызова есть {@code Таблица.Колонки.Добавить(…)} той же таблицы, где имя колонки — не строковый
+         * литерал: такая колонка в типе таблицы не видна.
+         */
+        boolean hasColumnAddWithUnknownName(Call call)
+        {
+            String table = call.source != null ? withoutSpaces(text(call.source)) : ""; //$NON-NLS-1$
+            for (String suffix : new String[] { ".Колонки", ".Columns" }) //$NON-NLS-1$ //$NON-NLS-2$
+                if (table.toLowerCase().endsWith(suffix.toLowerCase()))
+                    table = table.substring(0, table.length() - suffix.length());
+            if (table.isEmpty())
+                return false;
+            for (EObject object : contents(scopeOf(call.target)))
+                if (object instanceof Invocation invocation && !invocation.getParams().isEmpty()
+                    && invocation.getMethodAccess() instanceof DynamicFeatureAccess add
+                    && in(add.getName(), "Добавить", "Add") //$NON-NLS-1$ //$NON-NLS-2$
+                    && add.getSource() instanceof DynamicFeatureAccess columns
+                    && in(columns.getName(), "Колонки", "Columns") //$NON-NLS-1$ //$NON-NLS-2$
+                    && matches(columns.getSource(), table)
+                    && literalText(invocation.getParams().get(0)).isEmpty())
+                    return true;
+            return false;
+        }
+
+        /** В области вызова есть {@code Структура.Вставить(…)} той же структуры, где ключ — не строковый литерал. */
+        boolean hasStructureInsertWithUnknownKey(Call call)
+        {
+            if (call.source == null || !hasType(call.sourceTypes, "Structure", "FixedStructure")) //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            String structure = text(call.source);
+            if (structure.isEmpty())
+                return false;
+            for (EObject object : contents(scopeOf(call.target)))
+                if (object instanceof Invocation invocation && !invocation.getParams().isEmpty()
+                    && invocation.getMethodAccess() instanceof DynamicFeatureAccess insert
+                    && in(insert.getName(), "Вставить", "Insert") //$NON-NLS-1$ //$NON-NLS-2$
+                    && matches(insert.getSource(), structure)
+                    && literalText(invocation.getParams().get(0)).isEmpty())
+                    return true;
+            return false;
+        }
+
         /** Ветка «системный метод или конструктор» {@code ЗаполнитьТаблицуВозможныхЗначенийЛитерала}. */
         void platformCall(Call call)
         {
@@ -1526,11 +1568,20 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 full = false;
                 return;
             }
+            // Таблица.Индексы.Добавить("Колонки"): колонки берём у самой таблицы.
+            if (call.index == 0 && in(method, "Добавить", "Add") //$NON-NLS-1$ //$NON-NLS-2$
+                && call.source instanceof DynamicFeatureAccess indexes
+                && in(indexes.getName(), "Индексы", "Indexes") //$NON-NLS-1$ //$NON-NLS-2$
+                && isTableType(typesOf(indexes.getSource())))
+                objectTypes = typesOf(indexes.getSource());
             if (containsAny(parameterLower, "ключ", "индекс", "колонк", "сортировк", "группировк") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
                 && isTableType(objectTypes))
             {
                 branch("columns"); //$NON-NLS-1$
                 addAll(columns(objectTypes));
+                // Колонка с неизвестным именем (Колонки.Добавить(Колонка.Имя)) EDT в тип не заносит — набор неполный.
+                if (hasColumnAddWithUnknownName(call))
+                    full = false;
                 // Колонки результата запроса знает только план запроса (у типа РезультатЗапроса их нет).
                 if (hasType(objectTypes, "QueryResult") && call.source != null) //$NON-NLS-1$
                 {
@@ -1545,6 +1596,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 branch("keys"); //$NON-NLS-1$
                 addAll(hasTabularSection(objectTypes) ? elementProperties(objectTypes) : structureKeyNames(objectTypes));
+                // Ключ с неизвестным именем (Вставить(Ключ, …)) EDT в тип не заносит — набор неполный.
+                if (hasStructureInsertWithUnknownKey(call))
+                    full = false;
             }
             else if ("URIПространстваИмен".equalsIgnoreCase(parameter)) //$NON-NLS-1$
             {
@@ -2316,10 +2370,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     // У табличной части нужны свойства строки; mdOf(type) возвращает её владельца.
                     if (hasTabularSection(one))
                     {
-                        List<String> names = elementProperties(one);
-                        addAll(names);
-                        Global.tempLog("unknown-literal-tabular", "structureFilter type=" + en //$NON-NLS-1$ //$NON-NLS-2$
-                            + " validation=" + validation + " values=" + names); //$NON-NLS-1$ //$NON-NLS-2$
+                        addAll(elementProperties(one));
                         continue;
                     }
                     // ИР: метаданные типа — Структура (у структуры, выборки запроса и т. п.) → её ключи. В EDT —

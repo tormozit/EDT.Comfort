@@ -1,15 +1,20 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.preference.PreferenceManager;
+import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -17,22 +22,27 @@ import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.TabFolder;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.FilteredTree;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.eclipse.ui.internal.dialogs.PropertyDialog;
+import org.eclipse.ui.internal.dialogs.WorkbenchPreferenceDialog;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
@@ -45,6 +55,7 @@ public final class ProjectPropertyDialogHook implements IStartup
         "tormozit.comfort.projectPropertyDialog.treeExpanded"; //$NON-NLS-1$
     private static final String PENDING_KEY =
         "tormozit.comfort.projectPropertyDialog.pending"; //$NON-NLS-1$
+    private static final String ALL_PROJECTS = "Все"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -57,8 +68,8 @@ public final class ProjectPropertyDialogHook implements IStartup
                 {
                     if (!(event.widget instanceof Shell shell) || shell.isDisposed())
                         return;
-                    PreferenceDialog found = findPreferenceDialog(shell);
-                    if (!(found instanceof PropertyDialog dialog))
+                    PreferenceDialog dialog = findPreferenceDialog(shell);
+                    if (!(dialog instanceof PropertyDialog) && !(dialog instanceof WorkbenchPreferenceDialog))
                         return;
                     Shell propertyShell = dialog.getShell();
                     if (propertyShell == null || propertyShell.isDisposed()
@@ -81,7 +92,7 @@ public final class ProjectPropertyDialogHook implements IStartup
         return null;
     }
 
-    private static void scheduleInstall(Display display, PropertyDialog dialog, Shell shell, int attempt)
+    private static void scheduleInstall(Display display, PreferenceDialog dialog, Shell shell, int attempt)
     {
         if (shell.isDisposed())
             return;
@@ -90,22 +101,29 @@ public final class ProjectPropertyDialogHook implements IStartup
         display.timerExec(100, () -> scheduleInstall(display, dialog, shell, attempt + 1));
     }
 
-    private static boolean install(PropertyDialog dialog, Shell shell)
+    /**
+     * Строка «Проект:» над деревом страниц. В окне свойств проекта выбран проект, в окне «Параметры» —
+     * «Все» (рабочая область); выбор другого элемента открывает ту же страницу в другом окне.
+     */
+    private static boolean install(PreferenceDialog dialog, Shell shell)
     {
         if (shell.getData(PROJECT_SELECTOR_KEY) != null)
             return true;
 
-        if (!(dialog.getSelection() instanceof IStructuredSelection selection))
-            return true;
-        Object selected = selection.getFirstElement();
-        IProject current = projectFromSelection(selected);
-        if (current == null)
-            return true;
+        IProject current = null;
+        if (dialog instanceof PropertyDialog propertyDialog)
+        {
+            if (!(propertyDialog.getSelection() instanceof IStructuredSelection selection))
+                return true;
+            current = projectFromSelection(selection.getFirstElement());
+            if (current == null)
+                return true;
+        }
 
         TreeViewer tree = dialog.getTreeViewer();
         if (tree == null || tree.getControl() == null || tree.getControl().isDisposed())
             return false;
-        if (shell.getData(TREE_EXPANDED_KEY) == null)
+        if (current != null && shell.getData(TREE_EXPANDED_KEY) == null)
         {
             // Уровень 1 — невидимый корень viewer, уровень 2 — корневые разделы страниц.
             tree.expandToLevel(2);
@@ -116,9 +134,11 @@ public final class ProjectPropertyDialogHook implements IStartup
         for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
             if (project.isOpen() && Global.getDtProjectFromWorkspaceProject(project) != null)
                 projects.add(project);
-        if (projects.size() < 2)
+        if (projects.isEmpty())
             return true;
         projects.sort(Comparator.comparing(IProject::getName, String.CASE_INSENSITIVE_ORDER));
+        // Элемент 0 — «Все» (рабочая область).
+        projects.add(0, null);
 
         FilteredTree filteredTree = findFilteredTree(tree.getControl());
         if (filteredTree == null)
@@ -140,12 +160,16 @@ public final class ProjectPropertyDialogHook implements IStartup
         label.setText("Проект:"); //$NON-NLS-1$
         Combo combo = new Combo(row, SWT.READ_ONLY);
         combo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        combo.setToolTipText(TooltipText.wrap(combo,
+            "«Все» — настройки рабочей области (окно «Параметры»), проект — его свойства. Выбор открывает " //$NON-NLS-1$
+            + "ту же страницу в другом окне; изменения текущего окна при этом применяются." //$NON-NLS-1$
+            + Global.pluginSignForTooltip()));
         int currentIndex = -1;
         for (int i = 0; i < projects.size(); i++)
         {
             IProject project = projects.get(i);
-            combo.add(project.getName());
-            if (project.equals(current))
+            combo.add(project == null ? ALL_PROJECTS : project.getName());
+            if (Objects.equals(project, current))
                 currentIndex = i;
         }
         if (currentIndex < 0)
@@ -179,9 +203,115 @@ public final class ProjectPropertyDialogHook implements IStartup
             shell.getDisplay().asyncExec(() -> switchProject(dialog, shell, combo, originalIndex,
                 target, lastPageFocus[0]));
         });
+        if (current == null)
+            ProjectOverrideNote.install(dialog, combo, projects);
         leftArea.layout(true, true);
         shell.setData(PROJECT_SELECTOR_KEY, Boolean.TRUE);
         return true;
+    }
+
+    /**
+     * Надпись в строке кнопок страницы окна «Параметры» (слева от штатных кнопок) для страниц, у
+     * которых свойства проекта не дополняют настройки рабочей области, а замещают их копией: у каких
+     * проектов копия уже есть, в подсказке — когда она появляется. Новые такие страницы — записью в
+     * {@link #PAGES}.
+     */
+    private static final class ProjectOverrideNote
+    {
+        private static final String NOTE_KEY = "tormozit.comfort.projectOverrideNote"; //$NON-NLS-1$
+
+        /**
+         * @param preferencePageId страница окна «Параметры»
+         * @param qualifier узел настроек
+         * @param markerKey ключ узла проекта, означающий «у проекта своя копия настроек»
+         * @param explanation когда и что копируется
+         */
+        private record Page(String preferencePageId, String qualifier, String markerKey, String explanation) {}
+
+        private static final List<Page> PAGES = List.of(
+            // BslPropertyPage.getPreferenceManager(), com.e1c.g5.v8.dt.formatter.bsl.ui 1.0.1400.v202605050943
+            new Page("com.e1c.g5.v8.dt.formatter.ui.preferences.bslformatterpage", //$NON-NLS-1$
+                "com.e1c.g5.v8.dt.formatter.bsl", "projectSpecificSettingsInited", //$NON-NLS-1$ //$NON-NLS-2$
+                "При первом открытии этой страницы в свойствах проекта в проект копируются все настройки, " //$NON-NLS-1$
+                + "сохранённые здесь. После этого их изменения здесь на проект не действуют, а настройки, " //$NON-NLS-1$
+                + "которые здесь ещё не сохранялись, проект по-прежнему берёт отсюда.")); //$NON-NLS-1$
+
+        static void install(PreferenceDialog dialog, Combo combo, List<IProject> projects)
+        {
+            Runnable update = () ->
+            {
+                Page page = pageOf(dialog);
+                if (page != null && dialog.getSelectedPage() instanceof IPreferencePage preferencePage)
+                    addNote(preferencePage.getControl(), page, combo, projects);
+            };
+            dialog.addPageChangedListener(event -> update.run());
+            update.run();
+        }
+
+        /** Надпись — первым элементом строки кнопок страницы ({@code PreferencePage.createControl}). */
+        private static void addNote(Control pageControl, Page page, Combo combo, List<IProject> projects)
+        {
+            if (!(pageControl instanceof Composite content) || content.isDisposed()
+                    || content.getData(NOTE_KEY) != null)
+                return;
+            Composite buttonBar = null;
+            for (Control child : content.getChildren())
+                if (child instanceof Composite composite && composite.getLayout() instanceof GridLayout
+                        && Arrays.stream(composite.getChildren()).anyMatch(Button.class::isInstance))
+                    buttonBar = composite;
+            if (buttonBar == null)
+                return;
+            content.setData(NOTE_KEY, Boolean.TRUE);
+            Link note = new Link(buttonBar, SWT.NONE);
+            List<String> own = projectsWithCopy(page, projects);
+            note.setText("Своя копия у проектов: " + (own.isEmpty() ? "нет" : String.join(", ", own))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // Есть проекты, на которые эта страница не действует, — заметно.
+            if (!own.isEmpty())
+                note.setFont(JFaceResources.getFontRegistry().getBold(JFaceResources.DIALOG_FONT));
+            note.setToolTipText(TooltipText.wrap(note, page.explanation() + Global.pluginSignForTooltip()));
+            GridData noteData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            // Только свободное место строки: иначе ширина надписи входит в предпочтительную ширину
+            // страницы, и окно «Параметры» расширяется при перетаскивании разделителя.
+            noteData.widthHint = 0;
+            note.setLayoutData(noteData);
+            note.moveAbove(buttonBar.getChildren()[0]);
+            note.addListener(SWT.Selection, event ->
+            {
+                int index = combo.indexOf(event.text);
+                if (index > 0 && combo.isEnabled())
+                {
+                    combo.select(index);
+                    combo.notifyListeners(SWT.Selection, new Event());
+                }
+            });
+            ((GridLayout) buttonBar.getLayout()).numColumns++;
+            // Строка кнопок штатно прижата вправо по своей ширине — надписи нужна вся строка.
+            if (buttonBar.getLayoutData() instanceof GridData barData)
+            {
+                barData.horizontalAlignment = SWT.FILL;
+                barData.grabExcessHorizontalSpace = true;
+            }
+            content.layout(true, true);
+        }
+
+        private static Page pageOf(PreferenceDialog dialog)
+        {
+            String id = currentPageId(dialog);
+            for (Page page : PAGES)
+                if (page.preferencePageId().equals(id))
+                    return page;
+            return null;
+        }
+
+        /** Ссылки на проекты с копией настроек страницы. */
+        private static List<String> projectsWithCopy(Page page, List<IProject> projects)
+        {
+            List<String> own = new ArrayList<>();
+            for (IProject project : projects)
+                if (project != null && new ProjectScope(project).getNode(page.qualifier()).getBoolean(page.markerKey(), false))
+                    own.add("<a href=\"" + project.getName() + "\">" + project.getName().replace("&", "&&") + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            return own;
+        }
     }
 
     private static IProject projectFromSelection(Object selected)
@@ -216,20 +346,26 @@ public final class ProjectPropertyDialogHook implements IStartup
         return null;
     }
 
-    private static void switchProject(PropertyDialog dialog, Shell shell, Combo combo,
+    /** @param target проект или {@code null} — «Все» (окно «Параметры») */
+    private static void switchProject(PreferenceDialog dialog, Shell shell, Combo combo,
             int originalIndex, IProject target, Control lastPageFocus)
     {
         if (shell.isDisposed())
             return;
-        Object replacement = targetElement(dialog, target);
-        if (replacement == null)
+        Object replacement = target == null ? null
+            : dialog instanceof PropertyDialog propertyDialog ? targetElement(propertyDialog, target) : target;
+        if (target != null && replacement == null)
         {
             combo.select(originalIndex);
             combo.setEnabled(true);
             return;
         }
+        // Страницы параметров и свойств проекта — разные узлы с разными id, общая у них только подпись.
+        boolean sameKind = target != null && dialog instanceof PropertyDialog;
         String pageId = currentPageId(dialog);
+        List<String> labelPath = labelPath(dialog);
         PageState pageState = PageState.capture(dialog, lastPageFocus);
+        pageState.tabs = PageState.captureTabs(dialog);
         Shell owner = shell.getParent() instanceof Shell parent ? parent : null;
         if (!Global.invokeVoid(dialog, "okPressed") || !shell.isDisposed() //$NON-NLS-1$
                 || dialog.getReturnCode() != Window.OK)
@@ -243,13 +379,68 @@ public final class ProjectPropertyDialogHook implements IStartup
         }
         if (owner == null || owner.isDisposed())
             return;
-        PreferenceDialog next = PreferencesUtil.createPropertyDialogOn(owner, replacement,
-            pageId, null, null, PreferencesUtil.OPTION_NONE);
+        // Id страницы — до создания окна, как штатно: PreferencesUtil сразу вызывает create(), а выбор
+        // страницы в уже созданном окне сдвигает дерево страниц по горизонтали.
+        String nextPageId = sameKind ? pageId : null;
+        if (!sameKind && target == null)
+            nextPageId = findByLabelPath(PlatformUI.getWorkbench().getPreferenceManager(), labelPath);
+        else if (!sameKind)
+        {
+            // Узлы свойств проекта известны только окну свойств — пробное окно не открывается.
+            PreferenceDialog probe = PreferencesUtil.createPropertyDialogOn(owner, replacement, null, null, null,
+                PreferencesUtil.OPTION_NONE);
+            if (probe != null)
+            {
+                nextPageId = findByLabelPath(probe.getPreferenceManager(), labelPath);
+                probe.close();
+            }
+        }
+        PreferenceDialog next = target == null
+            ? PreferencesUtil.createPreferenceDialogOn(owner, nextPageId, null, null)
+            : PreferencesUtil.createPropertyDialogOn(owner, replacement, nextPageId, null, null,
+                PreferencesUtil.OPTION_NONE);
         if (next != null)
         {
             next.getShell().getDisplay().asyncExec(() -> pageState.restoreWhenReady(next, 0));
             next.open();
         }
+    }
+
+    /** Подписи узлов от корня до выбранной страницы. */
+    private static List<String> labelPath(PreferenceDialog dialog)
+    {
+        List<String> path = new ArrayList<>();
+        TreeViewer tree = dialog.getTreeViewer();
+        if (tree == null || tree.getControl().isDisposed() || !(tree.getControl() instanceof Tree swtTree)
+                || swtTree.getSelectionCount() == 0)
+            return path;
+        for (TreeItem item = swtTree.getSelection()[0]; item != null; item = item.getParentItem())
+            path.add(0, item.getText());
+        return path;
+    }
+
+    /** Id узла с теми же подписями; если такого нет — самого глубокого совпавшего предка. */
+    private static String findByLabelPath(PreferenceManager manager, List<String> path)
+    {
+        if (manager == null)
+            return null;
+        IPreferenceNode[] level = manager.getRootSubNodes();
+        String found = null;
+        for (String label : path)
+        {
+            IPreferenceNode matched = null;
+            for (IPreferenceNode node : level)
+                if (label.equals(node.getLabelText()))
+                {
+                    matched = node;
+                    break;
+                }
+            if (matched == null)
+                break;
+            found = matched.getId();
+            level = matched.getSubNodes();
+        }
+        return found;
     }
 
     private static String currentPageId(PreferenceDialog dialog)
@@ -281,6 +472,8 @@ public final class ProjectPropertyDialogHook implements IStartup
         private final String[] treeRowPath;
         private final String rowText;
         private final int rowIndex;
+        /** Выбранные вкладки страницы: путь к {@code TabFolder} и в последнем элементе — индекс вкладки. */
+        List<int[]> tabs = List.of();
 
         private PageState(int[] focusPath, int[] listPath, Class<?> focusType,
                 Class<?> listType, String[] treeRowPath, String rowText, int rowIndex)
@@ -336,6 +529,11 @@ public final class ProjectPropertyDialogHook implements IStartup
                     || page.getControl() == null)
                 return;
             Control root = page.getControl();
+            if (!restoreTabs(root) && attempt < 30)
+            {
+                retry(dialog, attempt);
+                return;
+            }
             Control list = resolve(root, listPath);
             if (listPath != null && (list == null || list.getClass() != listType
                     || !list.isVisible()))
@@ -415,6 +613,54 @@ public final class ProjectPropertyDialogHook implements IStartup
                 focus.setFocus();
             else if (list != null && list.isVisible())
                 list.setFocus();
+        }
+
+        static List<int[]> captureTabs(PreferenceDialog dialog)
+        {
+            List<int[]> result = new ArrayList<>();
+            if (dialog.getSelectedPage() instanceof IPreferencePage page && page.getControl() != null)
+                collectTabs(page.getControl(), page.getControl(), result);
+            return result;
+        }
+
+        private static void collectTabs(Control root, Control control, List<int[]> result)
+        {
+            if (control == null || control.isDisposed())
+                return;
+            if (control instanceof TabFolder folder && folder.getSelectionIndex() >= 0)
+            {
+                int[] path = path(root, folder);
+                int[] entry = Arrays.copyOf(path, path.length + 1);
+                entry[path.length] = folder.getSelectionIndex();
+                result.add(entry);
+            }
+            if (control instanceof Composite composite)
+                for (Control child : composite.getChildren())
+                    collectTabs(root, child, result);
+        }
+
+        /** @return {@code false}, если вкладки ещё нет (вкладку Комфорта страница получает позже) */
+        private boolean restoreTabs(Control root)
+        {
+            boolean complete = true;
+            for (int[] entry : tabs)
+            {
+                int index = entry[entry.length - 1];
+                if (!(resolve(root, Arrays.copyOf(entry, entry.length - 1)) instanceof TabFolder folder)
+                        || index >= folder.getItemCount())
+                {
+                    complete = false;
+                    continue;
+                }
+                if (folder.getSelectionIndex() != index)
+                {
+                    folder.setSelection(index);
+                    Event event = new Event();
+                    event.item = folder.getItem(index);
+                    folder.notifyListeners(SWT.Selection, event);
+                }
+            }
+            return complete;
         }
 
         private void retry(PreferenceDialog dialog, int attempt)

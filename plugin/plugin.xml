@@ -282,6 +282,7 @@
     <startup class="tormozit.TextTemplateFormatPagesHook"/>
     <startup class="tormozit.FindReplaceDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
+    <startup class="tormozit.BslFormatterHook"/>
     <startup class="tormozit.ThemeSwitchPreferencesHook"/>
       <startup class="tormozit.BslLanguagePreferenceHook"/>
     <startup class="tormozit.CheckDevelopmentPageHook"/>

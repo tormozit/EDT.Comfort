@@ -800,21 +800,23 @@ public class Activator extends AbstractUIPlugin
 
     /**
      * Потоки расчёта производных данных EDT ({@code derived_data_executor_N}: проверки, валидация
-     * метаданных) — с приоритетом ниже обычного. Сторож перегрузки EDT ({@code HostResourceManager}
+     * метаданных) — с обычным приоритетом вместо наивысшего, который ставит им EDT. Сторож перегрузки EDT ({@code HostResourceManager}
      * бандла {@code com._1c.g5.resourcemanagement}) засыпает на 50 мс и по запаздыванию пробуждения
      * объявляет перегрузку: при занятых всех ядрах он урезает потоки проверок вдвое или до одного
      * ({@code DerivedDataManagerProvider$1.gatherPermissions} в {@code com._1c.g5.v8.dt.core}
-     * 26.0.1.v202605050943) и зовёт {@code System.gc()}. С пониженным приоритетом проверки отдают
-     * ядро потоку UI и сторожу и при этом занимают все свободные ядра.
+     * 26.0.1.v202605050943) и зовёт {@code System.gc()}. С обычным приоритетом проверки делят ядра
+     * с потоком UI и сторожем на равных и при этом занимают все свободные ядра. Ниже обычного не
+     * понижать: при неактивном окне EDT потоки обычного приоритета других процессов вытесняют
+     * проверки, и прогон идёт в разы дольше.
      * <p>
      * Пул EDT заводит потоки сам, точки подключения к их созданию нет, поэтому потоки находятся
      * обходом группы потоков раз в {@link #PERIOD_MS}. На Windows приоритет Java переходит в ОС
-     * ({@code THREAD_PRIORITY_BELOW_NORMAL}); на Linux JVM по умолчанию приоритеты не применяет.
+     * ({@code THREAD_PRIORITY_NORMAL}); на Linux JVM по умолчанию приоритеты не применяет.
      */
     private static final class CheckThreadPriority
     {
         private static final String THREAD_PREFIX = "derived_data_executor_"; //$NON-NLS-1$
-        private static final int PRIORITY = Thread.NORM_PRIORITY - 2;
+        private static final int PRIORITY = Thread.NORM_PRIORITY;
         private static final long PERIOD_MS = 2_000L;
         private static final String TAG = "CheckThreadPriority"; //$NON-NLS-1$
 

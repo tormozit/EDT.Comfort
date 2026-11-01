@@ -1020,9 +1020,6 @@ final class FunctionReturnTypes
         var input = editor.getEditorInput();
         IFile file = input != null ? input.getAdapter(IFile.class) : null;
         var document = editor.getDocument();
-        Global.tempLog("assist-local-context-invalidation", "editor title=" + editor.getTitle() //$NON-NLS-1$ //$NON-NLS-2$
-            + " input=" + (input == null ? null : input.getClass().getName()) + " file=" + file //$NON-NLS-1$ //$NON-NLS-2$
-            + " document=" + (document == null ? null : document.getClass().getName())); //$NON-NLS-1$
         if (file != null && document != null)
             LocalContextInvalidation.observe(URI.createPlatformResourceURI(file.getFullPath().toString(), true), document);
     }
@@ -1045,8 +1042,6 @@ final class FunctionReturnTypes
                     return value;
                 invalidated[0]++;
                 REQUEST_STAMPS.remove(key);
-                Global.tempLog("assist-local-context-invalidation", "variable key=" + key //$NON-NLS-1$ //$NON-NLS-2$
-                    + " oldStamp=" + value.stamp() + " shown=" + lineKeys.contains(key) + " changed=" + changedModule); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return new VariableComputed(suffix, value.offset(), value.type());
             });
             RESULTS.replaceAll((key, value) ->
@@ -1056,12 +1051,9 @@ final class FunctionReturnTypes
                 invalidated[0]++;
                 REQUEST_STAMPS.remove(key);
                 INDEX_STAMPS.remove(key);
-                Global.tempLog("assist-local-context-invalidation", "function key=" + key //$NON-NLS-1$ //$NON-NLS-2$
-                    + " oldStamp=" + value.stamp() + " shown=" + lineKeys.contains(key) + " changed=" + changedModule); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return new Computed(suffix, value.type());
             });
         }
-        Global.tempLog("assist-local-context-invalidation", "changed=" + changedModule + " invalidated=" + invalidated[0]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (invalidated[0] > 0)
             publish();
     }
@@ -1083,7 +1075,6 @@ final class FunctionReturnTypes
                 INSTANCE.bufferCreated(buffer);
             org.eclipse.core.resources.ResourcesPlugin.getWorkspace().addResourceChangeListener(INSTANCE,
                 org.eclipse.core.resources.IResourceChangeEvent.POST_CHANGE);
-            Global.tempLog("assist-local-context-invalidation", "installed"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         static void stop()
@@ -1132,8 +1123,6 @@ final class FunctionReturnTypes
                 modules.put(document, module);
                 contextRevision(module);
                 document.addDocumentListener(listener);
-                Global.tempLog("assist-local-context-invalidation", "observe module=" + module //$NON-NLS-1$ //$NON-NLS-2$
-                    + " document=" + document.getClass().getName() + "@" + System.identityHashCode(document)); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -1172,7 +1161,7 @@ final class FunctionReturnTypes
             }
             catch (org.eclipse.core.runtime.CoreException error)
             {
-                Global.tempLogException("assist-local-context-invalidation", "resource.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+                // Ресурс недоступен — инвалидировать нечего.
             }
         }
 

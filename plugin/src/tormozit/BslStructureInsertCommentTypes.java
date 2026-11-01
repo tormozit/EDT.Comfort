@@ -3242,6 +3242,30 @@ public final class BslStructureInsertCommentTypes
             return node == null ? Integer.MAX_VALUE : node.getEndOffset();
         }
 
+        /**
+         * Контейнер, все типы которого принадлежат {@code table}: общие типы заменяются копиями через
+         * {@code replace}. {@code null} — менять общий тип нельзя, а заменить нечем.
+         */
+        private static TypeContainer ownTypes(Type table, TypeContainer container,
+            java.util.function.Consumer<com._1c.g5.v8.dt.mcore.TypeContainerDef> replace)
+        {
+            if (container.allTypes().stream().allMatch(item -> EcoreUtil.isAncestor(table, item)))
+                return container;
+            if (replace == null)
+                return null;
+            com._1c.g5.v8.dt.mcore.TypeContainerDef def = McoreFactory.eINSTANCE.createTypeContainerDef();
+            for (TypeItem item : new ArrayList<>(container.allTypes()))
+            {
+                EObject resolved = EcoreUtil.resolve(item, table);
+                if (!(resolved instanceof TypeItem resolvedItem) || resolvedItem.eIsProxy())
+                    return null;
+                def.getTypes().add(EcoreUtil.isAncestor(table, resolvedItem) ? resolvedItem
+                    : (TypeItem)EcoreUtil2.cloneWithProxies(resolvedItem));
+            }
+            replace.accept(def);
+            return def;
+        }
+
         /** {@code oldName} — безусловное переименование: свойство прежнего имени переименовываем на месте. */
         private static void add(Type table, String name, String oldName, SimpleStatement statement, Method method)
         {
@@ -3250,6 +3274,18 @@ public final class BslStructureInsertCommentTypes
                 : table.getCollectionElementTypes();
             TypeContainer columns = tree ? ValueTreeDynamicContextDefProvider.getColumnCollectionType(table)
                 : ValueTableDynamicContextDefProvider.getColumnCollectionType(table);
+            if (rows == null || columns == null)
+                return;
+            // У копии платформенной таблицы строка и коллекция колонок — ссылки на общие типы платформы:
+            // свойство, добавленное в них, появилось бы у всех таблиц значений проекта.
+            TypeContainer oldColumns = columns;
+            rows = ownTypes(table, rows, tree ? null : def -> table.setCollectionElementTypes(def));
+            columns = ownTypes(table, columns, def ->
+            {
+                for (com._1c.g5.v8.dt.mcore.Property property : table.getContextDef().getProperties())
+                    if (property.getTypeContainer() == oldColumns)
+                        property.setTypeContainer(def);
+            });
             if (rows == null || columns == null)
                 return;
             for (TypeItem row : rows.allTypes())

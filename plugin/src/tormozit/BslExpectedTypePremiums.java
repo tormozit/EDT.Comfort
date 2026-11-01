@@ -2594,8 +2594,13 @@ final class BslExpectedTypePremiums
             Version version = resource.getContents().isEmpty() ? Version.LATEST
                 : versions.getRuntimeVersionOrDefault(resource.getContents().get(0), Version.LATEST);
             List<Object> references = new ArrayList<>();
+            Set<String> seenNames = new HashSet<>();
             for (TypeItem item : items)
             {
+                // Разные экземпляры одного типа (например, «Массив из Строка» из разных присваиваний) — одна ссылка
+                String itemName = typeName(item);
+                if (!itemName.isEmpty() && !seenNames.add(itemName.toLowerCase(Locale.ROOT)))
+                    continue;
                 TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, resource);
                 Object reference = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
                     resolved, resource, Boolean.TRUE, version, Boolean.FALSE);
