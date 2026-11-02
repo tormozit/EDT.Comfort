@@ -194,7 +194,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /**
      * Тип ИР для overlap EDT+ИР по dedup-ключу — переживает пересборку popup
      * (подпись каждой перегрузки собирается из сигнатуры EDT + тип из кэша).
-     */
+     */ 
     private final java.util.Map<String, IrOverlapTypeMetadata> irOverlapTypeByKey =
         new java.util.HashMap<>();
 
