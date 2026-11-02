@@ -14,7 +14,11 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
- * Порт {@code ФорматироватьТекст()} из RDT: форматирование BSL и текста запроса через приложение ИР.
+ * Общие проверки применимости и определение проекта для команд ИР над текстом запроса.
+ * <p>
+ * Методы {@link #formatBslModule} и {@link #formatQuery} — отключённый порт {@code ФорматироватьТекст()}
+ * из RDT (форматирование через приложение ИР). Команда «Форматировать текст ИР» удалена (заменена штатной),
+ * команда, пункты меню и привязка Alt+Shift+F не зарегистрированы; код оставлен для возможного восстановления.
  */
 public final class IrFormatTextHandler
 {
@@ -40,6 +44,7 @@ public final class IrFormatTextHandler
         return viewer.getTextWidget() != null && !viewer.getTextWidget().isDisposed();
     }
 
+    /** Отключено: нигде не вызывается. */
     public static void formatBslModule(BslXtextEditor editor)
     {
         if (editor == null)
@@ -96,6 +101,7 @@ public final class IrFormatTextHandler
         }
     }
 
+    /** Отключено: нигде не вызывается. */
     public static void formatQuery(ISourceViewer viewer, Object queryDialog)
     {
         if (!isApplicableQuery(viewer))
@@ -196,4 +202,3 @@ public final class IrFormatTextHandler
             display.asyncExec(() -> ToastNotification.show(title, message, durationMs));
     }
 }
-

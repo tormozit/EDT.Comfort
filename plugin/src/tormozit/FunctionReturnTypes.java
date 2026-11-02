@@ -50,7 +50,6 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
  */
 final class FunctionReturnTypes
 {
-    private static final String LOG = "assist-function-return-type"; //$NON-NLS-1$
     static final String UNKNOWN = "?"; //$NON-NLS-1$
 
     /**
@@ -546,27 +545,6 @@ final class FunctionReturnTypes
                     requested++;
                 }
             }
-            log("visible.requests rows=" + requested + " idleMs=" + IDLE_MS); //$NON-NLS-1$ //$NON-NLS-2$
-            traceVisibleRows("idle"); //$NON-NLS-1$
-        }
-
-        private void traceVisibleRows(String phase)
-        {
-            if (table.isDisposed())
-                return;
-            List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
-                ContentAssistPopupSync.visibleProposals(assistant);
-            var area = table.getClientArea();
-            for (int i = table.getTopIndex(); i < table.getItemCount(); i++)
-            {
-                var item = table.getItem(i);
-                var bounds = item.getBounds();
-                if (bounds.y >= area.y + area.height)
-                    break;
-                Object proposal = rows != null && i < rows.size() ? rows.get(i) : null;
-                Global.tempLog("assist-type-display", "table phase=" + phase + " index=" + i //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " proposal=" + System.identityHashCode(proposal) + " text=" + item.getText()); //$NON-NLS-1$ //$NON-NLS-2$
-            }
         }
 
         private void close()
@@ -678,7 +656,6 @@ final class FunctionReturnTypes
         }
         catch (RuntimeException error)
         {
-            log("error lookup method=" + name + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -768,11 +745,7 @@ final class FunctionReturnTypes
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                long start = System.nanoTime();
-                int count = unloaded.size();
                 loadProxyNames(unloaded, module, file.getProject());
-                log("property proxies loaded=" + count //$NON-NLS-1$
-                    + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
                 publish();
                 return Status.OK_STATUS;
             }
@@ -861,10 +834,6 @@ final class FunctionReturnTypes
         String stamp = currentStamp(target.module());
         rememberLineContextKey(target.module(), target.key());
         VariableComputed computed = VARIABLE_RESULTS.get(target.key());
-        // #region temp #877 — что получает строка переменной
-        log("  show key=" + target.key() + " offset=" + target.offset() + " stamp=" + stamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " computed=" + computed); //$NON-NLS-1$
-        // #endregion
         if (computed != null && computed.matches(stamp, target.offset()))
         {
             boolean pending = variableSourcesPending(target.key());
@@ -1327,7 +1296,6 @@ final class FunctionReturnTypes
         IFile file = ForeignModuleModel.fileOf(target.module());
         if (file == null)
         {
-            log("skip noFile key=" + key); //$NON-NLS-1$
             RESULTS.putIfAbsent(key, new Computed("", "")); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
@@ -1422,7 +1390,6 @@ final class FunctionReturnTypes
      */
     private static void computeIndex(IndexRequest request)
     {
-        long start = System.nanoTime();
         Target target = request.target();
         String type = null;
         try
@@ -1472,10 +1439,8 @@ final class FunctionReturnTypes
         }
         catch (Throwable error)
         {
-            log("error index key=" + target.key() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+            // Тип остаётся неизвестным.
         }
-        log("index key=" + target.key() + " type=" + type //$NON-NLS-1$ //$NON-NLS-2$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
         var knownDocument = KNOWN_DOCUMENTS.get(target.module());
         if ((knownDocument == null || knownDocument.get() == null)
             && BslDocCommentComputedTypes.isExtendedTypesEnabled(request.file().getProject()))
@@ -1630,7 +1595,6 @@ final class FunctionReturnTypes
                     return Status.CANCEL_STATUS;
                 }
                 INDEX_STAMPS.remove(target.key());
-                log("reread after build key=" + target.key()); //$NON-NLS-1$
                 publish();
                 return Status.OK_STATUS;
             }
@@ -1644,7 +1608,6 @@ final class FunctionReturnTypes
     {
         if (request.nativeDocument() == null)
             return;
-        int queued;
         synchronized (QUEUE)
         {
             Request pending = null;
@@ -1663,10 +1626,7 @@ final class FunctionReturnTypes
             else
                 QUEUE.addLast(request);
             REQUEST_STAMPS.put(request.key(), request.state());
-            queued = QUEUE.size();
         }
-        log("schedule key=" + request.key() + " state=" + request.state() //$NON-NLS-1$ //$NON-NLS-2$
-            + " first=" + first + " queued=" + queued); //$NON-NLS-1$ //$NON-NLS-2$
         WORKER.schedule();
     }
 
@@ -1679,27 +1639,16 @@ final class FunctionReturnTypes
     private static void compute(Request request)
     {
         if (!requestStillCurrent(request) || hasCompletedResult(request))
-        {
-            log("native.skip key=" + request.key() + " state=" + request.state()); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
-        long start = System.nanoTime();
         Set<String> nativeDone = ConcurrentHashMap.newKeySet();
         if (request.nativeDocument() != null)
         {
-            Integer missing = null;
             List<Pending> pending = new java.util.ArrayList<>();
-            // #region temp timing #877: ожидание блокировки документа против работы под ней
-            long[] entered = new long[1];
             try
             {
-                missing = request.nativeDocument().readOnly(resource ->
+                request.nativeDocument().readOnly(resource ->
                 {
-                    entered[0] = System.nanoTime();
                     String actualStamp = ForeignModuleModel.stamp(request.file(), request.nativeDocument());
-                    log("native.request key=" + request.key() + " stamp=" + actualStamp //$NON-NLS-1$ //$NON-NLS-2$
-                        + " document=" + System.identityHashCode(request.nativeDocument()) //$NON-NLS-1$
-                        + " model=" + System.identityHashCode(resource)); //$NON-NLS-1$
                     if (!request.stamp().equals(actualStamp))
                         return null;
                     return readyFromNative(resource, request, nativeDone, pending);
@@ -1707,14 +1656,8 @@ final class FunctionReturnTypes
             }
             catch (Throwable error)
             {
-                log("error native module=" + request.module() + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                // Запрос окончится как неизвестный (ниже).
             }
-            long end = System.nanoTime();
-            log("native module=" + request.module() + " missing=" + missing //$NON-NLS-1$ //$NON-NLS-2$
-                + " ms=" + (end - start) / 1_000_000L //$NON-NLS-1$
-                + " waitMs=" + (entered[0] > 0 ? (entered[0] - start) / 1_000_000L : -1) //$NON-NLS-1$
-                + " underLockMs=" + (entered[0] > 0 ? (end - entered[0]) / 1_000_000L : -1)); //$NON-NLS-1$
-            // #endregion
             if (!requestStillCurrent(request))
                 return;
             resolvePending(request, pending);
@@ -1735,7 +1678,6 @@ final class FunctionReturnTypes
             storeNative(request, new VariableComputed(request.stamp(), request.variable().offset(), "")); //$NON-NLS-1$
         else
             storeNative(request, new Computed(request.stamp(), "")); //$NON-NLS-1$
-        log("finished unknown key=" + request.key() + " state=" + request.state()); //$NON-NLS-1$ //$NON-NLS-2$
         publish();
     }
 
@@ -1842,10 +1784,8 @@ final class FunctionReturnTypes
                 }
                 catch (RuntimeException error)
                 {
-                    log("error proxy uri=" + uri + " " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Имя останется пустым.
                 }
-                if (name == null || name.isEmpty())
-                    log("proxy unresolved uri=" + uri); //$NON-NLS-1$
                 PROXY_NAMES.put(uri, name != null ? name : ""); //$NON-NLS-1$
             }
         }
@@ -1860,7 +1800,6 @@ final class FunctionReturnTypes
     {
         if (pending.isEmpty())
             return;
-        long start = System.nanoTime();
         Set<URI> uris = new LinkedHashSet<>();
         for (Pending item : pending)
         {
@@ -1890,10 +1829,7 @@ final class FunctionReturnTypes
                 storeNative(request, new VariableComputed(item.stamp(), item.offset(), type));
             else
                 storeNative(request, new Computed(item.stamp(), type));
-            log("  resolved key=" + item.key() + " stamp=" + item.stamp() + " type=" + type); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
-        log("proxies module=" + request.module() + " items=" + pending.size() + " loaded=" + uris.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
         publish();
     }
 
@@ -1918,11 +1854,6 @@ final class FunctionReturnTypes
             return computeVariable(module, request, stamp, done, pending);
         int missing = 0;
         boolean dirty = false;
-        int noState = 0;
-        int emptyState = 0;
-        int proxyType = 0;
-        String proxyExample = null;
-        List<String> missingExamples = new java.util.ArrayList<>();
         for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
         {
             if (method.getName() == null || !method.getName().equalsIgnoreCase(request.method())
@@ -1932,12 +1863,6 @@ final class FunctionReturnTypes
             List<Object> parts = new java.util.ArrayList<>();
             boolean unloaded = false;
             boolean complete = ready != null && !ready.isEmpty();
-            // #region temp #877: почему у функции нет готового типа
-            if (ready == null)
-                noState++;
-            else if (ready.isEmpty())
-                emptyState++;
-            // #endregion
             if (complete)
             {
                 for (Object item : ready)
@@ -1956,9 +1881,6 @@ final class FunctionReturnTypes
             if (complete && unloaded)
             {
                 // Ссылки на типы загружаются после блокировки (resolvePending); до того — «?».
-                proxyType++;
-                if (proxyExample == null)
-                    proxyExample = method.getName() + ":" + parts; //$NON-NLS-1$
                 pending.add(new Pending(key, parts, stamp, -1));
                 done.add(key);
                 continue;
@@ -1966,8 +1888,6 @@ final class FunctionReturnTypes
             if (!complete)
             {
                 missing++;
-                if (missingExamples.size() < 5)
-                    missingExamples.add(method.getName());
                 // Готового типа нет, и пересчёта не будет: итог пустой — показ штатный, без «?».
                 // Тип из «Возвращаемое значение» (чтение комментария) — только предварительный
                 // при следующем пересчёте.
@@ -2004,8 +1924,6 @@ final class FunctionReturnTypes
             done.add(key);
             dirty |= storeNative(request, result);
         }
-        log("native reasons module=" + request.module() + " noState=" + noState + " emptyState=" + emptyState //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " proxyType=" + proxyType + " proxyExample=" + proxyExample + " examples=" + missingExamples); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (dirty)
             publish();
         return Integer.valueOf(missing);
@@ -2027,13 +1945,11 @@ final class FunctionReturnTypes
             return 0;
         int offset = target.offset();
         BslStructureInsertCommentTypes.refreshExternalFunctionTypes(module.eResource(), offset);
-        long start = System.nanoTime();
         org.eclipse.emf.ecore.EObject object = module.eResource().getEObject(target.fragment());
         if (!(object instanceof com._1c.g5.v8.dt.bsl.model.Variable variable)
             || variable.getName() == null || !variable.getName().equalsIgnoreCase(target.name()))
         {
             storeNative(request, new VariableComputed(stamp, offset, "")); //$NON-NLS-1$
-            log("variable unavailable key=" + target.key() + " fragment=" + target.fragment()); //$NON-NLS-1$ //$NON-NLS-2$
             publish();
             return 1;
         }
@@ -2049,7 +1965,6 @@ final class FunctionReturnTypes
         {
             pending.add(new Pending(key, parts, stamp, offset));
             done.add(key);
-            log("  var key=" + key + " stamp=" + stamp + " pending=" + parts); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return 0;
         }
         List<String> names = new java.util.ArrayList<>();
@@ -2060,8 +1975,6 @@ final class FunctionReturnTypes
         done.add(key);
         VariableComputed result = new VariableComputed(stamp, offset, type);
         boolean changed = storeNative(request, result);
-        log("variable key=" + key + " offset=" + offset + " stamp=" + stamp + " type=" + type //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + " ms=" + (System.nanoTime() - start) / 1_000_000L); //$NON-NLS-1$
         // Даже при том же типе новый штамп завершает ожидание: строка должна снять «?».
         if (changed)
             publish();
@@ -2087,10 +2000,6 @@ final class FunctionReturnTypes
             types = BslStructureInsertCommentTypes.arrayVariableTypes(types, variable, offset, environments);
             if (types == null || types.isEmpty())
             {
-                // #region agent log — причина пустого типа переменной (временно)
-                log("variable miss name=" + variable.getName() + " class=" + variable.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " offset=" + offset + " env=" + environments); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return null;
             }
             List<Object> parts = new java.util.ArrayList<>();
@@ -2099,8 +2008,6 @@ final class FunctionReturnTypes
                 Object part = partOf(item);
                 if (part == null)
                 {
-                    log("variable miss name=" + variable.getName() + " reason=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (item == null ? "nullItem" : "noName " + item.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                     return null;
                 }
                 parts.add(part);
@@ -2109,7 +2016,6 @@ final class FunctionReturnTypes
         }
         catch (RuntimeException error)
         {
-            log("variable miss name=" + variable.getName() + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -2258,15 +2164,8 @@ final class FunctionReturnTypes
     {
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
-        log("refresh list=" + visible + " listeners=" + LISTENERS.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (visible)
-        {
             ContentAssistPopupSync.refreshProposalTable(assistant);
-            var table = ContentAssistPopupSync.getProposalTable(ContentAssistPopupSync.getPopupObject(assistant));
-            if (table != null && !table.isDisposed()
-                && table.getData(TypeDemandSession.KEY) instanceof TypeDemandSession session)
-                session.traceVisibleRows("refresh"); //$NON-NLS-1$
-        }
         if (NATIVE_HINTS_CHANGED.getAndSet(false) && visible)
         {
             List<org.eclipse.jface.text.contentassist.ICompletionProposal> rows =
@@ -2423,11 +2322,5 @@ final class FunctionReturnTypes
         {
             visiting.remove(type);
         }
-    }
-
-    /** Временный лог (снять после подтверждения). */
-    private static void log(String text)
-    {
-        Global.tempLog(LOG, text);
     }
 }

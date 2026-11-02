@@ -1882,33 +1882,6 @@ public final class BslDocCommentComputedTypes
         return Integer.toHexString(System.identityHashCode(o));
     }
 
-    /** Диагностика: имена функций модуля, у которых в NORMAL возврата есть типы. */
-    static java.util.Set<String> diagTypedReturnFunctions(com._1c.g5.v8.dt.bsl.model.Module module)
-    {
-        java.util.Set<String> result = new java.util.HashSet<>();
-        if (module == null)
-            return result;
-        for (Method method : new ArrayList<>(module.allMethods()))
-        {
-            if (!(method instanceof com._1c.g5.v8.dt.bsl.model.Function) || method.getName() == null)
-                continue;
-            try
-            {
-                Object envs = BslDocCommentDescriptionFix.invokeCommentGetter(method, "environments"); //$NON-NLS-1$
-                Object collector = BslDocCommentDescriptionFix.invokeCommentGetter(method, "getFinalReturnState"); //$NON-NLS-1$
-                List<?> types = collector == null ? null : typesFromReturnProvider(collector, "NORMAL", envs); //$NON-NLS-1$
-                if (types != null && !types.isEmpty())
-                    result.add(method.getName());
-            }
-            catch (Throwable ignored)
-            {
-                // Не читается — считаем «с типом», чтобы не дать ложный returnLost.
-                result.add(method.getName());
-            }
-        }
-        return result;
-    }
-
     /** Диагностика: состояния возврата метода по режимам — {@code NORMAL=[…] LIGHT=[…]}. */
     static String describeFinalReturnState(EObject method)
     {

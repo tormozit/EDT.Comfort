@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -61,6 +63,7 @@ import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.Pragma;
 import com._1c.g5.v8.dt.bsl.model.PropertyType;
+import com._1c.g5.v8.dt.bsl.model.ReturnStatement;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
@@ -147,7 +150,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         "ОтметкаНезаполненного", "Отображать", "Размещение", "Текст", "ТолькоПросмотр", "Формат", "ЦветФона", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
         "ЦветТекста", "Шрифт"); //$NON-NLS-1$ //$NON-NLS-2$
     /** Стандартные имена форм → свойство объекта метаданных с основной формой. */
-    private static final Map<String, String> STANDARD_FORMS = Map.of("формаобъекта", "defaultObjectForm", //$NON-NLS-1$ //$NON-NLS-2$
+    static final Map<String, String> STANDARD_FORMS =Map.of("формаобъекта", "defaultObjectForm", //$NON-NLS-1$ //$NON-NLS-2$
         "формасписка", "defaultListForm", "формавыбора", "defaultChoiceForm", "формазаписи", "defaultRecordForm", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         "формагруппы", "defaultFolderForm", "формавыборагруппы", "defaultFolderChoiceForm", "форма", "defaultForm"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
     private static final Pattern TEMP_TABLE = Pattern.compile(
@@ -173,6 +176,36 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     public static List<String> unknownLiteralValues(StringLiteral literal, BooleanSupplier canceled, Pass pass)
     {
         return unknownLiteralValues(literal, canceled, pass, null);
+    }
+
+    /**
+     * Литерал вне вызова, создания объекта и индекса: сообщения штатных провайдеров проверки
+     * ({@code IAvailableStringLiteralServiceProvider.validate} — типы по аннотации, ОписаниеТипов и т. п.),
+     * как у bsl-legacy-check-string-literal. Для литералов в контексте вызова штатный список даёт
+     * {@link #unknownLiteralValues}.
+     */
+    public static List<String> stockOutsideMessages(StringLiteral literal)
+    {
+        EObject container = literal.eContainer();
+        if (container instanceof Invocation || container instanceof OperatorStyleCreator
+            || container instanceof IndexAccess
+            || container instanceof FunctionStyleCreator creator && creator.getTypeNameExpression() == literal
+            || literal.getLines().isEmpty() || literalText(literal).isEmpty()
+            || !(literal.eResource() instanceof XtextResource resource) || resource.getResourceServiceProvider() == null)
+            return List.of();
+        try
+        {
+            var provider = resource.getResourceServiceProvider()
+                .get(com._1c.g5.v8.dt.bsl.validation.stringliterals.IAvailableStringLiteralServiceProvider.class);
+            if (provider == null || !provider.isAppropriate(literal))
+                return List.of();
+            List<String> messages = provider.validate(literal);
+            return messages != null ? messages : List.of();
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            return List.of();
+        }
     }
 
     /** Те же полные списки для общего исправления опечаток; значение — варианты всего элемента списка. */
@@ -276,6 +309,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             int index = args.indexOf(literal);
             if (index >= 0)
                 analysis.call(container, args, index, ""); //$NON-NLS-1$
+            else if (container instanceof FunctionStyleCreator creator && creator.getTypeNameExpression() == literal)
+            {
+                // Новый("Имя"): имена типов даёт штатный список; «AddIn.…» штатная проверка пропускает.
+                if (!lower(literalText(literal)).startsWith("addin.")) //$NON-NLS-1$
+                    analysis.stockContext = Tuples.<EObject, List<Expression>, Integer>create(creator,
+                        List.<Expression>of(literal), 0);
+            }
             else
                 analysis.outside(literal);
         }
@@ -306,6 +346,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
          * модуля на каждый экспортный метод. Только на проход — значения держат модель модуля.
          */
         private final Map<Module, Map<String, Method>> moduleMethods = new IdentityHashMap<>();
+        /** Модуль формы вызывает {@code ИзменитьРеквизиты} ({@link Analysis#formAttributesSource}). */
+        private final Map<Module, Boolean> dynamicForms = new IdentityHashMap<>();
         /** Имена общих модулей (нижний регистр), не найденные и после перестройки справочника. */
         private final Set<String> missingCommonModules = new HashSet<>();
 
@@ -798,10 +840,28 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 result.add(proposal);
                 continue;
             }
-            if (isOurs(result.get(at), request) && !isOurs(proposal, request))
+            ICompletionProposal kept = result.get(at);
+            boolean keptOurs = isOurs(kept, request);
+            boolean nowOurs = isOurs(proposal, request);
+            if (keptOurs && !nowOurs && !isPropertyOverTypeName(kept, proposal))
+                result.set(at, proposal);
+            else if (!keptOurs && nowOurs && isPropertyOverTypeName(proposal, kept))
                 result.set(at, proposal);
         }
         return result.toArray(ICompletionProposal[]::new);
+    }
+
+    /**
+     * Наша строка — свойство (с типом значения), строка EDT — имя типа платформы с тем же текстом
+     * ({@code СвязьПоТипу}: свойство поля и тип {@code TypeLink}); описание строки типа — просто текст. Тогда остаётся
+     * наша: у неё тип и описание свойства.
+     */
+    private static boolean isPropertyOverTypeName(ICompletionProposal ours, ICompletionProposal stock)
+    {
+        return SmartContentAssistProcessor.unwrapProposal(ours) instanceof ConfigurableCompletionProposal mine
+            && Global.getField(mine, "additionalProposalInfo") instanceof Property //$NON-NLS-1$
+            && SmartContentAssistProcessor.unwrapProposal(stock) instanceof ConfigurableCompletionProposal theirs
+            && Global.getField(theirs, "additionalProposalInfo") instanceof String; //$NON-NLS-1$
     }
 
     /**
@@ -998,6 +1058,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         final List<String> branches = new ArrayList<>();
         /** {@code ЛиНаборЗначенийПолный}. */
         boolean full;
+        /** Значения взяты из реквизитов формы, которые модуль создаёт кодом: список заведомо неполный. */
+        private boolean dynamicFormAttributes;
         /** Ограничивать полноту по веткам только при поиске роли в вызываемом методе. */
         ParameterSearch parameterSearch;
         boolean sortDirection;
@@ -1105,8 +1167,95 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             branches.add(name);
         }
 
+        /**
+         * Значения берутся из реквизитов формы. Если модуль формы вызывает {@code ИзменитьРеквизиты},
+         * часть реквизитов и колонок создаётся кодом и в метаданных формы её нет — полного списка нет.
+         */
+        void formAttributesSource()
+        {
+            if (module == null || moduleForm() == null)
+                return;
+            Boolean dynamic = pass.dynamicForms.get(module);
+            if (dynamic == null)
+            {
+                dynamic = Boolean.FALSE;
+                for (EObject object : contents(module))
+                    if (object instanceof Invocation invocation
+                        && invocation.getMethodAccess() instanceof StaticFeatureAccess access
+                        && in(access.getName(), "ИзменитьРеквизиты", "ChangeAttributes")) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        dynamic = Boolean.TRUE;
+                        break;
+                    }
+                pass.dynamicForms.put(module, dynamic);
+            }
+            if (dynamic)
+                dynamicFormAttributes = true;
+        }
+
+        /**
+         * Литерал-аргумент вызова для штатных провайдеров списка EDT ({@code StringLiteralProposalService}):
+         * при проверке они дополняют значения там, где собственных значений нет. Тот же список даёт
+         * автодополнение, поэтому правила имён форм, предопределённых и типов не дублируются.
+         */
+        private Triple<EObject, List<Expression>, Integer> stockContext;
+
+        private void addStockValues()
+        {
+            var services = resource.getResourceServiceProvider();
+            if (services == null || stockContext == null)
+                return;
+            try
+            {
+                var registry = services.get(com._1c.g5.v8.dt.bsl.validation.stringliterals.IStringLiteralProposalProviderRegistry.class);
+                IScopeProvider scopes = services.get(IScopeProvider.class);
+                IIndexSlicePredicateService slices = services.get(IIndexSlicePredicateService.class);
+                if (registry == null || scopes == null)
+                    return;
+                Map<String, String> found = new LinkedHashMap<>();
+                // parent — путь без последней точки; провайдеры ждут набранный текст до курсора.
+                String typed = parent.isEmpty() ? "" : parent + "."; //$NON-NLS-1$ //$NON-NLS-2$
+                for (Object provider : registry.getAllProviders())
+                {
+                    checkCanceled();
+                    if (!(provider instanceof com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.IStringLiteralProposalProviderExtension extension)
+                        || provider instanceof BslLiteralValues || !extension.isAppropriate(stockContext))
+                        continue;
+                    for (var proposal : extension.computeProposals(stockContext, typed, scopes, slices, russian))
+                    {
+                        String text = proposal.getFirst() != null ? proposal.getFirst() : ""; //$NON-NLS-1$
+                        if (text.startsWith("\"")) //$NON-NLS-1$
+                            text = text.substring(1);
+                        if (!text.regionMatches(true, 0, typed, 0, typed.length()))
+                            continue;
+                        String rest = text.substring(typed.length());
+                        int dot = rest.indexOf('.');
+                        String name = (dot >= 0 ? rest.substring(0, dot) : rest).trim();
+                        if (!name.isEmpty())
+                            found.putIfAbsent(lower(name), name);
+                    }
+                }
+                if (found.isEmpty())
+                    return;
+                found.values().forEach(this::add);
+                branch("stockProposals"); //$NON-NLS-1$
+                pathAware = true;
+                full = true;
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                // Штатный список не рассчитался — значения не добавляем, литерал не проверяется.
+                values.clear();
+                full = false;
+            }
+        }
+
         void finish()
         {
+            if (validation && values.isEmpty() && stockContext != null)
+                addStockValues();
+            if (dynamicFormAttributes)
+                full = false;
             // Единственный шаблонный член не задаёт полный список допустимых имён.
             if (values.size() == 1)
             {
@@ -1139,6 +1288,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private void callInScope(EObject target, List<Expression> args, int index, String structureType)
         {
             checkCanceled();
+            if (structureType.isEmpty() && index >= 0 && !(target instanceof IndexAccess))
+                stockContext = Tuples.create(target, args, index);
             if (structureType.isEmpty() && index == 0 && target instanceof Invocation invocation
                 && invocation.getMethodAccess() instanceof StaticFeatureAccess access
                 && in(access.getName(), "Тип", "Type")) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1408,21 +1559,162 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         boolean hasColumnAddWithUnknownName(Call call)
         {
             String table = call.source != null ? withoutSpaces(text(call.source)) : ""; //$NON-NLS-1$
-            for (String suffix : new String[] { ".Колонки", ".Columns" }) //$NON-NLS-1$ //$NON-NLS-2$
+            for (String suffix : new String[] { ".Колонки", ".Columns", ".Индексы", ".Indexes" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                 if (table.toLowerCase().endsWith(suffix.toLowerCase()))
                     table = table.substring(0, table.length() - suffix.length());
-            if (table.isEmpty())
+            return !table.isEmpty() && hasUnknownMemberAdd(scopeOf(call.target), table, true, 0, 0);
+        }
+
+        /**
+         * У переменной {@code variable} в области {@code scope} добавляется колонка таблицы ({@code columns}) или
+         * ключ структуры с именем — не строковым литералом: EDT такой член в тип не заносит. Ищется: прямой вызов
+         * в области; присвоение из вызова метода модуля — по его {@code Возврат}; передача переменной параметром
+         * метода модуля — не глубже одной процедуры ({@code procedureDepth}). Цепочка возвратов — до
+         * {@link #MAX_UNKNOWN_ADD_DEPTH}. Результат запоминается в проходе.
+         */
+        boolean hasUnknownMemberAdd(EObject scope, String variable, boolean columns, int procedureDepth, int depth)
+        {
+            if (scope == null || variable.isEmpty() || depth > MAX_UNKNOWN_ADD_DEPTH)
                 return false;
-            for (EObject object : contents(scopeOf(call.target)))
-                if (object instanceof Invocation invocation && !invocation.getParams().isEmpty()
-                    && invocation.getMethodAccess() instanceof DynamicFeatureAccess add
-                    && in(add.getName(), "Добавить", "Add") //$NON-NLS-1$ //$NON-NLS-2$
-                    && add.getSource() instanceof DynamicFeatureAccess columns
-                    && in(columns.getName(), "Колонки", "Columns") //$NON-NLS-1$ //$NON-NLS-2$
-                    && matches(columns.getSource(), table)
-                    && literalText(invocation.getParams().get(0)).isEmpty())
-                    return true;
+            String key = (columns ? "c:" : "s:") + procedureDepth + ":" + lower(variable); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Map<String, Boolean> known = UNKNOWN_MEMBER_ADDS.computeIfAbsent(scope, k -> new ConcurrentHashMap<>());
+            Boolean cached = known.get(key);
+            if (cached != null)
+                return cached;
+            if (!visitingMemberAdds.computeIfAbsent(scope, k -> new HashSet<>()).add(key))
+                return false;
+            boolean result = false;
+            for (EObject object : contents(scope))
+            {
+                if (object instanceof Invocation invocation)
+                {
+                    if (isUnknownMemberAdd(invocation, variable, columns))
+                    {
+                        result = true;
+                        break;
+                    }
+                    if (procedureDepth == 0 && passedToUnknownAdd(invocation, variable, columns, depth))
+                    {
+                        result = true;
+                        break;
+                    }
+                }
+                else if (object instanceof SimpleStatement statement && matches(statement.getLeft(), variable)
+                    && statement.getRight() instanceof Invocation source
+                    && returnsUnknownAdd(source, columns, procedureDepth, depth))
+                {
+                    result = true;
+                    break;
+                }
+            }
+            if (!result && procedureDepth != 1 && scope instanceof Method method)
+                result = unknownAddInCallers(method, variable, columns, depth);
+            visitingMemberAdds.get(scope).remove(key);
+            known.put(key, result);
+            return result;
+        }
+
+        /**
+         * Переменная — параметр метода {@code method}: у его вызывающих в том же модуле в переданную переменную
+         * добавляется член с неизвестным именем. Вверх по цепочке вызывающих — {@code procedureDepth = 2}: подъём
+         * продолжается, спуск в процедуры нет.
+         */
+        private boolean unknownAddInCallers(Method method, String variable, boolean columns, int depth)
+        {
+            int index = -1;
+            for (int i = 0; i < method.getFormalParams().size(); i++)
+                if (variable.equalsIgnoreCase(method.getFormalParams().get(i).getName()))
+                    index = i;
+            if (index < 0 || module == null || method.getName() == null
+                || EcoreUtil2.getContainerOfType(method, Module.class) != module)
+                return false;
+            for (EObject object : contents(module))
+                if (object instanceof Invocation invocation && invocation.getMethodAccess() != null
+                    && method.getName().equalsIgnoreCase(invocation.getMethodAccess().getName())
+                    && index < invocation.getParams().size() && isSimpleName(invocation.getParams().get(index))
+                    && calleeOf(invocation) == method)
+                {
+                    Method caller = methodOf(invocation);
+                    if (hasUnknownMemberAdd(caller != null ? caller : module, text(invocation.getParams().get(index)),
+                        columns, 2, depth + 1))
+                        return true;
+                }
             return false;
+        }
+
+        private static final int MAX_UNKNOWN_ADD_DEPTH = 6;
+
+        /**
+         * {@link #hasUnknownMemberAdd}: область и ключ «вид:глубина:переменная» → результат. Общий для всех проходов:
+         * метод общего модуля иначе разбирался бы заново из каждого вызывающего модуля. Ключ слабый — после
+         * перепарсинга метод становится другим объектом и запись пропадает вместе со старым.
+         */
+        private static final Map<EObject, Map<String, Boolean>> UNKNOWN_MEMBER_ADDS =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+        /** Область и ключ, разбираемые сейчас этим анализом: защита от циклических вызовов. */
+        private final Map<EObject, Set<String>> visitingMemberAdds = new IdentityHashMap<>();
+
+        /** {@code Переменная.Колонки.Добавить(не литерал)} или {@code Переменная.Вставить(не литерал, …)}. */
+        private boolean isUnknownMemberAdd(Invocation invocation, String variable, boolean columns)
+        {
+            if (invocation.getParams().isEmpty() || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess add)
+                || !literalText(invocation.getParams().get(0)).isEmpty())
+                return false;
+            if (!columns)
+                return in(add.getName(), "Вставить", "Insert") && matches(add.getSource(), variable); //$NON-NLS-1$ //$NON-NLS-2$
+            return in(add.getName(), "Добавить", "Add") //$NON-NLS-1$ //$NON-NLS-2$
+                && add.getSource() instanceof DynamicFeatureAccess collection
+                && in(collection.getName(), "Колонки", "Columns") //$NON-NLS-1$ //$NON-NLS-2$
+                && matches(collection.getSource(), variable);
+        }
+
+        /** Переменная передана параметром метода модуля, и там в неё добавляется член с неизвестным именем. */
+        private boolean passedToUnknownAdd(Invocation invocation, String variable, boolean columns, int depth)
+        {
+            List<Expression> args = invocation.getParams();
+            for (int index = 0; index < args.size(); index++)
+                if (matches(args.get(index), variable))
+                {
+                    Method callee = calleeOf(invocation);
+                    if (callee != null && index < callee.getFormalParams().size()
+                        && hasUnknownMemberAdd(callee, nullToEmpty(callee.getFormalParams().get(index).getName()),
+                            columns, 1, depth + 1))
+                        return true;
+                }
+            return false;
+        }
+
+        /** Метод модуля, вернувший значение вызова, возвращает переменную с неизвестным именем члена. */
+        private boolean returnsUnknownAdd(Invocation source, boolean columns, int procedureDepth, int depth)
+        {
+            Method callee = calleeOf(source);
+            if (callee == null)
+                return false;
+            for (EObject object : contents(callee))
+                if (object instanceof ReturnStatement statement && statement.getExpression() != null
+                    && methodOf(statement) == callee)
+                {
+                    Expression value = statement.getExpression();
+                    if (value instanceof Invocation next ? returnsUnknownAdd(next, columns, procedureDepth, depth + 1)
+                        : isSimpleName(value)
+                            && hasUnknownMemberAdd(callee, text(value), columns, procedureDepth, depth + 1))
+                        return true;
+                }
+            return false;
+        }
+
+        /** Метод модуля, вызываемый в {@code invocation}; иначе {@code null}. Разбор вызовов общий с {@link #describe}. */
+        private Method calleeOf(Invocation invocation)
+        {
+            Map<EObject, CallTarget> known = pass.callTargets.computeIfAbsent(resource, key -> new IdentityHashMap<>());
+            CallTarget target = known.get(invocation);
+            if (target == null)
+            {
+                target = callTarget(invocation);
+                known.put(invocation, target);
+            }
+            return target != NO_CALL_TARGET && target.feature() instanceof Method method ? method : null;
         }
 
         /** В области вызова есть {@code Структура.Вставить(…)} той же структуры, где ключ — не строковый литерал. */
@@ -1430,17 +1722,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (call.source == null || !hasType(call.sourceTypes, "Structure", "FixedStructure")) //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
-            String structure = text(call.source);
-            if (structure.isEmpty())
-                return false;
-            for (EObject object : contents(scopeOf(call.target)))
-                if (object instanceof Invocation invocation && !invocation.getParams().isEmpty()
-                    && invocation.getMethodAccess() instanceof DynamicFeatureAccess insert
-                    && in(insert.getName(), "Вставить", "Insert") //$NON-NLS-1$ //$NON-NLS-2$
-                    && matches(insert.getSource(), structure)
-                    && literalText(invocation.getParams().get(0)).isEmpty())
-                    return true;
-            return false;
+            return hasUnknownMemberAdd(scopeOf(call.target), text(call.source), false, 0, 0);
         }
 
         /** Ветка «системный метод или конструктор» {@code ЗаполнитьТаблицуВозможныхЗначенийЛитерала}. */
@@ -1642,15 +1924,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             else if (hasType(objectTypes, "FormDataCollection")) //$NON-NLS-1$
             {
                 branch("formDataCollection"); //$NON-NLS-1$
+                formAttributesSource();
                 addAll(elementProperties(objectTypes));
             }
             else if ("ИмяРеквизита".equalsIgnoreCase(parameter) //$NON-NLS-1$
                 && in(method, "ЗначениеВРеквизитФормы", "РеквизитФормыВЗначение")) //$NON-NLS-1$ //$NON-NLS-2$
             {
                 branch("formAttribute"); //$NON-NLS-1$
-                if (moduleForm() != null)
-                    for (FormAttribute attribute : moduleForm().getAttributes())
-                        add(nameOf(attribute));
+                // Путь через точку («Объект.Реквизит», колонки таблицы) — как у РеквизитФормы.Путь.
+                addFormAttributes(moduleForm());
             }
             else if ("ИмяОбласти".equalsIgnoreCase(parameter) && hasType(objectTypes, "SpreadsheetDocument")) //$NON-NLS-1$ //$NON-NLS-2$
             {
@@ -2289,7 +2571,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 String value = literalText(string);
                 if (value.length() > MAX_LITERAL_LENGTH)
                     continue;
-                add(value);
+                // Литерал-список («Имя, ПутьКДанным») — это несколько слов, запятая не бывает внутри слова.
+                for (String part : value.split(",", -1)) //$NON-NLS-1$
+                    add(part);
             }
         }
 
@@ -2373,6 +2657,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         addAll(elementProperties(one));
                         continue;
                     }
+                    // ИР: ТаблицаФормы — своя ветка (ТекущиеДанные), не зависящая от ветки «Структура»: свойства,
+                    // добавленные таблице формы присваиваниями («ОтборСтрок»), ключами не являются.
+                    if (hasType(one, "FormTable")) //$NON-NLS-1$
+                    {
+                        formAttributesSource();
+                        addAll(properties(propertyTypes(one, "ТекущиеДанные"))); //$NON-NLS-1$
+                        continue;
+                    }
                     // ИР: метаданные типа — Структура (у структуры, выборки запроса и т. п.) → её ключи. В EDT —
                     // свойства, добавленные сверх платформенного типа, у типа с любым именем.
                     List<String> added = structureKeyNames(one);
@@ -2381,9 +2673,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     else if (isTableType(one))
                         addAll(columns(one));
                     else if (hasType(one, "FormDataCollection", "FormDataStructureAndCollection")) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        formAttributesSource();
                         addAll(elementProperties(one));
-                    else if (hasType(one, "FormTable")) //$NON-NLS-1$
-                        addAll(properties(propertyTypes(one, "ТекущиеДанные"))); //$NON-NLS-1$
+                    }
                     else if (mdOf(type) != null)
                         addAll(mdChildren(mdOf(type), en.contains("Manager") ? "dimensions" : "attributes")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 }
@@ -2401,7 +2694,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             for (TypeItem item : types)
             {
                 List<TypeItem> one = List.of(item);
-                for (String name : hasType(one, "Structure", "FixedStructure") //$NON-NLS-1$ //$NON-NLS-2$
+                // Строка таблицы и элемент коллекции формы: шаблонное платформенное свойство («ИмяКолонки») — не поле.
+                for (String name : hasType(one, "Structure", "FixedStructure", "ValueTableRow", "ValueTreeRow", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    "FormDataCollectionItem", "FormDataTreeItem", "FormDataStructureAndCollection") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     ? structureKeyNames(one) : properties(one))
                     addUnique(names, name);
             }
@@ -2646,7 +2941,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<String> properties(List<TypeItem> types)
         {
             List<String> names = new ArrayList<>();
-            for (TypeItem item : types)
+            // Неспециализированный элемент формы: члены всех расширений его вида
+            for (TypeItem item : FormItemTypes.expand(types))
             {
                 Type type = resolve(item);
                 ContextDef def = type != null ? type.getContextDef() : null;
@@ -2663,7 +2959,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<TypeItem> propertyTypes(List<TypeItem> owners, String name)
         {
             List<TypeItem> result = new ArrayList<>();
-            for (TypeItem owner : owners)
+            for (TypeItem owner : FormItemTypes.expand(owners))
             {
                 Type type = resolve(owner);
                 ContextDef def = type != null ? type.getContextDef() : null;
@@ -2779,6 +3075,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             pathAware = true;
             if (form == null)
                 return;
+            formAttributesSource();
             String path = parent.replaceAll("\\[[^\\]]*\\]", ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (path.isEmpty())
             {
@@ -2930,6 +3227,26 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                                 && !visited.contains(called))
                                 pending.add(called);
                         }
+                    }
+                    // ЗаполнитьЗначенияСвойств(Объект, Параметры): параметрами могут быть все свойства первого аргумента.
+                    if (object instanceof Invocation fill && isFillPropertyValues(fill) && fill.getParams().size() >= 2
+                        && isFormParameters(fill.getParams().get(1)))
+                    {
+                        Expression receiver = fill.getParams().get(0);
+                        // Имя в модуле формы штатный вычислитель в чужом ресурсе не знает: его тип — у свойства контекста формы.
+                        List<TypeItem> fillTypes = new ArrayList<>();
+                        if (receiver instanceof StaticFeatureAccess receiverAccess && context != null)
+                            for (Property property : context.allProperties())
+                                if (receiverAccess.getName() != null
+                                    && (receiverAccess.getName().equalsIgnoreCase(property.getName())
+                                        || receiverAccess.getName().equalsIgnoreCase(dualName(property))))
+                                {
+                                    fillTypes.addAll(property.getTypes());
+                                    break;
+                                }
+                        if (fillTypes.isEmpty())
+                            fillTypes = typesOf(receiver);
+                        addAll(properties(fillTypes));
                     }
                     if (object instanceof Invocation invocation
                         && invocation.getMethodAccess() instanceof DynamicFeatureAccess access

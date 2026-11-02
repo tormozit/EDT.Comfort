@@ -2979,6 +2979,7 @@ public final class BslStructureInsertCommentTypes
             return types;
         if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
             types = ArrayElementTypes.infer(types, variable, offset, environments);
+        types = FormItemKinds.infer(types, variable, offset, environments);
         return ColumnRenames.infer(types, variable, offset, environments);
     }
 
@@ -3335,6 +3336,204 @@ public final class BslStructureInsertCommentTypes
                 - NodeModelUtils.findActualNodeFor(method).getTotalOffset());
             property.setSource(source);
             type.getContextDef().getProperties().add(property);
+        }
+    }
+
+    /**
+     * ИР: усечение расширений элемента формы по {@code Элемент.Вид = ВидПоляФормы.ПолеВвода} выше позиции.
+     * Обход с конца; другой вид в более раннем присваивании — остаётся базовый тип. Вид → расширение —
+     * таблица EDT form ({@code ExtInfoManagementService.create*ExtInfo} + {@code FormItemInformationService}),
+     * ключ — английское имя значения, оно же литерал {@code ManagedForm*Type}.
+     */
+    private static final class FormItemKinds
+    {
+        private static final OnChangeEvictingCache PLANS = new OnChangeEvictingCache();
+        /** Базовый тип → {русское имя перечисления, английское}. */
+        private static final java.util.Map<String, String[]> ENUMS = java.util.Map.of(
+            "FormField", new String[] {"ВидПоляФормы", "FormFieldType"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "FormGroup", new String[] {"ВидГруппыФормы", "FormGroupType"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "FormDecoration", new String[] {"ВидДекорацииФормы", "FormDecorationType"}); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        private static final java.util.Map<String, String> EXTENSIONS = java.util.Map.ofEntries(
+            java.util.Map.entry("FormField.InputField", "FormFieldExtensionForATextBox"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.LabelField", "FormFieldExtensionForALabelField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.CheckBoxField", "FormFieldExtensionForACheckBoxField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.PictureField", "FormFieldExtensionForAPictureField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.RadioButtonField", "FormFieldExtensionForARadioButtonField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.SpreadsheetDocumentField", "FormFieldExtensionForASpreadsheetDocumentField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.TextDocumentField", "FormFieldExtensionForATextDocument"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.CalendarField", "FormFieldExtensionForACalendarField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.ProgressBarField", "FormFieldExtensionForAProgressBarField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.TrackBarField", "FormFieldExtensionForATrackBarField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.ChartField", "FormFieldExtensionForAChartField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.GanttChartField", "FormFieldExtensionForAGanttChartField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.DendrogramField", "FormFieldExtensionForADendrogramField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.GraphicalSchemaField", "FormFieldExtensionForAGraphicalSchemaField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.HTMLDocumentField", "FormExtensionForAHTMLDocumentField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.GeographicalSchemaField", "FormFieldExtensionForAGeographicalSchemaField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.FormattedDocumentField", "FormFieldExtensionForAFormattedDocument"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.PDFDocumentField", "FormExtensionForAPDFDocumentField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.PlannerField", "FormFieldExtensionForAPlanner"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormField.PeriodField", "FormFieldExtensionForAPeriodField"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.UsualGroup", "FormGroupExtensionForAUsualGroup"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.ColumnGroup", "FormGroupExtensionForAGroupOfColumns"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.CommandBar", "FormGroupExtensionForACommandBar"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.Popup", "FormGroupExtensionForAPopup"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.Page", "FormGroupExtensionForAPage"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormGroup.Pages", "FormGroupExtensionForPages"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormDecoration.Label", "FormDecorationExtensionForALabel"), //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Map.entry("FormDecoration.Picture", "FormDecorationExtensionForAPicture")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
+        {
+            try
+            {
+                String base = null;
+                for (TypeItem item : types)
+                {
+                    String segment = FormItemTypes.segmentOf(item);
+                    if (segment != null && ENUMS.containsKey(segment))
+                    {
+                        base = segment;
+                        break;
+                    }
+                }
+                if (base == null)
+                    return types;
+                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+                Module module = EcoreUtil2.getContainerOfType(variable, Module.class);
+                if (method == null && module != null)
+                    for (Method candidate : module.allMethods())
+                    {
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
+                        if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
+                        {
+                            method = candidate;
+                            break;
+                        }
+                    }
+                if (method == null || !(method.eResource() instanceof XtextResource resource))
+                    return types;
+                Method owner = method;
+                List<SimpleStatement> statements = PLANS.get(owner, resource,
+                    () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class));
+                // Как в ColumnRenames: присваивания до последней перезаписи самой переменной не действуют
+                int from = 0;
+                for (SimpleStatement statement : statements)
+                    if (statement.getLeft() instanceof StaticFeatureAccess access && sourceVariable(access) == variable
+                        && end(statement) <= offset)
+                        from = Math.max(from, end(statement));
+                List<Kind> kinds = new ArrayList<>();
+                for (SimpleStatement statement : statements)
+                    if (end(statement) > from && end(statement) <= offset && sameEnvironment(statement, environments)
+                        && isKindOf(statement.getLeft(), variable))
+                        kinds.add(new Kind(end(statement), statement.getRight()));
+                // ИР МожноПрименитьПрисвоениеТипаИзЕсли: «Если Поле.Вид = … Тогда» — внутри ветки и дальше по условию,
+                // если до него только «И»; как сужение по «Если ТипЗнч(Поле) = Тип(…) Тогда» в EDT
+                List<BinaryExpression> comparisons = PLANS.get(List.of(owner, BinaryExpression.class), resource,
+                    () -> EcoreUtil2.getAllContentsOfType(owner, BinaryExpression.class));
+                for (BinaryExpression comparison : comparisons)
+                {
+                    if (comparison.getOperation() != BinaryOperation.EQ || end(comparison) <= from
+                        || end(comparison) >= offset || !sameEnvironment(comparison, environments))
+                        continue;
+                    Expression value = isKindOf(comparison.getLeft(), variable) ? comparison.getRight()
+                        : isKindOf(comparison.getRight(), variable) ? comparison.getLeft() : null;
+                    com._1c.g5.v8.dt.bsl.model.Conditional branch = value != null ? guardedBranch(comparison) : null;
+                    ICompositeNode node = branch != null ? NodeModelUtils.findActualNodeFor(branch) : null;
+                    if (node != null && offset <= node.getEndOffset())
+                        kinds.add(new Kind(end(comparison), value));
+                }
+                if (kinds.isEmpty())
+                    return types;
+                kinds.sort(java.util.Comparator.comparingInt(Kind::end));
+                var computer = resource.getResourceServiceProvider()
+                    .get(com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class);
+                String current = base;
+                for (int index = kinds.size() - 1; index >= 0; index--)
+                {
+                    String extension = extensionName(base, kinds.get(index).value(), computer, environments);
+                    if (extension == null)
+                        continue;
+                    if (!current.equals(base) && !current.equals(extension))
+                    {
+                        current = base;
+                        break;
+                    }
+                    current = extension;
+                }
+                TypeItem chosen = current.equals(base) ? null : FormItemTypes.platformType(current);
+                if (!current.equals(base) && chosen == null)
+                    return types;
+                List<TypeItem> result = new ArrayList<>(types.size());
+                for (TypeItem item : types)
+                    if (!FormItemTypes.isExtensionOf(FormItemTypes.segmentOf(item), base))
+                        result.add(item);
+                if (chosen != null)
+                    result.add(chosen);
+                return result.size() == types.size() && result.containsAll(types) ? types : result;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                return types;
+            }
+        }
+
+        private static record Kind(int end, Expression value) {}
+
+        /** {@code Переменная.Вид}. */
+        private static boolean isKindOf(Expression expression, Variable variable)
+        {
+            return expression instanceof DynamicFeatureAccess property
+                && ("Вид".equalsIgnoreCase(property.getName()) || "Type".equalsIgnoreCase(property.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                && property.getSource() instanceof StaticFeatureAccess && sourceVariable(property.getSource()) == variable;
+        }
+
+        private static boolean sameEnvironment(EObject object, Environments environments)
+        {
+            Environmental environment = EcoreUtil2.getContainerOfType(object, Environmental.class);
+            return environment != null && environment.environments().containsAny(environments);
+        }
+
+        /** Ветка {@code Если}/{@code ИначеЕсли}, в условии которой сравнение связано с корнем только через «И». */
+        private static com._1c.g5.v8.dt.bsl.model.Conditional guardedBranch(BinaryExpression comparison)
+        {
+            EObject child = comparison;
+            for (EObject container = comparison.eContainer(); container != null; container = container.eContainer())
+            {
+                if (container instanceof com._1c.g5.v8.dt.bsl.model.Conditional branch)
+                    return branch.getPredicate() == child ? branch : null;
+                if (!(container instanceof BinaryExpression binary) || binary.getOperation() != BinaryOperation.AND)
+                    return null;
+                child = container;
+            }
+            return null;
+        }
+
+        /** {@code ВидПоляФормы.ПолеВвода} → {@code FormFieldExtensionForATextBox}; иначе {@code null}. */
+        private static String extensionName(String base, Expression value,
+            com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer computer, Environments environments)
+        {
+            String[] enumNames = ENUMS.get(base);
+            if (!(value instanceof DynamicFeatureAccess access) || !(access.getSource() instanceof StaticFeatureAccess source)
+                || !(enumNames[0].equalsIgnoreCase(source.getName()) || enumNames[1].equalsIgnoreCase(source.getName())))
+                return null;
+            List<FeatureEntry> entries = access.getFeatureEntries();
+            if (entries.isEmpty() && computer != null)
+                entries = computer.resolveObject(access, environments);
+            String name = access.getName();
+            for (FeatureEntry entry : entries)
+                if (entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.DuallyNamedElement named && named.getName() != null)
+                {
+                    name = named.getName();
+                    break;
+                }
+            return EXTENSIONS.get(base + "." + name); //$NON-NLS-1$
+        }
+
+        private static int end(EObject object)
+        {
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
+            return node == null ? Integer.MAX_VALUE : node.getEndOffset();
         }
     }
 
@@ -3748,13 +3947,6 @@ public final class BslStructureInsertCommentTypes
             boolean scopeOwner = beginExportVarsScope();
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
-            // #region agent log
-            // Сторож на дефекты EDT вида «частичный расчёт стёр тип возврата непричастной
-            // функции» (20.10.2026, bsl 28.0.1: сброс вызываемых). Только частичный расчёт:
-            // у полного «до» состояний нет.
-            java.util.Set<String> diagTypedBefore = module != null && partialParseResult(module) != null
-                ? BslDocCommentComputedTypes.diagTypedReturnFunctions(module) : null;
-            // #endregion
             boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
             try
             {
@@ -3770,8 +3962,6 @@ public final class BslStructureInsertCommentTypes
             finally
             {
                 BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
-                if (diagTypedBefore != null)
-                    logReturnLost(module, diagTypedBefore, complete);
                 if (resource != null)
                 {
                     if (complete)
@@ -3792,48 +3982,6 @@ public final class BslStructureInsertCommentTypes
          */
         private static final java.util.Set<Resource> INCOMPLETE_RESOURCES = java.util.Collections
             .synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
-
-        // #region agent log
-        /**
-         * Функция, у которой до частичного расчёта был тип возврата, а после — нет. Свой
-         * переразобранный метод сюда не попадает: у него новый объект и «до» нет.
-         */
-        private static void logReturnLost(Module module, java.util.Set<String> typedBefore, boolean complete)
-        {
-            if (typedBefore.isEmpty())
-                return;
-            java.util.Set<String> typedAfter = BslDocCommentComputedTypes.diagTypedReturnFunctions(module);
-            for (Method method : module.allMethods())
-            {
-                String name = method.getName();
-                if (name == null || !typedBefore.contains(name) || typedAfter.contains(name))
-                    continue;
-                Global.tempLog(SmartContentAssistProcessor.RECEIVER_TYPE_LOG, "returnLost function=" + name //$NON-NLS-1$
-                    + " module=" + (module.eResource() == null ? null : module.eResource().getURI()) //$NON-NLS-1$
-                    + " reparseMethod=" + diagReparseMethodName(module) //$NON-NLS-1$
-                    + " complete=" + complete //$NON-NLS-1$
-                    + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
-                    + " AFTER=" + BslDocCommentComputedTypes.diagReturnStateDeep(method)); //$NON-NLS-1$
-            }
-        }
-
-        private static String diagReparseMethodName(Module module)
-        {
-            try
-            {
-                Object parse = module == null || module.eResource() == null ? null
-                    : Global.invoke(module.eResource(), "getParseResult"); //$NON-NLS-1$
-                if (parse == null || !parse.getClass().getName().endsWith(".PartialParseResult")) //$NON-NLS-1$
-                    return "-"; //$NON-NLS-1$
-                Object m = Global.invoke(parse, "getReparseMethod"); //$NON-NLS-1$
-                return m instanceof com._1c.g5.v8.dt.bsl.model.Method method ? method.getName() : String.valueOf(m);
-            }
-            catch (Throwable e)
-            {
-                return "ERR:" + e; //$NON-NLS-1$
-            }
-        }
-        // #endregion
 
         private void installTypeSystemInScope(Module module, CancelIndicator cancelIndicator)
         {

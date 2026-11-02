@@ -408,12 +408,6 @@
           sequence="M1+M2+E">
     </key>
     <key
-          commandId="tormozit.IrFormatText"
-          contextId="org.eclipse.xtext.ui.XtextEditorScope"
-          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
-          sequence="M3+M2+F">
-    </key>
-    <key
           commandId="tormozit.ResetFolding"
           contextId="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
@@ -660,9 +654,9 @@
         description="Открыть конструктор запроса приложения ИР для текста запроса во вложенном строковом литерале BSL. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.IrFormatText"
-        name="Форматировать текст ИР"
+        name="Форматировать текст ИР (устарела)"
         categoryId="tormozit.commands.global"
-        description="Форматировать выделенный текст модуля или текст запроса через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+        description="Устаревшая команда, оставлена для сохранённых пользовательских привязок клавиш: выполняет штатное «Форматировать». (Комфорт)"/>
     <command
         id="tormozit.IrFindReferences"
         name="Найти ссылки ИР"
@@ -1125,6 +1119,10 @@
       </activeWhen>
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrFormatTextCommandHandler"
+        commandId="tormozit.IrFormatText">
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrQueryConstructorCommandHandler"
         commandId="tormozit.IrQueryConstructor">
       <activeWhen>
@@ -1134,10 +1132,6 @@
           </iterate>
         </with>
       </activeWhen>
-    </handler>
-    <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.IrFormatTextCommandHandler"
-        commandId="tormozit.IrFormatText">
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrFindReferencesCommandHandler"

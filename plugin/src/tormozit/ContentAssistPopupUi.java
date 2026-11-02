@@ -161,8 +161,6 @@ public final class ContentAssistPopupUi
 
         contextLabel.setText(shown);
         contextLabel.setData(TypeLabelMenu.TEXT_KEY, status == null ? text : ""); //$NON-NLS-1$
-        Global.tempLog("assist-parent-type", "apply text=" + text + " shown=" + shown //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " bounds=" + contextLabel.getBounds() + " status=" + status); //$NON-NLS-1$ //$NON-NLS-2$
         if (shown.equals(text))
             contextLabel.setToolTipText(null);
         else
@@ -293,7 +291,7 @@ public final class ContentAssistPopupUi
         }
         catch (Exception error)
         {
-            Global.tempLogException("assist-parent-type", "update.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
+            // Подпись необязательна — окно подсказок не должно падать из-за неё.
         }
     }
 
@@ -409,8 +407,6 @@ public final class ContentAssistPopupUi
         {
             caret = modelCaret;
         }
-        Global.tempLog("assist-parent-type", "resolve caret=" + caret + " live=" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " filter=" + filterOff + " invocation=" + invOff + " last=" + lastOff); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         if (inLiteral)
         {

@@ -109,6 +109,7 @@ public final class BslFormTypeContextEnrichment
         "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
     private static final String ATTRIBUTE_CALLBACK = "tormozit.formAttribute.types"; //$NON-NLS-1$
     private static final String ATTRIBUTE_ACCESS_CALLBACK = "tormozit.formAttribute.accessTypes"; //$NON-NLS-1$
+    private static final String INDEX_ACCESS_CALLBACK = "tormozit.indexAccess.types"; //$NON-NLS-1$
     private static final ThreadLocal<Set<StaticFeatureAccess>> ATTRIBUTE_ACCESS_VISITING =
         ThreadLocal.withInitial(() -> Collections.newSetFromMap(new IdentityHashMap<>()));
 
@@ -123,6 +124,8 @@ public final class BslFormTypeContextEnrichment
             (java.util.function.Function<Object[], Object>) BslFormTypeContextEnrichment::afterAttributeTypes);
         System.getProperties().put(ATTRIBUTE_ACCESS_CALLBACK,
             (java.util.function.Function<Object[], Object>) BslFormTypeContextEnrichment::afterAttributeAccessTypes);
+        System.getProperties().put(INDEX_ACCESS_CALLBACK,
+            (java.util.function.Function<Object[], Object>) BslFormTypeContextEnrichment::afterIndexAccessTypes);
         Bundle bundle = FrameworkUtil.getBundle(BslFormTypeContextEnrichment.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -168,6 +171,34 @@ public final class BslFormTypeContextEnrichment
         container.getTypes().add(arbitrary);
         property.setTypeContainer(container);
         return result;
+    }
+
+    /**
+     * {@code Структура[Ключ]}: у типа нет метода {@code Получить}, и EDT берёт тип элемента коллекции —
+     * {@code КлючИЗначение} (элемент обхода), хотя по ключу читается значение. Результат заменяется на Произвольный,
+     * только когда все типы источника — структуры, а результат состоит из одного {@code КлючИЗначение}.
+     */
+    private static Object afterIndexAccessTypes(Object[] args)
+    {
+        if (!(args[0] instanceof List<?> result) || result.isEmpty()
+            || !(args[1] instanceof com._1c.g5.v8.dt.bsl.model.IndexAccess access) || access.getSource() == null)
+            return args[0];
+        for (Object item : result)
+            if (!(item instanceof TypeItem type) || !"KeyAndValue".equals(McoreUtil.getTypeName(type))) //$NON-NLS-1$
+                return args[0];
+        List<TypeItem> source = ((TypesComputer)args[3]).computeTypes(access.getSource(), (Environments)args[4]);
+        if (source.isEmpty())
+            return args[0];
+        for (TypeItem item : source)
+        {
+            String name = McoreUtil.getTypeName(item);
+            if (!"Structure".equals(name) && !"FixedStructure".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                return args[0];
+        }
+        IRuntimeVersionSupport versions = (IRuntimeVersionSupport)args[2];
+        Version version = versions.getRuntimeVersionOrDefault(access, Version.LATEST);
+        IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
+        return List.of((TypeItem)provider.getProxy("Arbitrary")); //$NON-NLS-1$
     }
 
     /** Тип произвольного реквизита в точке чтения — по предшествующему безусловному присваиванию. */
@@ -258,6 +289,10 @@ public final class BslFormTypeContextEnrichment
             transformed = BslTypesComputerHook.transformReturnCallback(className, transformed, "_compute", //$NON-NLS-1$
                 "(Lcom/_1c/g5/v8/dt/bsl/model/StaticFeatureAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;", //$NON-NLS-1$
                 ATTRIBUTE_ACCESS_CALLBACK);
+        if (!inferrer && transformed != null)
+            transformed = BslTypesComputerHook.transformReturnCallback(className, transformed, "_compute", //$NON-NLS-1$
+                "(Lcom/_1c/g5/v8/dt/bsl/model/IndexAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;", //$NON-NLS-1$
+                INDEX_ACCESS_CALLBACK);
         return transformed;
     }
 

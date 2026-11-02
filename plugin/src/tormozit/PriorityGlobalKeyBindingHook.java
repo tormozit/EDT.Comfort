@@ -58,23 +58,17 @@ public class PriorityGlobalKeyBindingHook implements IStartup
 
 
     /**
-     * Команды ИР → USER в embedded/formEditor (XtextEditorScope — restore из IrKeyBindingHook);
-     * SYSTEM FormatAction в Xtext-контекстах снимается (E4 не отдаёт приоритет USER над designer.scheme).
+     * Команды ИР → USER в embedded/formEditor (XtextEditorScope — restore из IrKeyBindingHook).
      * Источник сочетаний — effective USER в XtextEditorScope; SYSTEM из plugin.xml не зеркалируется,
      * если пользователь уже переназначил команду в Keys.
      */
     private static final String[] IR_MIRROR_COMMAND_IDS = {
         IrMethodConstructorHandler.COMMAND_ID,
-        IrFormatTextCommandHandler.COMMAND_ID,
         IrModuleCheckHandler.COMMAND_ID
     };
 
     private static final String XTEXT_EDITOR_CONTEXT_ID =
             "org.eclipse.xtext.ui.XtextEditorScope"; //$NON-NLS-1$
-
-    /** Дочерний контекст XtextEditorScope, объявленный в бандле bsl.ui. */
-    private static final String BSL_EDITOR_CONTEXT_ID =
-            "com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"; //$NON-NLS-1$
 
     private static final String XTEXT_EMBEDDED_EDITOR_CONTEXT_ID =
             "org.eclipse.xtext.ui.embeddedTextEditorScope"; //$NON-NLS-1$
@@ -107,27 +101,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     private static final Set<String> LOCAL_CONTEXTS =
             new HashSet<>(Arrays.asList(LOCAL_OVERRIDE_CONTEXT_IDS));
 
-    private static final String XTEXT_FORMAT_ACTION_ID =
-            "org.eclipse.xtext.ui.FormatAction"; //$NON-NLS-1$
-
-    /** Контексты, где снимаем/восстанавливаем SYSTEM FormatAction (E4 не отдаёт приоритет USER). */
-    private static final String[] FORMAT_ACTION_SUPPRESSION_CONTEXT_IDS = {
-        XTEXT_EDITOR_CONTEXT_ID,
-        XTEXT_EMBEDDED_EDITOR_CONTEXT_ID,
-        FORM_EDITOR_CONTEXT_ID,
-        ORDINARY_FORM_EDITOR_CONTEXT_ID
-    };
-
-    /** Схема 1С designer: штатный «Формат» = Alt+Shift+F (com._1c.g5.v8.designer). */
-    private static final String DESIGNER_SCHEME_ID = "com._1c.g5.v8.designer.scheme"; //$NON-NLS-1$
-
-    /** Formal M2+M3+F — designer FormatAction в Xtext/embedded. */
-    private static final String FORMAT_ACTION_DESIGNER_SEQUENCE = "M2+M3+F"; //$NON-NLS-1$
-
     private static final List<KeyBinding> appliedOverrides = new ArrayList<>();
-
-    /** SYSTEM-привязки, временно снятые ради IrFormatText (восстанавливаются при resync). */
-    private static final List<Binding> suppressedCompetingBindings = new ArrayList<>();
 
     private static BindingService bindingServiceInternal;
     private static ICommandService commandService;
@@ -207,11 +181,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         }
 
         List<KeyBinding> desired = buildDesiredOverrides();
-        boolean irActive = IrKeyBindingHook.isActive();
-        Set<KeySequence> irFormatSequences = irActive
-                ? collectAllIrFormatTextSequences()
-                : Set.of();
-        boolean overridesNeedUpdate = !syncStateUpToDate(desired, irFormatSequences);
+        boolean overridesNeedUpdate = !overrideSignaturesEqual(appliedOverrides, desired);
 
         applyingOverrides = true;
         try
@@ -223,16 +193,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                 overridesNeedUpdate = true;
 
             if (overridesNeedUpdate)
-            {
                 removeAppliedOverrides();
-                restoreSuppressedBindings();
-            }
-
-            if (!irActive)
-                ensureFormatActionDefaults(Set.of());
-
-            if (irActive && !irFormatSequences.isEmpty())
-                reconcileFormatActionSuppression(irFormatSequences);
 
             if (!overridesNeedUpdate)
                 return;
@@ -246,8 +207,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
             if (Global.isLogEnabled())
             {
                 Global.log(TAG, "applied overrides: " + appliedOverrides.size() //$NON-NLS-1$
-                        + ", scheme=" + schemeId //$NON-NLS-1$
-                        + ", suppressed=" + suppressedCompetingBindings.size()); //$NON-NLS-1$
+                        + ", scheme=" + schemeId); //$NON-NLS-1$
                 logIrMirrorSummary(desired);
             }
         }
@@ -311,8 +271,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                 {
                     for (String mirrorContextId : IR_MIRROR_CONTEXT_IDS)
                         result.add(createOverride(sequence, parameterized, schemeId, mirrorContextId));
-                    if (IrFormatTextCommandHandler.COMMAND_ID.equals(commandId))
-                        result.add(createOverride(sequence, parameterized, schemeId, BSL_EDITOR_CONTEXT_ID));
                 }
             }
         }
@@ -341,186 +299,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
             return null;
         Set<KeySequence> sequences = collectGlobalKeySequences(commandId);
         return sequences.isEmpty() ? null : sequences.iterator().next().format();
-    }
-
-    private static boolean syncStateUpToDate(List<KeyBinding> desired, Set<KeySequence> irFormatSequences)
-    {
-        if (!overrideSignaturesEqual(appliedOverrides, desired))
-            return false;
-        Set<String> desiredSuppressions = computeRequiredSuppressionSignatures(irFormatSequences);
-        return desiredSuppressions.equals(bindingSignatures(suppressedCompetingBindings));
-    }
-
-    /** Все effective-сочетания IrFormatText в менеджере привязок (SYSTEM + USER). */
-    private static Set<KeySequence> collectAllIrFormatTextSequences()
-    {
-        Set<KeySequence> sequences = new LinkedHashSet<>();
-        if (bindingServiceInternal == null)
-            return sequences;
-
-        String activeScheme = activeSchemeId();
-        String platform = bindingServiceInternal.getPlatform();
-        String locale = bindingServiceInternal.getLocale();
-
-        for (Binding binding : bindingServiceInternal.getBindings())
-        {
-            if (binding == null)
-                continue;
-            ParameterizedCommand pc = binding.getParameterizedCommand();
-            if (pc == null || !IrFormatTextCommandHandler.COMMAND_ID.equals(pc.getId()))
-                continue;
-
-            String schemeId = binding.getSchemeId();
-            if (!activeScheme.equals(schemeId) && !DEFAULT_SCHEME_ID.equals(schemeId)
-                    && !DESIGNER_SCHEME_ID.equals(schemeId))
-                continue;
-            if (!matchesPlatformLocale(binding, platform, locale))
-                continue;
-
-            TriggerSequence trigger = binding.getTriggerSequence();
-            if (trigger instanceof KeySequence keySequence)
-                sequences.add(keySequence);
-        }
-        return sequences;
-    }
-
-    private static void reconcileFormatActionSuppression(Set<KeySequence> sequences)
-    {
-        Set<String> required = computeRequiredSuppressionSignatures(sequences);
-        if (required.equals(bindingSignatures(suppressedCompetingBindings)))
-            return;
-
-        restoreSuppressedBindings();
-        suppressCompetingFormatActionBindings(sequences);
-    }
-
-    private static Set<String> computeRequiredSuppressionSignatures(Set<KeySequence> sequences)
-    {
-        Set<String> sigs = findCompetingFormatActionSignatures(sequences);
-        if (bindingServiceInternal == null || sequences.isEmpty())
-            return sigs;
-
-        String activeScheme = activeSchemeId();
-        String platform = bindingServiceInternal.getPlatform();
-        String locale = bindingServiceInternal.getLocale();
-
-        for (Binding binding : suppressedCompetingBindings)
-        {
-            if (isSuppressibleFormatActionBinding(binding, sequences, activeScheme, platform, locale))
-                sigs.add(bindingSignature(binding));
-        }
-        return sigs;
-    }
-
-    private static Set<KeySequence> extractIrFormatTextSequences(List<KeyBinding> desired)
-    {
-        Set<KeySequence> sequences = new LinkedHashSet<>();
-        for (KeyBinding binding : desired)
-        {
-            ParameterizedCommand pc = binding.getParameterizedCommand();
-            if (pc == null || !"tormozit.IrFormatText".equals(pc.getId())) //$NON-NLS-1$
-                continue;
-            TriggerSequence trigger = binding.getTriggerSequence();
-            if (trigger instanceof KeySequence keySequence)
-                sequences.add(keySequence);
-        }
-        return sequences;
-    }
-
-    private static Set<String> findCompetingFormatActionSignatures(Set<KeySequence> sequences)
-    {
-        Set<String> sigs = new HashSet<>();
-        if (bindingServiceInternal == null || sequences.isEmpty())
-            return sigs;
-
-        String activeScheme = activeSchemeId();
-        String platform = bindingServiceInternal.getPlatform();
-        String locale = bindingServiceInternal.getLocale();
-
-        for (Binding binding : bindingServiceInternal.getBindings())
-        {
-            if (!isSuppressibleFormatActionBinding(binding, sequences, activeScheme, platform, locale))
-                continue;
-            sigs.add(bindingSignature(binding));
-        }
-        return sigs;
-    }
-
-    private static void suppressCompetingFormatActionBindings(Set<KeySequence> sequences)
-    {
-        if (bindingServiceInternal == null || sequences.isEmpty())
-            return;
-
-        String activeScheme = activeSchemeId();
-        String platform = bindingServiceInternal.getPlatform();
-        String locale = bindingServiceInternal.getLocale();
-
-        Binding[] snapshot = bindingServiceInternal.getBindings();
-        for (Binding binding : snapshot)
-        {
-            if (!isSuppressibleFormatActionBinding(binding, sequences, activeScheme, platform, locale))
-                continue;
-
-            bindingServiceInternal.removeBinding(binding);
-            suppressedCompetingBindings.add(binding);
-
-            if (Global.isLogEnabled())
-            {
-                Global.log(TAG, "suppressed FormatAction ctx=" + binding.getContextId() //$NON-NLS-1$
-                        + " scheme=" + binding.getSchemeId() //$NON-NLS-1$
-                        + " seq=" + binding.getTriggerSequence().format()); //$NON-NLS-1$
-            }
-        }
-    }
-
-    private static boolean isSuppressibleFormatActionBinding(
-            Binding binding,
-            Set<KeySequence> sequences,
-            String activeScheme,
-            String platform,
-            String locale)
-    {
-        if (binding == null || binding.getType() != Binding.SYSTEM)
-            return false;
-
-        ParameterizedCommand pc = binding.getParameterizedCommand();
-        if (pc == null || !XTEXT_FORMAT_ACTION_ID.equals(pc.getId()))
-            return false;
-
-        if (!isFormatActionSuppressionContext(binding.getContextId()))
-            return false;
-
-        String schemeId = binding.getSchemeId();
-        if (!activeScheme.equals(schemeId) && !DEFAULT_SCHEME_ID.equals(schemeId)
-                && !DESIGNER_SCHEME_ID.equals(schemeId))
-            return false;
-
-        if (!matchesPlatformLocale(binding, platform, locale))
-            return false;
-
-        TriggerSequence trigger = binding.getTriggerSequence();
-        return trigger instanceof KeySequence keySequence && sequences.contains(keySequence);
-    }
-
-    private static boolean isFormatActionSuppressionContext(String contextId)
-    {
-        if (contextId == null)
-            return false;
-        for (String allowed : FORMAT_ACTION_SUPPRESSION_CONTEXT_IDS)
-        {
-            if (allowed.equals(contextId))
-                return true;
-        }
-        return false;
-    }
-
-    private static void restoreSuppressedBindings()
-    {
-        if (bindingServiceInternal == null)
-            return;
-        for (Binding binding : suppressedCompetingBindings)
-            RuntimeKeyBindingSupport.restore(bindingServiceInternal, binding);
-        suppressedCompetingBindings.clear();
     }
 
     // =========================================================================
@@ -653,120 +431,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     {
         return binding.getSchemeId() + '|' + binding.getContextId()
                 + '|' + binding.getTriggerSequence().format();
-    }
-
-    /**
-     * Восстанавливает designer SYSTEM FormatAction Alt+Shift+F, если IrFormatText
-     * не занимает это сочетание. Нужно после removeBinding, не пережившего перезапуск EDT.
-     */
-    private static void ensureFormatActionDefaults(Set<KeySequence> irFormatSequences)
-    {
-        if (bindingServiceInternal == null || commandService == null)
-            return;
-
-        KeySequence designerFormatSequence;
-        try
-        {
-            designerFormatSequence = KeySequence.getInstance(FORMAT_ACTION_DESIGNER_SEQUENCE);
-        }
-        catch (Exception e)
-        {
-            Global.logError(TAG, "parse FormatAction sequence: " + FORMAT_ACTION_DESIGNER_SEQUENCE, e); //$NON-NLS-1$
-            return;
-        }
-        if (irFormatSequences.contains(designerFormatSequence))
-            return;
-
-        if (isFormatActionSequenceActive(designerFormatSequence))
-            return;
-
-        Command command = commandService.getCommand(XTEXT_FORMAT_ACTION_ID);
-        if (command == null || !command.isDefined())
-            return;
-
-        ParameterizedCommand parameterized;
-        try
-        {
-            parameterized = ParameterizedCommand.generateCommand(command, null);
-        }
-        catch (Exception e)
-        {
-            Global.logError(TAG, "generateCommand: " + XTEXT_FORMAT_ACTION_ID, e); //$NON-NLS-1$
-            return;
-        }
-
-        for (String contextId : FORMAT_ACTION_SUPPRESSION_CONTEXT_IDS)
-        {
-            Binding existing = findFormatActionSystemBinding(
-                    DESIGNER_SCHEME_ID, designerFormatSequence, contextId);
-            if (existing != null)
-            {
-                RuntimeKeyBindingSupport.restore(bindingServiceInternal, existing);
-                continue;
-            }
-
-            KeyBinding binding = new KeyBinding(
-                    designerFormatSequence,
-                    parameterized,
-                    DESIGNER_SCHEME_ID,
-                    contextId,
-                    null,
-                    null,
-                    null,
-                    Binding.SYSTEM);
-            RuntimeKeyBindingSupport.restore(bindingServiceInternal, binding);
-        }
-    }
-
-    /** Effective: Alt+Shift+F среди active-bindings FormatAction (не только запись в getBindings). */
-    private static boolean isFormatActionSequenceActive(KeySequence sequence)
-    {
-        if (bindingServiceInternal == null || sequence == null)
-            return false;
-
-        TriggerSequence[] active = bindingServiceInternal.getActiveBindingsFor(XTEXT_FORMAT_ACTION_ID);
-        if (active == null)
-            return false;
-
-        for (TriggerSequence trigger : active)
-        {
-            if (sequence.equals(trigger))
-                return true;
-        }
-        return false;
-    }
-
-    private static Binding findFormatActionSystemBinding(
-            String schemeId,
-            KeySequence sequence,
-            String contextId)
-    {
-        if (bindingServiceInternal == null || schemeId == null || contextId == null || sequence == null)
-            return null;
-
-        String platform = bindingServiceInternal.getPlatform();
-        String locale = bindingServiceInternal.getLocale();
-
-        for (Binding binding : bindingServiceInternal.getBindings())
-        {
-            if (binding == null || binding.getType() != Binding.SYSTEM)
-                continue;
-
-            ParameterizedCommand pc = binding.getParameterizedCommand();
-            if (pc == null || !XTEXT_FORMAT_ACTION_ID.equals(pc.getId()))
-                continue;
-            if (!contextId.equals(binding.getContextId()))
-                continue;
-            if (!schemeId.equals(binding.getSchemeId()))
-                continue;
-            if (!matchesPlatformLocale(binding, platform, locale))
-                continue;
-
-            TriggerSequence trigger = binding.getTriggerSequence();
-            if (trigger instanceof KeySequence keySequence && keySequence.equals(sequence))
-                return binding;
-        }
-        return null;
     }
 
     private static Set<String> bindingSignatures(List<? extends Binding> bindings)

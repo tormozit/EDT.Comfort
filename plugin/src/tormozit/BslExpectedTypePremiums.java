@@ -139,7 +139,6 @@ import com._1c.g5.v8.dt.platform.version.Version;
 final class BslExpectedTypePremiums
 {
     private static final String LOG = "expected-type"; //$NON-NLS-1$
-    private static final String FUZZY_LOG = "expected-type-fuzzy"; //$NON-NLS-1$
     /** {@code КонстантаМаксСловПроверятьДляОжидаемогоТипа}. */
     private static final int MAX_WORDS_FOR_TYPE = 200;
     private static final int MAX_TYPES_TO_CHECK = 3;
@@ -147,7 +146,6 @@ final class BslExpectedTypePremiums
     /** {@code МаксДлинаМалых} нечёткого поиска ИР. */
     private static final int FUZZY_SMALL_LENGTH = 8;
     /** Сверок нечёткого поиска с ИР на один контекст. */
-    private static final int MAX_FUZZY_RECONCILES = 5;
     /** {@code ИмяПеременнойВозвращаемогоЗначения}: «Возврат» ИР читает как присваивание этой переменной. */
     private static final String RETURN_VARIABLE = "Воз073"; //$NON-NLS-1$
     private static final String GLOBAL_CONTEXT = "Глобальный"; //$NON-NLS-1$
@@ -440,12 +438,6 @@ final class BslExpectedTypePremiums
     {
     }
 
-    /** Вызов нечёткого поиска — для сверки с ИР. */
-    private record FuzzyCall(String search, List<String> candidates, int minPercentSmall, int minPercentBig,
-        List<Integer> result)
-    {
-    }
-
     /** Последний посчитанный снимок. */
     private static volatile Snapshot current;
     /** Снимок места, для которого список сортируется сейчас; {@code null} — премий нет (ещё считаются). */
@@ -505,8 +497,6 @@ final class BslExpectedTypePremiums
         // В ИР разбор предыдущей инструкции отделён условием мЯзыкПрограммы = 0.
         // Список QL не должен получать слова из общего снимка предыдущего места BSL.
         boolean query = containsQueryProposals(raw);
-        Global.tempLog("expected-type-language", "withAddedWords query=" + query //$NON-NLS-1$ //$NON-NLS-2$
-            + " raw=" + raw.length + " bslAdded=" + added.size()); //$NON-NLS-1$ //$NON-NLS-2$
         if (query || processor != null && processor.hasIrProposalsForCurrentContext())
             added = List.of();
         boolean changed = false;
@@ -616,7 +606,7 @@ final class BslExpectedTypePremiums
         Expectation expectation = new Expectation(queryTypes, receiver, "=", "", -1, false, null); //$NON-NLS-1$ //$NON-NLS-2$
         Premiums result = Premiums.empty();
         Map<String, Word> words = words(proposals, Map.of(), Map.of());
-        typePremiums(result, context, expectation, words, new ArrayList<>(), null, QUERY_LANGUAGE);
+        typePremiums(result, context, expectation, words, null, QUERY_LANGUAGE);
         // ЗагрузитьСтатистикуВыбораВТаблицуСлов; «внутри выражения» в запросе не различается
         String statisticsContext = queryStatisticsContext(parent, parentTypes);
         if (!GLOBAL_CONTEXT.equals(statisticsContext))
@@ -723,8 +713,6 @@ final class BslExpectedTypePremiums
         boolean queryEditor = reloader != null && reloader.getFacade() != null
             && reloader.getFacade().isQueryMode() && viewer != null && viewer.getDocument() == document;
         boolean queryLiteral = BslQueryLiteralSupport.segmentKeyAt(document, caret) >= 0;
-        Global.tempLog("expected-type-language", "caret=" + caret + " queryEditor=" + queryEditor //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " queryLiteral=" + queryLiteral); //$NON-NLS-1$
         if (queryEditor || queryLiteral)
             return null;
         // Выделение, на котором открыт список: место — его начало
@@ -790,7 +778,7 @@ final class BslExpectedTypePremiums
         if (scene.facts() == null)
             return null;
         AddedWords adder = new AddedWords(Premiums.empty(), new HashMap<>(), new HashMap<>(), context,
-            scene, list, new ArrayList<>());
+            scene, list);
         return adder.variableName(context.selected(), scene.expectation() != null
             ? scene.expectation().types() : List.of());
     }
@@ -910,7 +898,7 @@ final class BslExpectedTypePremiums
             return snapshot;
         // Новые слова среза не нужны: они уже в снимке (премии считаются и для них)
         Premiums added = premiums(snapshot.context(), snapshot.scene(), snapshot.project(), list,
-            snapshot.variableTypes(), new ArrayList<>(), new LinkedHashMap<>());
+            snapshot.variableTypes(), new LinkedHashMap<>());
         Map<String, Integer> merged = new HashMap<>(snapshot.premiums().values());
         added.values().forEach(merged::putIfAbsent);
         Set<String> autoOpen = new HashSet<>(snapshot.premiums().autoOpen());
@@ -952,38 +940,15 @@ final class BslExpectedTypePremiums
         }
         catch (RuntimeException e)
         {
-            Global.tempLog(LOG, "read error " + e); //$NON-NLS-1$
             return null;
         }
         if (!Boolean.TRUE.equals(read) || scene[0] == null)
             return null;
-        List<FuzzyCall> fuzzyCalls = new ArrayList<>();
         Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
-        Premiums premiums = premiums(context, scene[0], project, list, variableTypes, fuzzyCalls, added);
+        Premiums premiums = premiums(context, scene[0], project, list, variableTypes, added);
         Set<String> evaluated = new HashSet<>();
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
-        // #region temp — строки предопределённых значений EDT: почему не распознан тип
-        int predefinedShown = 0;
-        for (ICompletionProposal proposal : list)
-        {
-            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
-            String className = raw == null ? "null" : raw.getClass().getName(); //$NON-NLS-1$
-            if (!className.contains("Predefined") && !className.contains("Segmentable")) //$NON-NLS-1$ //$NON-NLS-2$
-                continue;
-            Object info = raw instanceof ConfigurableCompletionProposal configurable
-                ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
-            Global.tempLog(LOG, "  predefined class=" + className.substring(className.lastIndexOf('.') + 1) //$NON-NLS-1$
-                + " display=\"" + raw.getDisplayString() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " name=\"" + SmartContentAssistProcessor.parseProposalListName(raw.getDisplayString()) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " replacement=\"" + (raw instanceof ConfigurableCompletionProposal c ? c.getReplacementString() : null) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " info=" + (info == null ? "null" : info.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " type=" + SmartCompletionProposal.predefinedValueType(proposal)); //$NON-NLS-1$
-            if (++predefinedShown == 10)
-                break;
-        }
-        // #endregion
-        reconcileFuzzyWithIr(fuzzyCalls);
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
             List.copyOf(added.values()));
     }
@@ -2176,7 +2141,6 @@ final class BslExpectedTypePremiums
                 }
             }
         }
-        Global.tempLog(LOG, "objectPropertyEnums configuration=" + (configuration != null) + " count=" + result.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return result;
     }
 
@@ -2337,7 +2301,7 @@ final class BslExpectedTypePremiums
 
     /** @param added новые слова места ({@link AddedWords}) по ключу — заполняется */
     private static Premiums premiums(Context context, Scene scene, IProject project, ICompletionProposal[] list,
-        Map<String, List<String>> variableTypes, List<FuzzyCall> fuzzyCalls, Map<String, BslAddedWordProposal> added)
+        Map<String, List<String>> variableTypes, Map<String, BslAddedWordProposal> added)
     {
         Premiums result = Premiums.empty();
         Matcher literal = TYPE_LITERAL.matcher(context.preceding());
@@ -2365,7 +2329,7 @@ final class BslExpectedTypePremiums
             return result;
         }
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
-        AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list, fuzzyCalls)
+        AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list)
             : null;
         if (adder != null)
         {
@@ -2376,7 +2340,7 @@ final class BslExpectedTypePremiums
         }
         boolean byType = adder == null || adder.run();
         if (scene.expectation() != null && byType)
-            typePremiums(result, context, scene.expectation(), words, fuzzyCalls, adder, MODULE_LANGUAGE);
+            typePremiums(result, context, scene.expectation(), words, adder, MODULE_LANGUAGE);
         if (!context.parent().isEmpty())
             weightPremiums(result, words, scene.frequencies(), words.size(), true);
         if (scene.statisticsContext() != null)
@@ -2507,7 +2471,6 @@ final class BslExpectedTypePremiums
         }
         catch (Exception e)
         {
-            Global.tempLog(LOG, "hover receiver error " + e); //$NON-NLS-1$
             return null;
         }
     }
@@ -2576,7 +2539,6 @@ final class BslExpectedTypePremiums
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLog(LOG, "type links error " + e); //$NON-NLS-1$
             return null;
         }
     }
@@ -2640,7 +2602,7 @@ final class BslExpectedTypePremiums
 
     /** @param adder новые слова встроенного языка; {@code null} — слова не добавляются */
     private static void typePremiums(Premiums result, Context context, Expectation expectation,
-        Map<String, Word> words, List<FuzzyCall> fuzzyCalls, AddedWords adder, int language)
+        Map<String, Word> words, AddedWords adder, int language)
     {
         String parent = context.parent();
         boolean noParent = parent.isEmpty();
@@ -2712,9 +2674,6 @@ final class BslExpectedTypePremiums
         // ИР: наличие имени в контексте ПеречислимыеСвойстваОбъектовМетаданных.
         Set<String> enumerations = adder != null ? adder.facts.objectPropertyEnums() : Set.of();
         boolean enumerableProperty = enumerations.contains(lower(dbTable));
-        Global.tempLog("expected-type-metadata-enum", "expected=" + mainType + " parent=" + parent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " systemEnum=" + expectation.systemEnum() + " properties=" + enumerations.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " enumerableProperty=" + enumerableProperty); //$NON-NLS-1$
         if (enumerableProperty && (!noParent || adder != null))
         {
             int level = countOf(parent, '.');
@@ -2803,11 +2762,11 @@ final class BslExpectedTypePremiums
                                 managers.add(word);
                         }
                         markBestWord(result, words, managers, except, lastWord,
-                            UNLIKE_FORBIDDEN_TYPES.contains(lower(typeName)), noParent, fuzzyCalls);
+                            UNLIKE_FORBIDDEN_TYPES.contains(lower(typeName)), noParent);
                     }
                 }
                 markBestWord(result, words, candidates, except, lastWord,
-                    UNLIKE_FORBIDDEN_TYPES.contains(lower(typeName)), noParent, fuzzyCalls);
+                    UNLIKE_FORBIDDEN_TYPES.contains(lower(typeName)), noParent);
                 strict = true;
                 if (++checked == MAX_TYPES_TO_CHECK)
                     break;
@@ -2844,13 +2803,13 @@ final class BslExpectedTypePremiums
      * {@code candidates} получает +3 — первое подходящее либо, при имени приёмника, самое похожее на него.
      */
     private static void markBestWord(Premiums result, Map<String, Word> words, List<Word> candidates, String except,
-        String fuzzyWord, boolean forbidUnlike, boolean noParent, List<FuzzyCall> fuzzyCalls)
+        String fuzzyWord, boolean forbidUnlike, boolean noParent)
     {
         // Уже набранная премия (в том числе штраф редкого слова) — до выбора: при равной порядок списка
         List<Word> ordered = new ArrayList<>(candidates);
         ordered.sort(Comparator.comparingInt(
             (Word word) -> result.values().getOrDefault(word.key(), Integer.valueOf(0)).intValue()).reversed());
-        Word best = bestWord(ordered, words.size(), except, fuzzyWord, forbidUnlike, noParent, fuzzyCalls);
+        Word best = bestWord(ordered, words.size(), except, fuzzyWord, forbidUnlike, noParent);
         if (best != null)
             add(result, words, best.key(), 3, true);
     }
@@ -2860,7 +2819,7 @@ final class BslExpectedTypePremiums
      * {@code setSize} слов; {@code null} — нет.
      */
     private static Word bestWord(List<Word> candidates, int setSize, String except, String fuzzyWord,
-        boolean forbidUnlike, boolean noParent, List<FuzzyCall> fuzzyCalls)
+        boolean forbidUnlike, boolean noParent)
     {
         List<Word> found = new ArrayList<>(candidates);
         if (!found.isEmpty())
@@ -2878,7 +2837,7 @@ final class BslExpectedTypePremiums
         Word best = forbidUnlike ? null : found.get(0);
         if (!fuzzyWord.isEmpty() && (best == null || found.size() > 1) && found.size() < MAX_WORDS_FOR_TYPE)
         {
-            Word fuzzy = fuzzyBest(found, except, fuzzyWord, fuzzyCalls);
+            Word fuzzy = fuzzyBest(found, except, fuzzyWord);
             if (fuzzy != null)
                 best = fuzzy;
         }
@@ -2886,7 +2845,7 @@ final class BslExpectedTypePremiums
     }
 
     /** Нечёткая часть {@code ОбозначитьСловоСОжидаемымТипомВТаблицеСлов} (уровни непохожести ИР). */
-    private static Word fuzzyBest(List<Word> found, String except, String fuzzyWord, List<FuzzyCall> fuzzyCalls)
+    private static Word fuzzyBest(List<Word> found, String except, String fuzzyWord)
     {
         String fuzzyLower = lower(fuzzyWord);
         boolean longFuzzy = fuzzyWord.length() >= FUZZY_SMALL_LENGTH;
@@ -2911,7 +2870,6 @@ final class BslExpectedTypePremiums
             int minBig = fuzzyWord.length() < FUZZY_SMALL_LENGTH ? bigDifference : smallDifference;
             List<Integer> indices = FuzzyStringSearch.stringSearch(fuzzyLower, names, FUZZY_SMALL_LENGTH, minSmall,
                 minBig);
-            fuzzyCalls.add(new FuzzyCall(fuzzyLower, names, minSmall, minBig, indices));
             for (Integer index : indices)
             {
                 Word word = found.get(index.intValue());
@@ -2986,7 +2944,6 @@ final class BslExpectedTypePremiums
         final Facts facts;
         private final Expectation expectation;
         private final ICompletionProposal[] list;
-        private final List<FuzzyCall> fuzzyCalls;
         private final IDocument document;
         private final String parent;
         /** {@code ВыражениеПриемник}. */
@@ -3007,7 +2964,7 @@ final class BslExpectedTypePremiums
         private String lineAfterWord = ""; //$NON-NLS-1$
 
         AddedWords(Premiums result, Map<String, Word> words, Map<String, BslAddedWordProposal> added, Context context,
-            Scene scene, ICompletionProposal[] list, List<FuzzyCall> fuzzyCalls)
+            Scene scene, ICompletionProposal[] list)
         {
             this.result = result;
             this.words = words;
@@ -3017,7 +2974,6 @@ final class BslExpectedTypePremiums
             this.facts = scene.facts();
             this.expectation = scene.expectation();
             this.list = list;
-            this.fuzzyCalls = fuzzyCalls;
             this.document = context.document();
             this.parent = context.parent();
             this.receiver = expectation != null ? expectation.receiver() : ""; //$NON-NLS-1$
@@ -3978,7 +3934,7 @@ final class BslExpectedTypePremiums
                 if (right.hasType(type))
                     typed.add(right);
             }
-            Word best = bestWord(typed, rights.size(), "", left.name(), true, false, fuzzyCalls); //$NON-NLS-1$
+            Word best = bestWord(typed, rights.size(), "", left.name(), true, false); //$NON-NLS-1$
             return best != null ? best.name() : ""; //$NON-NLS-1$
         }
 
@@ -4579,7 +4535,7 @@ final class BslExpectedTypePremiums
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(LOG, "choice error " + e); //$NON-NLS-1$
+                // Статистика выбора необязательна.
             }
         }
 
@@ -5160,108 +5116,6 @@ final class BslExpectedTypePremiums
             return section != null ? section : top.addNewSection(SETTINGS_SECTION);
         }
     }
-
-    // ------------------------------------------------------------------------------------------
-    // Сверка нечёткого поиска с ИР
-    // ------------------------------------------------------------------------------------------
-
-    /**
-     * Те же входы — в {@code мПлатформа.НечеткоеСравнениеСлов().StringSearch} подключённого ИР; оба
-     * результата пишутся во временный лог {@value #FUZZY_LOG}. Без ИР — только результат Java.
-     */
-    private static void reconcileFuzzyWithIr(List<FuzzyCall> calls)
-    {
-        if (calls.isEmpty())
-            return;
-        List<FuzzyCall> sample = new ArrayList<>(calls.subList(0, Math.min(calls.size(), MAX_FUZZY_RECONCILES)));
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
-        Job job = new Job("Комфорт: сверка нечёткого поиска с ИР") //$NON-NLS-1$
-        {
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
-            {
-                IRSession session = null;
-                try
-                {
-                    session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
-                }
-                catch (RuntimeException e)
-                {
-                    Global.tempLog(FUZZY_LOG, "session error " + e); //$NON-NLS-1$
-                }
-                for (FuzzyCall call : sample)
-                {
-                    String irResult = "ИР не подключён"; //$NON-NLS-1$
-                    if (session != null)
-                        irResult = irStringSearch(session, call);
-                    List<Integer> irIndices = parseIndices(irResult);
-                    Global.tempLog(FUZZY_LOG, "search=" + call.search() + " minSmall=" + call.minPercentSmall() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " minBig=" + call.minPercentBig() + " candidates=" + call.candidates().size() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " java=" + names(call, call.result()) + " ir=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (irIndices != null ? names(call, irIndices) : irResult)
-                        + " same=" + (irIndices != null && new HashSet<>(irIndices).equals(new HashSet<>(call.result())))); //$NON-NLS-1$
-                }
-                return Status.OK_STATUS;
-            }
-        };
-        job.setSystem(true);
-        job.schedule();
-    }
-
-    private static String irStringSearch(IRSession session, FuzzyCall call)
-    {
-        try
-        {
-            return session.executeOnComThread(() ->
-            {
-                Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
-                Object platform = ComBridge.invoke(irCache, "Получить"); //$NON-NLS-1$
-                Object fuzzy = ComBridge.invoke(platform, "НечеткоеСравнениеСлов"); //$NON-NLS-1$
-                Object raw = ComBridge.invoke(fuzzy, "StringSearch", call.search(), //$NON-NLS-1$
-                    String.join(",", call.candidates()), ",", Integer.valueOf(FUZZY_SMALL_LENGTH), //$NON-NLS-1$ //$NON-NLS-2$
-                    Integer.valueOf(call.minPercentSmall()), Integer.valueOf(call.minPercentBig()));
-                return ComBridge.toString(raw);
-            });
-        }
-        catch (Exception e)
-        {
-            return "ошибка " + e; //$NON-NLS-1$
-        }
-    }
-
-    /** Индексы через запятую; {@code null} — не индексы (ошибка). */
-    private static List<Integer> parseIndices(String text)
-    {
-        List<Integer> indices = new ArrayList<>();
-        if (text == null)
-            return null;
-        if (text.isBlank())
-            return indices;
-        for (String part : text.split(",")) //$NON-NLS-1$
-        {
-            try
-            {
-                indices.add(Integer.valueOf(part.trim()));
-            }
-            catch (NumberFormatException e)
-            {
-                return null;
-            }
-        }
-        return indices;
-    }
-
-    private static String names(FuzzyCall call, List<Integer> indices)
-    {
-        List<String> names = new ArrayList<>();
-        for (Integer index : indices)
-            names.add(index.intValue() >= 0 && index.intValue() < call.candidates().size()
-                ? call.candidates().get(index.intValue()) : "#" + index); //$NON-NLS-1$
-        return names.toString();
-    }
-
-    // ------------------------------------------------------------------------------------------
 
     /**
      * {@code УстановитьРейтингВСтрокеСлова}: премия прибавляется; слово, которого нет в списке, не

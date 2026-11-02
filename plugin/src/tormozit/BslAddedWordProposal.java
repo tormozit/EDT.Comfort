@@ -176,7 +176,6 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         catch (BadLocationException e)
         {
             selection = new Point(caret, 0);
-            Global.tempLog("expected-type", "added word apply error " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         finally
         {

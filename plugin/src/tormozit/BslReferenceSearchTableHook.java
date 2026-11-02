@@ -103,8 +103,6 @@ public final class BslReferenceSearchTableHook implements IStartup
     {
         System.getProperties().put(SearchResultDeduplication.KEY_CALLBACK,
             (Function<Object[], Object>) SearchResultDeduplication::occurrenceKey);
-        Global.tempLog("reference-occurrences", "callback installed; early=" //$NON-NLS-1$ //$NON-NLS-2$
-            + System.getProperties().get(SearchResultDeduplication.KEY_CALLBACK + ".status")); //$NON-NLS-1$
     }
 
     /** Ключ полнотекстового вхождения: общий URI комментария и точный диапазон в нём. */
@@ -130,8 +128,6 @@ public final class BslReferenceSearchTableHook implements IStartup
                     key = java.util.Arrays.asList(source, offset, length);
                 }
             }
-            Global.tempLog("reference-occurrences", "source=" + source + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " length=" + length + " class=" + reference.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
             return key;
         }
 
@@ -580,7 +576,6 @@ public final class BslReferenceSearchTableHook implements IStartup
             contextResolver.setFastCompletedCallback(() ->
             {
                 viewer.refresh();
-                Global.tempLog("reference-occurrences", "sorted after position resolution; rows=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
             });
             contextResolver.trackViewportScrolling();
             installComputeTypesAction();
@@ -755,8 +750,6 @@ public final class BslReferenceSearchTableHook implements IStartup
                 && references.size() == loadedReferences.size();
             for (int i = 0; unchanged && i < references.size(); i++)
                 unchanged = references.get(i) == loadedReferences.get(i);
-            Global.tempLog("reference-occurrences", "reload rows=" + references.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " unchanged=" + unchanged); //$NON-NLS-1$
             if (unchanged)
                 return;
             String targetName = searchTargetName();

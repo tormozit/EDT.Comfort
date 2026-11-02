@@ -526,6 +526,15 @@ public final class BslEditorHyperlinkHook implements IStartup
                     instanceof MdObject target)
                 {
                     boolean onTail = offset - regionStart > skip + raw.length();
+                    // «Обработка.Имя.Форма» с указателем на роли формы — переходы к основной форме,
+                    // а не к объекту.
+                    if (onTail && count == 2 && segments.length == 3 && hovered == 2)
+                    {
+                        BasicForm roleForm = roleForm(target, segments[2]);
+                        if (roleForm != null)
+                            return new TypeHyperlink(new Region(regionStart, fullLength), "Форма", roleForm, editor,
+                                page);
+                    }
                     if (segmentOnly && onTail)
                         return null;
                     // «Справочники.Имя.Метод» с указателем на методе — в метод модуля менеджера,
@@ -547,6 +556,14 @@ public final class BslEditorHyperlinkHook implements IStartup
     }
 
     private static final String METADATA_PREFIX = "Метаданные."; //$NON-NLS-1$
+
+    /** Основная форма объекта по имени роли («Форма», «ФормаСписка» …); {@code null} — роли нет или форма не задана. */
+    private static BasicForm roleForm(MdObject owner, String role)
+    {
+        String feature = BslLiteralValues.STANDARD_FORMS.get(role.toLowerCase(java.util.Locale.ROOT));
+        EStructuralFeature structural = feature == null ? null : owner.eClass().getEStructuralFeature(feature);
+        return structural != null && owner.eGet(structural) instanceof BasicForm form ? form : null;
+    }
 
     /** «Справочники.Имя.Формы.Ф» /«СправочникСсылка.Имя» → «Справочник.Имя.Форма.Ф» (первые {@code count} сегментов). */
     private static String normalizeFullName(String[] segments, int count)
@@ -1116,13 +1133,14 @@ public final class BslEditorHyperlinkHook implements IStartup
             // в UI берём только готовый результат, промах досчитываем в фоне.
             if (region == null || Display.getCurrent() == null
                 || !(viewer.getDocument() instanceof IDocumentExtension4 document))
-                return detect(viewer, region, multiple, () -> delegate.detectHyperlinks(viewer, region, multiple));
+                return detect(viewer, region, multiple,
+                    () -> coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region));
             long stamp = document.getModificationStamp();
             DetectedLinks ready = detected;
             if (ready != null && ready.stamp() == stamp && ready.offset() == region.getOffset()
                 && ready.multiple() == multiple)
                 return ready.links() == null ? null : ready.links().clone();
-            IHyperlink[] stock = delegate.detectHyperlinks(viewer, region, multiple);
+            IHyperlink[] stock = coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region);
             scheduleDetect(viewer, region, multiple, stock, document, stamp);
             if (stock == null)
                 return null;
@@ -1131,6 +1149,28 @@ public final class BslEditorHyperlinkHook implements IStartup
                 if (result[i] instanceof XtextHyperlink link)
                     result[i] = new HistoryHyperlink(link, source, page);
             return result;
+        }
+
+        /**
+         * Штатная ссылка литерала «Обработка.Имя.Форма» на «Форма» ведёт на объект, но её
+         * область — только «Обработка.Имя»: подчёркнуто не то, что под указателем, и список
+         * выбора закрывается при движении к нему. Такие ссылки отбрасываем — тогда работает
+         * {@link #textLink} с подсветкой имени целиком.
+         */
+        private static IHyperlink[] coveringOnly(IHyperlink[] links, IRegion region)
+        {
+            if (links == null || region == null)
+                return links;
+            List<IHyperlink> result = new ArrayList<>(links.length);
+            int offset = region.getOffset();
+            for (IHyperlink link : links)
+            {
+                IRegion area = link == null ? null : link.getHyperlinkRegion();
+                if (link != null && (area == null
+                    || offset >= area.getOffset() && offset <= area.getOffset() + area.getLength()))
+                    result.add(link);
+            }
+            return result.size() == links.length ? links : result.toArray(IHyperlink[]::new);
         }
 
         private void scheduleDetect(ITextViewer viewer, IRegion region, boolean multiple, IHyperlink[] stock,

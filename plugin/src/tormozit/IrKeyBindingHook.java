@@ -46,7 +46,6 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
     /** Команды ИР с привязками в {@code plugin.xml}. */
     private static final String[] IR_COMMAND_IDS = {
         IrMethodConstructorHandler.COMMAND_ID,
-        IrFormatTextCommandHandler.COMMAND_ID,
         IrModuleCheckHandler.COMMAND_ID
     };
 
@@ -206,7 +205,7 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
         display.timerExec(SYNC_DEBOUNCE_MS, pendingSyncTask);
     }
 
-    /** Полная пересборка: suppress/restore IR-привязок и зеркал FormatAction. */
+    /** Полная пересборка: suppress/restore IR-привязок. */
     static synchronized void syncIrKeyBindings()
     {
         if (bindingServiceInternal == null || commandService == null)

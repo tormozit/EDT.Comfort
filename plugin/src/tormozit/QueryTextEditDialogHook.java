@@ -237,20 +237,6 @@ public final class QueryTextEditDialogHook implements IStartup
             }
         });
 
-        MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
-            IrFormatTextHandler.MENU_LABEL);
-        ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
-            "Форматировать текст запроса через приложение ИР");
-        formatItem.setEnabled(IrFormatTextHandler.isApplicableQuery(viewer));
-        formatItem.addSelectionListener(new SelectionAdapter()
-        {
-            @Override
-            public void widgetSelected(SelectionEvent ev)
-            {
-                IrFormatTextHandler.formatQuery(viewer, queryDialog);
-            }
-        });
-
         MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
             IrQueryTextEditorHandler.MENU_LABEL);
         ComfortSubmenuHelper.setMenuItemTooltip(irEditorItem,

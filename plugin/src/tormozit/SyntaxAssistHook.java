@@ -815,7 +815,6 @@ public final class SyntaxAssistHook implements IStartup
     private static final class NavigationState
     {
         private static final String KEY = "tormozit.syntaxAssistNavigationState"; //$NON-NLS-1$
-        private static final String TOPIC = "syntax-assist-state"; //$NON-NLS-1$
         private static final Map<IWorkbenchWindow, NavigationState> SAVED = new IdentityHashMap<>();
 
         private Object version;
@@ -853,24 +852,19 @@ public final class SyntaxAssistHook implements IStartup
                     {
                         NavigationState state = capture(navigation, contents, search, browser, searchBrowser, viewer);
                         SAVED.put(window, state);
-                        Global.tempLog(TOPIC, "сохранено: вкладка=" + state.tab //$NON-NLS-1$
-                            + ", ветвей=" + state.expanded.size() //$NON-NLS-1$
-                            + ", статей=" + state.descriptionHistory.pages.size() //$NON-NLS-1$
-                            + ", страниц поиска=" + state.searchHistory.pages.size()); //$NON-NLS-1$
                     }
                     catch (Exception ex)
                     {
-                        Global.tempLogException(TOPIC, "сохранение", ex); //$NON-NLS-1$
+                        // Состояние не сохранено — панель откроется с начала.
                     }
                 });
                 NavigationState state = SAVED.get(window);
                 if (state != null)
                     state.restore(navigation, contents, search, browser, searchBrowser, viewer);
-                Global.tempLog(TOPIC, "подключено: восстановление=" + (state != null)); //$NON-NLS-1$
             }
             catch (Exception e)
             {
-                Global.tempLogException(TOPIC, "подключение/восстановление", e); //$NON-NLS-1$
+                // Панель остаётся штатной.
             }
         }
 

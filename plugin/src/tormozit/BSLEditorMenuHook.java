@@ -35,7 +35,6 @@ import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.handlers.IHandlerService;
@@ -89,7 +88,6 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_DebugIR = "Отладить объект ИР";
     private static final String ITEM_TEXT_MethodConstructor = "Конструктор метода ИР";
     private static final String ITEM_TEXT_QueryConstructor = IrQueryConstructorHandler.MENU_LABEL;
-    private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
     private static final String ITEM_TEXT_GitFragmentSearch = IrGitFragmentSearchHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck =IrModuleCheckHandler.MENU_LABEL;
@@ -109,13 +107,6 @@ public class BSLEditorMenuHook implements IStartup
     private static final String HOOK_MARKER = "tormozit.bslMenuHooked"; //$NON-NLS-1$
 
     static final String BSL_MENU_HOOK_MARKER = HOOK_MARKER;
-
-    /** Пассивная диагностика Alt+Shift+F (без перехвата). */
-    private static final String KEY_DIAG_MARKER = "tormozit.irFormatTextKeyDiag"; //$NON-NLS-1$
-
-    private static final String KEY_DIAG_THROTTLE = "tormozit.irFormatTextKeyDiagAt"; //$NON-NLS-1$
-
-    private static final long KEY_DIAG_THROTTLE_MS = 500L;
 
     /**
      * Набор DtGranularEditor-ов, к которым уже добавлен IPageChangedListener.
@@ -269,13 +260,6 @@ public class BSLEditorMenuHook implements IStartup
 
         textWidget.setData(HOOK_MARKER, Boolean.TRUE);
 
-        if (IrFormatTextDebug.isKeyDiagnosticEnabled())
-        {
-            IrFormatTextDebug.log("bsl hook attached editor=" //$NON-NLS-1$
-                + IrFormatTextDebug.formatEditorBrief(editor)
-                + " widget=StyledText@0x" + Integer.toHexString(System.identityHashCode(textWidget))); //$NON-NLS-1$
-        }
-
         MenuAdapter listener = buildMenuListener(editor);
         menu.addMenuListener(listener);
 
@@ -292,12 +276,11 @@ public class BSLEditorMenuHook implements IStartup
         return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
     }
 
-    /** Контекст Xtext и диагностика клавиш — без ожидания меню. */
+    /** Контекст Xtext — без ожидания меню. */
     static void ensureEmbeddedHooks(BslXtextEditor editor, StyledText textWidget)
     {
         if (editor == null || textWidget == null || textWidget.isDisposed())
             return;
-        attachKeyDiagnostic(editor, textWidget);
         EmbeddedBslXtextContextHook.attach(editor, textWidget);
         TextEditorIdentifierSelectionHook.attachToTextEditor(editor, textWidget);
         BreakpointRulerMenu.attach(editor, textWidget);
@@ -481,38 +464,6 @@ public class BSLEditorMenuHook implements IStartup
             ToastNotification.show("Точки останова", "Не удалось скопировать или вставить остановку: "
                 + error.getMessage());
         }
-    }
-
-    private static void attachKeyDiagnostic(BslXtextEditor editor, StyledText textWidget)
-    {
-        if (!IrFormatTextDebug.isKeyDiagnosticEnabled())
-            return;
-        if (Boolean.TRUE.equals(textWidget.getData(KEY_DIAG_MARKER)))
-            return;
-
-        Listener keyListener = event ->
-        {
-            if (!IrFormatTextDebug.isKeyDiagnosticEnabled())
-                return;
-            if (IrFormatTextDebug.looksLikeAltShiftF(event))
-            {
-                long now = System.currentTimeMillis();
-                Object lastAt = textWidget.getData(KEY_DIAG_THROTTLE);
-                if (lastAt instanceof Long last && now - last < KEY_DIAG_THROTTLE_MS)
-                    return;
-                textWidget.setData(KEY_DIAG_THROTTLE, now);
-                IrFormatTextDebug.logKeyDiagnostics(editor, event);
-                return;
-            }
-            if (IrFormatTextDebug.isFKey(event))
-                IrFormatTextDebug.step("keyProbe widget F-key", IrFormatTextDebug.formatKeyEvent(event)); //$NON-NLS-1$
-            if (IrFormatTextDebug.hasAltShiftModifiers(event))
-                IrFormatTextDebug.step("keyProbe widget alt+shift", IrFormatTextDebug.formatKeyEvent(event)); //$NON-NLS-1$
-        };
-
-        textWidget.addListener(SWT.KeyDown, keyListener);
-        textWidget.setData(KEY_DIAG_MARKER, Boolean.TRUE);
-        textWidget.addDisposeListener(e -> textWidget.removeListener(SWT.KeyDown, keyListener));
     }
 
     // =========================================================================
@@ -771,24 +722,6 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(moduleCheckClearItem);
 
-                    MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
-                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                            ITEM_TEXT_FormatText,
-                            IrFormatTextCommandHandler.COMMAND_ID,
-                            IrFormatTextCommandHandler.BINDING_CONTEXT_ID));
-                    ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
-                        "Форматировать выделенный текст через приложение ИР");
-                    formatItem.setEnabled(IrFormatTextHandler.isApplicableBsl(editor));
-                    formatItem.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
-                        {
-                            runFormatTextCommand(editor);
-                        }
-                    });
-                    addedItems.add(formatItem);
-
                     MenuItem declareTypeItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                             ITEM_TEXT_DeclareExpressionType,
@@ -971,26 +904,6 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         EditEmbeddedTextHandler.editEmbeddedText(editor);
-    }
-
-    private static void runFormatTextCommand(BslXtextEditor editor)
-    {
-        try
-        {
-            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
-            if (handlerService != null)
-            {
-                handlerService.executeCommand(IrFormatTextCommandHandler.COMMAND_ID, null);
-                IrFormatTextDebug.log("menu executeCommand OK"); //$NON-NLS-1$
-                return;
-            }
-            IrFormatTextDebug.log("menu handlerService=null → fallback"); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            IrFormatTextDebug.log("menu executeCommand failed: " + e.getMessage() + " → fallback"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        IrFormatTextHandler.formatBslModule(editor);
     }
 
     private static void runFindReferencesCommand(BslXtextEditor editor)

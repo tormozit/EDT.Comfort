@@ -1,16 +1,12 @@
 package tormozit;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
-import org.eclipse.swt.widgets.Control;
-import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
@@ -55,29 +51,6 @@ public final class EmbeddedBslXtextContextHook
 
     private EmbeddedBslXtextContextHook() {}
 
-    /** Строки для блока {@code report embeddedBsl} в {@link IrFormatTextDebug}. */
-    static List<String> formatDiagnosticLines(BslXtextEditor editor)
-    {
-        List<String> lines = new ArrayList<>(8);
-        StyledText focus = resolveFocusStyledText();
-        IContextService windowService = resolveWindowContextService(editor);
-        IContextService siteService = resolveSiteContextService(editor);
-
-        lines.add("bslMenuHook=" + hookMarker(focus, BSLEditorMenuHook.BSL_MENU_HOOK_MARKER)); //$NON-NLS-1$
-        lines.add("embeddedHook=" + hookMarker(focus, EMBEDDED_HOOK_MARKER)); //$NON-NLS-1$
-        lines.add("activationToken=" + hasActivationToken(focus)); //$NON-NLS-1$
-        lines.add("contextsWindow=" + formatContextIds(windowService)); //$NON-NLS-1$
-        lines.add("contextsSite=" + formatContextIds(siteService)); //$NON-NLS-1$
-        lines.add("boostFlags xtext=" + isXtextContextActive(windowService) //$NON-NLS-1$
-            + " formEditor=" + isFormEditorContextActive(windowService) //$NON-NLS-1$
-            + " embeddedForm=" + isEmbeddedInFormEditor(editor) //$NON-NLS-1$
-            + " embeddedGranular=" + isEmbeddedInDtGranularEditor(editor) //$NON-NLS-1$
-            + " needBoost=" + needsContextBoost(editor, windowService)); //$NON-NLS-1$
-        lines.add("activeEditor=" + formatActiveEditorId(editor)); //$NON-NLS-1$
-        lines.add("ensureSkip=" + formatEnsureSkipReason(editor, focus, windowService)); //$NON-NLS-1$
-        return lines;
-    }
-
     /** Подключает FocusIn/FocusOut на {@code textWidget} редактора. */
     public static void attach(BslXtextEditor editor, StyledText textWidget)
     {
@@ -100,23 +73,8 @@ public final class EmbeddedBslXtextContextHook
         textWidget.addListener(SWT.FocusIn, focusIn);
         textWidget.addListener(SWT.FocusOut, focusOut);
 
-        Listener keyDown = null;
-        if (IrFormatTextDebug.isKeyDiagnosticEnabled())
-        {
-            keyDown = event ->
-            {
-                if (!IrFormatTextDebug.looksLikeAltShiftF(event))
-                    return;
-                IrFormatTextDebug.step("embeddedKeyDown", //$NON-NLS-1$
-                    "ensureSkip=" + formatEnsureSkipReason(editor, textWidget, contextService)); //$NON-NLS-1$
-                IrFormatTextDebug.logFullRuntimeReport("embeddedKeyDown", event, editor); //$NON-NLS-1$
-            };
-            textWidget.addListener(SWT.KeyDown, keyDown);
-        }
-
         textWidget.setData(EMBEDDED_HOOK_MARKER, Boolean.TRUE);
 
-        Listener keyDownRef = keyDown;
         textWidget.addDisposeListener(e ->
         {
             deactivateIfNeeded(textWidget, contextService);
@@ -124,8 +82,6 @@ public final class EmbeddedBslXtextContextHook
             {
                 textWidget.removeListener(SWT.FocusIn, focusIn);
                 textWidget.removeListener(SWT.FocusOut, focusOut);
-                if (keyDownRef != null)
-                    textWidget.removeListener(SWT.KeyDown, keyDownRef);
             }
         });
 
@@ -143,13 +99,6 @@ public final class EmbeddedBslXtextContextHook
         return window.getService(IContextService.class);
     }
 
-    private static IContextService resolveSiteContextService(BslXtextEditor editor)
-    {
-        if (editor.getSite() == null)
-            return null;
-        return editor.getSite().getService(IContextService.class);
-    }
-
     private static void ensureActivated(
             BslXtextEditor editor,
             StyledText textWidget,
@@ -159,8 +108,6 @@ public final class EmbeddedBslXtextContextHook
         String skip = formatEnsureSkipReason(editor, textWidget, contextService);
         if (skip != null)
         {
-            if (IrFormatTextDebug.isKeyDiagnosticEnabled())
-                IrFormatTextDebug.step("embeddedEnsure skip", source + " " + skip); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -273,65 +220,6 @@ public final class EmbeddedBslXtextContextHook
         if (rootEditor == null || rootEditor instanceof BslXtextEditor)
             return false;
         return rootEditor instanceof DtGranularEditor<?>;
-    }
-
-    private static String formatActiveEditorId(BslXtextEditor editor)
-    {
-        if (editor == null || editor.getSite() == null)
-            return "null"; //$NON-NLS-1$
-        IWorkbenchPage page = editor.getSite().getPage();
-        if (page == null)
-            return "page=null"; //$NON-NLS-1$
-        IEditorPart rootEditor = page.getActiveEditor();
-        if (rootEditor == null)
-            return "null"; //$NON-NLS-1$
-        if (rootEditor.getSite() == null)
-            return rootEditor.getClass().getSimpleName();
-        return rootEditor.getSite().getId();
-    }
-
-    private static StyledText resolveFocusStyledText()
-    {
-        try
-        {
-            Display display = Display.getCurrent();
-            if (display == null)
-                display = Display.getDefault();
-            if (display == null)
-                return null;
-            Control focus = display.getFocusControl();
-            if (focus instanceof StyledText styledText && !styledText.isDisposed())
-                return styledText;
-        }
-        catch (Exception ignored)
-        {
-            // null ниже
-        }
-        return null;
-    }
-
-    private static String hookMarker(StyledText textWidget, String key)
-    {
-        if (textWidget == null)
-            return "focusNotStyledText"; //$NON-NLS-1$
-        return Boolean.TRUE.equals(textWidget.getData(key)) ? "true" : "false"; //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static String hasActivationToken(StyledText textWidget)
-    {
-        if (textWidget == null)
-            return "focusNotStyledText"; //$NON-NLS-1$
-        return textWidget.getData(ACTIVATION_DATA_KEY) != null ? "true" : "false"; //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static String formatContextIds(IContextService contextService)
-    {
-        if (contextService == null)
-            return "null"; //$NON-NLS-1$
-        Collection<?> activeIds = contextService.getActiveContextIds();
-        if (activeIds == null || activeIds.isEmpty())
-            return "[]"; //$NON-NLS-1$
-        return activeIds.toString();
     }
 
     private static String editorBrief(BslXtextEditor editor)

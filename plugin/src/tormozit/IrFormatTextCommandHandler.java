@@ -3,43 +3,35 @@ package tormozit;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.IWorkbenchPart;
-import org.eclipse.ui.handlers.HandlerUtil;
-import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import org.eclipse.core.commands.NotEnabledException;
+import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.common.NotDefinedException;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.handlers.IHandlerService;
 
-/** Команда «Форматировать текст ИР» через приложение ИР. */
+/**
+ * Заглушка удалённой команды «Форматировать текст ИР» ({@code tormozit.IrFormatText}).
+ *
+ * <p>Команда объявлена, чтобы сохранённые в настройках пользователя привязки клавиш (по умолчанию
+ * Alt+Shift+F) не вели в «команду не объявлена»: она выполняет штатное «Форматировать».
+ * Новых привязок у неё нет.
+ */
 public final class IrFormatTextCommandHandler extends AbstractHandler
 {
-    public static final String COMMAND_ID = "tormozit.IrFormatText"; //$NON-NLS-1$
-    public static final String BINDING_CONTEXT_ID = "org.eclipse.xtext.ui.XtextEditorScope"; //$NON-NLS-1$
+    private static final String STOCK_FORMAT_COMMAND_ID = "org.eclipse.xtext.ui.FormatAction"; //$NON-NLS-1$
+
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
-        IWorkbenchPart part = HandlerUtil.getActivePart(event);
-        IEditorPart editorPart = HandlerUtil.getActiveEditor(event);
-        BslXtextEditor editor = resolveBslEditor(part);
-        if (editor == null)
-            editor = resolveBslEditor(editorPart);
-        if (IrFormatTextDebug.isKeyDiagnosticEnabled())
+        IHandlerService handlers = PlatformUI.getWorkbench().getService(IHandlerService.class);
+        try
         {
-            IrFormatTextDebug.step("handler execute", //$NON-NLS-1$
-                "part=" + IrFormatTextDebug.formatPartBrief(part) //$NON-NLS-1$
-                    + " editorPart=" + IrFormatTextDebug.formatPartBrief(editorPart) //$NON-NLS-1$
-                    + " bsl=" + IrFormatTextDebug.formatEditorBrief(editor) //$NON-NLS-1$
-                    + " applicable=" + IrFormatTextHandler.isApplicableBsl(editor)); //$NON-NLS-1$
-            if (editor == null)
-                IrFormatTextDebug.problem("handler execute: editor null"); //$NON-NLS-1$
+            handlers.executeCommand(STOCK_FORMAT_COMMAND_ID, null);
         }
-
-        IrFormatTextHandler.formatBslModule(editor);
+        catch (NotDefinedException | NotHandledException | NotEnabledException e)
+        {
+            Global.log("IrFormatTextCommandHandler: " + e); //$NON-NLS-1$
+        }
         return null;
-    }
-
-    private static BslXtextEditor resolveBslEditor(IWorkbenchPart part)
-    {
-        if (part instanceof IEditorPart ep)
-            return GetRef.getActiveBslEditor(ep);
-        return GetRef.getActiveBslEditor(part);
     }
 }

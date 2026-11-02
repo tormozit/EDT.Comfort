@@ -3267,6 +3267,9 @@ finishSyncCycle(popup);
         }
     }
 
+    /** Снимок списка литерала при снятом флажке «Фильтр»: показана вся база, а не штатный префиксный отбор. */
+    private static final String LITERAL_ALL_PREFIX = "false*:"; //$NON-NLS-1$
+
     /**
      * Литерал-аргумент без ИР: фильтруем сохранённую базу, не запускаем JFace restart
      * при Backspace. До готовности базы оставляем видимые строки.
@@ -3302,14 +3305,20 @@ finishSyncCycle(popup);
         String filter = processor.literalArgPopupFilterForCaret(viewer, caret);
         SmartFilterTracker.setCurrentFilter(filter);
         boolean smart = SmartAssistFilterState.isSmartFilterEnabled();
-        String snapshot = smart + ":" + filter;
         Table table = fProposalTableField != null ? (Table) fProposalTableField.get(popup) : null;
         String previous = table != null && !table.isDisposed()
             ? (String) table.getData("comfort.literal.filter") : null;
+        // Снятие флажка «Фильтр» — полный список (как вне литерала); штатный префиксный отбор
+        // возвращается, когда набранное слово меняется.
+        boolean showAll = !smart && previous != null
+            && (previous.startsWith("true:") //$NON-NLS-1$
+                || previous.equals(LITERAL_ALL_PREFIX + filter));
+        String snapshot = showAll ? LITERAL_ALL_PREFIX + filter : smart + ":" + filter; //$NON-NLS-1$
         if (!snapshot.equals(previous))
             popupDisplayLimit = INITIAL_POPUP_DISPLAY_LIMIT;
         ICompletionProposal[] filtered = smart
             ? processor.filterProposalsInPlace(base, filter)
+            : showAll ? base
             : SmartContentAssistProcessor.filterStockDelegateProposals(viewer, caret, base);
         List<ICompletionProposal> full = new ArrayList<>(Arrays.asList(base));
         lastFullFilteredCount = filtered.length;

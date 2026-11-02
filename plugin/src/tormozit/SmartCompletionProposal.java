@@ -109,8 +109,6 @@ public class SmartCompletionProposal implements
     private FunctionReturnTypes.VariableTarget variableTarget;
     private boolean variableTargetResolved;
     /** Временно #877: строка уже записана в лог. */
-    private boolean rowLogged;
-    private boolean rowResultLogged;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
@@ -164,19 +162,6 @@ public class SmartCompletionProposal implements
         if (delegate instanceof ConfigurableCompletionProposal configurable)
             localized = BslFormDataTypes.decorateProposal(localized,
                 Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
-        // #region temp #877 — почему строка без типа: первый показ каждой строки
-        if (!rowLogged)
-        {
-            rowLogged = true;
-            Object info = delegate instanceof ConfigurableCompletionProposal c
-                ? Global.getField(c, "additionalProposalInfo") : null; //$NON-NLS-1$
-            Global.tempLog("assist-function-return-type", "row display=" + sourceDisplay //$NON-NLS-1$ //$NON-NLS-2$
-                + " delegate=" + (delegate == null ? null : delegate.getClass().getSimpleName()) //$NON-NLS-1$
-                + " overlap=" + (overlapDisplay != null) //$NON-NLS-1$
-                + " info=" + (info == null ? null : info.getClass().getSimpleName()) //$NON-NLS-1$
-                + " var=" + (variableTarget() != null) + " fn=" + (functionTarget() != null)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
         // Подпись совпадения с ИР несёт тип ИР — его досчитывает активация ИР.
         if (overlapDisplay == null)
             FunctionReturnTypes.rowShown(this);
@@ -184,14 +169,6 @@ public class SmartCompletionProposal implements
             ? localized : decoratePredefinedValueType(decoratePropertyType(decorateVariableType(
                 decorateFunctionType(localized, functionTarget()), variableTarget()))),
             moduleParams(), hasSeveralSignatures(sourceDisplay) ? signatureFirstParam(sourceDisplay) : null);
-        // #region temp — переменная без «<?>» при первом открытии: итоговая подпись первого показа
-        if (!rowResultLogged && variableTarget() != null)
-        {
-            rowResultLogged = true;
-            Global.tempLog("assist-function-return-type", "row result=" + collapsed //$NON-NLS-1$ //$NON-NLS-2$
-                + " source=" + sourceDisplay); //$NON-NLS-1$
-        }
-        // #endregion
         StyledString result;
         if (collapsed != localized)
         {
@@ -215,11 +192,6 @@ public class SmartCompletionProposal implements
             if (!nameOnly.isEmpty())
                 SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
         }
-        // #region temp #877: тип есть в кэше, но отсутствует на экране
-        Global.tempLog("assist-type-display", "render proposal=" + System.identityHashCode(this) //$NON-NLS-1$ //$NON-NLS-2$
-            + " source=" + sourceDisplay + " decorated=" + collapsed + " result=" + result.getString() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " variable=" + variableTarget()); //$NON-NLS-1$
-        // #endregion
         return result;
 
 

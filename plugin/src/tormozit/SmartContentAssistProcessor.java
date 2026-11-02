@@ -342,21 +342,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     // #region agent log
     static final String UI_BLOCK_LOG = "assist-ui-block"; //$NON-NLS-1$
 
-    /**
-     * Сторож на дефекты расчёта типов EDT: пустой список членов после «.» (с разбором
-     * получателя) и {@code returnLost} — функция потеряла тип возврата в частичном расчёте.
-     */
-    static final String RECEIVER_TYPE_LOG = "receiver-type"; //$NON-NLS-1$
-
-    /** Временная безусловная диагностика причин открытия списка. */
-    static void autoOpenLog(String phase, IDocument doc, int caret, String detail)
-    {
-        Global.tempLog("assist-auto-open", phase + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + " key=" + computeFullListContextKey(doc, caret) //$NON-NLS-1$
-            + " filter=\"" + (doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : "") //$NON-NLS-1$ //$NON-NLS-2$
-            + "\" around=\"" + uiBlockAround(doc, caret) + "\" " + detail); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
     static void uiBlockLog(String where, String data)
     {
         if (uiBlockLogQuiet(where))
@@ -2951,8 +2936,6 @@ return;
     private boolean scheduleWordListInBackground(ITextViewer viewer, IDocument doc, int offset,
                                                  int caret, long delayMs)
     {
-        autoOpenLog("word.request", doc, caret, "offset=" + offset + " epoch=" + wordListEpoch //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " live=" + resolveWidgetCaret(viewer) + " caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$
         if (memberStockAwaitInProgress || doc == null || caret < 0)
             return wordListSkip("state"); //$NON-NLS-1$
         // Ctrl+Space оставляем как был: там пользователь явно попросил список и ждёт его
@@ -3366,21 +3349,6 @@ return;
         }
     }
 
-    /**
-     * Отказ от переноса списка ЧЛЕНОВ в фон с указанием причины.
-     *
-     * <p>Отказ означает откат на {@code asyncExec}, то есть расчёт на UI-потоке. Без отметки
-     * это неотличимо в логе от «фон отработал и опубликовал», и по молчанию лога легко сделать
-     * неверный вывод о том, где считался список.
-     */
-    private static boolean memberStockSkip(String reason)
-    {
-        // #region agent log
-        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.skipBackground why=" + reason); //$NON-NLS-1$
-        // #endregion
-        return false;
-    }
-
     /** Отказ от переноса в фон с указанием причины — чтобы не гадать по пустому логу. */
     private static boolean wordListSkip(String reason)
     {
@@ -3677,9 +3645,6 @@ return;
         int liveCaret = resolveWidgetCaret(viewer);
         int liveKey = liveDoc != null && liveCaret >= 0
             ? computeFullListContextKey(liveDoc, liveCaret) : Integer.MIN_VALUE;
-        autoOpenLog("word.publish", liveDoc, liveCaret, "requestKey=" + key //$NON-NLS-1$ //$NON-NLS-2$
-            + " n=" + publishN + " epoch=" + epoch + "/" + wordListEpoch //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " gen=" + gen + "/" + memberStockContextGen); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistant thisCa = viewer instanceof SourceViewer sv
             ? ContentAssistPatcher.getContentAssistant(sv) : null;
         boolean thisPopup = thisCa != null && ContentAssistPopupSync.isPopupVisible(thisCa);
@@ -5488,6 +5453,11 @@ return EMPTY;
                 ? BslQueryLiteralSupport.compute(viewer, literalArgKeyAt(doc, caret))
                 : unwrapProposals(probeLiteralDelegateBest(viewer, offset, caret));
             edtClean = stripIrProposals(probed);
+            // Зонд от каретки вернул только строки с набранным префиксом. Полный список сегмента
+            // (как при автооткрытии у кавычки) досчитает фон и заменит им этот: иначе после
+            // снятия флажка «Фильтр» окну не из чего показать остальное.
+            if (!query && !literalTyped(doc, literalArgKeyAt(doc, caret), caret).isEmpty())
+                scheduleLiteralArgListInBackground(viewer, caret, "manualFullBase", null); //$NON-NLS-1$
             storeLiteralArgList(doc, caret, edtClean);
             // Список запроса посчитан от начала слова — годен всему сегменту.
             if (query && literalArgDoc == doc && literalArgQuote == literalArgKeyAt(doc, caret))
@@ -8921,7 +8891,6 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                     {
                         // При открытом окне список членов захватывается прямо на UI — фон тут
                         // не задействован вовсе.
-                        memberStockSkip("popupVisible"); //$NON-NLS-1$
                         captureMemberStockAtDot(viewer, dot);
                     }
                     else
@@ -9539,9 +9508,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         }
         if (memberDependencyRevision == revision)
             return;
-        Global.tempLog(RECEIVER_TYPE_LOG, "dependency.changed old=" + memberDependencyRevision //$NON-NLS-1$
-            + " new=" + revision + " stock=" + memberStockFullList.length //$NON-NLS-1$ //$NON-NLS-2$
-            + " parents=" + collectParentTypesFromProposals(memberStockFullList)); //$NON-NLS-1$
         memberDependencyRevision = revision;
         memberStockContextGen++;
         memberStockCaptureGen++;
@@ -9894,14 +9860,14 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         IDocument doc = viewer.getDocument();
         final long dependencyRevision = FunctionReturnTypes.localContextRevision(doc);
         if (doc == null || !(doc instanceof IXtextDocument))
-            return memberStockSkip("noXtextDoc"); //$NON-NLS-1$
+            return false;
         // Изоляция ставится в finally расчёта, то есть впервые — только после того, как
         // расчёт закончился. На первом расчёте в документе её ещё нет, фон отказывает, и
         // список членов считается на UI-потоке через asyncExec. Молчать об этом нельзя:
         // именно отсюда берутся «а почему это на UI».
         warmBslDocumentListener(viewer);
         if (!BslDataEventGuard.install(doc))
-            return memberStockSkip("noGuard"); //$NON-NLS-1$
+            return false;
         // Один расчёт на точку. Job.cancel() уже запущенный расчёт не останавливает (монитор
         // проверяется только между попытками), поэтому без этой проверки на каждый повторный
         // заход рождался ещё один поток: замер 05.09.2026 — ПЯТЬ параллельных «SCAP member
@@ -10041,10 +10007,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     if (raw == null)
                     {
                         uiBlockLog("memberStock.bg.lockBusyGiveUp", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #region agent log
-                        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.modelNotReady dot=" + dotContextKey //$NON-NLS-1$
-                            + " attempts=" + attempts + " receiver=" + contextReceiver); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #endregion
                         return Status.CANCEL_STATUS;
                     }
                     if (raw.length == 0)
@@ -10052,11 +10014,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
                             () -> dropStalePopupForEmptyMemberStock(viewer, dotContextKey, contextGen,
                                 contextReceiver));
-                        // #region agent log
-                        Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.empty dot=" + dotContextKey //$NON-NLS-1$
-                            + " attempts=" + attempts + " receiver=" + contextReceiver //$NON-NLS-1$ //$NON-NLS-2$
-                            + " | " + ReceiverTypeLabel.describeReceiverBeforeDot(doc, dotContextKey, probeOffset)); //$NON-NLS-1$
-                        // #endregion
                         return Status.CANCEL_STATUS;
                     }
                     final ICompletionProposal[] result = raw;
@@ -10066,11 +10023,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     // show в 00:19:10). Показ — тот же Paint+timerExec(0), что у списка слов.
                     backgroundStock = new BackgroundStock(dotContextKey, contextGen, contextReceiver,
                         result, events, dependencyRevision);
-                    Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.result dot=" + dotContextKey //$NON-NLS-1$
-                        + " revision=" + dependencyRevision + " current=" + FunctionReturnTypes.localContextRevision(doc) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " parents=" + collectParentTypesFromProposals(result)); //$NON-NLS-1$
-                    Global.tempLog(RECEIVER_TYPE_LOG, "memberStock.receiver dot=" + dotContextKey //$NON-NLS-1$
-                        + " " + ReceiverTypeLabel.describeReceiverBeforeDot(doc, dotContextKey, probeOffset)); //$NON-NLS-1$
                     runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
                         () ->
                         {
@@ -11116,13 +11068,40 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if ((BslExpectedTypePremiums.hasPremiums() || BslQueryLiteralSupport.hasPremiums(list))
             && !irProposalsActiveForCurrentContext())
             Arrays.sort(order, (a, b) -> comparePremiums(list[a.intValue()], list[b.intValue()]));
+        // Значения строкового литерала приходят из нескольких источников, каждый отсортирован отдельно:
+        // при равных премиях — общий алфавит. Новый номер строки, иначе штатный sorter вернёт прежний порядок.
+        boolean alphabetical = isLiteralValueListContext();
+        if (alphabetical)
+            Arrays.sort(order, (a, b) ->
+            {
+                int byPremium = comparePremiums(list[a.intValue()], list[b.intValue()]);
+                return byPremium != 0 ? byPremium : compareDisplayStrings(list[a.intValue()], list[b.intValue()]);
+            });
         ICompletionProposal[] result = new ICompletionProposal[list.length];
         for (int i = 0; i < list.length; i++)
         {
             int index = order[i].intValue();
-            result[i] = wrapProposal(unwrapProposal(list[index]), index);
+            result[i] = wrapProposal(unwrapProposal(list[index]), alphabetical ? i : index);
         }
         return result;
+    }
+
+    /** Строковый литерал (не запрос) в месте расчёта списка. */
+    private static boolean isLiteralValueListContext()
+    {
+        IDocument doc = GHOST_DOC.get();
+        Integer ghostCaret = GHOST_CARET.get();
+        ISourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        int caret;
+        if (doc != null && ghostCaret != null)
+            caret = ghostCaret.intValue();
+        else
+        {
+            doc = viewer != null ? viewer.getDocument() : null;
+            caret = resolveWidgetCaret(viewer);
+        }
+        return doc != null && caret >= 0 && viewer != null && isStringLiteralAssistContext(viewer, caret)
+            && BslQueryLiteralSupport.segmentKeyAt(doc, caret) < 0;
     }
 
     /**

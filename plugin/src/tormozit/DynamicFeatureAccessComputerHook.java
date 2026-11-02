@@ -29,6 +29,7 @@ import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
+import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCharacteristicTypes;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 
@@ -60,6 +61,13 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * унаследованный произвольный ключ; собственный строковый ключ получает код документации
  * из базового свойства. Вплетение {@code ContextDefImpl.allProperties} ставит ранний бандл.
  *
+ * <p>Окружение значений системных перечислений: в данных платформы у части значений оно уже окружения
+ * самого перечисления (например, у {@code РежимРедактированияКолонки.Непосредственно} нет сервера), хотя в
+ * справке доступность одна на всё перечисление. Проверка члена после точки сообщала ложное «Свойство (метод)
+ * объекта не обнаружено [Сервер]». Окружение значения расширяется до окружения перечисления в
+ * {@code EnvironmentalExtension.environments}, поэтому подсказки и переход к определению согласованы с
+ * проверкой. Вплетение ставит ранний бандл {@code tormozit.comfort.early}.
+ *
  * <p>Инструментирование через {@code WeavingHook}, как {@link OpenHelperAttributePropertiesHook}:
  * вызов через {@code System.getProperties}, без зависимости бандла BSL от Комфорта.
  */
@@ -85,7 +93,18 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         System.getProperties().put(PROP_PROPERTY_TRACE,
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::traceProperty);
         System.getProperties().put("tormozit.platform.structureKey", //$NON-NLS-1$
-            (Function<Object[], Object>) StructureKeyDefinition::complete);
+            (Function<Object[], Object>) args -> AbstractTypeMembers.properties(StructureKeyDefinition.complete(args),
+                args[1]));
+        System.getProperties().put("tormozit.platform.contextMethods", //$NON-NLS-1$
+            (Function<Object[], Object>) args -> AbstractTypeMembers.methods(args[0], args[1]));
+        System.getProperties().put("tormozit.platform.environments", //$NON-NLS-1$
+            (Function<Object[], Object>) SystemEnumEnvironments::extend);
+        System.getProperties().put("tormozit.dynamicFeatureAccess.allMembers", //$NON-NLS-1$
+            (Function<Object[], Object>) args -> AbstractTypeMembers.byOwner(args[0]));
+        System.getProperties().put("tormozit.dynamicFeatureAccess.formItemTypes", //$NON-NLS-1$
+            (Function<Object[], Object>) FormItemTypes::expand);
+        System.getProperties().put("tormozit.bslValidator.openType", //$NON-NLS-1$
+            (Function<Object[], Object>) args -> AbstractTypeMembers.validatorOpenType(args[0], args[1], args[2], args[3], args[4]));
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -111,6 +130,33 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             && context.eContainer() instanceof Type owner && "KeyAndValue".equals(owner.getName()) //$NON-NLS-1$
             && property.getTypes().size() == 1
             && "String".equals(com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(property.getTypes().get(0))); //$NON-NLS-1$
+    }
+
+    /** Окружение значения системного перечисления не уже окружения самого перечисления. */
+    private static final class SystemEnumEnvironments
+    {
+        /** {@code {окружение, член}} — окружение члена, штатное или расширенное до окружения перечисления. */
+        static Object extend(Object[] args)
+        {
+            Object result = args[0];
+            try
+            {
+                if (result instanceof Environments environments && args[1] instanceof Property property
+                    && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef context
+                    && context.eContainer() instanceof Type owner && owner.isSysEnum())
+                {
+                    Environments ownerEnvironments = owner.environments();
+                    if (ownerEnvironments != null && !ownerEnvironments.isEmpty()
+                        && !environments.containsAll(ownerEnvironments))
+                        return ownerEnvironments;
+                }
+            }
+            catch (RuntimeException exception)
+            {
+                // Остаётся штатное окружение.
+            }
+            return result;
+        }
     }
 
     /** Исправление определения свойства, общее для расчёта типов и документации EDT. */
@@ -145,6 +191,303 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                     result.add(property);
             }
             return removed == 0 ? properties : org.eclipse.emf.common.util.ECollections.unmodifiableEList(result);
+        }
+    }
+
+    /**
+     * Члены абстрактного типа «ОбъектМетаданных» ({@code MetadataObject}) — свойства и методы всех его
+     * типов-наследников. Подмена в результате {@code ContextDefImpl.allProperties/allMethods}: тот же набор
+     * видят автодополнение, проверки, подсказки и значения литералов. Штатные {@code allProperties} и
+     * {@code allMethods} берут у родителей только {@code getProperties()/getMethods()}, поэтому члены
+     * наследников не попадают в соседние типы и вложенного вызова нет. Типы-наследники ищутся среди типов
+     * платформы той же версии (имена начинаются с имени предка, принадлежность подтверждает цепочка
+     * {@code getParentType()}); результат кэшируется на тип.
+     */
+    private static final class AbstractTypeMembers
+    {
+        private static final String ABSTRACT_TYPE = "MetadataObject"; //$NON-NLS-1$
+        private static final java.util.Map<Type, java.util.List<java.lang.ref.WeakReference<Type>>> CHILDREN =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
+        /** Типы-наследники найдены: набор членов {@code MetadataObject} полный, проверку членов можно включать. */
+        private static volatile boolean verified;
+
+        /**
+         * Имя типа из списка открытых в {@code BslJavaValidator.unknownLeftPart}: то же имя — тип пропускается
+         * (штатное поведение), другое — проверяется. {@code MetadataObject} проверяется, когда объединение членов
+         * наследников подтверждено ({@link #verified}). Типы с динамическими ключами ({@code Структура}, строка
+         * таблицы и т. п.) проверяются только для вызова метода: динамические у них ключи, а не методы. Метод
+         * ли помечаемый элемент, определяется не по последнему обращению цепочки, а по самому помечаемому — части
+         * с номером {@code index - 1}: в {@code Выборка.Поле.Выгрузить()} помечалось бы поле выборки.
+         */
+        static String validatorOpenType(Object typeName, Object access, Object parts, Object index, Object typeNames)
+        {
+            String name = String.valueOf(typeName);
+            // ВсеЭлементыФормы в списке открытых типов EDT нет: имя элемента формы — динамическое, и набор полон
+            // только у модуля загруженной формы с элементами. Иначе вместо проверяемого имени возвращается
+            // FormAllItems, которое есть среди типов, — тип пропускается.
+            if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> names //$NON-NLS-1$
+                && names.contains("FormAllItems") && !flaggedIsMethodCall(access, parts, index) //$NON-NLS-1$
+                && !formItemsKnown(access))
+                return "FormAllItems"; //$NON-NLS-1$
+            // Внешняя обработка/отчёт: экспортные методы и реквизиты — у конкретного объекта, набор типа неполный.
+            // Возвращается имя такого типа из набора — тип пропускается для любого члена, в том числе метода.
+            if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> external) //$NON-NLS-1$
+                for (Object candidate : external)
+                    if (candidate instanceof String text
+                        && (text.startsWith("ExternalDataProcessor") || text.startsWith("ExternalReport"))) //$NON-NLS-1$ //$NON-NLS-2$
+                        return text;
+            // Шаблонный анонимный тип («СправочникОбъектИмяСправочника» от Справочники[Имя].СоздатьЭлемент()):
+            // только свои члены, реквизиты зависят от имени, известного только при выполнении.
+            if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> generic) //$NON-NLS-1$
+                for (Object candidate : generic)
+                    if (candidate instanceof String text && PlatformTemplateTypes.isTemplateName(text))
+                        return text;
+            if (ABSTRACT_TYPE.equals(name))
+                return verified ? name + ".comfort-members-merged" : name; //$NON-NLS-1$
+            return flaggedIsMethodCall(access, parts, index) ? name + ".comfort-method-checked" : name; //$NON-NLS-1$
+        }
+
+        /** Модуль принадлежит загруженной форме, и у неё есть элементы: имя вне списка — действительно неизвестное. */
+        private static boolean formItemsKnown(Object access)
+        {
+            com._1c.g5.v8.dt.bsl.model.Module module = access instanceof org.eclipse.emf.ecore.EObject object
+                ? org.eclipse.xtext.EcoreUtil2.getContainerOfType(object, com._1c.g5.v8.dt.bsl.model.Module.class)
+                : null;
+            return module != null && module.getOwner() instanceof com._1c.g5.v8.dt.form.model.Form form
+                && !form.eIsProxy() && !form.getItems().isEmpty();
+        }
+
+        private static boolean flaggedIsMethodCall(Object access, Object parts, Object index)
+        {
+            Object flagged = parts instanceof java.util.List<?> list && index instanceof Integer position
+                && position >= 1 && position <= list.size() ? list.get(position - 1) : access;
+            if (flagged instanceof com._1c.g5.v8.dt.bsl.model.Invocation)
+                return true;
+            return flagged instanceof com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess dynamic
+                && dynamic.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Invocation invocation
+                && invocation.getMethodAccess() == dynamic;
+        }
+
+        static Object properties(Object result, Object self)
+        {
+            return merge(result, self, true);
+        }
+
+        static Object methods(Object result, Object self)
+        {
+            return merge(result, self, false);
+        }
+
+        /**
+         * Результат {@code getAllMethodAndProperties}: тройки {@code {методы, свойства, тип}}. Члены абстрактного
+         * типа, объявленные в типах-наследниках, переносятся в тройки этих наследников — подпись «~ Владелец» в
+         * списке и подсказка берут тип из тройки. Одноимённый член у нескольких наследников попадает в тройку каждого:
+         * штатное группирование по имени подписывает его перечнем владельцев.
+         */
+        @SuppressWarnings("unchecked")
+        static Object byOwner(Object result)
+        {
+            if (!(result instanceof java.util.Collection<?> triples))
+                return result;
+            try
+            {
+                java.util.List<Object> output = new java.util.ArrayList<>();
+                boolean changed = false;
+                for (Object raw : triples)
+                {
+                    if (!(raw instanceof org.eclipse.xtext.util.Triple<?, ?, ?> triple)
+                        || !(triple.getThird() instanceof Type owner) || !ABSTRACT_TYPE.equals(owner.getName()))
+                    {
+                        output.add(raw);
+                        continue;
+                    }
+                    java.util.List<Type> children = children(owner);
+                    java.util.Set<Type> childSet = new java.util.HashSet<>(children);
+                    java.util.List<Method> keptMethods = new java.util.ArrayList<>();
+                    java.util.List<Property> keptProperties = new java.util.ArrayList<>();
+                    java.util.Map<Type, java.util.List<Method>> methodsOf = new java.util.LinkedHashMap<>();
+                    java.util.Map<Type, java.util.List<Property>> propertiesOf = new java.util.LinkedHashMap<>();
+                    for (Object item : (java.util.Collection<Object>)triple.getFirst())
+                    {
+                        Method method = (Method)item;
+                        if (!childSet.contains(containerType(method)))
+                        {
+                            keptMethods.add(method);
+                            continue;
+                        }
+                        for (Type child : children)
+                            if (child.getContextDef() != null)
+                                for (Method own : child.getContextDef().getMethods())
+                                    if (sameName(own, method))
+                                        methodsOf.computeIfAbsent(child, k -> new java.util.ArrayList<>()).add(own);
+                    }
+                    for (Object item : (java.util.Collection<Object>)triple.getSecond())
+                    {
+                        Property property = (Property)item;
+                        if (!childSet.contains(containerType(property)))
+                        {
+                            keptProperties.add(property);
+                            continue;
+                        }
+                        for (Type child : children)
+                            if (child.getContextDef() != null)
+                                for (Property own : child.getContextDef().getProperties())
+                                    if (sameName(own, property))
+                                        propertiesOf.computeIfAbsent(child, k -> new java.util.ArrayList<>()).add(own);
+                    }
+                    if (methodsOf.isEmpty() && propertiesOf.isEmpty())
+                    {
+                        output.add(raw);
+                        continue;
+                    }
+                    changed = true;
+                    if (!keptMethods.isEmpty() || !keptProperties.isEmpty())
+                        output.add(org.eclipse.xtext.util.Tuples.create(keptMethods, keptProperties, owner));
+                    java.util.Set<Type> ordered = new java.util.LinkedHashSet<>(methodsOf.keySet());
+                    ordered.addAll(propertiesOf.keySet());
+                    for (Type child : ordered)
+                        output.add(org.eclipse.xtext.util.Tuples.create(
+                            methodsOf.getOrDefault(child, java.util.List.<Method>of()),
+                            propertiesOf.getOrDefault(child, java.util.List.<Property>of()), child));
+                }
+                return changed ? output : result;
+            }
+            catch (RuntimeException exception)
+            {
+                return result;
+            }
+        }
+
+        private static Type containerType(EObject member)
+        {
+            EObject container = member.eContainer();
+            return container != null && container.eContainer() instanceof Type type ? type : null;
+        }
+
+        private static boolean sameName(com._1c.g5.v8.dt.mcore.DuallyNamedElement left,
+            com._1c.g5.v8.dt.mcore.DuallyNamedElement right)
+        {
+            return left.getName() != null && left.getName().equalsIgnoreCase(right.getName());
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Object merge(Object result, Object self, boolean properties)
+        {
+            if (!(self instanceof com._1c.g5.v8.dt.mcore.ContextDef context)
+                || !(context.eContainer() instanceof Type owner) || !ABSTRACT_TYPE.equals(owner.getName())
+                || BUSY.get() != null || !(result instanceof java.util.List<?> own))
+                return result;
+            BUSY.set(Boolean.TRUE);
+            try
+            {
+                java.util.List<Type> children = children(owner);
+                if (children.isEmpty())
+                    return result;
+                java.util.Set<String> names = new java.util.HashSet<>();
+                for (Object item : own)
+                    names.add(key((com._1c.g5.v8.dt.mcore.DuallyNamedElement)item));
+                java.util.List<Object> merged = new java.util.ArrayList<>((java.util.List<Object>)own);
+                for (Type child : children)
+                {
+                    com._1c.g5.v8.dt.mcore.ContextDef def = child.getContextDef();
+                    if (def == null)
+                        continue;
+                    for (com._1c.g5.v8.dt.mcore.DuallyNamedElement member : properties
+                        ? (java.util.List<? extends com._1c.g5.v8.dt.mcore.DuallyNamedElement>)def.getProperties()
+                        : (java.util.List<? extends com._1c.g5.v8.dt.mcore.DuallyNamedElement>)def.getMethods())
+                        if (names.add(key(member)))
+                            merged.add(member);
+                }
+                return new org.eclipse.emf.common.util.DelegatingEList.UnmodifiableEList<>(merged);
+            }
+            catch (RuntimeException exception)
+            {
+                return result;
+            }
+            finally
+            {
+                BUSY.remove();
+            }
+        }
+
+        private static String key(com._1c.g5.v8.dt.mcore.DuallyNamedElement member)
+        {
+            return (member.getName() != null ? member.getName() : "").toLowerCase(java.util.Locale.ROOT); //$NON-NLS-1$
+        }
+
+        private static java.util.List<Type> children(Type owner)
+        {
+            java.util.List<java.lang.ref.WeakReference<Type>> cached = CHILDREN.get(owner);
+            if (cached != null)
+            {
+                java.util.List<Type> live = new java.util.ArrayList<>(cached.size());
+                for (java.lang.ref.WeakReference<Type> reference : cached)
+                {
+                    Type type = reference.get();
+                    if (type == null)
+                    {
+                        live = null;
+                        break;
+                    }
+                    live.add(type);
+                }
+                if (live != null)
+                    return live;
+            }
+            java.util.List<Type> found = find(owner);
+            verified = verified || !found.isEmpty();
+            java.util.List<java.lang.ref.WeakReference<Type>> references = new java.util.ArrayList<>(found.size());
+            for (Type type : found)
+                references.add(new java.lang.ref.WeakReference<>(type));
+            CHILDREN.put(owner, references);
+            return found;
+        }
+
+        private static java.util.List<Type> find(Type owner)
+        {
+            java.util.List<Type> found = new java.util.ArrayList<>();
+            URI ownerUri = EcoreUtil.getURI(owner);
+            com._1c.g5.v8.dt.platform.IEObjectProvider provider = null;
+            for (com._1c.g5.v8.dt.platform.version.Version version
+                : com._1c.g5.v8.dt.platform.version.Version.getPlatformSupportVersions())
+            {
+                com._1c.g5.v8.dt.platform.IEObjectProvider candidate = com._1c.g5.v8.dt.platform.IEObjectProvider.Registry.INSTANCE
+                    .get(com._1c.g5.v8.dt.mcore.McorePackage.Literals.TYPE_ITEM, version);
+                org.eclipse.xtext.resource.IEObjectDescription description = candidate != null
+                    ? candidate.getEObjectDescription(owner.getName()) : null;
+                if (description != null && ownerUri.equals(EcoreUtil.getURI(description.getEObjectOrProxy())))
+                {
+                    provider = candidate;
+                    break;
+                }
+            }
+            if (provider == null)
+                return found;
+            String prefix = owner.getName().toLowerCase(java.util.Locale.ROOT);
+            for (org.eclipse.xtext.resource.IEObjectDescription description : provider.getEObjectDescriptions(
+                d -> d.getName() != null && d.getName().toString().length() > prefix.length()
+                    && d.getName().toString().toLowerCase(java.util.Locale.ROOT).startsWith(prefix)))
+            {
+                if (EcoreUtil.resolve(description.getEObjectOrProxy(), owner) instanceof Type child
+                    && child != owner && descends(child, owner))
+                    found.add(child);
+            }
+            return found;
+        }
+
+        private static boolean descends(Type type, Type owner)
+        {
+            TypeItem current = type.getParentType();
+            for (int depth = 0; current != null && depth < 32; depth++)
+            {
+                if (!(EcoreUtil.resolve(current, owner) instanceof Type parent))
+                    return false;
+                if (parent == owner)
+                    return true;
+                current = parent.getParentType();
+            }
+            return false;
         }
     }
 

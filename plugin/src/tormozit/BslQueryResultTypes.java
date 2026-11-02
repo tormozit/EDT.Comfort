@@ -99,6 +99,7 @@ import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.dcs.resource.IDependentQuerySchemaProvider;
 import com._1c.g5.v8.dt.ql.model.ABinaryOperatorsExpression;
+import com._1c.g5.v8.dt.ql.model.DbViewNestedTableFromQuery;
 import com._1c.g5.v8.dt.ql.model.InExpression;
 import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
@@ -338,13 +339,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             Shape shape = plan.shape(expression, Collections.newSetFromMap(new IdentityHashMap<>()));
             List<String> totals = shape != null && shape.kind.equals("QueryResult") //$NON-NLS-1$
                 ? shape.results.get(0).totals : null;
-            Global.tempLog("expected-type", "query totals=" + totals //$NON-NLS-1$ //$NON-NLS-2$
-                + " shape=" + (shape == null ? null : shape.kind)); //$NON-NLS-1$
             return totals;
         }
         catch (RuntimeException | LinkageError failure)
         {
-            Global.tempLog("expected-type", "query totals failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -484,6 +482,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         if (!plan.queries.isEmpty())
                             session.hasQueries = true;
                         session.plans.put(method, plan);
+                        if (!plan.types.isEmpty())
+                            scheduleTypesRefresh(module.eResource(), node.getOffset());
                     }
                     problems.addAll(plan.unknownFields(cancellation));
                 }
@@ -628,33 +628,66 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 restart(widget.getDisplay(), RELINK_ASSIST_RETRY_MS);
                 return;
             }
-            int offset = viewer.getSelectedRange().x;
-            Job job = new Job("Комфорт: типы результатов запросов") //$NON-NLS-1$
-            {
-                @Override
-                protected IStatus run(IProgressMonitor monitor)
-                {
-                    try
-                    {
-                        document.readOnly(resource ->
-                        {
-                            BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
-                                status -> {});
-                            // Сеансы менеджера временных таблиц для литералов модуля (issue 889, решение 1А)
-                            BslTempTableSessions.refreshDocument(document, resource, offset);
-                            return null;
-                        });
-                    }
-                    catch (RuntimeException | LinkageError failure)
-                    {
-                        // Досчёт не удался — следующая попытка обновления повторит расчёт.
-                    }
-                    return Status.OK_STATUS;
-                }
-            };
-            job.setSystem(true);
-            job.schedule();
+            scheduleTypesRefresh(document, viewer.getSelectedRange().x, false);
         }
+    }
+
+    /**
+     * Фоновый досчёт плана метода по смещению {@code offset} (модельному).
+     * @param revalidate перезапустить проверку модуля, если досчёт изменил типы: маркеры ставились по старым
+     */
+    private static void scheduleTypesRefresh(IXtextDocument document, int offset, boolean revalidate)
+    {
+        Job job = new Job("Комфорт: типы результатов запросов") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                try
+                {
+                    int generation = BslDocCommentComputedTypes.typesGeneration();
+                    document.readOnly(resource ->
+                    {
+                        BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
+                            status -> {});
+                        // Сеансы менеджера временных таблиц для литералов модуля (issue 889, решение 1А)
+                        BslTempTableSessions.refreshDocument(document, resource, offset);
+                        return null;
+                    });
+                    boolean changed = generation != BslDocCommentComputedTypes.typesGeneration();
+                    if (revalidate && changed)
+                        Global.invokeVoid(document, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+                }
+                catch (RuntimeException | LinkageError failure)
+                {
+                    // Досчёт не удался — следующая попытка обновления повторит расчёт.
+                }
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /**
+     * Проверка подготовила план метода с типами результатов, но в модель типы вносит только досчёт, а он
+     * при открытии идёт лишь для метода под кареткой: остальные методы остаются со штатными типами и
+     * ложными ошибками полей выборки до первого автодополнения. Досчёт запускается по открытому документу.
+     */
+    private static void scheduleTypesRefresh(Resource resource, int offset)
+    {
+        URI uri = resource.getURI();
+        List<IXtextDocument> documents;
+        synchronized (WATCHED_DOCUMENTS)
+        {
+            documents = new ArrayList<>(WATCHED_DOCUMENTS.keySet());
+        }
+        for (IXtextDocument document : documents)
+            if (document instanceof XtextDocument xtext && uri.equals(xtext.getResourceURI()))
+            {
+                scheduleTypesRefresh(document, offset, true);
+                return;
+            }
     }
 
     private static Session session(Resource resource, boolean create)
@@ -1133,8 +1166,15 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         }
     }
 
+    /** @param nested колонки вложенной таблицы запроса ({@code Поле.(Колонка1, Колонка2)}): значение поля — РезультатЗапроса; иначе null */
     private record Field(String name, String nameRu, List<TypeItem> types,
-        URI literalUri, int offset, int length) {}
+        URI literalUri, int offset, int length, Result nested)
+    {
+        Field(String name, String nameRu, List<TypeItem> types, URI literalUri, int offset, int length)
+        {
+            this(name, nameRu, types, literalUri, offset, length, null);
+        }
+    }
     /** @param totals колонки итогов {@code ИТОГИ ПО} в порядке уровней */
     private record Result(List<Field> fields, boolean ordinary, boolean dropped, List<String> totals) {}
     private record Shape(String kind, List<Result> results) {}
@@ -1272,6 +1312,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     return tempTable(expression);
                 if (expression instanceof IndexAccess index)
                     return indexed(shape(index.getSource(), visiting), index.getIndex());
+                // Поле-вложенная таблица выборки: Выборка.Вложенная — РезультатЗапроса со своими колонками
+                if (expression instanceof DynamicFeatureAccess fieldAccess && fieldAccess.getName() != null)
+                {
+                    Shape owner = shape(fieldAccess.getSource(), visiting);
+                    if (owner == null || !owner.kind.equals("QueryResultSelection") || owner.results.size() != 1) //$NON-NLS-1$
+                        return null;
+                    String fieldName = lower(fieldAccess.getName());
+                    for (Field field : owner.results.get(0).fields)
+                        if (field.nested != null && (fieldName.equals(lower(field.name)) || fieldName.equals(lower(field.nameRu))))
+                            return new Shape("QueryResult", List.of(field.nested)); //$NON-NLS-1$
+                    return null;
+                }
                 if (!(expression instanceof Invocation invocation)
                     || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access))
                     return null;
@@ -1583,7 +1635,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             : endLocation.getSecond() - location.getSecond();
                         fields.add(new Field(field.getName(), field.getNameRu(),
                             type == null ? List.of() : List.copyOf(type.getTypes()),
-                            literalUri, offset, length));
+                            literalUri, offset, length,
+                            field instanceof DbViewNestedTableFromQuery nested
+                                ? nestedResult(nested, computer, literalUri, offset, length) : null));
                     }
                 }
                 // Сохраняем место УНИЧТОЖИТЬ/ПОМЕСТИТЬ в пакете. Его колонки
@@ -1595,6 +1649,22 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             cached = List.copyOf(results);
             queries.put(literal, cached);
             return cached;
+        }
+
+        /** Колонки вложенной таблицы запроса — как обычный результат: из него строится РезультатЗапроса поля. */
+        private static Result nestedResult(DbViewNestedTableFromQuery nested,
+            DerivedTypeComputerForDbViewQuery computer, URI literalUri, int offset, int length)
+        {
+            List<Field> columns = new ArrayList<>();
+            for (DbViewFieldDef column : nested.getActualFields())
+            {
+                TypeDescription type = computer.getFieldType(column).getFirst();
+                columns.add(new Field(column.getName(), column.getNameRu(),
+                    type == null ? List.of() : List.copyOf(type.getTypes()), literalUri, offset, length,
+                    column instanceof DbViewNestedTableFromQuery deeper
+                        ? nestedResult(deeper, computer, literalUri, offset, length) : null));
+            }
+            return new Result(List.copyOf(columns), true, false, List.of());
         }
 
         /** Параметры схемы запроса в порядке первого упоминания и их ожидаемые типы EDT. */
@@ -1795,7 +1865,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 property.setWritable(type.getName().equals("ValueTableRow")); //$NON-NLS-1$
                 property.setEnvironments(Environments.ALL);
                 TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
-                container.getTypes().addAll(field.types);
+                if (field.nested != null)
+                    container.getTypes().add(baseType("QueryResult")); //$NON-NLS-1$
+                else
+                    container.getTypes().addAll(field.types);
                 property.setTypeContainer(container);
                 if (field.offset >= 0 && field.length > 0)
                 {

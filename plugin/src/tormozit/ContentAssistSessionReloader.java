@@ -4915,13 +4915,6 @@ boolean inLiteral = endCaret >= 0
     {
         contextPremiumAutoOpenCaret = -1;
         String skipText = event == null ? null : event.getText();
-        SmartContentAssistProcessor.autoOpenLog("document", event != null ? event.getDocument() : null, //$NON-NLS-1$
-            event != null ? event.getOffset() + (skipText != null ? skipText.length() : 0) : -1,
-            "insertedLength=" + (skipText == null ? 0 : skipText.length()) //$NON-NLS-1$
-                + (skipText != null && skipText.length() <= 100
-                    ? " text=\"" + ContentAssistDebug.jsonEscapeForLog(skipText) + "\"" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " removed=" + (event != null ? event.getLength() : -1) //$NON-NLS-1$
-                + " pending=" + pendingAutoOpen + " timerGen=" + completionAutoOpenScheduleGen.get()); //$NON-NLS-1$ //$NON-NLS-2$
         boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
         if (skipText != null && skipText.indexOf('"') >= 0)
             Global.tempLog("assist-literal-quote", "document.quote apply=" + proposalApply //$NON-NLS-1$ //$NON-NLS-2$
@@ -5187,8 +5180,6 @@ boolean inLiteral = endCaret >= 0
     private void scheduleCompletionAutoOpen(int expectedCaretAfter, int autoOpenSeq)
     {
         int gen = completionAutoOpenScheduleGen.incrementAndGet();
-        SmartContentAssistProcessor.autoOpenLog("timer.schedule", viewer.getDocument(), expectedCaretAfter, //$NON-NLS-1$
-            "gen=" + gen + " seq=" + autoOpenSeq); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         int delay = settings != null ? settings.getTimeout() : 0;
         SmartContentAssistProcessor.uiBlockLog("autoOpen.schedule", //$NON-NLS-1$
@@ -5215,9 +5206,6 @@ boolean inLiteral = endCaret >= 0
         // expectedCaretAfter пришёл из DocumentEvent — модельный офсет, поэтому и live тоже модельный
         int liveCaret = text != null && !text.isDisposed() ? toModelOffset(text.getCaretOffset()) : -1;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-        SmartContentAssistProcessor.autoOpenLog("timer.fire", viewer.getDocument(), liveCaret, //$NON-NLS-1$
-            "expected=" + expectedCaretAfter + " gen=" + gen + "/" + genGlobal //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " popup=" + popupVisible); //$NON-NLS-1$
         if (gen != genGlobal)
         {
             SmartContentAssistProcessor.uiBlockLog("autoOpen.timer.skip", //$NON-NLS-1$
@@ -5535,13 +5523,11 @@ boolean inLiteral = endCaret >= 0
         }
         catch (BadLocationException e)
         {
-            SmartContentAssistProcessor.autoOpenLog("contextWord.dotError", doc, caret, e.toString()); //$NON-NLS-1$
+            // Нет точки — решает префикс ниже.
         }
         if (!prefix.isEmpty() || memberDot)
         {
             contextPremiumAutoOpenCaret = -1;
-            SmartContentAssistProcessor.autoOpenLog("contextWord.check", doc, caret, //$NON-NLS-1$
-                "reason=" + (memberDot ? "dot" : "prefix") + " allowed=true"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return true;
         }
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
@@ -5563,8 +5549,6 @@ boolean inLiteral = endCaret >= 0
             ? irCompletionSnapshot != null && irCompletionSnapshot.caret == caret
                 && shouldOpenFromIr(irCompletionSnapshot)
             : BslExpectedTypePremiums.hasAutoOpenWord(doc, caret);
-        SmartContentAssistProcessor.autoOpenLog("contextWord.check", doc, caret, //$NON-NLS-1$
-            "ir=" + (session != null) + " allowed=" + allowed); //$NON-NLS-1$ //$NON-NLS-2$
         if (allowed)
             contextPremiumAutoOpenCaret = -1;
         else
@@ -7196,7 +7180,6 @@ processor.applyIrCompletion(snapshot);
         if (!reloader.allowsContextWordAutoOpen(caret))
             return false;
         boolean ok = ContentAssistPopupSync.showPossibleCompletions(ca, true);
-        SmartContentAssistProcessor.autoOpenLog("word.show", doc, caret, "ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
         return ok;
     }
 

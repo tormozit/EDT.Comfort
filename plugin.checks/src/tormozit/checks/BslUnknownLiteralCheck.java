@@ -18,7 +18,11 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
 import tormozit.BslLiteralValues;
 import tormozit.ComfortCheckIds;
 
-/** ПроверитьВыраженияУровня из ирКлсПолеТекстаПрограммы; список и полнота — общий анализатор. */
+/**
+ * ПроверитьВыраженияУровня из ирКлсПолеТекстаПрограммы; список и полнота — общий анализатор.
+ * Замещает bsl-legacy-check-string-literal; правила имён форм — по бандлу com._1c.g5.v8.dt.bsl.ui
+ * 22.0.0.v202605050943 (DefaultFormsNameProvider, StringLiteralProposalProviderGetOrOpenForm).
+ */
 public final class BslUnknownLiteralCheck extends BasicCheck<Object>
 {
     // Временный контрольный замер CPU: отключён весь анализ этой проверки.
@@ -40,9 +44,10 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
                 + "(<a href=\"#\" onclick=\"comfortOpenBslPreferences();return false;\">"
                 + "Параметры → V8 → Встроенный язык</a>). Анализ вызываемых методов может заметно "
                 + "нагружать процессор при массовой проверке."
-                + "<br><br>В отличие от штатной bsl-legacy-check-string-literal, использующей встроенные "
-                + "списки EDT, проверяет также литералы вне вызовов, списки через запятую, пути через "
-                + "точку и имена сортировки. Проверки дополняют друг друга.")
+                + "<br><br>Проверяет также литералы вне вызовов, списки через запятую, пути через "
+                + "точку и имена сортировки; полные имена форм в ОткрытьФорму, ПолучитьФорму и "
+                + "ОткрытьФормуМодально. Колонки и ключи неизвестного состава не проверяет."
+                + "<br><br>Динамически замещает штатную проверку bsl-legacy-check-string-literal.")
             .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
             .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
             .module().checkedObjectType(BslPackage.Literals.MODULE);
@@ -82,6 +87,8 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
             {
                 acceptor.addIssue("Литерал «" + value + "» отсутствует в списке допустимых значений", literal);
             }
+            for (String message : BslLiteralValues.stockOutsideMessages(literal))
+                acceptor.addIssue(message, literal);
         }
     }
 

@@ -651,15 +651,12 @@ public class Activator extends AbstractUIPlugin
     /**
      * Динамическое замещение без изменения профилей: только при выполнении CheckExecutor
      * считает штатные проверки неактивными. Включённость замен на это не влияет.
-     * Вызовы ICheckSettings.isEnabled() подтверждены в com.e1c.g5.v8.dt.check 6.0.100.v202605050943:
-     * проверки языка, модели и делегатов. Замена вызова сохраняет стек и штатную очистку маркеров.
+     * Вызовы ICheckSettings.isEnabled() в CheckExecutor подменяет ранний бандл (CheckExecutorEnabledWeaving):
+     * к старту основного бандла CheckExecutor уже загружен. Здесь только функция, которую он вызывает.
      */
-    private static final class BuiltinCheckReplacements implements WeavingHook, ClassFileTransformer
+    private static final class BuiltinCheckReplacements
     {
-        private static final String TARGET = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
-        private static final String SETTINGS_TYPE = "com/e1c/g5/v8/dt/check/settings/ICheckSettings"; //$NON-NLS-1$
         private static final String CALLBACK = "tormozit.checkReplacement.enabled"; //$NON-NLS-1$
-        private static volatile boolean woven;
 
         static void start(BundleContext context)
         {
@@ -668,87 +665,12 @@ public class Activator extends AbstractUIPlugin
                     && ComfortCheckIds.REPLACED_BUILTIN_CHECKS.contains(settings.getId().getCheckId());
                 return !replaced && settings.isEnabled();
             });
-            BuiltinCheckReplacements hook = new BuiltinCheckReplacements();
-            context.registerService(WeavingHook.class, hook, null);
-            try
-            {
-                Bundle checks = org.eclipse.core.runtime.Platform.getBundle("com.e1c.g5.v8.dt.check"); //$NON-NLS-1$
-                if (checks == null)
-                    throw new IllegalStateException("Бандл проверок EDT недоступен"); //$NON-NLS-1$
-                checks.loadClass(TARGET);
-                if (!woven)
-                    BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET);
-            }
-            catch (ClassNotFoundException | RuntimeException | LinkageError failure)
-            {
-            }
         }
 
         static void stop()
         {
             // Уже преобразованный класс продолжает обращаться к callback после остановки бандла.
             System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)ICheckSettings::isEnabled);
-        }
-
-        @Override
-        public void weave(WovenClass type)
-        {
-            if (type.getState() == WovenClass.TRANSFORMING && TARGET.equals(type.getClassName()))
-            {
-                type.setBytes(rewrite(type.getBytes()));
-                woven = true;
-            }
-        }
-
-        @Override
-        public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
-            ProtectionDomain domain, byte[] bytes)
-        {
-            return TARGET.replace('.', '/').equals(name) ? rewrite(bytes) : null;
-        }
-
-        private static byte[] rewrite(byte[] bytes)
-        {
-            ClassReader reader = new ClassReader(bytes);
-            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-            int[] calls = { 0 };
-            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-            {
-                @Override
-                public MethodVisitor visitMethod(int access, String name, String descriptor,
-                    String signature, String[] exceptions)
-                {
-                    return new MethodVisitor(Opcodes.ASM9,
-                        super.visitMethod(access, name, descriptor, signature, exceptions))
-                    {
-                        @Override
-                        public void visitMethodInsn(int opcode, String owner, String method,
-                            String descriptor, boolean isInterface)
-                        {
-                            if (opcode == Opcodes.INVOKEINTERFACE && SETTINGS_TYPE.equals(owner)
-                                && "isEnabled".equals(method) && "()Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
-                            {
-                                // В стеке settings; Predicate из java.base доступен загрузчику EDT.
-                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
-                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
-                                super.visitLdcInsn(CALLBACK);
-                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
-                                    "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.SWAP);
-                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", //$NON-NLS-1$
-                                    "test", "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$ //$NON-NLS-2$
-                                calls[0]++;
-                                return;
-                            }
-                            super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
-                        }
-                    };
-                }
-            }, 0);
-            if (calls[0] == 0)
-                throw new IllegalStateException("В CheckExecutor не найдены вызовы isEnabled"); //$NON-NLS-1$
-            return writer.toByteArray();
         }
     }
 

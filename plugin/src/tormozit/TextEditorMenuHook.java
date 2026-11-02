@@ -39,7 +39,6 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
-import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
  * Подменю «Комфорт» в контекстном меню текстовых редакторов Workbench.
@@ -246,7 +245,7 @@ public class TextEditorMenuHook implements IStartup
         TextEditorComfortMenu.attachContextWithViewer(text, HOOK_MARKER, viewer, ext, editable);
     }
 
-    /** Display-фильтр Ctrl+Alt+V / Alt+Shift+F для модальных диалогов (куда Key Binding Service не доставляет события). */
+    /** Display-фильтр Ctrl+Alt+V для модальных диалогов (куда Key Binding Service не доставляет события). */
     private static void handleDisplayKeyDown(Event event)
     {
         // Ctrl+Alt+V ── вставка со сравнением
@@ -264,27 +263,6 @@ public class TextEditorMenuHook implements IStartup
                 return;
             event.doit = false;
             PasteWithCompareActions.run(shell, ctx);
-            return;
-        }
-
-        // Alt+Shift+F ── форматирование текста ИР (только для диалогов с QL-редактором, при подключённом ИР)
-        if (event.keyCode == 'f'
-            && (event.stateMask & SWT.MOD2) != 0
-            && (event.stateMask & SWT.MOD3) != 0)
-        {
-            if (!(event.widget instanceof StyledText text) || text.isDisposed())
-                return;
-            ISourceViewer viewer = TextEditor.resolveViewerFromDialog(text);
-            if (viewer == null || !IrFormatTextHandler.isApplicableQuery(viewer))
-                return;
-            IDtProject dtProject = IrFormatTextHandler.resolveDtProjectForQuery(null);
-            if (dtProject == null)
-                return;
-            IRSession irSession = IRApplication.getSession(dtProject, true);
-            if (irSession == null || irSession.executor == null)
-                return;
-            event.doit = false;
-            IrFormatTextHandler.formatQuery(viewer, null);
         }
     }
 
@@ -570,21 +548,6 @@ public class TextEditorMenuHook implements IStartup
 
                     if (viewer != null && IrFormatTextHandler.isApplicableQuery(viewer))
                     {
-                        MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
-                            IrFormatTextHandler.MENU_LABEL);
-                        ComfortSubmenuHelper.setMenuItemTooltip(formatItem,
-                            "Форматировать текст через приложение ИР");
-                        formatItem.setEnabled(true);
-                        formatItem.addSelectionListener(new SelectionAdapter()
-                        {
-                            @Override
-                            public void widgetSelected(SelectionEvent ev)
-                            {
-                                IrFormatTextHandler.formatQuery(viewer, null);
-                            }
-                        });
-                        addedItems.add(formatItem);
-
                         MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                             IrQueryTextEditorHandler.MENU_LABEL);
                         ComfortSubmenuHelper.setMenuItemTooltip(irEditorItem,
