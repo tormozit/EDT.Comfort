@@ -29,6 +29,44 @@ final class BslNodeLookup
 
     private BslNodeLookup() {}
 
+    /** Корень разбора без getContents(): тот может запустить installDerivedState всего модуля. */
+    static EObject rootAst(org.eclipse.emf.ecore.resource.Resource resource)
+    {
+        if (!(resource instanceof XtextResource xtext))
+            return null;
+        var parse = xtext.getParseResult();
+        return parse == null ? null : parse.getRootASTElement();
+    }
+
+    /** Условия CustomLeafNodeFinder.caseLeafNode подтверждены в бандле bsl-ui. */
+    static void installAssistLeafLookup()
+    {
+        System.getProperties().put("tormozit.bsl.assistLeafLookup", //$NON-NLS-1$
+            (java.util.function.Function<Object[], Object>) args ->
+            {
+                long started = System.nanoTime();
+                INode node = (INode) args[0];
+                int offset = ((Integer) args[1]).intValue();
+                boolean leading = ((Boolean) args[2]).booleanValue();
+                try
+                {
+                    // leading: start < offset <= end; обычный поиск: start <= offset < end.
+                    return leading && offset == Integer.MIN_VALUE ? null : leafAt(node, leading ? offset - 1 : offset);
+                }
+                finally
+                {
+                    Global.tempLog("assist-leaf-lookup", "offset=" + offset + " leading=" + leading //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+                }
+            });
+    }
+
+    /** Фабрика контекстов вызывается штатным процессором уже внутри чтения модели. */
+    static <T> T assistRead(Supplier<T> action)
+    {
+        return indexed(action);
+    }
+
     static ILeafNode leafAt(INode node, int offset)
     {
         return indexed(() -> findLeafNodeAtOffset(node, offset));

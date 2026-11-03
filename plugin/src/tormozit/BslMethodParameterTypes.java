@@ -28,8 +28,6 @@ public final class BslMethodParameterTypes
     /** Возвращает null, если описание параметра или контекст его вычисления отсутствуют. */
     public static List<TypeItem> fromComment(Method method, FormalParam parameter)
     {
-        Global.tempLog("call-arguments", "comment.begin method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " parameter=" + parameter.getName() + " resource=" + method.eResource()); //$NON-NLS-1$ //$NON-NLS-2$
         List<TypeItem> documented = null;
         try
         {
@@ -47,9 +45,6 @@ public final class BslMethodParameterTypes
                     oldFormat);
                 var field = comment.getParametersSection() != null
                     ? comment.getParametersSection().getParameterByName(parameter.getName()) : null;
-                Global.tempLog("call-arguments", "comment.parsed method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " parameter=" + parameter.getName() + " oldFormat=" + oldFormat //$NON-NLS-1$ //$NON-NLS-2$
-                    + " field=" + (field != null) + " lines=" + comments.getCommentLines(method)); //$NON-NLS-1$ //$NON-NLS-2$
                 if (field != null)
                 {
                     var models = services.get(IBmModelManager.class);
@@ -84,12 +79,8 @@ public final class BslMethodParameterTypes
         }
         catch (RuntimeException error)
         {
-            Global.tempLogException("call-arguments", "comment.failed method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " parameter=" + parameter.getName(), error); //$NON-NLS-1$
             // Контекст недоступен: вызывающий код использует прежний путь расчёта типов.
         }
-        Global.tempLog("call-arguments", "comment.result method=" + method.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " parameter=" + parameter.getName() + " types=" + documented); //$NON-NLS-1$ //$NON-NLS-2$
         return documented;
     }
 }

@@ -1017,10 +1017,6 @@ boolean inLiteral = endCaret >= 0
      */
     private void prepareStockLinkedModeBeforeAssistInsert(DocumentEvent event)
     {
-        Global.tempLog("call-arguments", "document.before offset=" + (event != null ? event.getOffset() : -1) //$NON-NLS-1$ //$NON-NLS-2$
-            + " text=" + (event != null ? event.getText() : null) //$NON-NLS-1$
-            + " selected=" + (lastAssistSelection != null ? lastAssistSelection.getClass().getName() : null) //$NON-NLS-1$
-            + " wrappedApply=" + SmartCompletionProposal.isAnyApplyInProgress()); //$NON-NLS-1$
         pendingBslDocumentListener = null;
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
@@ -1465,6 +1461,7 @@ boolean inLiteral = endCaret >= 0
             // Проверено в ImplicitJobs.begin/ThreadJob.joinRun: свободное правило
             // берётся сразу; при конфликте отмена проверяется до начала ожидания.
             manager.beginRule(ASSIST_SYNC_HOLD, noWait);
+            traceHoldAcquired(System.nanoTime(), "uiGate", sync); //$NON-NLS-1$
             return Boolean.TRUE;
         }
         catch (org.eclipse.core.runtime.OperationCanceledException e)
@@ -2584,7 +2581,7 @@ boolean inLiteral = endCaret >= 0
         return resource ->
         {
             boolean owner = BslQueryResultTypes.beginOpenModuleCalculation(
-                resource == null || resource.getContents().isEmpty() ? null : resource.getContents().get(0));
+                BslNodeLookup.rootAst(resource));
             try
             {
                 return work.exec(resource);
@@ -3102,10 +3099,12 @@ boolean inLiteral = endCaret >= 0
     {
         if (job == null)
             return Boolean.FALSE;
+        observeSyncHoldJob(job);
         if (preemptLowPriority)
             for (org.eclipse.core.runtime.IProgressMonitor holder : LOW_PRIORITY_HOLDERS)
                 holder.setCanceled(true);
         long t0 = System.nanoTime();
+        traceModelHold("request", t0, job, "priority=" + (preemptLowPriority ? "assist" : "low")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (!attachHoldRule(job, abort))
             return abort != null ? null : Boolean.FALSE;
         if (abort != null)
@@ -3125,6 +3124,7 @@ boolean inLiteral = endCaret >= 0
         {
             org.eclipse.core.runtime.jobs.Job.getJobManager().beginRule(ASSIST_SYNC_HOLD, null);
             held = true;
+            traceHoldAcquired(t0, preemptLowPriority ? "assist" : "low", job); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (RuntimeException e)
         {
@@ -3143,6 +3143,57 @@ boolean inLiteral = endCaret >= 0
     static void endModelSyncHold()
     {
         org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(ASSIST_SYNC_HOLD);
+        java.util.ArrayDeque<long[]> traces = HOLD_TRACES.get();
+        long[] trace = traces.pollLast();
+        Global.tempLog("assist-model-hold", "released id=" + (trace == null ? -1 : trace[0]) //$NON-NLS-1$ //$NON-NLS-2$
+            + " th=" + Thread.currentThread().getName() + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " heldMs=" + (trace == null ? -1 : (System.nanoTime() - trace[1]) / 1_000_000.0)); //$NON-NLS-1$
+        if (traces.isEmpty())
+            HOLD_TRACES.remove();
+    }
+
+    private static final ThreadLocal<java.util.ArrayDeque<long[]>> HOLD_TRACES =
+        ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> HOLD_OBSERVED_JOBS =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+    private static void traceModelHold(String phase, long id, org.eclipse.core.runtime.jobs.Job job, String detail)
+    {
+        Global.tempLog("assist-model-hold", phase + " id=" + id //$NON-NLS-1$ //$NON-NLS-2$
+            + " job=" + System.identityHashCode(job) + " name=" + job.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " th=" + Thread.currentThread().getName() + " " + detail); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void traceHoldAcquired(long id, String kind, org.eclipse.core.runtime.jobs.Job job)
+    {
+        long now = System.nanoTime();
+        java.util.ArrayDeque<long[]> traces = HOLD_TRACES.get();
+        traces.addLast(new long[] { id, now });
+        traceModelHold("acquired", id, job, "kind=" + kind + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " waitMs=" + ((now - id) / 1_000_000.0)); //$NON-NLS-1$
+    }
+
+    private static void observeSyncHoldJob(org.eclipse.core.runtime.jobs.Job job)
+    {
+        synchronized (HOLD_OBSERVED_JOBS)
+        {
+            if (!HOLD_OBSERVED_JOBS.add(job))
+                return;
+            job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+            {
+                @Override
+                public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    traceModelHold("sync.running", 0L, event.getJob(), ""); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+
+                @Override
+                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    traceModelHold("sync.done", 0L, event.getJob(), "result=" + event.getResult()); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            });
+        }
     }
 
     private static final java.util.Map<IDocument, ValidationWatch> VALIDATION_WATCHES =
@@ -5897,6 +5948,41 @@ if (!inLiteral)
         return viewer != null ? INSTALLED.get(viewer) : null;
     }
 
+    /** UI: фоновые обновления уступают не только открытому списку, но и его подготовке. */
+    boolean isCompletionOpeningOrVisible()
+    {
+        return completionAutoOpenPending || manualIrAssistPending
+            || processor != null && processor.isAssistBackgroundInFlight()
+            || ContentAssistPopupSync.isPopupVisible(assistant);
+    }
+
+    /** Редактор документа фонового расчёта; не зависит от контекста текущего UI-callback. */
+    static ContentAssistSessionReloader forDocument(IDocument document)
+    {
+        if (document == null)
+            return null;
+        for (ContentAssistSessionReloader reloader : INSTALLED.values())
+            if (reloader.viewer.getDocument() == document)
+                return reloader;
+        return null;
+    }
+
+    /** Публикация ожидаемого типа и нового порядка в том редакторе, где шёл расчёт. UI-поток. */
+    static void refreshContextPremiums(IDocument document)
+    {
+        ContentAssistSessionReloader reloader = forDocument(document);
+        Global.tempLog("boolean-default-ranking", "refreshDocument found=" + (reloader != null)); //$NON-NLS-1$ //$NON-NLS-2$
+        if (reloader == null)
+            return;
+        ContentAssistPopupUi.updateContextTypeLabel(reloader.viewer);
+        if (!ContentAssistPopupSync.isPopupVisible(reloader.assistant))
+            return;
+        ContentAssistPopupSync.invalidateSyncSnapshot();
+        boolean refreshed = ContentAssistPopupSync.recomputePopupList(reloader.assistant, reloader.viewer,
+            reloader.processor);
+        Global.tempLog("boolean-default-ranking", "refreshDocument recomputed=" + refreshed); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     /** Сессия редактора, которому принадлежит процессор (только UI-поток). */
     static ContentAssistSessionReloader forProcessor(SmartContentAssistProcessor processor)
     {
@@ -7293,10 +7379,15 @@ processor.applyIrCompletion(snapshot);
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
-        ContentAssistant ca = ACTIVE_ASSISTANT.get();
-        SourceViewer viewer = ACTIVE_VIEWER.get();
-        SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
-        ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
+        // После фонового расчёта UI-callback уже вне ThreadLocal-контекста compute.
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        ContentAssistant ca = reloader != null ? reloader.assistant : null;
+        SourceViewer viewer = reloader != null ? reloader.viewer : null;
+        SmartContentAssistProcessor processor = reloader != null ? reloader.processor : null;
+        Global.tempLog("boolean-default-ranking", "popupRefresh irOnly=" + irOnly //$NON-NLS-1$ //$NON-NLS-2$
+            + " threadContext=" + (ACTIVE_RELOADER.get() != null) + " session=" + (reloader != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " visible=" + (ca != null && ContentAssistPopupSync.isPopupVisible(ca)) //$NON-NLS-1$
+            + " recomputing=" + ContentAssistPopupSync.isRecomputeInProgress()); //$NON-NLS-1$
         if (ca == null || viewer == null || processor == null || reloader == null)
             return;
         if (irOnly && !processor.shouldRefreshIrPopup())

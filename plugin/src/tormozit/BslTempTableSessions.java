@@ -1130,27 +1130,48 @@ public final class BslTempTableSessions
      */
     static void refreshDocument(IDocument document, XtextResource resource, int offset)
     {
-        if (document == null || resource == null || resource.getContents().isEmpty()
-            || !(resource.getContents().get(0) instanceof Module module))
+        refreshDocument(document, resource, new int[] { offset }, CancelIndicator.NullImpl);
+    }
+
+    static void refreshDocument(IDocument document, XtextResource resource, int[] offsets, CancelIndicator cancellation)
+    {
+        long started = System.nanoTime();
+        try
+        {
+        if (cancellation.isCanceled())
+            throw new org.eclipse.core.runtime.OperationCanceledException();
+        if (document == null || !(BslNodeLookup.rootAst(resource) instanceof Module module))
             return;
         Map<Integer, Session> found = new LinkedHashMap<>();
-        Analysis probe = new Analysis(null, CancelIndicator.NullImpl);
+        Analysis probe = new Analysis(null, cancellation);
         for (Method method : module.allMethods())
         {
+            if (cancellation.isCanceled())
+                throw new org.eclipse.core.runtime.OperationCanceledException();
             ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
             if (node == null)
                 continue;
             // Считается только метод под кареткой; остальные — из готового кэша, если он ещё действителен
-            boolean caretMethod = offset >= node.getOffset() && offset <= node.getEndOffset();
+            boolean caretMethod = false;
+            int start = node.getOffset();
+            int end = node.getEndOffset();
+            for (int offset : offsets)
+                if (offset >= start && offset <= end)
+                {
+                    caretMethod = true;
+                    break;
+                }
             for (StringLiteral literal : EcoreUtil2.getAllContentsOfType(method, StringLiteral.class))
             {
+                if (cancellation.isCanceled())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
                 Cached cached = cachedSession(literal);
                 if (!caretMethod && (cached == null || !current(cached.dependencies))
                     || caretMethod && Analysis.queryOf(literal, probe) == null)
                     continue;
                 var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
                 if (!lines.isEmpty())
-                    found.put(lines.get(0).getOffset(), caretMethod ? compute(literal, CancelIndicator.NullImpl)
+                    found.put(lines.get(0).getOffset(), caretMethod ? compute(literal, cancellation)
                         : cached.session);
             }
         }
@@ -1159,7 +1180,15 @@ public final class BslTempTableSessions
         Display display = PlatformUI.getWorkbench().getDisplay();
         if (display.isDisposed())
             return;
+        if (cancellation.isCanceled())
+            throw new org.eclipse.core.runtime.OperationCanceledException();
         display.asyncExec(() -> publish(document, found));
+        }
+        finally
+        {
+            Global.tempLog("assist-temp-tables", "offsets=" + java.util.Arrays.toString(offsets) //$NON-NLS-1$ //$NON-NLS-2$
+                + " canceled=" + cancellation.isCanceled() + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static void publish(IDocument document, Map<Integer, Session> found)

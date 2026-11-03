@@ -273,7 +273,8 @@ public final class ContentAssistPopupUi
     {
         try
         {
-            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(viewer);
+            ContentAssistant assistant = reloader != null ? reloader.getAssistant() : null;
             if (assistant == null || viewer == null)
                 return;
             Object popup = ContentAssistPopupSync.getPopupObject(assistant);

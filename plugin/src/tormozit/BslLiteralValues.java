@@ -1125,7 +1125,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)TypeNameCache::proposals);
             ResourcesPlugin.getWorkspace().addResourceChangeListener(WORKSPACE_LISTENER,
                 IResourceChangeEvent.POST_CHANGE | IResourceChangeEvent.PRE_CLOSE | IResourceChangeEvent.PRE_DELETE);
-            Global.tempLog("type-name-cache", "installed; key=project/(environments,constructor)");
         }
 
         static void stop()
@@ -1143,9 +1142,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         private static Object proposals(Object[] args)
         {
-            long started = System.nanoTime();
-            String status = "fallback";
-            String detail = "";
             try
             {
                 Object provider = args[0];
@@ -1227,27 +1223,15 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 for (NameOption option : options)
                     result.add(Tuples.create("\"" + before + option.text, option.label,
                         IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
-                status = hit ? "hit" : "build";
-                detail = " project=" + project.getName() + " environments=" + environments
-                    + " constructor=" + constructor + " description=" + description + " russian=" + russian
-                    + " parent=" + parent + " values=" + result.size() + " generation=" + state.generation;
                 return result;
             }
             catch (org.eclipse.core.runtime.OperationCanceledException canceled)
             {
-                status = "canceled";
                 throw canceled;
             }
             catch (RuntimeException | LinkageError failure)
             {
-                status = "failed";
-                Global.tempLogException("type-name-cache", "catalog calculation", failure);
                 return null;
-            }
-            finally
-            {
-                Global.tempLog("type-name-cache", "lookup status=" + status + detail
-                    + " elapsedNs=" + (System.nanoTime() - started));
             }
         }
 
@@ -1394,8 +1378,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 // Новый объект состояния: расчёт, начавшийся до события, не заполнит новый каталог.
                 CatalogState previous = state;
                 state = new CatalogState(previous.generation + 1);
-                Global.tempLog("type-name-cache", "invalidate project=" + projectName
-                    + " reason=" + reason + " generation=" + state.generation);
             }
 
             private static boolean metadata(Object object)
@@ -1413,7 +1395,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 catch (RuntimeException | LinkageError failure)
                 {
                     metadataInvalidated("listenerFailure");
-                    Global.tempLogException("type-name-cache", "metadata invalidation project=" + projectName, failure);
                 }
             }
 

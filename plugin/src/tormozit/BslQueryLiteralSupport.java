@@ -2361,6 +2361,8 @@ final class BslQueryLiteralSupport
         @Override
         public Image getImage()
         {
+            if (BslAddedWordProposal.isCodeGenerator(ql.getDisplayString()))
+                return BslAddedWordProposal.codeGeneratorImage();
             return ql.getImage();
         }
 
@@ -3871,7 +3873,9 @@ final class BslQueryLiteralSupport
     {
         if (!(document instanceof XtextDocument xtext))
             return null;
-        return xtext.tryReadOnly(resource ->
+        // Проверка литералов не меняет текст модели. Обычный tryReadOnly побочно
+        // вызывает modelChanged и держит документ на подсветке/проверке всего модуля.
+        return ContentAssistSessionReloader.readOnlyPeekAst(xtext, resource -> BslNodeLookup.read(state ->
         {
             if (resource == null)
                 return null;
@@ -3900,7 +3904,7 @@ final class BslQueryLiteralSupport
             // Публикует рассчитанные схемы из кэша; -1 не запускает расчёт других методов.
             BslTempTableSessions.refreshDocument(document, resource, -1);
             return result;
-        });
+        }, resource));
     }
 
     /** Проверка текста запроса штатным валидатором языка запросов; {@code null} — сбой. Только UI. */

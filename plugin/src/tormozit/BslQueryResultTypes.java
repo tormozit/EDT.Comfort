@@ -177,8 +177,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     /** Только происхождение обращения к полю; схемы и типы запросов здесь не рассчитываются. */
     static boolean isQueryFieldAt(XtextResource resource, int offset)
     {
-        if (resource.getContents().isEmpty()
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+        if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(BslNodeLookup.rootAst(resource)))
             return false;
         EObject object = BslNodeLookup.resolveContainedElementAt(resource, offset);
         DynamicFeatureAccess access = EcoreUtil2.getContainerOfType(object, DynamicFeatureAccess.class);
@@ -200,8 +199,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     static List<String> fieldNamesAt(XtextResource resource, int offset)
     {
         List<String> names = new ArrayList<>();
-        if (resource.getContents().isEmpty()
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+        if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(BslNodeLookup.rootAst(resource)))
             return List.of();
         Object lock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
         if (lock == null)
@@ -277,8 +275,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     static Map<String, com._1c.g5.v8.dt.mcore.Property> queryParametersAt(XtextResource resource, int offset)
     {
-        if (resource.getContents().isEmpty()
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
+        if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(BslNodeLookup.rootAst(resource)))
         {
             return null;
         }
@@ -501,16 +498,25 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     static void refresh(Resource resource, int offset, Consumer<String> status,
         Predicate<Method> recompute)
     {
+        long started = System.nanoTime();
+        Consumer<String> trace = phase -> Global.tempLog("assist-query-plan", "id=" + started //$NON-NLS-1$ //$NON-NLS-2$
+            + " offset=" + offset + " phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
+            + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+        trace.accept("begin"); //$NON-NLS-1$
+        try
+        {
         if (!(resource instanceof XtextResource xtext)
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(
-                resource.getContents().isEmpty() ? null : resource.getContents().get(0)))
+                BslNodeLookup.rootAst(resource)))
             return;
         Method method = EcoreUtil2.getContainerOfType(
             BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), xtext, offset), Method.class);
         ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
         if (node == null)
             return;
+        trace.accept("session.begin"); //$NON-NLS-1$
         Session session = session(resource, true);
+        trace.accept("session.end"); //$NON-NLS-1$
         String text = node.getText();
         Plan previous = session.plans.get(method);
         if (previous != null && previous.complete && current(previous, text))
@@ -521,8 +527,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             Plan plan = current(previous, text) ? previous : new Plan(method, text);
             // Валидация могла уже подготовить план, не переустанавливая типы BSL.
+            trace.accept("prepare.begin"); //$NON-NLS-1$
             if (plan != previous)
                 plan.prepare();
+            trace.accept("prepare.end"); //$NON-NLS-1$
             if (!plan.queries.isEmpty())
                 session.hasQueries = true;
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
@@ -534,7 +542,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
+                trace.accept("recompute.begin"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
+                trace.accept("recompute.end"); //$NON-NLS-1$
                 if (!recomputed)
                 {
                     return;
@@ -547,6 +557,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
             session.plans.remove(method);
+        }
+        }
+        finally
+        {
+            trace.accept("end"); //$NON-NLS-1$
         }
     }
 
@@ -638,35 +653,119 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     private static void scheduleTypesRefresh(IXtextDocument document, int offset, boolean revalidate)
     {
-        Job job = new Job("Комфорт: типы результатов запросов") //$NON-NLS-1$
+        synchronized (TYPE_REFRESH_JOBS)
         {
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
+            TypeRefreshJob job = TYPE_REFRESH_JOBS.get(document);
+            boolean created = job == null;
+            if (created)
             {
-                try
-                {
-                    int generation = BslDocCommentComputedTypes.typesGeneration();
-                    document.readOnly(resource ->
-                    {
-                        BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset,
-                            status -> {});
-                        // Сеансы менеджера временных таблиц для литералов модуля (issue 889, решение 1А)
-                        BslTempTableSessions.refreshDocument(document, resource, offset);
-                        return null;
-                    });
-                    boolean changed = generation != BslDocCommentComputedTypes.typesGeneration();
-                    if (revalidate && changed)
-                        Global.invokeVoid(document, "checkAndUpdateAnnotations"); //$NON-NLS-1$
-                }
-                catch (RuntimeException | LinkageError failure)
-                {
-                    // Досчёт не удался — следующая попытка обновления повторит расчёт.
-                }
-                return Status.OK_STATUS;
+                job = new TypeRefreshJob(document);
+                TYPE_REFRESH_JOBS.put(document, job);
             }
-        };
-        job.setSystem(true);
-        job.schedule();
+            job.pending.merge(Integer.valueOf(offset), Boolean.valueOf(revalidate), (a, b) -> a || b);
+            Global.tempLog("assist-query-refresh", "enqueue offset=" + offset + " revalidate=" + revalidate //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " pending=" + job.pending.size() + " newJob=" + created); //$NON-NLS-1$ //$NON-NLS-2$
+            if (created)
+                job.schedule();
+        }
+    }
+
+    private static final Map<IXtextDocument, TypeRefreshJob> TYPE_REFRESH_JOBS = new IdentityHashMap<>();
+
+    /** Один читатель документа: запросы методов объединяются, одинаковые смещения не дублируются. */
+    private static final class TypeRefreshJob extends Job
+    {
+        private final IXtextDocument document;
+        private final Map<Integer, Boolean> pending = new java.util.LinkedHashMap<>();
+        private boolean needsValidation;
+
+        TypeRefreshJob(IXtextDocument document)
+        {
+            super("Комфорт: типы результатов запросов"); //$NON-NLS-1$
+            this.document = document;
+            setSystem(true);
+        }
+
+        @Override
+        protected IStatus run(IProgressMonitor monitor)
+        {
+            Map<Integer, Boolean> batch;
+            synchronized (TYPE_REFRESH_JOBS)
+            {
+                batch = new java.util.LinkedHashMap<>(pending);
+                pending.clear();
+            }
+            long started = System.nanoTime();
+            Boolean held = null;
+            boolean retry = false;
+            boolean completed = false;
+            int generation = BslDocCommentComputedTypes.typesGeneration();
+            Global.tempLog("assist-query-refresh", "batch.begin offsets=" + batch.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+                if (!ContentAssistSessionReloader.isModelCurrent(document))
+                {
+                    retry = true;
+                    return Status.CANCEL_STATUS;
+                }
+                held = ContentAssistSessionReloader.beginLowPriorityHold(document, monitor, monitor::isCanceled);
+                if (held == null || monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
+                {
+                    retry = true;
+                    return Status.CANCEL_STATUS;
+                }
+                BslNodeLookup.compute(monitor, () -> ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                {
+                    for (Integer offset : batch.keySet())
+                    {
+                        if (monitor.isCanceled())
+                            throw new org.eclipse.core.runtime.OperationCanceledException();
+                        BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset.intValue(),
+                            status -> {}, null, monitor::isCanceled);
+                    }
+                    // Один обход литералов для всех методов пакета, под тем же чтением модели.
+                    BslTempTableSessions.refreshDocument(document, resource,
+                        batch.keySet().stream().mapToInt(Integer::intValue).toArray(), monitor::isCanceled);
+                    return null;
+                }));
+                completed = true;
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                retry = true;
+                return Status.CANCEL_STATUS;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                Global.tempLog("assist-query-refresh", "batch.error " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            finally
+            {
+                if (Boolean.TRUE.equals(held))
+                    ContentAssistSessionReloader.endLowPriorityHold(monitor);
+                needsValidation |= batch.containsValue(Boolean.TRUE)
+                    && generation != BslDocCommentComputedTypes.typesGeneration();
+                Global.tempLog("assist-query-refresh", "batch.end offsets=" + batch.keySet() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " retry=" + retry + " canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+                synchronized (TYPE_REFRESH_JOBS)
+                {
+                    if (retry && WATCHED_DOCUMENTS.containsKey(document))
+                        batch.forEach((offset, revalidate) -> pending.merge(offset, revalidate, (a, b) -> a || b));
+                    if (pending.isEmpty())
+                        TYPE_REFRESH_JOBS.remove(document, this);
+                    else
+                        // Job.schedule во время run назначает следующий проход после завершения.
+                        schedule(retry ? RELINK_ASSIST_RETRY_MS : 0L);
+                }
+            }
+            if (completed && needsValidation)
+            {
+                Global.invokeVoid(document, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+                needsValidation = false;
+            }
+            return Status.OK_STATUS;
+        }
     }
 
     /**
@@ -701,7 +800,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return null;
         Session session = new Session();
         resource.eAdapters().add(session);
-        if (!resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module module)
+        if (BslNodeLookup.rootAst(resource) instanceof Module module)
             watchMetadata(module);
         return session;
     }
@@ -854,9 +953,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
     private static boolean assistOpen(BslXtextEditor editor)
     {
-        boolean open = editor != null && editor.getInternalSourceViewer() instanceof SourceViewer viewer
-            && ContentAssistPopupSync.isPopupVisible(ContentAssistPatcher.getContentAssistant(viewer));
-        return open;
+        if (editor == null || !(editor.getInternalSourceViewer() instanceof SourceViewer viewer))
+            return false;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(viewer);
+        return reloader != null ? reloader.isCompletionOpeningOrVisible()
+            : ContentAssistPopupSync.isPopupVisible(ContentAssistPatcher.getContentAssistant(viewer));
     }
 
     private static void scheduleRelinkJob(List<IXtextDocument> documents, boolean onActivation)
@@ -1874,7 +1975,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 {
                     BslDerivedPropertySource source = BslFactory.eINSTANCE.createBslDerivedPropertySource();
                     source.setMethodName(method.getName());
-                    source.setModuleUri(EcoreUtil.getURI(method.eResource().getContents().get(0)).trimFragment().toString());
+                    source.setModuleUri(method.eResource().getURI().toString());
                     source.setLocalOffset(field.offset - NodeModelUtils.findActualNodeFor(method).getTotalOffset());
                     property.setSource(source);
                     sources.put(sourceKey(field.name, source.getLocalOffset()),

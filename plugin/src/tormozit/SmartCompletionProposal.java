@@ -1010,10 +1010,6 @@ public class SmartCompletionProposal implements
 
     private void beginProposalApply(IDocument document, boolean irApply, boolean replaceParentOverlap)
     {
-        ConfigurableCompletionProposal traced = asConfigurable(delegate);
-        Global.tempLog("call-arguments", "apply.begin class=" + delegate.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " ir=" + irApply + " replaceParent=" + replaceParentOverlap //$NON-NLS-1$ //$NON-NLS-2$
-            + " replacement=" + (traced != null ? EqualsSpacePad.readInsertText(traced) : null)); //$NON-NLS-1$
         PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
         if (irApply || replaceParentOverlap)
             IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
@@ -1740,7 +1736,6 @@ public class SmartCompletionProposal implements
             && needsWordOnlyInsert(cp, document, caret);
         if (!wordOnly)
             return false;
-        Global.tempLog("call-arguments", "apply.wordOnly caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
         int effectiveOffset = completionOffset >= 0 ? completionOffset : caret;
         // Полный replacement не вставляем, поэтому его DataEvent/LinkedMode неприменим:
         // позиции рассчитаны для новых скобок, а мы сохраняем уже существующие.
@@ -1802,8 +1797,6 @@ public class SmartCompletionProposal implements
     private boolean tryApplyPickedCall(IDocument document, ITextViewer viewer, int caret, Integer stateMask)
     {
         ConfigurableCompletionProposal cp = asConfigurable(delegate);
-        Global.tempLog("call-arguments", "pick.enter caret=" + caret + " class=" + delegate.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " replacement=" + (cp != null ? cp.getReplacementString() : null)); //$NON-NLS-1$
         if (cp == null || document == null || caret < 0 || caret > document.getLength()
             || SmartContentAssistProcessor.isCommentAssistContext(document, caret))
             return false;
@@ -1813,12 +1806,10 @@ public class SmartCompletionProposal implements
         // Генераторы, литералы и содержательные шаблоны имеют собственную вставку.
         if (open < 0 || close < open || !replacement.substring(open + 1, close).matches("[\\s,]*")) //$NON-NLS-1$
             return false;
-        Global.tempLog("call-arguments", "pick caret=" + caret + " replacement=" + replacement); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         boolean inserted = false;
         try
         {
             java.util.List<String> arguments = BslExpectedTypePremiums.pickCallArguments(document, caret, delegate);
-            Global.tempLog("call-arguments", "picked=" + arguments); //$NON-NLS-1$ //$NON-NLS-2$
             if (arguments == null || arguments.isEmpty())
                 return false;
             int start = cp.getReplacementOffset();
@@ -1861,7 +1852,6 @@ public class SmartCompletionProposal implements
         }
         catch (BadLocationException | RuntimeException error)
         {
-            Global.tempLogException("call-arguments", "apply caret=" + caret + " inserted=" + inserted, error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return inserted;
         }
     }

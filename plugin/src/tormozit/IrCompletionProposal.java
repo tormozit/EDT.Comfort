@@ -167,6 +167,10 @@ public final class IrCompletionProposal implements
     @Override
     public Image getImage()
     {
+        if (BslAddedWordProposal.isCodeGenerator(wordValue))
+            return BslAddedWordProposal.codeGeneratorImage();
+        if (BslAddedWordProposal.isCodeTemplate(wordValue))
+            return BslAddedWordProposal.codeTemplateImage();
         Image borrowed = stockAssistImage;
         if (borrowed != null && !borrowed.isDisposed())
             return borrowed;

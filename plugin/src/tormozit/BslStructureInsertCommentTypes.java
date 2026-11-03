@@ -495,12 +495,21 @@ public final class BslStructureInsertCommentTypes
     static void refreshQueryTypesForAssist(Resource resource, int offset,
         java.util.function.Consumer<String> onRecompute, Runnable onLocked)
     {
+        refreshQueryTypesForAssist(resource, offset, onRecompute, onLocked, CancelIndicator.NullImpl);
+    }
+
+    static void refreshQueryTypesForAssist(Resource resource, int offset,
+        java.util.function.Consumer<String> onRecompute, Runnable onLocked, CancelIndicator cancellation)
+    {
+        if (cancellation.isCanceled())
+            throw new org.eclipse.core.runtime.OperationCanceledException();
         if (resource == null || org.eclipse.swt.widgets.Display.getCurrent() != null
-            || resource.getContents().isEmpty()
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0))
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(BslNodeLookup.rootAst(resource))
             || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree))
             return;
-        refreshExternalFunctionTypes(resource, offset);
+        refreshExternalFunctionTypes(resource, offset, cancellation);
+        if (cancellation.isCanceled())
+            throw new org.eclipse.core.runtime.OperationCanceledException();
         Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
         if (queryLock != null)
             ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
@@ -511,7 +520,7 @@ public final class BslStructureInsertCommentTypes
                     method ->
                     {
                         Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-                        if (!queryTree.recomputeDependent(module, method, CancelIndicator.NullImpl))
+                        if (!queryTree.recomputeDependent(module, method, cancellation))
                             return false;
                         java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
                         if (!changed.isEmpty())
@@ -620,10 +629,22 @@ public final class BslStructureInsertCommentTypes
     /** Обновляет штатные состояния вызывающего метода после уточнения внешнего возврата. */
     static void refreshExternalFunctionTypes(Resource resource, int offset)
     {
+        refreshExternalFunctionTypes(resource, offset, CancelIndicator.NullImpl);
+    }
+
+    private static void refreshExternalFunctionTypes(Resource resource, int offset, CancelIndicator cancellation)
+    {
+        long started = System.nanoTime();
+        Global.tempLog("assist-query-refresh", "external.begin offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " cancellable=" + (cancellation != CancelIndicator.NullImpl)); //$NON-NLS-1$
+        try
+        {
+        if (cancellation.isCanceled())
+            throw new org.eclipse.core.runtime.OperationCanceledException();
         long revision = FunctionReturnTypes.semanticRevision();
         if (revision == 0 || org.eclipse.swt.widgets.Display.getCurrent() != null
             || !(resource instanceof org.eclipse.xtext.resource.XtextResource xtext)
-            || resource.getContents().isEmpty() || !(resource.getContents().get(0) instanceof Module module)
+            || !(BslNodeLookup.rootAst(resource) instanceof Module module)
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module)
             || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem tree))
             return;
@@ -635,6 +656,7 @@ public final class BslStructureInsertCommentTypes
         boolean[] changed = { false };
         ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
         {
+            List<Method> refreshed = new ArrayList<>();
             var dfa = xtext.getResourceServiceProvider().get(DynamicFeatureAccessComputer.class);
             var owner = (com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService)
                 service(tree, "ownerComputerService");
@@ -642,32 +664,56 @@ public final class BslStructureInsertCommentTypes
                 return false;
             for (Method method : new ArrayList<>(module.allMethods()))
             {
+                if (cancellation.isCanceled())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
                 if (offset >= 0 && method != selected
                     || Long.valueOf(revision).equals(EXTERNAL_RETURN_REVISIONS.get(method)))
                     continue;
                 boolean affected = false;
                 for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
                 {
+                    if (cancellation.isCanceled())
+                        throw new org.eclipse.core.runtime.OperationCanceledException();
                     if (invocation.getMethodAccess() == null
                         || !FunctionReturnTypes.hasSemanticReturnName(invocation.getMethodAccess().getName()))
                         continue;
                     for (FeatureEntry entry : com._1c.g5.v8.dt.bsl.util.BslUtil.getRealObject(
                         invocation.getMethodAccess(), method, dfa, owner, true))
+                    {
+                        if (cancellation.isCanceled())
+                            throw new org.eclipse.core.runtime.OperationCanceledException();
                         if (entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Method exported
                             && !FunctionReturnTypes.semanticReturnTypes(exported).isEmpty())
                             affected = true;
+                    }
                 }
-                if (affected && !tree.recomputeDependent(module, method, CancelIndicator.NullImpl))
+                if (affected && !tree.recomputeDependent(module, method, cancellation))
+                {
+                    if (cancellation.isCanceled())
+                        throw new org.eclipse.core.runtime.OperationCanceledException();
                     continue;
+                }
+                if (cancellation.isCanceled())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
                 changed[0] |= affected;
-                EXTERNAL_RETURN_REVISIONS.put(method, revision);
+                refreshed.add(method);
             }
+            if (cancellation.isCanceled())
+                throw new org.eclipse.core.runtime.OperationCanceledException();
             if (changed[0])
                 BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            for (Method method : refreshed)
+                EXTERNAL_RETURN_REVISIONS.put(method, revision);
             return true;
         });
         if (changed[0])
             BslDocCommentComputedTypes.bumpTypesGeneration();
+        }
+        finally
+        {
+            Global.tempLog("assist-query-refresh", "external.end offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " canceled=" + cancellation.isCanceled() + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /**

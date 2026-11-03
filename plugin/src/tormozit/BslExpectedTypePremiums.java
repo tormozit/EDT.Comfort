@@ -392,8 +392,30 @@ final class BslExpectedTypePremiums
 
     /** @param added слова, которых нет у EDT ({@link AddedWords}) */
     private record Snapshot(Context context, Scene scene, IProject project, Map<String, List<String>> variableTypes,
-        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added, boolean complete)
+        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added, boolean complete,
+        Set<ICompletionProposal> knownProposals)
     {
+        /** Только ссылки: getDisplayString может запускать дорогое построение StyledString EDT. */
+        boolean covers(ICompletionProposal[] list)
+        {
+            for (ICompletionProposal proposal : list)
+            {
+                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                if (!(raw instanceof BslAddedWordProposal) && !knownProposals.contains(raw))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    private static Set<ICompletionProposal> proposalIdentities(ICompletionProposal[] list, Snapshot previous)
+    {
+        Set<ICompletionProposal> result = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        if (previous != null)
+            result.addAll(previous.knownProposals());
+        for (ICompletionProposal proposal : list)
+            result.add(SmartContentAssistProcessor.unwrapProposal(proposal));
+        return Collections.unmodifiableSet(result);
     }
 
     /**
@@ -422,13 +444,14 @@ final class BslExpectedTypePremiums
      * @param methodParameters    имена параметров текущего метода в порядке объявления
      * @param tempTableColumns     родитель — {@code Колонки} временной таблицы менеджера ({@code М.Таблицы["Вт"]}): её
      *                             колонки (метаданные {@code ВременнаяТаблицаЗапроса} ИР); {@code null} — не определены
+     * @param queryAllowed         контекст допускает создание запроса (условие флагов компиляции ИР)
      */
     private record Facts(int bodyStartLine, List<String> parentTypes, boolean parentCollection, boolean parentIndexed,
         boolean parentSystemEnum, Set<String> constructorTypes, List<String> nestedTypes,
         Set<String> objectPropertyEnums, boolean formClient, boolean structureConstructor, List<Local> locals,
         List<Local> receiverProperties, List<String> selectionTypes, List<String> queryTotals, boolean betweenMethods,
         ModuleType moduleType, Map<String, String> commonModuleGroups, List<String> methodParameters,
-        List<String> tempTableColumns)
+        List<String> tempTableColumns, boolean queryAllowed)
     {
     }
 
@@ -757,6 +780,21 @@ final class BslExpectedTypePremiums
         Snapshot snapshot = current;
         if (snapshot != null && snapshot.context().sameAs(context))
         {
+            if (Display.getCurrent() != null)
+            {
+                long started = System.nanoTime();
+                boolean covered = snapshot.covers(list);
+                active = snapshot;
+                // Восстановленный полный список может содержать тысячи новых строк.
+                // UI только читает снимок; их премии считает существующий фоновый Job.
+                if (!snapshot.complete())
+                    schedule(context, snapshot.project(), list.clone());
+                else if (!covered)
+                    schedule(context, snapshot.project(), list.clone(), snapshot);
+                Global.tempLog("completion-ui-snapshot", "count=" + list.length + " covered=" + covered //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " complete=" + snapshot.complete() + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
             publish(extend(snapshot, list));
             if (!snapshot.complete())
                 schedule(context, snapshot.project(), list.clone());
@@ -789,8 +827,12 @@ final class BslExpectedTypePremiums
         current = null;
         active = null;
         pending = null;
-        var assistant = ContentAssistSessionReloader.getActiveAssistant();
-        ITextViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        Context context = requested;
+        var reloader = ContentAssistSessionReloader.forDocument(context != null ? context.document() : null);
+        var assistant = reloader != null ? reloader.getAssistant() : null;
+        ITextViewer viewer = reloader != null ? reloader.getViewer() : null;
+        Global.tempLog("boolean-default-ranking", "foreignReady session=" + (reloader != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " visible=" + (assistant != null && ContentAssistPopupSync.isPopupVisible(assistant))); //$NON-NLS-1$
         if (assistant == null || viewer == null || !ContentAssistPopupSync.isPopupVisible(assistant))
             return;
         List<ICompletionProposal> proposals = ContentAssistPopupSync.computedProposals(assistant);
@@ -948,36 +990,53 @@ final class BslExpectedTypePremiums
 
     private static void schedule(Context context, IProject project, ICompletionProposal[] list)
     {
+        schedule(context, project, list, null);
+    }
+
+    private static void schedule(Context context, IProject project, ICompletionProposal[] list, Snapshot extensionBase)
+    {
         if (context.sameAs(pending))
             return;
         pending = context;
+        long revision = foreignParameterRevision;
         Job job = new Job("Комфорт: ожидаемый тип") //$NON-NLS-1$
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
+                long started = System.nanoTime();
+                String route = extensionBase == null ? "full" : "extend"; //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("completion-premium-job", "begin route=" + route + " count=" + list.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 try
                 {
-                    Snapshot computed = compute(context, project, list);
+                    if (!context.sameAs(requested) || revision != foreignParameterRevision)
+                        return Status.CANCEL_STATUS;
+                    Snapshot latest = current;
+                    Snapshot basis = extensionBase != null && latest != null && latest.complete()
+                        && latest.context().sameAs(context) ? latest : extensionBase;
+                    Snapshot computed = basis == null ? compute(context, project, list) : extend(basis, list);
                     if (computed == null)
                         return Status.OK_STATUS;
+                    if (!context.sameAs(requested) || revision != foreignParameterRevision)
+                        return Status.CANCEL_STATUS;
                     publish(computed);
-                    if (active == computed)
+                    if (active == computed && (basis == null || computed.premiums() != basis.premiums()))
                     {
                         Display display = Display.getDefault();
                         if (display != null && !display.isDisposed())
                             display.asyncExec(() -> {
-                                ITextViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-                                if (viewer instanceof org.eclipse.jface.text.source.SourceViewer source
-                                    && viewer.getDocument() == context.document())
-                                    ContentAssistPopupUi.updateContextTypeLabel(source);
-                                ContentAssistSessionReloader.refreshPopupIfOpen();
+                                Global.tempLog("boolean-default-ranking", "publishUI active=" + (active == computed)); //$NON-NLS-1$ //$NON-NLS-2$
+                                if (active != computed)
+                                    return;
+                                ContentAssistSessionReloader.refreshContextPremiums(context.document());
                                 ContentAssistSessionReloader.onContextPremiumsReady(context.document());
                             });
                     }
                 }
                 finally
                 {
+                    Global.tempLog("completion-premium-job", "end route=" + route + " count=" + list.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
                     if (pending == context)
                         pending = null;
                 }
@@ -996,6 +1055,8 @@ final class BslExpectedTypePremiums
      */
     private static Snapshot extend(Snapshot snapshot, ICompletionProposal[] list)
     {
+        if (snapshot.covers(list))
+            return snapshot;
         boolean unseen = false;
         for (ICompletionProposal proposal : list)
         {
@@ -1007,7 +1068,9 @@ final class BslExpectedTypePremiums
             }
         }
         if (!unseen)
-            return snapshot;
+            return new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(), snapshot.variableTypes(),
+                snapshot.premiums(), snapshot.evaluated(), snapshot.added(), snapshot.complete(),
+                proposalIdentities(list, snapshot));
         // Новые слова среза не нужны: они уже в снимке (премии считаются и для них)
         Premiums added = premiums(snapshot.context(), snapshot.scene(), snapshot.project(), list,
             snapshot.variableTypes(), new LinkedHashMap<>());
@@ -1019,8 +1082,8 @@ final class BslExpectedTypePremiums
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
         Snapshot extended = new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(),
-            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(), snapshot.complete());
-        current = extended;
+            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(), snapshot.complete(),
+            proposalIdentities(list, snapshot));
         return extended;
     }
 
@@ -1041,7 +1104,7 @@ final class BslExpectedTypePremiums
             if (timing != null)
                 timing.readRequested = System.nanoTime();
             read = ContentAssistSessionReloader.readOnlyForContentAssist((IXtextDocument)context.document(),
-                resource ->
+                resource -> BslNodeLookup.read(state ->
                 {
                     if (timing != null)
                         timing.modelEntered = System.nanoTime();
@@ -1067,7 +1130,7 @@ final class BslExpectedTypePremiums
                         if (timing != null)
                             timing.modelExited = System.nanoTime();
                     }
-                });
+                }, resource));
         }
         catch (RuntimeException e)
         {
@@ -1100,7 +1163,7 @@ final class BslExpectedTypePremiums
         if (parameterRevision != foreignParameterRevision)
             return null;
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
-            List.copyOf(added.values()), complete);
+            List.copyOf(added.values()), complete, proposalIdentities(list, null));
     }
 
     private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list)
@@ -2192,17 +2255,23 @@ final class BslExpectedTypePremiums
     // Сведения модели для новых слов
     // ------------------------------------------------------------------------------------------
 
-    /** {@link Facts} места; {@code null} — после {@code Новый} (список типов ранжирует EDT). */
+    /** {@link Facts} места, включая имена переменных для генератора запроса после {@code Новый}. */
     private static Facts facts(XtextResource resource, Context context, Expectation expectation,
         ParamHintHtmlModifier.CallSiteInfo site, List<TypeItem> parentItems)
     {
         String preceding = stripEnd(context.preceding());
-        if (endsWithWord(preceding, "Новый")) //$NON-NLS-1$
-            return null;
         IDocument document = context.document();
         Module module = !resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module m
             ? m : null;
         com._1c.g5.v8.dt.bsl.model.Method method = methodAt(resource, context.start());
+        Environments environments = method != null ? method.environments() : moduleEnvironments(resource);
+        boolean queryAllowed = environments != null
+            && (!environments.contains(Environment.MNG_CLIENT) || environments.contains(Environment.CLIENT));
+        // После «Новый» нужны только занятые имена, остальные премии здесь не рассчитываются.
+        if (endsWithWord(preceding, "Новый")) //$NON-NLS-1$
+            return new Facts(-1, List.of(), false, false, false, Set.of(), List.of(), Set.of(), false, false,
+                locals(resource, module, method, context.start(), false), List.of(), List.of(), null, method == null,
+                module != null ? module.getModuleType() : null, Map.of(), List.of(), null, queryAllowed);
         Type parentType = parentItems.isEmpty() ? null : resolveType(resource, parentItems.get(0));
         String parentName = parentType != null ? lower(typeName(parentType)) : ""; //$NON-NLS-1$
         TypeContainer elements = parentType != null ? parentType.getCollectionElementTypes() : null;
@@ -2233,9 +2302,8 @@ final class BslExpectedTypePremiums
             nestedTypes.addAll(typeNames(expressionTypeItems(resource, start, start + typeOf.group(1).length(),
                 typeOf.group(1))));
         }
-        Environments environments = method != null ? method.environments() : null;
         boolean formClient = module != null && module.getModuleType() == ModuleType.FORM_MODULE
-            && environments != null && environments.contains(Environment.MNG_CLIENT);
+            && method != null && environments != null && environments.contains(Environment.MNG_CLIENT);
         boolean structureConstructor = site != null && site.owner instanceof OperatorStyleCreator creator
             && STRUCTURE.equalsIgnoreCase(typeName(resolveType(resource, creator.getType())));
         // Типы переменных нужны только <ЗаполнитьСвойства> (строка из одного «Родитель.»)
@@ -2280,7 +2348,7 @@ final class BslExpectedTypePremiums
             nestedTypes, objectPropertyEnums, formClient, structureConstructor, locals, receiverProperties,
             selectionTypes, queryTotals, method == null, module != null ? module.getModuleType() : null,
             context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : Map.of(),
-            methodParameters, tempTableColumns);
+            methodParameters, tempTableColumns, queryAllowed);
     }
 
     /** {@code мНомерПервойСтрокиТелаМетода}: строка после закрывающей скобки параметров (с 0); {@code -1} — нет. */
@@ -2386,8 +2454,6 @@ final class BslExpectedTypePremiums
             return null;
         Object info = proposalInfo(proposal);
         ParamSet signature = SmartContentAssistProcessor.paramSetSignatureOf(proposal);
-        Global.tempLog("call-arguments", "metadata info=" + (info != null ? info.getClass().getName() : null) //$NON-NLS-1$ //$NON-NLS-2$
-            + " signature=" + (signature != null)); //$NON-NLS-1$
         if (signature == null && !(info instanceof com._1c.g5.v8.dt.bsl.model.Method)
             && !(info instanceof BslContextDefMethod))
             return null;
@@ -2494,11 +2560,7 @@ final class BslExpectedTypePremiums
                         && formal.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Method owner)
                     {
                         List<TypeItem> declaredItems = formalParameterTypes(owner, formal);
-                        Global.tempLog("call-arguments", "sourceParameter.raw owner=" + owner.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " parameter=" + formal.getName() + " items=" + declaredItems); //$NON-NLS-1$ //$NON-NLS-2$
                         List<String> declaredTypes = callTypeNames(resource, declaredItems);
-                        Global.tempLog("call-arguments", "sourceParameter=" + formal.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " inferred=" + actualTypes + " declared=" + declaredTypes); //$NON-NLS-1$ //$NON-NLS-2$
                         for (String type : declaredTypes)
                             if (!containsIgnoreCase(actualTypes, type))
                                 actualTypes.add(type);
@@ -2507,9 +2569,6 @@ final class BslExpectedTypePremiums
                 List<String> expectedTypes = types.get(i);
                 boolean compatible = actualTypes.isEmpty() || expectedTypes.isEmpty()
                     || actualTypes.stream().anyMatch(type -> containsIgnoreCase(expectedTypes, type));
-                Global.tempLog("call-arguments", "parameter=" + name + " candidate=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + (candidate != null ? candidate.name() : null) + " actual=" + actualTypes //$NON-NLS-1$
-                    + " expected=" + expectedTypes + " compatible=" + compatible); //$NON-NLS-1$ //$NON-NLS-2$
                 String argument = candidate != null && compatible ? candidate.name() : ""; //$NON-NLS-1$
                 if (candidate == null && module.getModuleType() == ModuleType.FORM_MODULE
                     && "ЭтаФорма".equalsIgnoreCase(name))
@@ -2801,6 +2860,13 @@ final class BslExpectedTypePremiums
         }
         AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list)
             : null;
+        // ИР: ИмяТипа с конструктором. Штатный список типов по-прежнему ранжирует EDT.
+        if (endsWithWord(stripEnd(context.preceding()), "Новый")) //$NON-NLS-1$
+        {
+            if (adder != null)
+                adder.queryTemplate();
+            return result;
+        }
         if (adder != null)
         {
             adder.surroundingConstructions();
@@ -3487,6 +3553,7 @@ final class BslExpectedTypePremiums
         {
             if (line < 0)
                 return true;
+            queryTemplate();
             String selected = context.selected();
             boolean insideExpression = scene.insideExpression();
             boolean singleExpression = !insideExpression && lineAfterWord.isBlank();
@@ -3777,23 +3844,19 @@ final class BslExpectedTypePremiums
 
         void surroundingConstructions()
         {
+            Global.tempLog("completion-constructions", "offer line=" + line + " caret=" + context.caret() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " anchor=" + context.anchor() + " parent=" + parent + " word=" + currentWord() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " prefixBlank=" + lineBeforeWord.isBlank() + " suffixBlank=" + lineAfterWord.isBlank() //$NON-NLS-1$ //$NON-NLS-2$
+                + " insideExpression=" + scene.insideExpression() + " betweenMethods=" + facts.betweenMethods() //$NON-NLS-1$ //$NON-NLS-2$
+                + " selectedLength=" + context.selected().length()); //$NON-NLS-1$
             if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
                 return;
             String selected = context.selected();
-            String afterCaret;
-            try
-            {
-                IRegion info = document.getLineInformation(line);
-                int caret = Math.min(Math.max(context.caret(), info.getOffset()), info.getOffset() + info.getLength());
-                afterCaret = document.get(caret, info.getOffset() + info.getLength() - caret);
-            }
-            catch (Exception e)
-            {
-                return;
-            }
             // СокрЛ(мТекущаяСтрокаНачало) = мНачалоКонтекста И ПустаяСтрока(мТекущаяСтрокаКонец)
+            // Зонд расчёта может стоять перед уже набранным словом: мТекущаяСтрокаКонец — после слова,
+            // а не после context.caret(). Этот остаток рассчитан в конструкторе от конца идентификатора.
             boolean emptyLine = selected.isEmpty() && parent.isEmpty() && !scene.insideExpression()
-                && lineBeforeWord.isBlank() && afterCaret.isBlank();
+                && lineBeforeWord.isBlank() && lineAfterWord.isBlank();
             // мНачальнаяСтрока < мКонечнаяСтрока И мНачальнаяКолонка = 1 И мКонечнаяКолонка = 1
             boolean wholeLines = !selected.isEmpty() && context.caret() == lineOffset
                 && selected.indexOf('\n') >= 0 && selected.endsWith("\n"); //$NON-NLS-1$
@@ -3824,6 +3887,8 @@ final class BslExpectedTypePremiums
                 construction("Функция КонецФункции", between ? 2 : 0, false); //$NON-NLS-1$
                 construction("Процедура КонецПроцедуры", between ? 2 : 0, false); //$NON-NLS-1$
             }
+            Global.tempLog("completion-constructions", "offered emptyLine=" + emptyLine + " wholeLines=" + wholeLines //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " added=" + added.keySet()); //$NON-NLS-1$
         }
 
         /** {@code мКонтекст} без родителя: слово у каретки целиком. */
@@ -4034,6 +4099,33 @@ final class BslExpectedTypePremiums
         {
             return new BslAddedWordProposal(header, BslAddedWordProposal.Kind.CONSTRUCTION, header,
                 BslAddedWordProposal.Absorb.LINE, -1, "", closing, false, statistical, false); //$NON-NLS-1$
+        }
+
+        /** {@code СловоГенераторЗапрос}: начало инструкции либо список типов после {@code Новый}. */
+        private void queryTemplate()
+        {
+            if (line < 0 || !parent.isEmpty()
+                || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
+                return;
+            boolean afterNew = endsWithWord(precedingText, "Новый"); //$NON-NLS-1$
+            if (afterNew)
+            {
+                // Штатный список типов учитывает доступность Запроса в текущем контексте.
+                if (!proposals.containsKey("запрос") && !proposals.containsKey("query")) //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+            }
+            else if (!facts.queryAllowed() || facts.betweenMethods() || scene.insideExpression()
+                || !lineBeforeWord.isBlank() || !lineAfterWord.isBlank() || !context.selected().isEmpty())
+                return;
+            String beforeNew = afterNew
+                ? stripEnd(precedingText.substring(0, precedingText.length() - "Новый".length())) : ""; //$NON-NLS-1$ //$NON-NLS-2$
+            Matcher assignment = afterNew ? receiverMatcher("=", beforeNew) : null; //$NON-NLS-1$
+            String query = assignment != null ? assignment.group(1) : newVariableName("Запрос"); //$NON-NLS-1$
+            String resultName = newVariableName("РезультатЗапроса"); //$NON-NLS-1$
+            String template = query + " = Новый Запрос;\n" + query + ".Текст = \"<?>\";\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + resultName + " = " + query + ".Выполнить();"; //$NON-NLS-1$ //$NON-NLS-2$
+            generator("Запрос_Текст_Выполнить", 1, template, BslAddedWordProposal.Absorb.LINE_CONTENT, //$NON-NLS-1$
+                -1, false, false);
         }
 
         /** Слово-генератор: всегда добавляется ({@code ДобавитьВТаблицуСлов}) с готовым текстом вставки. */
@@ -4296,7 +4388,7 @@ final class BslExpectedTypePremiums
             Set<String> taken = new HashSet<>();
             for (Local local : facts.locals())
                 taken.add(lower(local.name()));
-            if (parent.isEmpty())
+            if (parent.isEmpty() && !endsWithWord(precedingText, "Новый")) //$NON-NLS-1$
             {
                 for (Word word : words.values())
                 {

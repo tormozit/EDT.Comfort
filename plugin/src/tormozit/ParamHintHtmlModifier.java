@@ -6577,7 +6577,8 @@ public final class ParamHintHtmlModifier
     static Boolean booleanParameterDefault(EObject method, int index, String name)
     {
         com._1c.g5.v8.dt.bsl.model.Method source = ParameterSeeLinks.sourceMethod(method);
-        ForeignParamTypes.ParamInfo foreign = source != null ? ForeignParamTypes.expectedInfo(source, name) : null;
+        ForeignParamTypes.ParamInfo foreign = source != null
+            ? ForeignParamTypes.expectedInfo(source, name, index) : null;
         String text = ParameterSeeLinks.defaultValueText(method, name);
         if (foreign != null)
             text = foreign.defaultValue();
@@ -8569,7 +8570,7 @@ public final class ParamHintHtmlModifier
     {
         private static final String LOG = "param-hint-foreign-types"; //$NON-NLS-1$
         /** Типы и значение по умолчанию параметра — по одной модели целевого модуля. */
-        record ParamInfo(String types, String defaultValue, List<ParameterType> expected)
+        record ParamInfo(String types, String defaultValue, List<ParameterType> expected, int index)
         {
         }
 
@@ -8592,6 +8593,12 @@ public final class ParamHintHtmlModifier
 
         /** Готовые типы и дефолт из одного расчёта целевого модуля. */
         static ParamInfo expectedInfo(com._1c.g5.v8.dt.bsl.model.Method method, String parameter)
+        {
+            return expectedInfo(method, parameter, -1);
+        }
+
+        /** В mock-сигнатуре EDT имена могут быть Param1/Param2: позиция берётся из объявления цели. */
+        static ParamInfo expectedInfo(com._1c.g5.v8.dt.bsl.model.Method method, String parameter, int index)
         {
             Resource resource = method.eResource();
             if (resource == null || resource.getURI() == null || method.getName() == null
@@ -8627,7 +8634,17 @@ public final class ParamHintHtmlModifier
             Map<String, ParamInfo> ready = request != null
                 && request.stamp().equals(ForeignModuleModel.stamp(request.file(), request.document()))
                 ? RESULTS.get(request.key()) : null;
-            return ready != null ? ready.get(parameter.toLowerCase(Locale.ROOT)) : null;
+            ParamInfo info = null;
+            if (ready != null)
+            {
+                if (index >= 0)
+                    info = ready.values().stream().filter(value -> value.index() == index).findFirst().orElse(null);
+                else
+                    info = ready.get(parameter.toLowerCase(Locale.ROOT));
+            }
+            Global.tempLog("boolean-default-ranking", "lookup target=" + target + " index=" + index //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " parameter=" + parameter + " ready=" + (ready != null) + " info=" + info); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return info;
         }
 
         private ForeignParamTypes()
@@ -8782,9 +8799,11 @@ public final class ParamHintHtmlModifier
                         if (name != null)
                         {
                             List<ParameterType> expected = new ArrayList<>();
+                            int index = -1;
                             for (FormalParam formal : method.getFormalParams())
                                 if (name.equalsIgnoreCase(formal.getName()))
                                 {
+                                    index = method.getFormalParams().indexOf(formal);
                                     List<TypeItem> items = BslMethodParameterTypes.fromComment(method, formal);
                                     if (items == null || items.isEmpty())
                                         items = TypeSystemUtil.getVariableTypesAfterModelObject(formal, formal);
@@ -8798,7 +8817,7 @@ public final class ParamHintHtmlModifier
                                 }
                             types.put(name.toLowerCase(Locale.ROOT), new ParamInfo(
                                 formatParamContentTypesHtml(parameter),
-                                ParameterSeeLinks.defaultValueText(method, name), List.copyOf(expected)));
+                                ParameterSeeLinks.defaultValueText(method, name), List.copyOf(expected), index));
                         }
                     }
                 }

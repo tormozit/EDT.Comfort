@@ -1,11 +1,5 @@
 package tormozit;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 
 import org.eclipse.core.runtime.IConfigurationElement;
 import org.eclipse.core.runtime.IStatus;
@@ -30,12 +24,6 @@ import org.osgi.framework.FrameworkUtil;
 public final class ComfortStartup implements IStartup
 {
     private static final String TAG = "ComfortStartup"; //$NON-NLS-1$
-
-    /**
-     * Накопитель падений по сеансам — не в {@code temp-logs}, чтобы следующий старт его не стёр.
-     */
-    private static final Path FAILURES_FILE =
-        Path.of("C:\\VC\\EDT.Comfort\\.tmp\\comfort-startup-failures.log"); //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -135,7 +123,6 @@ public final class ComfortStartup implements IStartup
 
     private static void fail(Bundle bundle, String context, Throwable error)
     {
-        appendFailureFile(context, error);
         platformLog(bundle, IStatus.ERROR, context, error);
     }
 
@@ -147,26 +134,4 @@ public final class ComfortStartup implements IStartup
         Platform.getLog(bundle).log(new Status(severity, bundle.getSymbolicName(), text, error));
     }
 
-    private static void appendFailureFile(String context, Throwable error)
-    {
-        StringWriter sw = new StringWriter();
-        sw.append(java.time.LocalDateTime.now().toString());
-        sw.append(' ');
-        sw.append(context == null ? "" : context); //$NON-NLS-1$
-        sw.append(System.lineSeparator());
-        if (error != null)
-            error.printStackTrace(new PrintWriter(sw));
-        sw.append(System.lineSeparator());
-        try
-        {
-            Path parent = FAILURES_FILE.getParent();
-            if (parent != null)
-                Files.createDirectories(parent);
-            Files.writeString(FAILURES_FILE, sw.toString(), StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
 }

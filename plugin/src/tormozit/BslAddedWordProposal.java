@@ -18,6 +18,7 @@ import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.ImageDataProvider;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
 
@@ -481,33 +482,126 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     @Override
     public Image getImage()
     {
+        boolean generator = isCodeGenerator(word);
+        boolean codeTemplate = isCodeTemplate(word) || kind == Kind.CONSTRUCTION
+            && (closing != null || template.contains(CARET) || template.contains(CENTER) || template.indexOf('\n') >= 0);
+        Global.tempLog("completion-generator-icon", "word=" + word + " generator=" + generator //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " template=" + codeTemplate + " kind=" + kind + " surrounding=" + (closing != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (generator)
+            return codeGeneratorImage();
+        if (codeTemplate)
+            return codeTemplateImage();
         if (ghostMember)
         {
-            String key = "tormozit.completion.ghostMember"; //$NON-NLS-1$
+            Image base = BslSharedImages.getImage(kind == Kind.METHOD ? BslSharedImages.IMG_EXTERNAL_FUNC
+                : BslSharedImages.IMG_EXTERNAL_PROPERTY);
+            if (base == null || base.isDisposed())
+                return null;
+            String key = "tormozit.completion.ghostMember." + kind + "." + System.identityHashCode(base); //$NON-NLS-1$ //$NON-NLS-2$
             var registry = Activator.getDefault().getImageRegistry();
             if (registry.getDescriptor(key) == null)
             {
-                // PLUGIN_ID — ключ настроек, а не Bundle-SymbolicName.
-                var url = Activator.getDefault().getBundle().getEntry("icons/obj16/ghost_member.png"); //$NON-NLS-1$
-                if (url != null)
-                {
-                    var descriptor = org.eclipse.jface.resource.ImageDescriptor.createFromURL(url);
-                    var data = descriptor.getImageData(100);
-                    if (data != null)
-                    {
-                        // Приглушённый силуэт: различим на обеих темах, не перетягивает внимание с имени.
-                        for (int y = 0; y < data.height; y++)
-                            for (int x = 0; x < data.width; x++)
-                                data.setAlpha(x, y, data.getAlpha(x, y) / 2);
-                        descriptor = org.eclipse.jface.resource.ImageDescriptor.createFromImageData(data);
-                    }
-                    registry.put(key, descriptor);
-                }
+                var descriptor = org.eclipse.jface.resource.ImageDescriptor.createWithFlags(
+                    org.eclipse.jface.resource.ImageDescriptor.createFromImage(base), org.eclipse.swt.SWT.IMAGE_GRAY);
+                registry.put(key, org.eclipse.jface.resource.ImageDescriptor.createFromImageDataProvider(zoom -> {
+                    var data = descriptor.getImageData(zoom);
+                    if (data == null)
+                        return null;
+                    var mask = data.getTransparencyMask();
+                    byte[] originalAlpha = data.alphaData;
+                    byte[] fadedAlpha = new byte[data.width * data.height];
+                    for (int y = 0; y < data.height; y++)
+                        for (int x = 0; x < data.width; x++)
+                        {
+                            int index = y * data.width + x;
+                            int alpha = originalAlpha != null ? originalAlpha[index] & 255
+                                : data.alpha >= 0 ? data.alpha : 255;
+                            fadedAlpha[index] = (byte)(mask.getPixel(x, y) == 0 ? 0 : alpha / 2);
+                        }
+                    data.alpha = -1;
+                    data.transparentPixel = -1;
+                    data.maskData = null;
+                    data.alphaData = fadedAlpha;
+                    return data;
+                }));
             }
             return registry.get(key);
         }
         return BslSharedImages.getImage(kind == Kind.METHOD ? BslSharedImages.IMG_EXTERNAL_FUNC
             : kind == Kind.PROPERTY ? BslSharedImages.IMG_EXTERNAL_PROPERTY : BslSharedImages.IMG_STATEMENT_BLOCK);
+    }
+
+    /** Общий признак генераторов для локального списка, слов ИР и языка запросов. */
+    static boolean isCodeGenerator(String word)
+    {
+        return word != null && switch (word)
+        {
+            case "<ЗаполнитьСвойства>", "<СопоставитьСвойства>", "<УдалитьВыбранныеЭлементы>", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "<ОбойтиЭлементы>", "<ПроверитьТип>", "<ПоследнийЭлемент>", "<УдалитьИзКоллекции>", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "<НайтиДобавитьСтроку>", "<СписокВсехСвойств>", "<СписокПараметров>", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "<СоздатьПеременные>", "<СоздатьПеременную>", "Запрос_Текст_Выполнить" -> true; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            default -> false;
+        };
+    }
+
+    /** Составные шаблоны вставки используют тот же значок, что штатные шаблоны EDT. */
+    static boolean isCodeTemplate(String word)
+    {
+        return word != null && switch (word)
+        {
+            case "Пока Цикл", "Для По", "Попытка Исключение", "НачатьТранзакцию Попытка", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                "#Если КонецЕсли", "#Область КонецОбласти", "Функция КонецФункции", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "Процедура КонецПроцедуры", "ИначеЕсли  Тогда" -> true; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> word.contains(CARET) || word.contains(CENTER);
+        };
+    }
+
+    static Image codeTemplateImage()
+    {
+        return BslSharedImages.getImage("com._1c.g5.v8.dt.bsl.ui/obj16/templateprop_co.png"); //$NON-NLS-1$
+    }
+
+    /** Штатный шаблон EDT с золотой звездой; реестр плагина управляет временем жизни изображения. */
+    static Image codeGeneratorImage()
+    {
+        var registry = Activator.getDefault().getImageRegistry();
+        String key = "tormozit.completion.codeGenerator"; //$NON-NLS-1$
+        Image image = registry.get(key);
+        if (image == null)
+        {
+            Image template = codeTemplateImage();
+            var descriptor = org.eclipse.jface.resource.ImageDescriptor.createFromImage(template);
+            image = new Image(Display.getCurrent(), (ImageDataProvider)zoom ->
+            {
+                var data = descriptor.getImageData(zoom);
+                // Альфа исходного PNG сохраняется и за пределами самой звезды.
+                if (data.alphaData == null)
+                {
+                    data.alphaData = new byte[data.width * data.height];
+                    for (int y = 0; y < data.height; y++)
+                        for (int x = 0; x < data.width; x++)
+                            data.setAlpha(x, y, data.getPixel(x, y) == data.transparentPixel ? 0 : 255);
+                }
+                String[] star = { "...o...", "...o...", "..oyo..", "ooyyyoo", "..oyo..", "...o...", "...o..." }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+                int size = Math.max(7, Math.round(7 * zoom / 100f));
+                int gold = data.palette.getPixel(new org.eclipse.swt.graphics.RGB(255, 204, 51));
+                int outline = data.palette.getPixel(new org.eclipse.swt.graphics.RGB(153, 102, 0));
+                for (int y = 0; y < size; y++)
+                    for (int x = 0; x < size; x++)
+                    {
+                        char pixel = star[y * 7 / size].charAt(x * 7 / size);
+                        if (pixel == '.')
+                            continue;
+                        int px = data.width - size + x;
+                        int py = data.height - size + y;
+                        data.setPixel(px, py, pixel == 'y' ? gold : outline);
+                        data.setAlpha(px, py, 255);
+                    }
+                return data;
+            });
+            registry.put(key, image);
+        }
+        return image;
     }
 
     /** Боковая подсказка — отдельное описание слова либо текст вставки (код, без переноса строк). */
