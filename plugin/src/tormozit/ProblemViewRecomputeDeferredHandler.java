@@ -38,8 +38,7 @@ public class ProblemViewRecomputeDeferredHandler extends AbstractHandler impleme
         element.setTooltip(count > 0
             ? "Запустить проверки отложенных: " + count + " "
                 + Global.russianPlural(count, "объект", "объекта", "объектов")
-                + " после массового изменения. Открытый в редакторе отложенный объект"
-                + " пересчитывается сам." + Global.pluginSignForTooltip()
+                + ". Открытый в редакторе объект пересчитывается сам." + Global.pluginSignForTooltip()
             : "Отложенного пересчета проверок нет." + Global.pluginSignForTooltip());
     }
 }

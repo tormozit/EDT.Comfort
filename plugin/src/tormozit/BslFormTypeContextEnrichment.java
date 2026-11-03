@@ -517,6 +517,10 @@ public final class BslFormTypeContextEnrichment
             return;
         if (FORM_MODULE_INSTALLED.contains(module))
             return;
+        // В сборке вложенный полный расчёт модуля формы тянет цепочку по всей конфигурации
+        // (разбор модулей, десятки ГБ, паралич GC). Берём только уже посчитанное.
+        if (BslDocCommentComputedTypes.isBuildThread())
+            return;
         if (!INSTALLING_FORM_MODULE.add(module))
             return;
         try

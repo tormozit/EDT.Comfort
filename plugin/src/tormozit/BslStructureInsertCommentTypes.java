@@ -631,7 +631,7 @@ public final class BslStructureInsertCommentTypes
         if (lock == null)
             return;
         Method selected = offset < 0 ? null : EcoreUtil2.getContainerOfType(
-            new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset), Method.class);
+            BslNodeLookup.containedAt(new org.eclipse.xtext.resource.EObjectAtOffsetHelper(), xtext, offset), Method.class);
         boolean[] changed = { false };
         ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
         {
@@ -730,7 +730,7 @@ public final class BslStructureInsertCommentTypes
                 return;
             }
             Method method = EcoreUtil2.getContainerOfType(
-                new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset),
+                BslNodeLookup.containedAt(new org.eclipse.xtext.resource.EObjectAtOffsetHelper(), xtext, offset),
                 Method.class);
             if (method == null || method.getName() == null)
                 return;
@@ -1040,6 +1040,9 @@ public final class BslStructureInsertCommentTypes
 
     private static String propertyDescription(Property property, EObject context, boolean projectEnabled)
     {
+        String templateDescription = BslTemplateTypes.propertyDescription(property);
+        if (templateDescription != null)
+            return templateDescription;
         if (!(property instanceof DerivedProperty derived)
             || !(derived.getSource() instanceof BslDerivedPropertySource source)
             || source.getModuleUri() == null
@@ -1209,7 +1212,7 @@ public final class BslStructureInsertCommentTypes
         {
             return null;
         }
-        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        var leaf = BslNodeLookup.leafAt(node, offset);
         EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
         Invocation invocation = EcoreUtil2.getContainerOfType(semantic, Invocation.class);
         if (invocation == null && block instanceof Method method)
@@ -1388,7 +1391,7 @@ public final class BslStructureInsertCommentTypes
         int offset = node.getTotalOffset() + source.getLocalOffset();
         if (offset < node.getTotalOffset() || offset >= node.getTotalEndOffset())
             return null;
-        var leaf = NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        var leaf = BslNodeLookup.leafAt(node, offset);
         EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
         return EcoreUtil2.getContainerOfType(semantic, Invocation.class);
     }
@@ -1832,7 +1835,7 @@ public final class BslStructureInsertCommentTypes
     {
         if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext))
             return null;
-        EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset);
+        EObject object = BslNodeLookup.resolveContainedElementAt(xtext, offset);
         FeatureAccess access = null;
         for (EObject current = object; current != null && access == null; current = current.eContainer())
         {
@@ -1924,7 +1927,7 @@ public final class BslStructureInsertCommentTypes
             int keyOffset = node.getTotalOffset() + source.getLocalOffset();
             if (keyOffset >= node.getTotalOffset() && keyOffset < node.getTotalEndOffset())
             {
-                var leaf = NodeModelUtils.findLeafNodeAtOffset(node, keyOffset);
+                var leaf = BslNodeLookup.leafAt(node, keyOffset);
                 EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
                 StringLiteral literal = EcoreUtil2.getContainerOfType(semantic, StringLiteral.class);
                 if (literal != null && leaf != null)
@@ -2073,7 +2076,7 @@ public final class BslStructureInsertCommentTypes
                 Property variable = variablePropertyForHint(referenced, resource, offset);
                 if (variable != null)
                     return variable;
-                EObject expression = helper.resolveContainedElementAt(resource, offset);
+                EObject expression = BslNodeLookup.containedAt(helper, resource, offset);
                 return variablePropertyForHint(expression, resource, offset);
             });
             completePropertyHover(info, object, viewer);

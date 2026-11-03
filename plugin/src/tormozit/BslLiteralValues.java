@@ -18,6 +18,10 @@ import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -42,6 +46,11 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.Tuples;
 
+import com._1c.g5.v8.bm.core.event.BmEvent;
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.event.IBmSyncEventListener;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.modeling.xtext.scoping.ISlicedScope;
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
@@ -324,14 +333,16 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     }
 
     /**
-     * Общий проход анализа литералов: узлы области в порядке {@code eAllContents}, исходные методы экспортных
-     * методов, язык и конфигурация проекта. Только для неизменной модели — на одну проверку модуля или один
-     * расчёт; глобально не хранить. Текст узлов не запоминается: строки всех выражений модуля, удержанные до
+     * Общий проход анализа литералов: узлы области и их подмножества по видам в порядке {@code eAllContents},
+     * исходные методы экспортных методов, язык и конфигурация проекта. Только для неизменной модели — на одну
+     * проверку модуля или один расчёт; глобально не хранить. Текст узлов не запоминается: строки всех выражений модуля, удержанные до
      * конца его проверки в параллельных потоках, заметно поднимали расход памяти и нагрузку на GC.
      */
     public static final class Pass
     {
         private final Map<EObject, List<EObject>> contents = new IdentityHashMap<>();
+        /** Подмножества узлов по видам: повторные поиски не перебирают нерелевантные узлы AST. */
+        private final Map<EObject, Map<List<Class<?>>, List<EObject>>> selectedContents = new IdentityHashMap<>();
         /** Исходный метод по набору ресурсов, в котором разрешался, и полному URI. */
         private final Map<Object, Map<URI, EObject>> sourceMethods = new IdentityHashMap<>();
         private final Map<XtextResource, Boolean> russian = new IdentityHashMap<>();
@@ -350,6 +361,27 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private final Map<Module, Boolean> dynamicForms = new IdentityHashMap<>();
         /** Имена общих модулей (нижний регистр), не найденные и после перестройки справочника. */
         private final Set<String> missingCommonModules = new HashSet<>();
+        /** Готовые имена штатных типов; только на проход, отдельно для каждого фактического scope. */
+        private final Map<XtextResource, StockServices> stockServices = new IdentityHashMap<>();
+
+        /** Один набор сервисов строковых провайдеров на ресурс и проход проверки. */
+        StockServices stockServices(XtextResource resource)
+        {
+            StockServices known = stockServices.get(resource);
+            if (known != null)
+                return known;
+            var services = resource.getResourceServiceProvider();
+            if (services == null)
+                return null;
+            var registry = services.get(com._1c.g5.v8.dt.bsl.validation.stringliterals.IStringLiteralProposalProviderRegistry.class);
+            IScopeProvider scopes = services.get(IScopeProvider.class);
+            IIndexSlicePredicateService slices = services.get(IIndexSlicePredicateService.class);
+            if (registry == null || scopes == null)
+                return null;
+            StockServices result = new StockServices(registry.getAllProviders(), scopes, slices);
+            stockServices.put(resource, result);
+            return result;
+        }
 
         public Pass()
         {
@@ -386,6 +418,37 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             contents.put(scope, result);
             return result;
         }
+
+        /** Объединение видов в исходном порядке AST; каждый узел попадает в список один раз. */
+        List<EObject> contents(EObject scope, Runnable checkCanceled, Class<?>... kinds)
+        {
+            Map<List<Class<?>>, List<EObject>> byKinds = selectedContents.computeIfAbsent(scope,
+                key -> new HashMap<>());
+            List<Class<?>> key = List.of(kinds);
+            List<EObject> source = contents(scope, checkCanceled);
+            List<EObject> result = byKinds.get(key);
+            if (result != null)
+                return result;
+            result = new ArrayList<>();
+            for (EObject object : source)
+            {
+                checkCanceled.run();
+                for (Class<?> kind : kinds)
+                    if (kind.isInstance(object))
+                    {
+                        result.add(object);
+                        break;
+                    }
+            }
+            // Незавершённый при отмене индекс не сохраняется.
+            byKinds.put(key, result);
+            return result;
+        }
+    }
+
+    /** Сервисы и реестр переиспользуются только в одном проходе для одного ресурса. */
+    private static record StockServices(List<?> providers, IScopeProvider scopes, IIndexSlicePredicateService slices)
+    {
     }
 
     /** Один расчёт автодополнения: ручной ли вызов и строки, добавленные этим классом. */
@@ -495,8 +558,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
             {
-                EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
-                    .resolveContainedElementAt(resource, offset);
+                EObject object = BslNodeLookup.containedAt(new org.eclipse.xtext.resource.EObjectAtOffsetHelper(), resource, offset);
                 StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
                 if (literal == null)
                     return null;
@@ -782,7 +844,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     {
         if (resource == null || resource.getParseResult() == null || offset <= 0)
             return null;
-        INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset - 1);
+        INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset - 1);
         EObject semantic = leaf != null ? NodeModelUtils.findActualSemanticObjectFor(leaf) : null;
         if (!(semantic instanceof StringLiteral literal))
             return null;
@@ -1040,6 +1102,361 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             ? module : null;
     }
 
+    static void installTypeNameCache()
+    {
+        TypeNameCache.install();
+    }
+
+    static void stopTypeNameCache()
+    {
+        TypeNameCache.stop();
+    }
+
+    /** Общий каталог проверки и штатного автодополнения; bsl.ui 22.0.0.v202605050943. */
+    private static final class TypeNameCache
+    {
+        private static final String CALLBACK = "tormozit.stringLiteralTypeNames.proposals";
+        private static final String PROVIDERS = "com._1c.g5.v8.dt.bsl.ui.internal.contentassist.stringliteral.";
+        private static final Map<IProject, ProjectCatalog> PROJECTS = Collections.synchronizedMap(new WeakHashMap<>());
+        private static final IResourceChangeListener WORKSPACE_LISTENER = TypeNameCache::workspaceChanged;
+
+        static void install()
+        {
+            System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)TypeNameCache::proposals);
+            ResourcesPlugin.getWorkspace().addResourceChangeListener(WORKSPACE_LISTENER,
+                IResourceChangeEvent.POST_CHANGE | IResourceChangeEvent.PRE_CLOSE | IResourceChangeEvent.PRE_DELETE);
+            Global.tempLog("type-name-cache", "installed; key=project/(environments,constructor)");
+        }
+
+        static void stop()
+        {
+            System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)args -> null);
+            ResourcesPlugin.getWorkspace().removeResourceChangeListener(WORKSPACE_LISTENER);
+            List<ProjectCatalog> catalogs;
+            synchronized (PROJECTS)
+            {
+                catalogs = new ArrayList<>(PROJECTS.values());
+                PROJECTS.clear();
+            }
+            catalogs.forEach(ProjectCatalog::close);
+        }
+
+        private static Object proposals(Object[] args)
+        {
+            long started = System.nanoTime();
+            String status = "fallback";
+            String detail = "";
+            try
+            {
+                Object provider = args[0];
+                String name = provider.getClass().getName();
+                boolean constructor = name.equals(PROVIDERS + "StringLiteralProposalProviderFuncCtor");
+                boolean description = name.equals(PROVIDERS + "StringLiteralProposalProviderTypeDescription");
+                if (!constructor && !description && !name.equals(PROVIDERS + "StringLiteralProposalProviderMethodType"))
+                    return null;
+                var bundle = org.osgi.framework.FrameworkUtil.getBundle(provider.getClass());
+                if (bundle == null || !bundle.getVersion().toString().equals("22.0.0.v202605050943"))
+                    return null;
+                EObject context = (EObject)args[1];
+                if (!(context.eResource() instanceof XtextResource resource) || !(args[2] instanceof String typed))
+                    return null;
+                IV8Project v8 = v8Project(resource);
+                IProject project = v8 != null ? v8.getProject() : null;
+                IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+                IBmModel model = project != null && models != null ? models.getModel(project) : null;
+                if (project == null || model == null || model.isDisposed())
+                    return null;
+                Method method = EcoreUtil2.getContainerOfType(context, Method.class);
+                Module module = EcoreUtil2.getContainerOfType(context, Module.class);
+                Environments environments = method != null ? method.environments()
+                    : module != null ? module.environments() : null;
+                if (environments == null)
+                    return null;
+                if (v8 instanceof com._1c.g5.v8.dt.core.platform.IDependentProject dependent
+                    && dependent.getParent() != null)
+                {
+                    IProject parent = dependent.getParent().getProject();
+                    IBmModel parentModel = parent != null ? models.getModel(parent) : null;
+                    if (parentModel == null || parentModel.isDisposed())
+                        return null;
+                    ProjectCatalog parentCatalog;
+                    synchronized (PROJECTS)
+                    {
+                        parentCatalog = PROJECTS.computeIfAbsent(parent, key -> new ProjectCatalog(key.getName()));
+                    }
+                    // Изменение базовой конфигурации должно сбрасывать каталог расширения,
+                    // даже если сам каталог базового проекта ещё ни разу не запрашивали.
+                    parentCatalog.watch(parentModel);
+                }
+                boolean russian = (Boolean)args[5];
+                ProjectCatalog projectCatalog;
+                synchronized (PROJECTS)
+                {
+                    projectCatalog = PROJECTS.computeIfAbsent(project, key -> new ProjectCatalog(key.getName()));
+                }
+                projectCatalog.watch(model);
+                CatalogState state = projectCatalog.state;
+                TypeNameKey key = new TypeNameKey(environments, constructor);
+                LanguageCatalog catalog = state.catalogs.computeIfAbsent(key, unused -> new LanguageCatalog());
+                int language = russian ? 0 : 1;
+                NameIndex index = catalog.languages.get(language);
+                boolean hit = index != null;
+                if (!hit)
+                {
+                    index = build(context, (IScopeProvider)args[3], (IIndexSlicePredicateService)args[4],
+                        russian, constructor);
+                    // Публикуется только готовый каталог. Строим без замка: другой расчёт может держать AST.
+                    catalog.languages.compareAndSet(language, null, index);
+                    index = catalog.languages.get(language);
+                }
+                String token = typed;
+                String before = "";
+                if (description)
+                {
+                    String[] parts = typed.split(",");
+                    if (parts.length == 0)
+                        return List.of();
+                    token = parts[parts.length - 1].trim();
+                    before = typed.substring(0, typed.lastIndexOf(token));
+                }
+                int dot = token.lastIndexOf('.');
+                String parent = dot >= 0 ? token.substring(0, dot) : "";
+                List<NameOption> options = (description ? index.description : index.ordinary)
+                    .getOrDefault(parent, List.of());
+                List<Triple<String, String, IBslStringLiteralProposalImageProvider>> result = new ArrayList<>(options.size());
+                for (NameOption option : options)
+                    result.add(Tuples.create("\"" + before + option.text, option.label,
+                        IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
+                status = hit ? "hit" : "build";
+                detail = " project=" + project.getName() + " environments=" + environments
+                    + " constructor=" + constructor + " description=" + description + " russian=" + russian
+                    + " parent=" + parent + " values=" + result.size() + " generation=" + state.generation;
+                return result;
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                status = "canceled";
+                throw canceled;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                status = "failed";
+                Global.tempLogException("type-name-cache", "catalog calculation", failure);
+                return null;
+            }
+            finally
+            {
+                Global.tempLog("type-name-cache", "lookup status=" + status + detail
+                    + " elapsedNs=" + (System.nanoTime() - started));
+            }
+        }
+
+        private static NameIndex build(EObject context, IScopeProvider scopes, IIndexSlicePredicateService slices,
+            boolean russian, boolean constructor)
+        {
+            IScope scope = scopes.getScope(context, McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+            var filter = slices.getPredicate(russian ? "indexSliceScriptRu" : "indexSliceScriptIntnl");
+            Map<String, Map<String, NameOption>> ordinary = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            Map<String, Map<String, NameOption>> description = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            for (IEObjectDescription item : ((ISlicedScope)scope).getAllElements(List.of(filter)))
+            {
+                if (Thread.currentThread().isInterrupted())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
+                if (item.getUserData("MetaType") != null || item.getEClass() == McorePackage.Literals.TYPE_SET)
+                    continue;
+                boolean plainType = item.getEClass() == McorePackage.Literals.TYPE;
+                if (constructor && (!plainType || !((Type)item.getEObjectOrProxy()).isCreatedByNewOperator()))
+                    continue;
+                QualifiedName name = item.getQualifiedName();
+                String parent = "";
+                for (int segment = 0; segment < name.getSegmentCount(); segment++)
+                {
+                    String label = name.getSegment(segment);
+                    String text = parent.isEmpty() ? label : parent + "." + label;
+                    NameOption option = new NameOption(text, label);
+                    description.computeIfAbsent(parent, unused -> new LinkedHashMap<>())
+                        .putIfAbsent(lower(text), option);
+                    if (plainType)
+                        ordinary.computeIfAbsent(parent, unused -> new LinkedHashMap<>())
+                            .putIfAbsent(lower(text), option);
+                    parent = text;
+                }
+            }
+            return new NameIndex(freeze(ordinary), freeze(description));
+        }
+
+        private static Map<String, List<NameOption>> freeze(Map<String, Map<String, NameOption>> source)
+        {
+            Map<String, List<NameOption>> result = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            source.forEach((parent, options) -> result.put(parent, List.copyOf(options.values())));
+            return Collections.unmodifiableMap(result);
+        }
+
+        private static void invalidateProjects(String reason)
+        {
+            List<ProjectCatalog> catalogs;
+            synchronized (PROJECTS)
+            {
+                catalogs = new ArrayList<>(PROJECTS.values());
+            }
+            // Зависимые проекты и расширения тоже могут использовать типы изменённой конфигурации.
+            catalogs.forEach(catalog -> catalog.invalidate(reason));
+        }
+
+        private static void workspaceChanged(IResourceChangeEvent event)
+        {
+            if (event.getType() != IResourceChangeEvent.POST_CHANGE)
+            {
+                if (event.getResource() instanceof IProject project)
+                {
+                    ProjectCatalog removed = PROJECTS.remove(project);
+                    if (removed != null)
+                        removed.close();
+                    invalidateProjects("projectClosed:" + project.getName());
+                }
+                return;
+            }
+            if (event.getDelta() == null)
+                return;
+            for (var delta : event.getDelta().getAffectedChildren())
+                if (delta.getResource() instanceof IProject project
+                    && (delta.findMember(new org.eclipse.core.runtime.Path(".settings")) != null
+                        || delta.findMember(new org.eclipse.core.runtime.Path(".project")) != null
+                        || (delta.getFlags() & org.eclipse.core.resources.IResourceDelta.OPEN) != 0))
+                {
+                    invalidateProjects("projectSettings:" + project.getName());
+                }
+        }
+
+        private static record TypeNameKey(Environments environments, boolean constructor)
+        {
+        }
+
+        private static record NameOption(String text, String label)
+        {
+        }
+
+        private static record NameIndex(Map<String, List<NameOption>> ordinary,
+            Map<String, List<NameOption>> description)
+        {
+        }
+
+        private static final class LanguageCatalog
+        {
+            final java.util.concurrent.atomic.AtomicReferenceArray<NameIndex> languages =
+                new java.util.concurrent.atomic.AtomicReferenceArray<>(2);
+        }
+
+        private static final class CatalogState
+        {
+            final long generation;
+            final Map<TypeNameKey, LanguageCatalog> catalogs = new ConcurrentHashMap<>();
+
+            CatalogState(long generation)
+            {
+                this.generation = generation;
+            }
+        }
+
+        private static final class ProjectCatalog
+        {
+            final String projectName;
+            volatile CatalogState state = new CatalogState(0);
+            private java.lang.ref.WeakReference<IBmModel> model = new java.lang.ref.WeakReference<>(null);
+            private final IBmSyncEventListener listener = this::metadataChanged;
+
+            ProjectCatalog(String projectName)
+            {
+                this.projectName = projectName;
+            }
+
+            synchronized void watch(IBmModel current)
+            {
+                if (model.get() == current)
+                    return;
+                close();
+                current.addSyncEventListener(listener);
+                model = new java.lang.ref.WeakReference<>(current);
+                invalidate("modelChanged");
+            }
+
+            synchronized void close()
+            {
+                IBmModel previous = model.get();
+                if (previous != null && !previous.isDisposed())
+                    previous.removeSyncEventListener(listener);
+                model.clear();
+                invalidate("close");
+            }
+
+            void invalidate(String reason)
+            {
+                // Новый объект состояния: расчёт, начавшийся до события, не заполнит новый каталог.
+                CatalogState previous = state;
+                state = new CatalogState(previous.generation + 1);
+                Global.tempLog("type-name-cache", "invalidate project=" + projectName
+                    + " reason=" + reason + " generation=" + state.generation);
+            }
+
+            private static boolean metadata(Object object)
+            {
+                return object instanceof EObject node
+                    && node.eClass().getEPackage() == com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.eINSTANCE;
+            }
+
+            private void metadataChanged(BmEvent event)
+            {
+                try
+                {
+                    onMetadataChanged(event);
+                }
+                catch (RuntimeException | LinkageError failure)
+                {
+                    metadataInvalidated("listenerFailure");
+                    Global.tempLogException("type-name-cache", "metadata invalidation project=" + projectName, failure);
+                }
+            }
+
+            private void metadataInvalidated(String reason)
+            {
+                invalidateProjects("metadata:" + projectName + ":" + reason);
+            }
+
+            private void onMetadataChanged(BmEvent event)
+            {
+                if (event.getChangeEvents() != null)
+                    for (var change : event.getChangeEvents().values())
+                        if (metadata(change.getObject()))
+                        {
+                            metadataInvalidated(change.isFqnChanged() ? "rename:" + change.getOldFqn() : "metadataChange");
+                            return;
+                        }
+                var association = event.getAssociationEvent();
+                if (association == null)
+                    return;
+                if (association.getAssociated() != null)
+                    for (Object object : association.getAssociated())
+                        if (metadata(object))
+                        {
+                            metadataInvalidated("metadataAdded");
+                            return;
+                        }
+                if (association.getDeassociated() != null)
+                    for (Object object : association.getDeassociated())
+                        if (metadata(object))
+                        {
+                            metadataInvalidated("metadataRemoved");
+                            return;
+                        }
+                // При удалении BM может передать только идентификаторы уже отсоединённых объектов.
+                if (association.isDeassociated()
+                    && (association.getDeassociated() == null || association.getDeassociated().isEmpty()))
+                    metadataInvalidated("removedIds");
+            }
+        }
+    }
+
+
     private static final CallTarget NO_CALL_TARGET = new CallTarget(null, null, List.of(), null);
 
     private static final class Analysis
@@ -1179,7 +1596,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (dynamic == null)
             {
                 dynamic = Boolean.FALSE;
-                for (EObject object : contents(module))
+                for (EObject object : contents(module, Invocation.class))
                     if (object instanceof Invocation invocation
                         && invocation.getMethodAccess() instanceof StaticFeatureAccess access
                         && in(access.getName(), "ИзменитьРеквизиты", "ChangeAttributes")) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1205,23 +1622,40 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             var services = resource.getResourceServiceProvider();
             if (services == null || stockContext == null)
                 return;
+            List<Expression> stockArgs = stockContext.getSecond();
+            Integer stockIndex = stockContext.getThird();
+            if (stockArgs == null || stockIndex == null || stockIndex < 0 || stockIndex >= stockArgs.size()
+                || !(stockArgs.get(stockIndex) instanceof StringLiteral))
+            {
+                // При спуске в вызываемый метод аргументом бывает переменная. Штатный FuncCtor
+                // безусловно приводит аргумент к StringLiteral: раньше здесь ловилось исключение.
+                values.clear();
+                full = false;
+                return;
+            }
             try
             {
-                var registry = services.get(com._1c.g5.v8.dt.bsl.validation.stringliterals.IStringLiteralProposalProviderRegistry.class);
-                IScopeProvider scopes = services.get(IScopeProvider.class);
-                IIndexSlicePredicateService slices = services.get(IIndexSlicePredicateService.class);
-                if (registry == null || scopes == null)
+                StockServices stock = pass.stockServices(resource);
+                if (stock == null)
                     return;
+                IScopeProvider scopes = stock.scopes;
+                IIndexSlicePredicateService slices = stock.slices;
                 Map<String, String> found = new LinkedHashMap<>();
                 // parent — путь без последней точки; провайдеры ждут набранный текст до курсора.
                 String typed = parent.isEmpty() ? "" : parent + "."; //$NON-NLS-1$ //$NON-NLS-2$
-                for (Object provider : registry.getAllProviders())
+                for (Object provider : stock.providers)
                 {
                     checkCanceled();
                     if (!(provider instanceof com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.IStringLiteralProposalProviderExtension extension)
-                        || provider instanceof BslLiteralValues || !extension.isAppropriate(stockContext))
+                        || provider instanceof BslLiteralValues)
                         continue;
-                    for (var proposal : extension.computeProposals(stockContext, typed, scopes, slices, russian))
+                    boolean appropriate = extension.isAppropriate(stockContext);
+                    if (!appropriate)
+                        continue;
+                    List<Triple<String, String, IBslStringLiteralProposalImageProvider>> proposals =
+                        extension.computeProposals(stockContext, typed, scopes, slices, russian);
+                    Map<String, String> providerValues = new LinkedHashMap<>();
+                    for (var proposal : proposals)
                     {
                         String text = proposal.getFirst() != null ? proposal.getFirst() : ""; //$NON-NLS-1$
                         if (text.startsWith("\"")) //$NON-NLS-1$
@@ -1232,8 +1666,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         int dot = rest.indexOf('.');
                         String name = (dot >= 0 ? rest.substring(0, dot) : rest).trim();
                         if (!name.isEmpty())
-                            found.putIfAbsent(lower(name), name);
+                            providerValues.putIfAbsent(lower(name), name);
                     }
+                    providerValues.forEach(found::putIfAbsent);
                 }
                 if (found.isEmpty())
                     return;
@@ -1472,9 +1907,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 ? pass.sourceMethods.computeIfAbsent(resolutionScope, key -> new HashMap<>()) : null;
             EObject cached = known != null ? known.get(sourceUri) : null;
             if (cached != null)
-            {
                 return cached;
-            }
             Method shared = sharedSourceMethod(sourceResourceUri, exported.getName());
             if (shared != null)
             {
@@ -1584,7 +2017,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (!visitingMemberAdds.computeIfAbsent(scope, k -> new HashSet<>()).add(key))
                 return false;
             boolean result = false;
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, Invocation.class, SimpleStatement.class))
             {
                 if (object instanceof Invocation invocation)
                 {
@@ -1628,7 +2061,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (index < 0 || module == null || method.getName() == null
                 || EcoreUtil2.getContainerOfType(method, Module.class) != module)
                 return false;
-            for (EObject object : contents(module))
+            for (EObject object : contents(module, Invocation.class))
                 if (object instanceof Invocation invocation && invocation.getMethodAccess() != null
                     && method.getName().equalsIgnoreCase(invocation.getMethodAccess().getName())
                     && index < invocation.getParams().size() && isSimpleName(invocation.getParams().get(index))
@@ -1691,7 +2124,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             Method callee = calleeOf(source);
             if (callee == null)
                 return false;
-            for (EObject object : contents(callee))
+            for (EObject object : contents(callee, ReturnStatement.class))
                 if (object instanceof ReturnStatement statement && statement.getExpression() != null
                     && methodOf(statement) == callee)
                 {
@@ -2246,7 +2679,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 full = false;
                 String formVariable = name;
                 String fromForm = ".Параметры"; //$NON-NLS-1$
-                for (EObject object : contents(scope))
+                for (EObject object : contents(scope, Invocation.class, OperatorStyleCreator.class))
                 {
                     if (object instanceof Invocation invocation && in(invocation.getMethodAccess() != null
                         ? invocation.getMethodAccess().getName() : null, "Вставить", "Insert") //$NON-NLS-1$ //$NON-NLS-2$
@@ -2270,7 +2703,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 }
                 if (structureKeys(scope, name, null, fromForm, structureType, from, to, formVariable))
                     return;
-                for (EObject object : contents(scope))
+                for (EObject object : contents(scope, Invocation.class))
                 {
                     if (!(object instanceof Invocation invocation) || !isFillPropertyValues(invocation)
                         || invocation.getParams().size() < 2)
@@ -2321,7 +2754,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         return;
                     }
                 }
-                for (EObject object : contents(scope))
+                for (EObject object : contents(scope, ForEachStatement.class))
                 {
                     if (!(object instanceof ForEachStatement loop) || offsetOf(loop) < from
                         || !matches(loop.getCollection(), name) || loop.getVariableAccess() == null)
@@ -2342,7 +2775,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 String substitute = null;
                 int substituteAt = 0;
-                for (EObject object : contents(scope))
+                for (EObject object : contents(scope, SimpleStatement.class, Invocation.class, OperatorStyleCreator.class))
                 {
                     int at = offsetOf(object);
                     if (object instanceof SimpleStatement statement && substitute == null && at > start
@@ -2431,7 +2864,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         boolean hasUnknownParameterRead(ParameterSearch search)
         {
-            for (EObject object : contents(search.method))
+            for (EObject object : contents(search.method, StaticFeatureAccess.class))
             {
                 if (!(object instanceof StaticFeatureAccess access) || !matches(access, search.name)
                     || access.eContainer() instanceof SimpleStatement assignment && assignment.getLeft() == access
@@ -2448,7 +2881,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** {@code Объект[Имя]}, {@code Объект.Свойство(Имя)}: свойства объекта. */
         void objectPropertyNames(EObject scope, String name)
         {
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, IndexAccess.class, Invocation.class))
             {
                 Expression owner = null;
                 if (object instanceof IndexAccess access && matches(access.getIndex(), name))
@@ -2481,7 +2914,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** {@code ЗаполнитьЗначенияСвойств(А, Б, Имя)}: свойства приёмника или источника. */
         void fillPropertyValuesNames(EObject scope, String name)
         {
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, Invocation.class))
             {
                 if (!(object instanceof Invocation invocation) || !isFillPropertyValues(invocation)
                     || invocation.getParams().size() < 3 || !matches(invocation.getParams().get(2), name))
@@ -2528,7 +2961,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** {@code Выполнить("Объект." + Имя + "(…")}: методы объекта. */
         void dynamicCallNames(EObject scope, String name)
         {
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, BinaryExpression.class))
             {
                 if (!(object instanceof BinaryExpression binary) || binary.getOperation() != BinaryOperation.PLUS
                     || !matches(binary.getRight(), name) || !(binary.getLeft() instanceof StringLiteral prefix)
@@ -2554,7 +2987,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Литералы, с которыми выражение сравнивают (и которые ему присваивают). Низковероятные. */
         void comparedLiterals(EObject scope, String name, boolean collectAssignments)
         {
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, BinaryExpression.class, SimpleStatement.class))
             {
                 Expression literal = null;
                 if (object instanceof BinaryExpression binary && binary.getOperation() == BinaryOperation.EQ)
@@ -2601,7 +3034,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (scope == null)
                 return false;
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, Invocation.class))
             {
                 if (!(object instanceof Invocation invocation) || invocation.getMethodAccess() == null
                     || !FORM_OPEN_METHODS.contains(lower(invocation.getMethodAccess().getName()))
@@ -2625,7 +3058,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             if (!in(structureType, STRUCTURE, "ФиксированнаяСтруктура")) //$NON-NLS-1$
                 return false;
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, Invocation.class, SimpleStatement.class))
             {
                 Expression owner = null;
                 if (object instanceof Invocation invocation && !invocation.getParams().isEmpty()
@@ -2786,7 +3219,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             int at = offsetOf(access);
             List<TypeItem> result = new ArrayList<>();
-            for (EObject object : contents(method))
+            for (EObject object : contents(method, SimpleStatement.class))
             {
                 if (!(object instanceof SimpleStatement statement)
                     || !(statement.getLeft() instanceof StaticFeatureAccess left) || left == access
@@ -3207,7 +3640,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 Method method = pending.get(i);
                 if (!visited.add(method))
                     continue;
-                for (EObject object : contents(method))
+                for (EObject object : contents(method, Invocation.class, DynamicFeatureAccess.class))
                 {
                     if (object instanceof Invocation invocation && invocation.getMethodAccess() != null)
                     {
@@ -3508,7 +3941,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             List<String> names = new ArrayList<>();
             if (module == null)
                 return names;
-            for (EObject object : contents(module))
+            for (EObject object : contents(module, StringLiteral.class))
             {
                 if (!(object instanceof StringLiteral literal))
                     continue;
@@ -3561,7 +3994,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             String name = text(receiver);
             Invocation found = null;
             EObject scope = methodOf(receiver) != null ? methodOf(receiver) : module;
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, SimpleStatement.class))
                 if (object instanceof SimpleStatement statement && offsetOf(statement) < offsetOf(receiver)
                     && matches(statement.getLeft(), name) && statement.getRight() instanceof Invocation invocation
                     && isTemplateCall(invocation))
@@ -3584,10 +4017,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
 
         /** Узлы области из индекса прохода; обход, как и построение индекса, прерывается отменой. */
-        Iterable<EObject> contents(EObject scope)
+        Iterable<EObject> contents(EObject scope, Class<?>... kinds)
         {
             checkCanceled();
-            List<EObject> result = scope != null ? pass.contents(scope, this::checkCanceled) : List.of();
+            List<EObject> result = scope != null ? pass.contents(scope, this::checkCanceled, kinds) : List.of();
             return () -> new java.util.Iterator<EObject>()
             {
                 private final java.util.Iterator<EObject> delegate = result.iterator();
@@ -3622,7 +4055,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Позиция следующего присваивания выражению после {@code from} ({@code Позиция0ВМетодеДо}). */
         int reassignmentAfter(EObject scope, String name, int from)
         {
-            for (EObject object : contents(scope))
+            for (EObject object : contents(scope, SimpleStatement.class))
                 if (object instanceof SimpleStatement statement && offsetOf(statement) > from
                     && matches(statement.getLeft(), name))
                     return offsetOf(statement);

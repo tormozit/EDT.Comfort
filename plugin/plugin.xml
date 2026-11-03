@@ -35,6 +35,8 @@
     <stringLiteralProposals class="tormozit.BslLiteralValues"/>
   </extension>
   <extension point="com._1c.g5.v8.dt.bsl.invocationTypesComputerExtension">
+    <computers computer="tormozit.BslTemplateTypes" name="GetArea" nameRu="ПолучитьОбласть"/>
+    <computers computer="tormozit.BslTemplateTypes" name="Execute" nameRu="Выполнить"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Execute" nameRu="Выполнить"/>
     <computers computer="tormozit.BslQueryResultTypes" name="ExecuteBatch" nameRu="ВыполнитьПакет"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Select" nameRu="Выбрать"/>
@@ -736,7 +738,7 @@
         id="tormozit.problemView.recomputeDeferred"
         name="Запустить проверки отложенных"
         categoryId="tormozit.commands.global"
-        description="Запустить проверки объектов, пересчет которых отложен после массового изменения (Комфорт)"/>
+        description="Запустить проверки объектов, пересчет которых отложен (Комфорт)"/>
     <command
         id="tormozit.problemView.openCheckSettings"
         name="Открыть настройку проверки"
@@ -1587,7 +1589,7 @@
             label="Отложенные"
             mode="FORCE_TEXT"
             style="push"
-            tooltip="Запустить проверки объектов, пересчет которых отложен после массового изменения (Комфорт)"/>
+            tooltip="Запустить проверки объектов, пересчет которых отложен (Комфорт)"/>
         <command
             commandId="tormozit.problemView.recomputeChecks"
             icon="platform:/plugin/com._1c.g5.v8.dt.ui/icons/obj16/check.png"

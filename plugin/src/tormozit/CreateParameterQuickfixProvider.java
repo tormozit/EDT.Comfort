@@ -111,7 +111,7 @@ public final class CreateParameterQuickfixProvider extends AbstractExternalQuick
             List<String> names = document.readOnly(resource -> {
                 if (!isManyParametersCheck(resource, code))
                     return null;
-                ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
                 Invocation invocation = leaf == null ? null
                     : invocation(NodeModelUtils.findActualSemanticObjectFor(leaf));
                 return addedParameterNames(invocation);

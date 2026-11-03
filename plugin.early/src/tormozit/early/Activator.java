@@ -46,6 +46,7 @@ public final class Activator
         TypeComputationWeaving.install(context);
         ArrayElementTypesWeaving.install(context);
         ArrayTypeReferenceWeaving.install(context);
+        StringLiteralTypeNamesWeaving.install(context);
         QuickFixPresentationWeaving.install(context);
         DynamicFeatureWeaving.install(context);
         StructureKeyWeaving.install(context);
@@ -61,6 +62,7 @@ public final class Activator
         DerivedCheckCancellation.install(context);
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
+        CheckLookupDiagnostics.install(context);
     }
 
     @Override
@@ -71,13 +73,143 @@ public final class Activator
             (BiFunction<Object, String, String>) (manager, title) -> title);
         System.getProperties().put(CheckDurations.CALLBACK + ".begin", (Consumer<Object>) check -> {}); //$NON-NLS-1$
         System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
+        System.getProperties().put(CheckDurations.CALLBACK + ".monitor", //$NON-NLS-1$
+            (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
+    }
+
+    /**
+     * ВРЕМЕННАЯ диагностика «Unknown check id» при остановке проектов сравнения: перед
+     * {@code throw new IllegalStateException} в {@code CheckRepository.getCheck(CheckUid, IDtProject)}
+     * безусловно пишет в {@code <workspace>/.metadata/comfort-check-lookup.log} проект, id проверки и
+     * состав {@code registeredChecks} менеджера проверок этого проекта. Поведение не меняет.
+     */
+    private static final class CheckLookupDiagnostics implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.checkLookup.diagnostic"; //$NON-NLS-1$
+        private static final String TARGET = "com.e1c.g5.v8.dt.internal.check.repository.CheckRepository"; //$NON-NLS-1$
+        private static final String GET_CHECK_DESCRIPTOR = "(Lcom/e1c/g5/v8/dt/check/settings/CheckUid;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/core/platform/IDtProject;)Lcom/e1c/g5/v8/dt/check/ICheck;"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            var hook = new CheckLookupDiagnostics();
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) hook::record);
+            context.registerService(WeavingHook.class, hook, null);
+        }
+
+        private void record(Object[] args)
+        {
+            var line = new StringBuilder();
+            line.append(java.time.LocalDateTime.now()).append(" thread=").append(Thread.currentThread().getName()); //$NON-NLS-1$
+            try
+            {
+                Object repository = args[0];
+                Object project = args[2];
+                line.append(" uid=").append(args[1]); //$NON-NLS-1$
+                line.append(" project=").append(project.getClass().getMethod("getName").invoke(project)); //$NON-NLS-1$ //$NON-NLS-2$
+                line.append(" projectId=").append(System.identityHashCode(project)); //$NON-NLS-1$
+                for (var method : repository.getClass().getDeclaredMethods())
+                {
+                    if (!method.getName().equals("getCheckMetadataManager") || method.getParameterCount() != 1) //$NON-NLS-1$
+                        continue;
+                    method.setAccessible(true);
+                    Object manager = method.invoke(repository, project);
+                    line.append(" manager=").append(System.identityHashCode(manager)); //$NON-NLS-1$
+                    var field = manager.getClass().getDeclaredField("registeredChecks"); //$NON-NLS-1$
+                    field.setAccessible(true);
+                    Map<?, ?> checks = (Map<?, ?>) field.get(manager);
+                    long comfort = checks.keySet().stream().filter(key -> String.valueOf(key).startsWith("tormozit.")).count(); //$NON-NLS-1$
+                    line.append(" registered=").append(checks.size()).append(" comfort=").append(comfort); //$NON-NLS-1$ //$NON-NLS-2$
+                    break;
+                }
+            }
+            catch (Throwable failure)
+            {
+                line.append(" diagnostic failed: ").append(failure); //$NON-NLS-1$
+            }
+            write(line.toString());
+        }
+
+        private static synchronized void write(String text)
+        {
+            try
+            {
+                String area = System.getProperty("osgi.instance.area"); //$NON-NLS-1$
+                var file = java.nio.file.Path.of(java.net.URI.create(area)).resolve(".metadata/comfort-check-lookup.log"); //$NON-NLS-1$
+                java.nio.file.Files.writeString(file, text + System.lineSeparator(),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Throwable ignored)
+            {
+                // диагностика не должна ломать проверки
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] inserted = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        if (!name.equals("getCheck") || !desc.equals(GET_CHECK_DESCRIPTOR)) //$NON-NLS-1$
+                            return original;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitTypeInsn(int opcode, String type)
+                            {
+                                if (opcode == Opcodes.NEW && type.equals("java/lang/IllegalStateException")) //$NON-NLS-1$
+                                {
+                                    // Callback.accept(new Object[] {this, uid, project}) до создания исключения
+                                    EarlyWeaving.emitGetProperty(this, CALLBACK, "java/util/function/Consumer"); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.ICONST_3);
+                                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                    for (int i = 0; i < 3; i++)
+                                    {
+                                        super.visitInsn(Opcodes.DUP);
+                                        super.visitInsn(Opcodes.ICONST_0 + i);
+                                        super.visitVarInsn(Opcodes.ALOAD, i);
+                                        super.visitInsn(Opcodes.AASTORE);
+                                    }
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                    inserted[0]++;
+                                }
+                                super.visitTypeInsn(opcode, type);
+                            }
+                        };
+                    }
+                }, 0);
+                if (inserted[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", inserted[0] == 1 //$NON-NLS-1$
+                    ? "woven" : "skipped: throw sites=" + inserted[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
     }
 
     /**
      * check 6.0.100.v202605050943 {@code CheckExecutor}: собственное время каждой проверки, сумма по
      * всем потокам. Три вызова {@code ICheck.check} заменены вызовом добавленного статического
      * метода, который зовёт тот же {@code check} между {@code .begin} и {@code .end}. Основной бандл
-     * читает суммы из {@code .totals} ({проверка → нс}) до и после пересчёта.
+     * читает суммы из {@code .totals} ({проверка → нс}) до и после пересчёта. Монитор проверки
+     * перед вызовом проходит через функцию {@code .monitor} (проверка, монитор) → монитор: основной
+     * бандл откладывает свои проверки, пока UI ждёт поток проверки; по умолчанию монитор тот же.
      */
     private static final class CheckDurations implements WeavingHook
     {
@@ -110,6 +242,8 @@ public final class Activator
             System.getProperties().put(CALLBACK + ".end", (Consumer<Object>) hook::end); //$NON-NLS-1$
             System.getProperties().put(CALLBACK + ".totals", //$NON-NLS-1$
                 (java.util.function.Supplier<Map<Object, Long>>) hook::totals);
+            System.getProperties().put(CALLBACK + ".monitor", //$NON-NLS-1$
+                (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
             context.registerService(WeavingHook.class, hook, null);
         }
 
@@ -207,7 +341,7 @@ public final class Activator
             }
         }
 
-        /** {@code begin(check); try { check.check(…); } finally { end(check); }} */
+        /** {@code monitor = .monitor(check, monitor); begin(check); try { check.check(…); } finally { end(check); }} */
         private static void emitWrapper(MethodVisitor mv)
         {
             Label start = new Label();
@@ -215,6 +349,13 @@ public final class Activator
             Label failed = new Label();
             mv.visitCode();
             mv.visitTryCatchBlock(start, done, failed, null);
+            EarlyWeaving.emitGetProperty(mv, CALLBACK + ".monitor", "java/util/function/BiFunction"); //$NON-NLS-1$ //$NON-NLS-2$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 5);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/core/runtime/IProgressMonitor"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ASTORE, 5);
             emitCallback(mv, ".begin"); //$NON-NLS-1$
             mv.visitLabel(start);
             for (int i = 0; i < 6; i++)
@@ -1271,6 +1412,8 @@ public final class Activator
     {
         private static final String CALLBACK = "tormozit.platform.structureKey"; //$NON-NLS-1$
         private static final String METHODS_CALLBACK = "tormozit.platform.contextMethods"; //$NON-NLS-1$
+        private static final String UTIL_METHODS_DESC = "(Lcom/_1c/g5/v8/dt/mcore/ContextDef;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/bsl/model/Module;Lcom/e1c/g5/dt/core/api/naming/INamingService;)Ljava/util/List;"; //$NON-NLS-1$
 
         static void install(BundleContext context)
         {
@@ -1282,8 +1425,9 @@ public final class Activator
         @Override
         public void weave(WovenClass woven)
         {
+            boolean util = "com._1c.g5.v8.dt.bsl.util.BslUtil".equals(woven.getClassName()); //$NON-NLS-1$
             if (woven.getState() != WovenClass.TRANSFORMING
-                || !"com._1c.g5.v8.dt.mcore.impl.ContextDefImpl".equals(woven.getClassName())) //$NON-NLS-1$
+                || !util && !"com._1c.g5.v8.dt.mcore.impl.ContextDefImpl".equals(woven.getClassName())) //$NON-NLS-1$
                 return;
             ClassReader reader = new ClassReader(woven.getBytes());
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
@@ -1295,10 +1439,15 @@ public final class Activator
                     String signature, String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                    String callback = "allProperties".equals(name) ? CALLBACK //$NON-NLS-1$
+                    // Редактор ищет члены не через ContextDef.allMethods, а через BslUtil.allMethods: у типа берутся
+                    // только собственные методы и ссылочные контексты — наследники абстрактного типа не видны.
+                    String callback = util ? "allMethods".equals(name) ? METHODS_CALLBACK : null //$NON-NLS-1$
+                        : "allProperties".equals(name) ? CALLBACK //$NON-NLS-1$
                         : "allMethods".equals(name) ? METHODS_CALLBACK : null; //$NON-NLS-1$
-                    if (callback == null || !"()Lorg/eclipse/emf/common/util/EList;".equals(descriptor)) //$NON-NLS-1$
+                    if (callback == null || !(util ? UTIL_METHODS_DESC : "()Lorg/eclipse/emf/common/util/EList;") //$NON-NLS-1$
+                        .equals(descriptor))
                         return mv;
+                    String resultType = util ? "java/util/List" : "org/eclipse/emf/common/util/EList"; //$NON-NLS-1$ //$NON-NLS-2$
                     return new MethodVisitor(Opcodes.ASM9, mv)
                     {
                         @Override
@@ -1326,7 +1475,7 @@ public final class Activator
                                 super.visitInsn(Opcodes.AASTORE);
                                 super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
                                     "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/emf/common/util/EList"); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, resultType);
                                 touched.set(true);
                             }
                             super.visitInsn(opcode);
@@ -1336,7 +1485,8 @@ public final class Activator
             }, 0);
             if (touched.get())
                 woven.setBytes(writer.toByteArray());
-            System.getProperties().put(CALLBACK + ".woven", touched.get()); //$NON-NLS-1$
+            if (!util)
+                System.getProperties().put(CALLBACK + ".woven", touched.get()); //$NON-NLS-1$
         }
     }
 
@@ -1431,7 +1581,8 @@ public final class Activator
      * константа-имя типа в методе заменена вызовом функции основного бандла {@code {имя типа, обращение}}. Она
      * возвращает то же имя (тип пропускается, штатное поведение) или другое (тип проверяется): у типов с
      * динамическими ключами ({@code Структура}, строка таблицы и т. п.) проверяются вызовы методов, а у
-     * {@code MetadataObject} — всё, когда основной бандл объединил члены его типов-наследников. До основного бандла
+     * {@code MetadataObject} — всё, когда основной бандл объединил члены его типов-наследников; {@code PictureLib}
+     * (набор членов полный) проверяется всегда. До основного бандла
      * функция по умолчанию возвращает имя без изменений. Вплетение применяется, только если найдены все
      * ожидаемые вставки; итог — в системном свойстве {@code STATUS}.
      */
@@ -1444,7 +1595,7 @@ public final class Activator
         /** Типы из списка открытых в {@code unknownLeftPart}: динамические ключи или объединяемые члены. */
         private static final java.util.Set<String> OPEN_TYPES = java.util.Set.of("MetadataObject", "Structure", //$NON-NLS-1$ //$NON-NLS-2$
             "FixedStructure", "ValueTableRow", "ValueTreeRow", "QueryResultSelection", "ConstantsSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-            "FormDataStructure", "FormDataCollectionItem", "FormDataTreeItem"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "FormDataStructure", "FormDataCollectionItem", "FormDataTreeItem", "PictureLib"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
         static void install(BundleContext context)
         {
@@ -1738,6 +1889,114 @@ public final class Activator
             return changed.get() ? writer.toByteArray() : null;
         }
     }
+
+    /** Общий каталог имён типов перед штатным расчётом проверки и автодополнения. */
+    private static final class StringLiteralTypeNamesWeaving implements WeavingHook
+    {
+        private static final String ROOT = "com._1c.g5.v8.dt.bsl.ui.";
+        private static final String BASE = ROOT + "contentassist.stringliteral.AbstractStringLiteralProposalProvider";
+        private static final String DESCRIPTION = ROOT + "internal.contentassist.stringliteral.StringLiteralProposalProviderTypeDescription";
+        private static final String CALLBACK = "tormozit.stringLiteralTypeNames.proposals";
+        private static final String PREFIX = "(Lorg/eclipse/emf/ecore/EObject;Ljava/lang/String;Lorg/eclipse/xtext/scoping/IScopeProvider;"
+            + "Lcom/_1c/g5/modeling/xtext/scoping/IIndexSlicePredicateService;";
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (Function<Object[], Object>)args -> null);
+            context.registerService(WeavingHook.class, new StringLiteralTypeNamesWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String target = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING || !(BASE.equals(target) || DESCRIPTION.equals(target)))
+                return;
+            try
+            {
+                String version = woven.getBundleWiring().getBundle().getVersion().toString();
+                if (!version.equals("22.0.0.v202605050943"))
+                {
+                    log("unsupported class=" + target + " version=" + version);
+                    return;
+                }
+                boolean base = BASE.equals(target);
+                String methodName = base ? "createProposalsBaseType" : "computeProposals";
+                String methodDescriptor = PREFIX + (base ? "Lcom/google/common/base/Predicate;" : "")
+                    + "Z)Ljava/util/List;";
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] changed = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                        String[] exceptions)
+                    {
+                        MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!methodName.equals(name) || !methodDescriptor.equals(descriptor))
+                            return original;
+                        changed[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                EarlyWeaving.emitGetProperty(this, CALLBACK, "java/util/function/Function");
+                                super.visitLdcInsn(6);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                for (int index = 0; index < 6; index++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(index);
+                                    int slot = index == 5 ? (base ? 6 : 5) : index;
+                                    super.visitVarInsn(index == 5 ? Opcodes.ILOAD : Opcodes.ALOAD, slot);
+                                    if (index == 5)
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                            "(Z)Ljava/lang/Boolean;", false);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                super.visitInsn(Opcodes.DUP);
+                                Label fallback = new Label();
+                                super.visitJumpInsn(Opcodes.IFNULL, fallback);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/List");
+                                super.visitInsn(Opcodes.ARETURN);
+                                super.visitLabel(fallback);
+                                // На ветке отказа остаётся один Object; исходные локальные переменные не менялись.
+                                super.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] {"java/lang/Object"});
+                                super.visitInsn(Opcodes.POP);
+                            }
+                        };
+                    }
+                }, 0);
+                if (changed[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                log("class=" + target + " version=" + version + " points=" + changed[0]);
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                log("failed class=" + target + " error=" + failure);
+            }
+        }
+
+        private static void log(String text)
+        {
+            try
+            {
+                var file = java.nio.file.Path.of("C:/VC/EDT.Comfort/.tmp/literal-optimization/type-name-weaving.log");
+                java.nio.file.Files.createDirectories(file.getParent());
+                java.nio.file.Files.writeString(file, java.time.LocalDateTime.now() + " " + text + System.lineSeparator(),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (java.io.IOException failure)
+            {
+            }
+        }
+    }
+
 
     /** Подпись подавления проверки — первая строка сообщения; само описание проблемы сохраняется целиком. */
     private static final class QuickFixPresentationWeaving implements WeavingHook
@@ -2193,6 +2452,9 @@ public final class Activator
     {
         private static final String TARGET =
             "com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer"; //$NON-NLS-1$
+        private static final String NAMING_TARGET =
+            "com._1c.g5.v8.dt.bsl.typesystem.NamingCollectionServiceProvider"; //$NON-NLS-1$
+        private static final String PROP_NAMING = "tormozit.dynamicFeatureAccess.namingCollections"; //$NON-NLS-1$
         private static final String PROP_PROPERTY_TRACE = "tormozit.dynamicFeatureAccess.propertyTrace"; //$NON-NLS-1$
         /** Результат {@code getAllMethodAndProperties}: члены по типам-владельцам для подписи «~ Владелец». */
         private static final String PROP_ALL_MEMBERS = "tormozit.dynamicFeatureAccess.allMembers"; //$NON-NLS-1$
@@ -2203,9 +2465,16 @@ public final class Activator
          * Неспециализированный тип элемента формы получает члены всех своих расширений.
          */
         private static final String PROP_FORM_ITEM_TYPES = "tormozit.dynamicFeatureAccess.formItemTypes"; //$NON-NLS-1$
+        /**
+         * То же для поиска методов проверкой члена после точки: он берёт у типа только собственные методы, поэтому
+         * к абстрактному «ОбъектМетаданных» добавляются его наследники.
+         */
+        private static final String PROP_METHOD_TYPES = "tormozit.dynamicFeatureAccess.methodTypes"; //$NON-NLS-1$
 
         static void install(BundleContext context)
         {
+            System.getProperties().putIfAbsent(PROP_NAMING, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(PROP_METHOD_TYPES, (Function<Object[], Object>) args -> args[0]);
             // Основной бандл позже заменит эти функции; до него результат строго штатный.
             System.getProperties().putIfAbsent(PROP_PROPERTY_TRACE, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(PROP_ALL_MEMBERS, (Function<Object[], Object>) args -> args[0]);
@@ -2214,15 +2483,16 @@ public final class Activator
         }
 
         /** В начале метода: {@code types = функция({types, resource})}; {@code types} — локальная 1. */
-        private static void expandTypesAtEntry(MethodVisitor mv, int resourceLocal, String castTo)
+        private static void expandTypesAtEntry(MethodVisitor mv, int resourceLocal, String castTo, String property,
+            int nameLocal)
         {
             mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
                 "()Ljava/util/Properties;", false); //$NON-NLS-1$
-            mv.visitLdcInsn(PROP_FORM_ITEM_TYPES);
+            mv.visitLdcInsn(property);
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
                 "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
             mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
-            mv.visitInsn(Opcodes.ICONST_2);
+            mv.visitInsn(nameLocal >= 0 ? Opcodes.ICONST_3 : Opcodes.ICONST_2);
             mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
             mv.visitInsn(Opcodes.DUP);
             mv.visitInsn(Opcodes.ICONST_0);
@@ -2232,6 +2502,14 @@ public final class Activator
             mv.visitInsn(Opcodes.ICONST_1);
             mv.visitVarInsn(Opcodes.ALOAD, resourceLocal);
             mv.visitInsn(Opcodes.AASTORE);
+            if (nameLocal >= 0)
+            {
+                // Третий элемент — искомое имя члена
+                mv.visitInsn(Opcodes.DUP);
+                mv.visitInsn(Opcodes.ICONST_2);
+                mv.visitVarInsn(Opcodes.ALOAD, nameLocal);
+                mv.visitInsn(Opcodes.AASTORE);
+            }
             mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
                 "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
             mv.visitTypeInsn(Opcodes.CHECKCAST, castTo);
@@ -2241,11 +2519,12 @@ public final class Activator
         @Override
         public void weave(WovenClass woven)
         {
-            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+            boolean naming = NAMING_TARGET.equals(woven.getClassName());
+            if (woven.getState() != WovenClass.TRANSFORMING || !naming && !TARGET.equals(woven.getClassName()))
                 return;
             try
             {
-                byte[] transformed = transform(woven.getBytes());
+                byte[] transformed = naming ? transformNaming(woven.getBytes()) : transform(woven.getBytes());
                 if (transformed != null)
                     woven.setBytes(transformed);
             }
@@ -2254,8 +2533,74 @@ public final class Activator
             }
         }
 
+        private static void callbackResult(MethodVisitor mv, String callback, String resultType, int... locals)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(callback);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitIntInsn(Opcodes.BIPUSH, locals.length + 1);
+            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP_X1);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.AASTORE);
+            for (int index = 0; index < locals.length; index++)
+            {
+                mv.visitInsn(Opcodes.DUP);
+                mv.visitIntInsn(Opcodes.BIPUSH, index + 1);
+                mv.visitVarInsn(Opcodes.ALOAD, locals[index]);
+                mv.visitInsn(Opcodes.AASTORE);
+            }
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, resultType);
+        }
+
+        /** Реестр дополняется перед кэшированием по версии платформы, одновременно для обоих его потребителей. */
+        static byte[] transformNaming(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"readNamingCollection".equals(name) //$NON-NLS-1$
+                        || !"(Lcom/_1c/g5/v8/dt/platform/version/Version;)Ljava/util/Map;".equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                callbackResult(this, PROP_NAMING, "java/util/Map", 1); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
         private static final String PROPERTY_DESC = "(Ljava/util/Collection;" //$NON-NLS-1$
             + "Lcom/_1c/g5/v8/dt/mcore/util/Environments;Ljava/lang/String;Z" //$NON-NLS-1$
+            + "Lorg/eclipse/emf/ecore/resource/Resource;Lorg/eclipse/xtext/util/CancelIndicator;)Ljava/util/List;"; //$NON-NLS-1$
+
+        private static final String METHOD_DESC = "(Ljava/util/Collection;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/mcore/util/Environments;Ljava/lang/String;IZ" //$NON-NLS-1$
             + "Lorg/eclipse/emf/ecore/resource/Resource;Lorg/eclipse/xtext/util/CancelIndicator;)Ljava/util/List;"; //$NON-NLS-1$
 
         static byte[] transform(byte[] classfileBuffer)
@@ -2278,7 +2623,7 @@ public final class Activator
                             public void visitCode()
                             {
                                 super.visitCode();
-                                expandTypesAtEntry(this, 2, "java/util/List"); //$NON-NLS-1$
+                                expandTypesAtEntry(this, 2, "java/util/List", PROP_FORM_ITEM_TYPES, -1); //$NON-NLS-1$
                                 touched.set(true);
                             }
 
@@ -2309,6 +2654,20 @@ public final class Activator
                                 super.visitInsn(opcode);
                             }
                         };
+                    // Поиск методов (проверка члена после точки): типы расширяются так же, как для свойств.
+                    // Локальные: 1 — типы, 6 — ресурс.
+                    if (mv != null && "getObjectFromContextDefOfTypes".equals(name) //$NON-NLS-1$
+                        && METHOD_DESC.equals(descriptor))
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                expandTypesAtEntry(this, 6, "java/util/Collection", PROP_METHOD_TYPES, 3); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                        };
                     if (mv == null || !"getObjectFromContextDefOfTypes".equals(name) //$NON-NLS-1$
                         || !PROPERTY_DESC.equals(descriptor))
                         return mv;
@@ -2318,7 +2677,7 @@ public final class Activator
                         public void visitCode()
                         {
                             super.visitCode();
-                            expandTypesAtEntry(this, 5, "java/util/Collection"); //$NON-NLS-1$
+                            expandTypesAtEntry(this, 5, "java/util/Collection", PROP_FORM_ITEM_TYPES, -1); //$NON-NLS-1$
                             touched.set(true);
                         }
 
@@ -2327,36 +2686,8 @@ public final class Activator
                         {
                             if (opcode == Opcodes.ARETURN)
                             {
-                                // Callback дополняет source найденного свойства; список сохраняется.
-                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
-                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
-                                super.visitLdcInsn(PROP_PROPERTY_TRACE);
-                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
-                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.SWAP);
-                                super.visitInsn(Opcodes.ICONST_4);
-                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.DUP_X1);
-                                super.visitInsn(Opcodes.SWAP);
-                                super.visitInsn(Opcodes.ICONST_0);
-                                super.visitInsn(Opcodes.SWAP);
-                                super.visitInsn(Opcodes.AASTORE);
-                                super.visitInsn(Opcodes.DUP);
-                                super.visitInsn(Opcodes.ICONST_1);
-                                super.visitVarInsn(Opcodes.ALOAD, 1);
-                                super.visitInsn(Opcodes.AASTORE);
-                                super.visitInsn(Opcodes.DUP);
-                                super.visitInsn(Opcodes.ICONST_2);
-                                super.visitVarInsn(Opcodes.ALOAD, 3);
-                                super.visitInsn(Opcodes.AASTORE);
-                                super.visitInsn(Opcodes.DUP);
-                                super.visitInsn(Opcodes.ICONST_3);
-                                super.visitVarInsn(Opcodes.ALOAD, 5);
-                                super.visitInsn(Opcodes.AASTORE);
-                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
-                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/List"); //$NON-NLS-1$
+                                // {результат, типы, имя, ресурс}
+                                callbackResult(this, PROP_PROPERTY_TRACE, "java/util/List", 1, 3, 5); //$NON-NLS-1$
                                 touched.set(true);
                             }
                             super.visitInsn(opcode);

@@ -11,6 +11,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.ui.IStartup;
+import org.eclipse.xtext.resource.XtextResource;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -23,6 +24,11 @@ import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.dt.bsl.typesystem.NamingCollectionServiceProvider;
+import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.platform.IEObjectProvider;
+import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
+import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.Property;
@@ -100,11 +106,16 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         System.getProperties().put("tormozit.platform.environments", //$NON-NLS-1$
             (Function<Object[], Object>) SystemEnumEnvironments::extend);
         System.getProperties().put("tormozit.dynamicFeatureAccess.allMembers", //$NON-NLS-1$
-            (Function<Object[], Object>) args -> AbstractTypeMembers.byOwner(args[0]));
+            (Function<Object[], Object>) args -> AbstractTypeMembers.byOwner(
+                SpecialMemberTemplates.withoutGenericFormItems(args[0])));
         System.getProperties().put("tormozit.dynamicFeatureAccess.formItemTypes", //$NON-NLS-1$
             (Function<Object[], Object>) FormItemTypes::expand);
+        System.getProperties().put("tormozit.dynamicFeatureAccess.methodTypes", //$NON-NLS-1$
+            (Function<Object[], Object>) args -> AbstractTypeMembers.withChildren(FormItemTypes.expand(args), args[1], args[2]));
         System.getProperties().put("tormozit.bslValidator.openType", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.validatorOpenType(args[0], args[1], args[2], args[3], args[4]));
+        System.getProperties().put("tormozit.dynamicFeatureAccess.namingCollections", //$NON-NLS-1$
+            (Function<Object[], Object>) SpecialMemberTemplates::namingCollections);
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -201,7 +212,7 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
      * {@code allMethods} берут у родителей только {@code getProperties()/getMethods()}, поэтому члены
      * наследников не попадают в соседние типы и вложенного вызова нет. Типы-наследники ищутся среди типов
      * платформы той же версии (имена начинаются с имени предка, принадлежность подтверждает цепочка
-     * {@code getParentType()}); результат кэшируется на тип.
+     * {@code getParentType()}).
      */
     private static final class AbstractTypeMembers
     {
@@ -223,13 +234,26 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         static String validatorOpenType(Object typeName, Object access, Object parts, Object index, Object typeNames)
         {
             String name = String.valueOf(typeName);
-            // ВсеЭлементыФормы в списке открытых типов EDT нет: имя элемента формы — динамическое, и набор полон
-            // только у модуля загруженной формы с элементами. Иначе вместо проверяемого имени возвращается
-            // FormAllItems, которое есть среди типов, — тип пропускается.
+            // Член найден, но EDT считает его неизвестным: isUnknownDFAPart принимает любое DerivedProperty без
+            // source за заглушку имени, которую поиск создаёт для неизвестного элемента коллекции. Такое же свойство
+            // без source объявляет и контекст формы (ПодчиненныеЭлементы группы). Объявленное в ContextDef — не
+            // заглушка: возвращается имя из набора типов — тип пропускается.
+            if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> declared //$NON-NLS-1$
+                && flaggedIsDeclaredDerivedProperty(parts, index))
+                for (Object candidate : declared)
+                    if (candidate instanceof String text)
+                        return text;
+            // ВсеЭлементыФормы в списке открытых типов EDT нет: имя элемента формы — динамическое, набор неполон
+            // даже у формы с элементами (их добавляет код в других модулях). Вместо проверяемого имени
+            // возвращается FormAllItems, которое есть среди типов, — тип пропускается.
             if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> names //$NON-NLS-1$
-                && names.contains("FormAllItems") && !flaggedIsMethodCall(access, parts, index) //$NON-NLS-1$
-                && !formItemsKnown(access))
+                && names.contains("FormAllItems") && !flaggedIsMethodCall(access, parts, index)) //$NON-NLS-1$
                 return "FormAllItems"; //$NON-NLS-1$
+            // ЭлементыФормы (ПодчиненныеЭлементы группы): имя дочернего элемента — динамическое, состав зависит
+            // от формы, а не от типа. Имя вне списка не проверяется, вызов метода — проверяется.
+            if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> children //$NON-NLS-1$
+                && children.contains("FormItems") && !flaggedIsMethodCall(access, parts, index)) //$NON-NLS-1$
+                return "FormItems"; //$NON-NLS-1$
             // Внешняя обработка/отчёт: экспортные методы и реквизиты — у конкретного объекта, набор типа неполный.
             // Возвращается имя такого типа из набора — тип пропускается для любого члена, в том числе метода.
             if ("Structure".equals(name) && typeNames instanceof java.util.Collection<?> external) //$NON-NLS-1$
@@ -243,19 +267,53 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                 for (Object candidate : generic)
                     if (candidate instanceof String text && PlatformTemplateTypes.isTemplateName(text))
                         return text;
+            // Имена элементов именованной коллекции задаются при выполнении, список свойств типа неполон.
+            // Используем тот же реестр EDT, что DynamicFeatureAccessComputer при создании DerivedProperty.
+            if ("Structure".equals(name) && !flaggedIsMethodCall(access, parts, index)) //$NON-NLS-1$
+            {
+                String collection = namingCollectionName(access, typeNames);
+                if (collection != null)
+                    return collection;
+            }
+            // БиблиотекаКартинок: набор членов полный, EDT пропускает тип напрасно — проверяется всегда.
+            if ("PictureLib".equals(name)) //$NON-NLS-1$
+                return name + ".comfort-members-complete"; //$NON-NLS-1$
             if (ABSTRACT_TYPE.equals(name))
                 return verified ? name + ".comfort-members-merged" : name; //$NON-NLS-1$
             return flaggedIsMethodCall(access, parts, index) ? name + ".comfort-method-checked" : name; //$NON-NLS-1$
         }
 
-        /** Модуль принадлежит загруженной форме, и у неё есть элементы: имя вне списка — действительно неизвестное. */
-        private static boolean formItemsKnown(Object access)
+        private static String namingCollectionName(Object access, Object typeNames)
         {
-            com._1c.g5.v8.dt.bsl.model.Module module = access instanceof org.eclipse.emf.ecore.EObject object
-                ? org.eclipse.xtext.EcoreUtil2.getContainerOfType(object, com._1c.g5.v8.dt.bsl.model.Module.class)
-                : null;
-            return module != null && module.getOwner() instanceof com._1c.g5.v8.dt.form.model.Form form
-                && !form.eIsProxy() && !form.getItems().isEmpty();
+            if (!(access instanceof EObject object) || !(object.eResource() instanceof XtextResource resource)
+                || !(typeNames instanceof java.util.Collection<?> names))
+                return null;
+            var services = resource.getResourceServiceProvider();
+            if (services == null)
+                return null;
+            NamingCollectionServiceProvider collections = services.get(NamingCollectionServiceProvider.class);
+            IRuntimeVersionSupport versions = services.get(IRuntimeVersionSupport.class);
+            if (collections == null || versions == null)
+                return null;
+            Version version = versions.getRuntimeVersionOrDefault(resource, Version.LATEST);
+            for (Object candidate : names)
+                if (candidate instanceof String text && collections.isNamingCollectionTypeName(text, version))
+                    return text;
+            return null;
+        }
+
+        /** Единственный найденный член помечаемой части — свойство без source, объявленное в контексте типа. */
+        private static boolean flaggedIsDeclaredDerivedProperty(Object parts, Object index)
+        {
+            if (!(parts instanceof java.util.List<?> list) || !(index instanceof Integer position)
+                || position < 1 || position > list.size()
+                || !(list.get(position - 1) instanceof com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess flagged))
+                return false;
+            var entries = flagged.getFeatureEntries();
+            return entries.size() == 1
+                && entries.get(0).getFeature() instanceof com._1c.g5.v8.dt.mcore.DerivedProperty property
+                && property.getSource() == null
+                && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef;
         }
 
         private static boolean flaggedIsMethodCall(Object access, Object parts, Object index)
@@ -267,6 +325,71 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             return flagged instanceof com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess dynamic
                 && dynamic.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Invocation invocation
                 && invocation.getMethodAccess() == dynamic;
+        }
+
+        /**
+         * Список типов поиска методов: к абстрактному типу добавляются его наследники. Поиск метода берёт у типа
+         * только собственные методы ({@code getMethods}), а не {@code allMethods}, где объединение уже сделано.
+         */
+        static Object withChildren(Object types, Object resource, Object memberName)
+        {
+            if (!(types instanceof java.util.Collection<?> list) || list.isEmpty() || list.size() > 32)
+                return types;
+            try
+            {
+                Type abstractType = null;
+                for (Object candidate : list)
+                    if (candidate instanceof TypeItem item
+                        && EcoreUtil.resolve(item, (org.eclipse.emf.ecore.resource.Resource)resource) instanceof Type type
+                        && ABSTRACT_TYPE.equals(type.getName()))
+                    {
+                        abstractType = type;
+                        break;
+                    }
+                if (abstractType == null)
+                    return types;
+                java.util.List<Object> result = new java.util.ArrayList<>(list);
+                // Одноимённый метод у наследников описан по-разному: у части платформа не отмечает возвращаемое
+                // значение (ПолучитьИменаПредопределенных у планов счетов и видов расчёта). Если есть описания
+                // со значением — остаются только они, иначе проверка видит «процедуру» вместо функции.
+                java.util.List<Type> owners = new java.util.ArrayList<>();
+                boolean anyReturns = false;
+                for (Type child : children(abstractType))
+                {
+                    Method found = child.getContextDef() != null ? methodNamed(child, memberName) : null;
+                    if (found == null)
+                    {
+                        if (memberName == null)
+                            owners.add(child);
+                        continue;
+                    }
+                    owners.add(child);
+                    anyReturns |= found.isRetVal();
+                }
+                for (Type child : owners)
+                {
+                    Method found = memberName != null ? methodNamed(child, memberName) : null;
+                    if (anyReturns && found != null && !found.isRetVal())
+                        continue;
+                    if (!result.contains(child))
+                        result.add(child);
+                }
+                return result;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                return types;
+            }
+        }
+
+        private static Method methodNamed(Type type, Object memberName)
+        {
+            if (!(memberName instanceof String name) || type.getContextDef() == null)
+                return null;
+            for (Method method : type.getContextDef().getMethods())
+                if (name.equalsIgnoreCase(method.getName()) || name.equalsIgnoreCase(method.getNameRu()))
+                    return method;
+            return null;
         }
 
         static Object properties(Object result, Object self)
@@ -375,8 +498,10 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         private static Object merge(Object result, Object self, boolean properties)
         {
             if (!(self instanceof com._1c.g5.v8.dt.mcore.ContextDef context)
-                || !(context.eContainer() instanceof Type owner) || !ABSTRACT_TYPE.equals(owner.getName())
+                || !(context.eContainer() instanceof Type owner)
                 || BUSY.get() != null || !(result instanceof java.util.List<?> own))
+                return result;
+            if (!ABSTRACT_TYPE.equals(owner.getName()))
                 return result;
             BUSY.set(Boolean.TRUE);
             try
@@ -396,10 +521,23 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                     for (com._1c.g5.v8.dt.mcore.DuallyNamedElement member : properties
                         ? (java.util.List<? extends com._1c.g5.v8.dt.mcore.DuallyNamedElement>)def.getProperties()
                         : (java.util.List<? extends com._1c.g5.v8.dt.mcore.DuallyNamedElement>)def.getMethods())
+                    {
                         if (names.add(key(member)))
+                        {
                             merged.add(member);
+                            continue;
+                        }
+                        // Описание со значением заменяет описание-процедуру того же метода у другого наследника
+                        if (!properties && member instanceof Method method && method.isRetVal())
+                            for (int index = own.size(); index < merged.size(); index++)
+                                if (merged.get(index) instanceof Method kept && !kept.isRetVal()
+                                    && key(kept).equals(key(member)))
+                                    merged.set(index, member);
+                    }
                 }
-                return new org.eclipse.emf.common.util.DelegatingEList.UnmodifiableEList<>(merged);
+                // Штатный allMethods возвращает EList; BslUtil.allMethods — изменяемый список, его так и оставляем.
+                return result instanceof org.eclipse.emf.common.util.EList
+                    ? new org.eclipse.emf.common.util.DelegatingEList.UnmodifiableEList<>(merged) : merged;
             }
             catch (RuntimeException exception)
             {
@@ -489,6 +627,113 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             }
             return false;
         }
+    }
+
+    /**
+     * Дополнения ИР к шаблонным членам. Именованные коллекции подключаются к штатному реестру EDT:
+     * поиск свойства создаёт DerivedProperty с введённым именем и типами элементов коллекции.
+     * КомандыФормы включены для имён, добавляемых при выполнении: генерация EDT знает только команды формы.
+     * COMОбъект уже допускает произвольные обращения в штатном валидаторе, тип значения неизвестен.
+     */
+    private static final class SpecialMemberTemplates
+    {
+        /**
+         * FormItemPropertyContextDefInferrer создаёт типы коллекций внутри свойств конкретной формы,
+         * ссылаясь из их контекста на платформенный контекст. Унаследованный ControlName — шаблон,
+         * а не элемент этой формы. Убираем его и из соседних платформенных списков того же типа,
+         * а для всех элементов формы — также из контекстов её дочерних коллекций FormItems.
+         * Поиск динамических имён остаётся штатным.
+         */
+        static Object withoutGenericFormItems(Object result)
+        {
+            if (!(result instanceof Collection<?> triples))
+                return result;
+            java.util.Set<String> concreteCollections = new java.util.HashSet<>();
+            for (Object raw : triples)
+                if (raw instanceof org.eclipse.xtext.util.Triple<?, ?, ?> triple
+                    && triple.getThird() instanceof Type owner && isFormItemCollection(owner.getName())
+                    && org.eclipse.xtext.EcoreUtil2.getContainerOfType(owner,
+                        com._1c.g5.v8.dt.form.model.Form.class) != null)
+                    concreteCollections.add(owner.getName());
+            java.util.List<Object> output = new java.util.ArrayList<>();
+            boolean changed = false;
+            for (Object raw : triples)
+            {
+                if (!(raw instanceof org.eclipse.xtext.util.Triple<?, ?, ?> triple)
+                    || !(triple.getThird() instanceof Type owner)
+                    || !concreteCollections.contains(owner.getName())
+                    || !(triple.getSecond() instanceof Collection<?> properties))
+                {
+                    output.add(raw);
+                    continue;
+                }
+                java.util.List<Object> kept = new java.util.ArrayList<>();
+                for (Object item : properties)
+                {
+                    if (item instanceof Property property && "ControlName".equals(property.getName()) //$NON-NLS-1$
+                        && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef context
+                        && context.eContainer() instanceof Type declaration
+                        && isFormItemCollection(FormItemTypes.segmentOf(declaration)))
+                        continue;
+                    kept.add(item);
+                }
+                if (kept.size() == properties.size())
+                    output.add(raw);
+                else
+                {
+                    changed = true;
+                    output.add(org.eclipse.xtext.util.Tuples.create(triple.getFirst(), kept, owner));
+                }
+            }
+            return changed ? output : result;
+        }
+
+        private static boolean isFormItemCollection(String name)
+        {
+            return "FormAllItems".equals(name) || "FormItems".equals(name); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static final java.util.Map<String, java.util.List<String>> COLLECTIONS = java.util.Map.of(
+            "FormCommands", java.util.List.of("FormCommand"), //$NON-NLS-1$ //$NON-NLS-2$
+            "PanelPages", java.util.List.of("PanelPage"), //$NON-NLS-1$ //$NON-NLS-2$
+            "CustomFields", java.util.List.of("CustomField"), //$NON-NLS-1$ //$NON-NLS-2$
+            "DataCompositionSchemaDataSets", java.util.List.of("DataCompositionSchemaDataSetQuery", //$NON-NLS-1$ //$NON-NLS-2$
+                "DataCompositionSchemaDataSetObject", "DataCompositionSchemaDataSetUnion"), //$NON-NLS-1$ //$NON-NLS-2$
+            "DataCompositionTemplateDataSets", java.util.List.of("DataCompositionTemplateDataSetQuery", //$NON-NLS-1$ //$NON-NLS-2$
+                "DataCompositionTemplateDataSetObject", "DataCompositionTemplateDataSetUnion"), //$NON-NLS-1$ //$NON-NLS-2$
+            "DataCompositionSchemaParameters", java.util.List.of("DataCompositionSchemaParameter"), //$NON-NLS-1$ //$NON-NLS-2$
+            "FilterSettings", java.util.List.of("FilterItemControl"), //$NON-NLS-1$ //$NON-NLS-2$
+            "DataCompositionSettingsVariants", java.util.List.of("DataCompositionSettingsVariant")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        /** {штатный реестр, версия}; вызывается до помещения реестра в кэш NamingCollectionServiceProvider. */
+        static Object namingCollections(Object[] args)
+        {
+            if (!(args[0] instanceof java.util.Map<?, ?> original) || !(args[1] instanceof Version version))
+                return args[0];
+            java.util.Map<Object, Object> result = new java.util.HashMap<>(original);
+            IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
+            if (provider == null)
+                return args[0];
+            for (var rule : COLLECTIONS.entrySet())
+            {
+                if (original.containsKey(rule.getKey()))
+                    continue;
+                if (provider.getEObjectDescription(rule.getKey()) == null)
+                    continue; // Тип отсутствует в этой версии платформы.
+                java.util.List<URI> elements = new java.util.ArrayList<>();
+                for (String name : rule.getValue())
+                {
+                    var description = provider.getEObjectDescription(name);
+                    if (description != null)
+                        elements.add(EcoreUtil.getURI(description.getEObjectOrProxy()));
+                }
+                if (elements.size() == rule.getValue().size())
+                    result.put(rule.getKey(), java.util.List.copyOf(elements));
+            }
+            return result;
+        }
+
+
     }
 
     /** Дополняет источник найденного свойства, сохраняя штатный список результата. */

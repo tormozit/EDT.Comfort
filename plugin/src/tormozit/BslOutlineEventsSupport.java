@@ -3137,9 +3137,10 @@ public final class BslOutlineEventsSupport
             return;
         try
         {
-            document.readOnly((IUnitOfWork<Void, XtextResource>) resource ->
+            // Без readOnly: он в UI ждёт все задания разрешения ссылок BSL (секунды на большом модуле).
+            IUnitOfWork<Void, XtextResource> work = resource ->
             {
-                if (resource.getParseResult() == null)
+                if (resource == null || resource.getParseResult() == null)
                     return null;
                 Module root = (Module) resource.getParseResult().getRootASTElement();
                 if (root == null)
@@ -3159,7 +3160,9 @@ public final class BslOutlineEventsSupport
                     labels.eventDisplayByInternalName.putIfAbsent(internal, stripEventSignature(ru));
                 }
                 return null;
-            });
+            };
+            document.getClass().getMethod("readOnlyDataModelWithoutSync", IUnitOfWork.class) //$NON-NLS-1$
+                    .invoke(document, work);
         }
         catch (Exception ignored)
         {

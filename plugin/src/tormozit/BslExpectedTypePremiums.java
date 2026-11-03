@@ -139,6 +139,7 @@ import com._1c.g5.v8.dt.platform.version.Version;
 final class BslExpectedTypePremiums
 {
     private static final String LOG = "expected-type"; //$NON-NLS-1$
+    private static volatile long foreignParameterRevision;
     /** {@code КонстантаМаксСловПроверятьДляОжидаемогоТипа}. */
     private static final int MAX_WORDS_FOR_TYPE = 200;
     private static final int MAX_TYPES_TO_CHECK = 3;
@@ -233,16 +234,17 @@ final class BslExpectedTypePremiums
      */
     private record Expectation(List<String> types, String receiver, String token, String callMethod,
         int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems,
-        List<String> matchingTypes)
+        List<String> matchingTypes, Boolean booleanDefault)
     {
-        /** Чистое «Неопределено» (типично — новая переменная) — ожидаемый тип неизвестен. */
+        /** Только «Неопределено» — ожидаемый тип неизвестен; смешанный набор сохраняется целиком. */
         Expectation
         {
-            if (types != null && types.size() == 1 && ("Неопределено".equalsIgnoreCase(types.get(0)) //$NON-NLS-1$
+            if (types != null && types.size() == 1 && (UNDEFINED.equalsIgnoreCase(types.get(0))
                 || "Undefined".equalsIgnoreCase(types.get(0)))) //$NON-NLS-1$
             {
                 types = new ArrayList<>();
                 matchingTypes = List.of();
+                typeItems = List.of();
             }
         }
 
@@ -250,7 +252,7 @@ final class BslExpectedTypePremiums
             boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems)
         {
             this(types, receiver, token, callMethod, parameterIndex, systemEnum, systemProperty, formalParameter,
-                typeItems, typeItems.isEmpty() ? List.copyOf(types) : matchingTypeNames(typeItems));
+                typeItems, typeItems.isEmpty() ? List.copyOf(types) : matchingTypeNames(typeItems), null);
         }
 
         Expectation(List<String> types, String receiver, String token, String callMethod, int parameterIndex,
@@ -281,7 +283,8 @@ final class BslExpectedTypePremiums
      */
     private record Scene(Expectation expectation, String statisticsContext, boolean insideExpression,
         Map<String, Integer> frequencies, String receiverLine, String expectedTypeText, Map<String, String> predefinedTypes,
-        Facts facts, List<String> literalTypes, List<String> parentDisplayTypes)
+        Facts facts, List<String> literalTypes, List<String> parentDisplayTypes, Map<String, String> memberNames,
+        Map<String, List<String>> memberTypes)
     {
         /** Типы приёмника без слишком широких ({@link #BROAD_TYPES}), в нижнем регистре. */
         Set<String> strongReceiverTypes()
@@ -389,7 +392,7 @@ final class BslExpectedTypePremiums
 
     /** @param added слова, которых нет у EDT ({@link AddedWords}) */
     private record Snapshot(Context context, Scene scene, IProject project, Map<String, List<String>> variableTypes,
-        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added)
+        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added, boolean complete)
     {
     }
 
@@ -489,10 +492,20 @@ final class BslExpectedTypePremiums
      */
     static ICompletionProposal[] withAddedWords(ICompletionProposal[] raw)
     {
+        return withAddedWords(raw, active);
+    }
+
+    private static ICompletionProposal[] withAddedWords(ICompletionProposal[] raw, Snapshot snapshot)
+    {
         if (raw == null)
             return null;
-        Snapshot snapshot = active;
         List<BslAddedWordProposal> added = snapshot != null ? snapshot.added() : List.of();
+        Set<String> stockNames = new HashSet<>();
+        for (ICompletionProposal proposal : raw)
+            if (!(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof BslAddedWordProposal))
+                stockNames.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
+        added = added.stream().filter(word -> !word.isGhostMember()
+            || !stockNames.contains(lower(word.getWord()))).toList();
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         // В ИР разбор предыдущей инструкции отделён условием мЯзыкПрограммы = 0.
         // Список QL не должен получать слова из общего снимка предыдущего места BSL.
@@ -635,9 +648,89 @@ final class BslExpectedTypePremiums
         return parent;
     }
 
+    /** Родитель, независимые особые члены и статистика до первого показа фонового списка членов. */
+    static ICompletionProposal[] prepareMemberList(IDocument document, int caret, ICompletionProposal[] list)
+    {
+        BasePreparationTiming timing = new BasePreparationTiming();
+        try
+        {
+            // Вызывается фоновым расчётом членов до публикации списка в UI.
+            if (Display.getCurrent() != null || !(document instanceof IXtextDocument) || caret < 0
+                || list == null)
+                return list;
+            Context context = contextAt(document, caret);
+            if (context == null || context.parent().isEmpty())
+                return list;
+            requested = context;
+            Snapshot snapshot = current;
+            if (snapshot != null && snapshot.context().sameAs(context))
+            {
+                Snapshot extended = extend(snapshot, list);
+                publish(extended);
+                timing.result = snapshot.complete() ? "cachedFull" : "cachedBase"; //$NON-NLS-1$ //$NON-NLS-2$
+                return withAddedWords(list, extended);
+            }
+            active = null;
+            Snapshot computed = compute(context, activeProject(), list, false, timing);
+            publish(computed);
+            timing.result = computed != null ? "computed" : "noSnapshot"; //$NON-NLS-1$ //$NON-NLS-2$
+            return computed != null ? withAddedWords(list, computed) : list;
+        }
+        catch (Exception error)
+        {
+            timing.result = "error:" + error.getClass().getName(); //$NON-NLS-1$
+            Global.tempLog("completion-base", "prepareMemberList: " + error); //$NON-NLS-1$ //$NON-NLS-2$
+            return list;
+        }
+        finally
+        {
+            timing.log(caret, list == null ? -1 : list.length);
+        }
+    }
+
+    /** Временный безусловный замер добавленного участка до публикации списка; все интервалы — мс. */
+    private static final class BasePreparationTiming
+    {
+        final long started = System.nanoTime();
+        long readRequested;
+        long modelEntered;
+        long modelExited;
+        long readReturned;
+        long rankingStarted;
+        long rankingFinished;
+        String result = "skipped"; //$NON-NLS-1$
+        long phaseStarted;
+        final StringBuilder phases = new StringBuilder();
+
+        void phase(String name)
+        {
+            long now = System.nanoTime();
+            if (phaseStarted != 0)
+                phases.append(' ').append(name).append("Ms=").append(millis(phaseStarted, now)); //$NON-NLS-1$
+            phaseStarted = now;
+        }
+
+        void log(int caret, int count)
+        {
+            long finished = System.nanoTime();
+            Global.tempLog("completion-base", "prepare id=" + started //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " count=" + count + " result=" + result //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " totalMs=" + millis(started, finished) //$NON-NLS-1$
+                + " beforeModelMs=" + millis(readRequested, modelEntered) //$NON-NLS-1$
+                + " modelMs=" + millis(modelEntered, modelExited) //$NON-NLS-1$
+                + " readReturnMs=" + millis(modelExited, readReturned) //$NON-NLS-1$
+                + " rankingMs=" + millis(rankingStarted, rankingFinished) + phases); //$NON-NLS-1$
+        }
+
+        private static double millis(long from, long to)
+        {
+            return from == 0 || to == 0 ? -1 : (to - from) / 1_000_000.0;
+        }
+    }
+
     /**
-     * Готовит снимок премий для списка {@code list} у каретки {@code caret} (модельное смещение). Фоновый
-     * поток считает сразу, UI-поток — только запускает фоновый расчёт.
+     * Готовит полный снимок премий. Базовый снимок доступен сразу, ожидаемый тип догружается в фоне.
+     * Без базового снимка фоновый поток считает сразу, UI-поток только запускает расчёт.
      */
     static void ensure(IDocument document, int caret, ICompletionProposal[] list)
     {
@@ -665,6 +758,8 @@ final class BslExpectedTypePremiums
         if (snapshot != null && snapshot.context().sameAs(context))
         {
             publish(extend(snapshot, list));
+            if (!snapshot.complete())
+                schedule(context, snapshot.project(), list.clone());
             return;
         }
         active = null;
@@ -685,6 +780,23 @@ final class BslExpectedTypePremiums
         current = computed;
         if (computed.context().sameAs(requested))
             active = computed;
+    }
+
+    /** Общий расчёт чужого модуля готов: перечитать ожидание и обновить уже открытый список. UI-поток. */
+    static void foreignParameterTypesReady()
+    {
+        foreignParameterRevision++;
+        current = null;
+        active = null;
+        pending = null;
+        var assistant = ContentAssistSessionReloader.getActiveAssistant();
+        ITextViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (assistant == null || viewer == null || !ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        List<ICompletionProposal> proposals = ContentAssistPopupSync.computedProposals(assistant);
+        if (proposals != null)
+            ensure(viewer.getDocument(), SmartContentAssistProcessor.resolveWidgetCaret(viewer),
+                proposals.toArray(new ICompletionProposal[0]));
     }
 
     private static IProject activeProject()
@@ -907,54 +1019,100 @@ final class BslExpectedTypePremiums
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
         Snapshot extended = new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(),
-            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added());
+            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(), snapshot.complete());
         current = extended;
         return extended;
     }
 
     private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list)
     {
+        return compute(context, project, list, true, null);
+    }
+
+    private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list, boolean complete,
+        BasePreparationTiming timing)
+    {
+        long parameterRevision = foreignParameterRevision;
         Scene[] scene = new Scene[1];
         Map<String, List<String>> variableTypes = new HashMap<>();
         Boolean read;
         try
         {
+            if (timing != null)
+                timing.readRequested = System.nanoTime();
             read = ContentAssistSessionReloader.readOnlyForContentAssist((IXtextDocument)context.document(),
                 resource ->
                 {
-                    if (resource == null)
-                        return Boolean.FALSE;
-                    READ_RESOURCE.set(resource);
+                    if (timing != null)
+                        timing.modelEntered = System.nanoTime();
                     try
                     {
-                        scene[0] = scene(resource, context, list);
-                        if (scene[0].expectation() != null)
-                            collectVariableTypes(resource, context, list, variableTypes);
+                        if (resource == null)
+                            return Boolean.FALSE;
+                        READ_RESOURCE.set(resource);
+                        try
+                        {
+                            scene[0] = scene(resource, context, list, complete, timing);
+                            if (scene[0].expectation() != null)
+                                collectVariableTypes(resource, context, list, variableTypes);
+                        }
+                        finally
+                        {
+                            READ_RESOURCE.remove();
+                        }
+                        return Boolean.TRUE;
                     }
                     finally
                     {
-                        READ_RESOURCE.remove();
+                        if (timing != null)
+                            timing.modelExited = System.nanoTime();
                     }
-                    return Boolean.TRUE;
                 });
         }
         catch (RuntimeException e)
         {
             return null;
         }
+        finally
+        {
+            if (timing != null)
+                timing.readReturned = System.nanoTime();
+        }
         if (!Boolean.TRUE.equals(read) || scene[0] == null)
             return null;
         Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
-        Premiums premiums = premiums(context, scene[0], project, list, variableTypes, added);
+        Premiums premiums;
+        if (timing != null)
+            timing.rankingStarted = System.nanoTime();
+        try
+        {
+            premiums = premiums(context, scene[0], project, list, variableTypes, added);
+        }
+        finally
+        {
+            if (timing != null)
+                timing.rankingFinished = System.nanoTime();
+        }
         Set<String> evaluated = new HashSet<>();
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
+        // Старый расчёт не должен затереть снимок, уже перечитанный после готовности чужого модуля.
+        if (parameterRevision != foreignParameterRevision)
+            return null;
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
-            List.copyOf(added.values()));
+            List.copyOf(added.values()), complete);
     }
 
     private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list)
     {
+        return scene(resource, context, list, true, null);
+    }
+
+    private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list, boolean complete,
+        BasePreparationTiming timing)
+    {
+        if (timing != null)
+            timing.phase("start"); //$NON-NLS-1$
         Matcher literal = TYPE_LITERAL.matcher(context.preceding());
         if (literal.find())
         {
@@ -973,27 +1131,51 @@ final class BslExpectedTypePremiums
             // Здесь строки списка — имена типов, а не значения/конструкции встроенного языка.
             // ИменаВложенныхТипов не проходят фильтр Expectation: «Неопределено» тоже имя типа.
             return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
-                Collections.emptyMap(), null, aliases, List.of());
+                Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of());
         }
+        if (timing != null)
+            timing.phase("literalProbe"); //$NON-NLS-1$
         ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
         if (site != null && !site.contains(context.start()))
             site = null;
-        Expectation expectation = expectation(resource, context, site, list);
+        if (timing != null)
+            timing.phase("callSite"); //$NON-NLS-1$
+        Expectation expectation = complete ? expectation(resource, context, site, list) : null;
+        if (timing != null)
+            timing.phase("expectation"); //$NON-NLS-1$
         List<TypeItem> parentTypes = context.parent().isEmpty() ? List.of()
             : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
+        if (timing != null)
+            timing.phase("parentTypes"); //$NON-NLS-1$
         String statisticsContext = statisticsContext(context, typeNames(parentTypes));
         boolean insideExpression = insideExpression(context, site);
+        if (timing != null)
+            timing.phase("statisticsContext"); //$NON-NLS-1$
+        Map<String, String> memberNames = new LinkedHashMap<>();
         Map<String, Integer> frequencies = context.parent().isEmpty() ? Collections.emptyMap()
-            : memberFrequencies(resource, context);
+            : memberFrequencies(resource, context, memberNames);
+        Map<String, List<String>> memberTypes = complete && !memberNames.isEmpty()
+            ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
+        if (timing != null)
+            timing.phase("frequencies"); //$NON-NLS-1$
         // В комментарии слово — не выражение, приёмника у него нет.
         boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret());
-        return new Scene(expectation, statisticsContext, insideExpression, frequencies,
-            comment ? null : receiverTypeLine(expectation, resource), expectation == null || expectation.typeItems().isEmpty()
+        String receiverLine = comment ? null : receiverTypeLine(expectation, resource);
+        String expectedTypeText = expectation == null || expectation.typeItems().isEmpty()
                 ? receiverTypes(expectation).isEmpty() ? "" //$NON-NLS-1$
                     : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                : FunctionReturnTypes.typeSetText(expectation.typeItems()),
-            predefinedTypes(resource, expectation, list), facts(resource, context, expectation, site, parentTypes), List.of(),
-            displayTypeNames(parentTypes, resource));
+                : FunctionReturnTypes.typeSetText(expectation.typeItems());
+        Map<String, String> predefined = predefinedTypes(resource, expectation, list);
+        if (timing != null)
+            timing.phase("typeLabels"); //$NON-NLS-1$
+        Facts facts = facts(resource, context, expectation, site, parentTypes);
+        if (timing != null)
+            timing.phase("facts"); //$NON-NLS-1$
+        List<String> parentDisplayTypes = displayTypeNames(parentTypes, resource);
+        if (timing != null)
+            timing.phase("parentLabels"); //$NON-NLS-1$
+        return new Scene(expectation, statisticsContext, insideExpression, frequencies, receiverLine, expectedTypeText,
+            predefined, facts, List.of(), parentDisplayTypes, memberNames, memberTypes);
     }
 
     /** Приставка ключа {@link Scene#predefinedTypes} для предопределённых значений ссылочного типа. */
@@ -1100,6 +1282,7 @@ final class BslExpectedTypePremiums
         String callMethod = ""; //$NON-NLS-1$
         int parameterIndex = -1;
         String systemProperty = null;
+        Boolean booleanDefault = null;
         // «Возврат» ИР читает как присваивание переменной результата метода.
         if (endsWithWord(preceding, "Возврат") || endsWithWord(preceding, "Return")) //$NON-NLS-1$ //$NON-NLS-2$
         {
@@ -1119,6 +1302,7 @@ final class BslExpectedTypePremiums
                 types.addAll(call.types());
                 receiver = call.receiver();
                 callMethod = call.method();
+                booleanDefault = call.booleanDefault();
             }
         }
         // Ожидание от параметра вызова, пока его не перебил приёмник слева от оператора
@@ -1210,7 +1394,8 @@ final class BslExpectedTypePremiums
         if (names.isEmpty() && receiver.isEmpty())
             return null;
         return new Expectation(names, receiver, token, callMethod, parameterIndex, hasSystemEnum(types),
-            systemProperty, formalParameter, List.copyOf(types));
+            systemProperty, formalParameter, List.copyOf(types),
+            types.isEmpty() ? List.copyOf(names) : matchingTypeNames(types), formalParameter ? booleanDefault : null);
     }
 
     /** Тип ключа {@code коллекция[}: ключ соответствия, Число по ЕстьЧисловойИндекс, Строка для доступа по имени. */
@@ -1243,8 +1428,12 @@ final class BslExpectedTypePremiums
     }
 
     /** Ожидание в аргументе вызова: типы параметра, приёмник (имя параметра или ключа) и имя метода. */
-    private record CallExpectation(List<TypeItem> types, String receiver, String method)
+    private record CallExpectation(List<TypeItem> types, String receiver, String method, Boolean booleanDefault)
     {
+        CallExpectation(List<TypeItem> types, String receiver, String method)
+        {
+            this(types, receiver, method, null);
+        }
     }
 
     /** {@code ТаблицаОжидаемыхТиповПараметраМетода} для вызова метода. */
@@ -1259,7 +1448,8 @@ final class BslExpectedTypePremiums
         Expression source = access instanceof DynamicFeatureAccess dynamic ? dynamic.getSource() : null;
         List<TypeItem> sourceTypes = source != null ? expressionTypeItems(resource, source, offset) : List.of();
         List<TypeItem> types = new ArrayList<>();
-        String receiver = parameterExpectation(resource, invocation, index, types);
+        CallExpectation formal = parameterExpectation(resource, invocation, index, types);
+        String receiver = formal != null ? formal.receiver() : ""; //$NON-NLS-1$
         // ЭлементБлокировкиДанных.УстановитьЗначение("Поле", Значение): тип поля пространства блокировки.
         if (index == 1 && !args.isEmpty() && source != null
             && ("УстановитьЗначение".equalsIgnoreCase(methodName) || "SetValue".equalsIgnoreCase(methodName)) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1332,9 +1522,9 @@ final class BslExpectedTypePremiums
             CallExpectation target = executedMethodExpectation(resource, literalText(args.get(1)), index - 2, list,
                 offset);
             if (target != null)
-                return new CallExpectation(target.types(), target.receiver(), methodName);
+                return new CallExpectation(target.types(), target.receiver(), methodName, target.booleanDefault());
         }
-        return new CallExpectation(types, receiver, methodName);
+        return new CallExpectation(types, receiver, methodName, formal != null ? formal.booleanDefault() : null);
     }
 
     /** {@code ТаблицаОжидаемыхТиповПараметраМетода} для конструктора {@code Новый Тип(…)}. */
@@ -1375,10 +1565,10 @@ final class BslExpectedTypePremiums
     }
 
     /**
-     * {@code ИмяПараметраВызоваМетода}: типы параметра {@code index} в {@code types}; результат — имя
-     * параметра (приёмник). Вариант синтаксиса подбирается по типам уже введённых аргументов.
+     * {@code ИмяПараметраВызоваМетода}: типы параметра {@code index} в {@code types}; результат —
+     * приёмник и значение по умолчанию. Вариант синтаксиса подбирается по типам уже введённых аргументов.
      */
-    private static String parameterExpectation(XtextResource resource, Invocation invocation, int index,
+    private static CallExpectation parameterExpectation(XtextResource resource, Invocation invocation, int index,
         List<TypeItem> types)
     {
         for (FeatureEntry entry : featureEntries(invocation.getMethodAccess()))
@@ -1393,7 +1583,15 @@ final class BslExpectedTypePremiums
                 if (parameter != null)
                 {
                     types.addAll(parameter.getType());
-                    return parameterName(parameter);
+                    // Экспортный метод общего модуля: тип параметра — у его метода в модуле.
+                    com._1c.g5.v8.dt.bsl.model.Method source = types.isEmpty()
+                        ? ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(method) : null;
+                    if (source != null && source.getFormalParams().size() > index)
+                        types.addAll(formalParameterTypes(source, source.getFormalParams().get(index)));
+                    String name = parameterName(parameter);
+                    return new CallExpectation(types, name, "", //$NON-NLS-1$
+                        containsIgnoreCase(typeNames(types), BOOLEAN)
+                            ? ParamHintHtmlModifier.booleanParameterDefault(method, index, name) : null);
                 }
             }
             else if (feature instanceof com._1c.g5.v8.dt.bsl.model.Method method && !feature.eIsProxy()
@@ -1401,10 +1599,13 @@ final class BslExpectedTypePremiums
             {
                 FormalParam parameter = method.getFormalParams().get(index);
                 types.addAll(formalParameterTypes(method, parameter));
-                return nullToEmpty(parameter.getName());
+                String name = nullToEmpty(parameter.getName());
+                return new CallExpectation(types, name, "", //$NON-NLS-1$
+                    containsIgnoreCase(typeNames(types), BOOLEAN)
+                        ? ParamHintHtmlModifier.booleanParameterDefault(method, index, name) : null);
             }
         }
-        return ""; //$NON-NLS-1$
+        return null;
     }
 
     /**
@@ -1466,7 +1667,8 @@ final class BslExpectedTypePremiums
                 {
                     FormalParam parameter = method.getFormalParams().get(index);
                     return new CallExpectation(formalParameterTypes(method, parameter),
-                        nullToEmpty(parameter.getName()), methodName);
+                        nullToEmpty(parameter.getName()), methodName,
+                        ParamHintHtmlModifier.booleanParameterDefault(method, index, parameter.getName()));
                 }
             }
             return null;
@@ -1496,7 +1698,9 @@ final class BslExpectedTypePremiums
                     Parameter parameter = chooseParameter(resource, variants, List.of(), index, offset);
                     if (parameter != null)
                         return new CallExpectation(new ArrayList<>(parameter.getType()), parameterName(parameter),
-                            methodName);
+                            methodName, containsIgnoreCase(typeNames(parameter.getType()), BOOLEAN)
+                                ? ParamHintHtmlModifier.booleanParameterDefault(method, index, parameterName(parameter))
+                                : null);
                 }
             }
         }
@@ -1763,9 +1967,9 @@ final class BslExpectedTypePremiums
     {
         if (resource.getParseResult() == null)
             return null;
-        INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
         if (leaf == null && offset > 0)
-            leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset - 1);
+            leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset - 1);
         EObject semantic = leaf != null ? leaf.getSemanticElement() : null;
         return semantic != null ? EcoreUtil2.getContainerOfType(semantic, com._1c.g5.v8.dt.bsl.model.Method.class)
             : null;
@@ -1794,7 +1998,7 @@ final class BslExpectedTypePremiums
         Expression result = null;
         if (resource.getParseResult() == null || end <= 0)
             return null;
-        INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), end - 1);
+        INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), end - 1);
         int start = end;
         for (INode node = leaf; node != null; node = node.getParent())
         {
@@ -1815,7 +2019,7 @@ final class BslExpectedTypePremiums
     {
         if (resource.getParseResult() == null || end <= start)
             return null;
-        INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), end - 1);
+        INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), end - 1);
         for (INode node = leaf; node != null; node = node.getParent())
         {
             if (node.getOffset() < start)
@@ -1848,18 +2052,47 @@ final class BslExpectedTypePremiums
 
     /**
      * Тип параметра вызова — из актуального комментария, как в BslCommentUiUtils$2 EDT.
-     * Состояние переменной (особенно LIGHT) может ещё хранить прежний комментарий.
+     * Без описания — NORMAL после объявления параметра, как в той же штатной подсказке.
+     * getVariableTypesAtOffset предпочитает LIGHT даже при наличии NORMAL.
      * Один путь для подсказки при наведении и боковой подсказки списка.
      */
     private static List<TypeItem> formalParameterTypes(com._1c.g5.v8.dt.bsl.model.Method method,
         FormalParam parameter)
     {
         ICompositeNode node = NodeModelUtils.findActualNodeFor(parameter);
-        List<TypeItem> stateTypes = variableTypeItemsAt(parameter, node != null ? node.getEndOffset() : 0,
-            method.environments());
         List<TypeItem> documented = BslMethodParameterTypes.fromComment(method, parameter);
-        List<TypeItem> result = documented != null && !documented.isEmpty() ? documented : stateTypes;
-        return result;
+        if (documented != null && !documented.isEmpty())
+            return documented;
+        var foreign = ParamHintHtmlModifier.expectedParameterTypes(method, parameter.getName());
+        if (foreign != null && !foreign.isEmpty())
+        {
+            List<TypeItem> result = new ArrayList<>();
+            for (var type : foreign)
+            {
+                if (type.uri() != null)
+                {
+                    var proxy = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createType();
+                    ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(type.uri());
+                    result.add(proxy);
+                }
+                else if (type.name() != null)
+                    addTypeByName(result, type.name());
+            }
+            return result;
+        }
+        try
+        {
+            // BslCommentUiUtils$2: getVariableTypesAfterModelObject(param, param).
+            // Этот API читает NORMAL в getTotalEndOffset(), а не LIGHT в getEndOffset().
+            List<TypeItem> normal = node != null
+                ? TypeSystemUtil.getVariableTypesAfterModelObject(parameter, parameter) : List.of();
+            return node != null ? new ArrayList<>(BslStructureInsertCommentTypes.arrayVariableTypes(normal, parameter,
+                node.getTotalEndOffset(), method.environments())) : new ArrayList<>();
+        }
+        catch (RuntimeException error)
+        {
+            return new ArrayList<>();
+        }
     }
 
     /** Готовый тип переменной в точке — тем же вызовом, что боковая подсказка EDT. */
@@ -1877,6 +2110,59 @@ final class BslExpectedTypePremiums
         {
             return new ArrayList<>();
         }
+    }
+
+    /** Типы добавленных членов: тот же вычислитель выражений и состояния переменных, что у слов EDT. */
+    private static Map<String, List<String>> collectMemberTypes(XtextResource resource, Context context,
+        Map<String, String> names, ICompletionProposal[] list)
+    {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        // Базовый список публикуется без типов; модель здесь читает только фоновая задача полного снимка.
+        if (Display.getCurrent() != null)
+            return result;
+        var method = methodAt(resource, context.start());
+        if (method == null)
+            return result;
+        Set<String> stock = new HashSet<>();
+        for (ICompletionProposal proposal : list)
+            if (!(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof BslAddedWordProposal))
+                stock.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
+        for (FeatureAccess access : EcoreUtil2.getAllContentsOfType(method, FeatureAccess.class))
+        {
+            String name = access.getName();
+            if (name == null || stock.contains(lower(name)))
+                continue;
+            boolean call = access.eContainer() instanceof Invocation invocation
+                && invocation.getMethodAccess() == access;
+            String key = (call ? "m:" : "p:") + lower(name); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!names.containsKey(key)
+                || !expressionText(access).equalsIgnoreCase(context.parent() + "." + name)) //$NON-NLS-1$
+                continue;
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(access);
+            if (node == null || node.getOffset() <= context.anchor() && node.getEndOffset() >= context.caret())
+                continue;
+            Expression value = call ? (Invocation)access.eContainer() : access;
+            // Для неизвестного свойства EDT не хранит тип слева от '='. Выводим его из значения справа.
+            if (!call && access.eContainer() instanceof SimpleStatement statement
+                && statement.getLeft() == access && statement.getRight() != null)
+                value = statement.getRight();
+            ICompositeNode valueNode = NodeModelUtils.findActualNodeFor(value);
+            if (valueNode == null)
+                continue;
+            try
+            {
+                List<String> types = typeNames(expressionTypeItems(resource, value, valueNode.getEndOffset()));
+                List<String> merged = result.computeIfAbsent(key, ignored -> new ArrayList<>());
+                for (String type : types)
+                    if (!containsIgnoreCase(merged, type))
+                        merged.add(type);
+            }
+            catch (RuntimeException error)
+            {
+                // Тип этого обращения пока недоступен; остальные члены продолжаем рассчитывать.
+            }
+        }
+        return result;
     }
 
     /** Типы переменных списка (строки EDT с {@code FantomVariableOccurrence}) в точке списка. */
@@ -2089,6 +2375,172 @@ final class BslExpectedTypePremiums
         return result;
     }
 
+    /**
+     * ИР: {@code ПодобратьПараметрыВызоваМетода}/{@code ПроверитьДобавитьСквознойПараметр}.
+     * Только одноимённое доступное свойство; неизвестный тип не запрещает подстановку.
+     * Возвращает null, если ни одного параметра не подобрано.
+     */
+    static List<String> pickCallArguments(IDocument document, int offset, ICompletionProposal proposal)
+    {
+        if (!(document instanceof IXtextDocument xtextDocument))
+            return null;
+        Object info = proposalInfo(proposal);
+        ParamSet signature = SmartContentAssistProcessor.paramSetSignatureOf(proposal);
+        Global.tempLog("call-arguments", "metadata info=" + (info != null ? info.getClass().getName() : null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " signature=" + (signature != null)); //$NON-NLS-1$
+        if (signature == null && !(info instanceof com._1c.g5.v8.dt.bsl.model.Method)
+            && !(info instanceof BslContextDefMethod))
+            return null;
+        return ContentAssistSessionReloader.readOnlyForContentAssist(xtextDocument, resource ->
+        {
+            if (resource == null || resource.getContents().isEmpty()
+                || !(resource.getContents().get(0) instanceof Module module))
+                return null;
+            var method = methodAt(resource, offset);
+            List<String> names = new ArrayList<>();
+            List<List<String>> types = new ArrayList<>();
+            int required = 0;
+            if (signature != null)
+            {
+                // Контекстные ПолучитьФорму/ОткрытьФорму ИР оставляет без подбора.
+                String name = SmartContentAssistProcessor.parseProposalListName(proposal.getDisplayString());
+                if (module.getModuleType() == ModuleType.FORM_MODULE
+                    && ("ПолучитьФорму".equalsIgnoreCase(name) || "ОткрытьФорму".equalsIgnoreCase(name)
+                        || "GetForm".equalsIgnoreCase(name) || "OpenForm".equalsIgnoreCase(name)))
+                    return null;
+                required = Math.max(0, signature.getMinParams());
+                var source = signature.eContainer() instanceof com._1c.g5.v8.dt.mcore.Method target
+                    ? ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(target) : null;
+                for (Parameter parameter : signature.getParams())
+                {
+                    names.add(parameterName(parameter));
+                    List<TypeItem> items = new ArrayList<>(parameter.getType());
+                    int index = names.size() - 1;
+                    if (items.isEmpty() && source != null && source.getFormalParams().size() > index)
+                        items.addAll(formalParameterTypes(source, source.getFormalParams().get(index)));
+                    types.add(callTypeNames(resource, items));
+                }
+            }
+            else
+            {
+                // Экспортный образ другого модуля — BslContextDefMethod, а не Method.
+                // Исходный метод разрешаем тем же путём, что подсказка параметров EDT.
+                var target = info instanceof EObject object
+                    ? ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(object) : null;
+                if (target == null || target.eIsProxy())
+                    return null;
+                for (FormalParam parameter : target.getFormalParams())
+                {
+                    names.add(parameter.getName());
+                    types.add(callTypeNames(resource, formalParameterTypes(target, parameter)));
+                    if (parameter.getDefaultValue() == null)
+                        required = names.size();
+                }
+            }
+            Map<String, Local> candidates = new LinkedHashMap<>();
+            Set<String> localNames = new HashSet<>();
+            // Сначала локальные: они затеняют переменные модуля и свойства контекста.
+            for (Local local : locals(resource, module, method, offset, false))
+                if (local.visible())
+                {
+                    candidates.putIfAbsent(lower(local.name()), local);
+                    localNames.add(lower(local.name()));
+                }
+            var contexts = resource.getResourceServiceProvider().get(
+                com._1c.g5.v8.dt.bsl.contextdef.IBslModuleContextDefService.class);
+            ContextDef context = contexts != null ? contexts.getContextDef(module) : null;
+            List<ContextDef> contextDefs = new ArrayList<>();
+            if (context != null)
+                contextDefs.add(context);
+            if (module.getOwner() != null
+                && Global.invoke(module.getOwner(), "getFormContext") instanceof ContextDef formContext) //$NON-NLS-1$
+                contextDefs.add(formContext);
+            Environments environments = method != null ? method.environments() : module.environments();
+            for (ContextDef contextDef : contextDefs)
+                for (Property property : contextDef.allProperties())
+                {
+                    if (!property.isReadable() || environments != null
+                        && !property.environments().containsAny(environments))
+                        continue;
+                    if (property.getName() != null)
+                        candidates.putIfAbsent(lower(property.getName()),
+                            new Local(property.getName(), callTypeNames(resource, property.getTypes()), true));
+                    if (property.getNameRu() != null && !property.getNameRu().isEmpty())
+                        candidates.putIfAbsent(lower(property.getNameRu()),
+                            new Local(property.getNameRu(), callTypeNames(resource, property.getTypes()), true));
+                }
+            List<String> arguments = new ArrayList<>();
+            boolean matched = false;
+            for (int i = 0; i < names.size(); i++)
+            {
+                String name = names.get(i);
+                Local candidate = candidates.get(lower(name));
+                List<String> actualTypes = candidate != null ? candidate.types() : List.of();
+                Variable variable = candidate != null && localNames.contains(lower(candidate.name()))
+                    ? findVariable(resource, candidate.name(), offset) : null;
+                if (variable == null && localNames.contains(lower(name)))
+                    for (DeclareStatement statement : module.getDeclareStatements())
+                        for (ExplicitVariable declared : statement.getVariables())
+                            if (name.equalsIgnoreCase(declared.getName()))
+                                variable = declared;
+                if (variable != null)
+                {
+                    actualTypes = callTypeNames(resource,
+                        variableTypeItemsAt(variable, offset, environmentsOf(resource, variable)));
+                    // У формального параметра EDT показывает также типы его описания.
+                    // Состояние в точке может содержать только выведенное «Число»,
+                    // хотя комментарий объявляет «ФормаКлиентскогоПриложения».
+                    if (variable instanceof FormalParam formal
+                        && formal.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Method owner)
+                    {
+                        List<TypeItem> declaredItems = formalParameterTypes(owner, formal);
+                        Global.tempLog("call-arguments", "sourceParameter.raw owner=" + owner.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " parameter=" + formal.getName() + " items=" + declaredItems); //$NON-NLS-1$ //$NON-NLS-2$
+                        List<String> declaredTypes = callTypeNames(resource, declaredItems);
+                        Global.tempLog("call-arguments", "sourceParameter=" + formal.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " inferred=" + actualTypes + " declared=" + declaredTypes); //$NON-NLS-1$ //$NON-NLS-2$
+                        for (String type : declaredTypes)
+                            if (!containsIgnoreCase(actualTypes, type))
+                                actualTypes.add(type);
+                    }
+                }
+                List<String> expectedTypes = types.get(i);
+                boolean compatible = actualTypes.isEmpty() || expectedTypes.isEmpty()
+                    || actualTypes.stream().anyMatch(type -> containsIgnoreCase(expectedTypes, type));
+                Global.tempLog("call-arguments", "parameter=" + name + " candidate=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + (candidate != null ? candidate.name() : null) + " actual=" + actualTypes //$NON-NLS-1$
+                    + " expected=" + expectedTypes + " compatible=" + compatible); //$NON-NLS-1$ //$NON-NLS-2$
+                String argument = candidate != null && compatible ? candidate.name() : ""; //$NON-NLS-1$
+                if (candidate == null && module.getModuleType() == ModuleType.FORM_MODULE
+                    && "ЭтаФорма".equalsIgnoreCase(name))
+                    argument = "ЭтаФорма"; //$NON-NLS-1$
+                matched |= !argument.isEmpty();
+                arguments.add(argument);
+            }
+            while (arguments.size() > required && arguments.get(arguments.size() - 1).isEmpty())
+                arguments.remove(arguments.size() - 1);
+            return matched ? arguments : null;
+        });
+    }
+
+    /** Как в расчёте списка: ссылки на типы разрешаются в ресурсе текущего модуля. */
+    private static List<String> callTypeNames(XtextResource resource, List<TypeItem> items)
+    {
+        var previous = READ_RESOURCE.get();
+        READ_RESOURCE.set(resource);
+        try
+        {
+            return typeNames(items);
+        }
+        finally
+        {
+            if (previous == null)
+                READ_RESOURCE.remove();
+            else
+                READ_RESOURCE.set(previous);
+        }
+    }
+
     /** Свойства объекта {@code ИмяЛевогоОбъекта} приёмника {@code Объект.Свойство =}; {@code visible} — запись разрешена. */
     private static List<Local> receiverProperties(XtextResource resource, Context context, Expectation expectation)
     {
@@ -2206,7 +2658,8 @@ final class BslExpectedTypePremiums
      * Частота {@code Родитель.Член} в тексте метода ({@code ЗаполнитьТаблицуСловИзТекста} с родительским
      * контекстом), без комментариев, строк и вхождения у каретки.
      */
-    private static Map<String, Integer> memberFrequencies(XtextResource resource, Context context)
+    private static Map<String, Integer> memberFrequencies(XtextResource resource, Context context,
+        Map<String, String> names)
     {
         Map<String, Integer> result = new HashMap<>();
         com._1c.g5.v8.dt.bsl.model.Method method = methodAt(resource, context.start());
@@ -2226,7 +2679,11 @@ final class BslExpectedTypePremiums
         Matcher matcher = Pattern.compile("(?<![\\p{L}\\p{N}_.])" + Pattern.quote(context.parent()) //$NON-NLS-1$
             + "\\.([\\p{L}_][\\p{L}\\p{N}_]*)(\\s*\\()?", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(clean); //$NON-NLS-1$
         while (matcher.find())
-            result.merge((matcher.group(2) != null ? "m:" : "p:") + lower(matcher.group(1)), 1, Integer::sum); //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            String key = (matcher.group(2) != null ? "m:" : "p:") + lower(matcher.group(1)); //$NON-NLS-1$ //$NON-NLS-2$
+            result.merge(key, 1, Integer::sum);
+            names.putIfAbsent(key, matcher.group(1));
+        }
         // Само вводимое слово не считается
         try
         {
@@ -2248,6 +2705,7 @@ final class BslExpectedTypePremiums
         {
             // частота без поправки
         }
+        names.keySet().retainAll(result.keySet());
         return result;
     }
 
@@ -2329,6 +2787,18 @@ final class BslExpectedTypePremiums
             return result;
         }
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
+        // ИР: ЗаполнитьЛокальныеСвойстваИМетодыПоТексту → ЗаполнитьТаблицуСловИзТекста.
+        // Частота уже собрана по всему методу, без строк, комментариев и слова у каретки.
+        for (Map.Entry<String, String> member : scene.memberNames().entrySet())
+        {
+            String key = member.getKey().substring(2);
+            if (words.containsKey(key))
+                continue;
+            boolean method = member.getKey().startsWith("m:"); //$NON-NLS-1$
+            List<String> types = scene.memberTypes().getOrDefault(member.getKey(), List.of());
+            words.put(key, new Word(key, member.getValue(), types, method, false));
+            added.put(key, BslAddedWordProposal.ghostMember(member.getValue(), method, types));
+        }
         AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list)
             : null;
         if (adder != null)
@@ -2616,7 +3086,7 @@ final class BslExpectedTypePremiums
         String byName = typeFromReceiverName(expectation);
         List<String> allTypes = byName == null ? new ArrayList<>(expectation.types())
             // чтобы нестрогий подбор сработал
-            : new ArrayList<>(List.of(byName.isEmpty() ? UNDEFINED : byName));
+            : new ArrayList<>(byName.isEmpty() ? List.of() : List.of(byName));
         List<String> matchingTypes = (byName == null ? expectation.matchingTypes() : allTypes).stream()
             .filter(type -> !"Произвольный".equalsIgnoreCase(type) && !"?".equals(type)).toList(); //$NON-NLS-1$ //$NON-NLS-2$
         allTypes.removeIf(type -> "Произвольный".equalsIgnoreCase(type) || "?".equals(type)); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2705,12 +3175,20 @@ final class BslExpectedTypePremiums
             add(result, words, lower(UNDEFINED), allTypes.size() > 1 ? 3 : 1, allTypes.size() > 1);
         if (noParent && containsIgnoreCase(allTypes, BOOLEAN) && !receiverIsMethod)
         {
-            boolean falsePreferred = lastLower.equals("видимость") || lastLower.equals("доступность") //$NON-NLS-1$ //$NON-NLS-2$
-                || lastLower.equals("стандартнаяобработка"); //$NON-NLS-1$
+            Boolean booleanDefault = expectation.booleanDefault();
+            // Явно обычно передают противоположное тому, что можно получить пропуском аргумента.
+            boolean falsePreferred = booleanDefault != null ? booleanDefault.booleanValue()
+                : lastLower.equals("видимость") || lastLower.equals("доступность") //$NON-NLS-1$ //$NON-NLS-2$
+                    || lastLower.equals("стандартнаяобработка"); //$NON-NLS-1$
             add(result, words, "ложь", falsePreferred ? 5 : 3, true); //$NON-NLS-1$
-            boolean truePreferred = lastLower.equals("загрузка") || lastLower.equals("использование") //$NON-NLS-1$ //$NON-NLS-2$
-                || lastLower.equals("отказ"); //$NON-NLS-1$
+            boolean truePreferred = booleanDefault != null ? !booleanDefault.booleanValue()
+                : lastLower.equals("загрузка") || lastLower.equals("использование") //$NON-NLS-1$ //$NON-NLS-2$
+                    || lastLower.equals("отказ"); //$NON-NLS-1$
             add(result, words, "истина", truePreferred ? 5 : 3, true); //$NON-NLS-1$
+            Global.tempLog("boolean-default-ranking", "ranking method=" + expectation.callMethod() //$NON-NLS-1$ //$NON-NLS-2$
+                + " index=" + expectation.parameterIndex() + " receiver=" + receiver //$NON-NLS-1$ //$NON-NLS-2$
+                + " default=" + booleanDefault + " falsePreferred=" + falsePreferred //$NON-NLS-1$ //$NON-NLS-2$
+                + " truePreferred=" + truePreferred + " premiums=" + result.values()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // По совпадению слова и типа
         String receiverParent = withoutLastFragment(receiver);
@@ -4256,6 +4734,9 @@ final class BslExpectedTypePremiums
         Map<String, Word> words = new LinkedHashMap<>();
         for (ICompletionProposal proposal : list)
         {
+            if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof BslAddedWordProposal added
+                && added.isGhostMember())
+                continue;
             String name = SmartContentAssistProcessor.filterMatchName(proposal);
             String key = lower(name);
             if (key.isEmpty() || words.containsKey(key))
@@ -4274,6 +4755,9 @@ final class BslExpectedTypePremiums
     /** Типы строки списка: свойство и метод платформы — из модели, остальное — из подписи строки. */
     private static List<String> proposalTypes(ICompletionProposal proposal, Map<String, String> predefinedTypes)
     {
+        if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof BslAddedWordProposal added
+            && added.isGhostMember())
+            return added.getInferredTypes();
         String contextType = predefinedTypeIn(proposal, predefinedTypes);
         if (contextType != null)
             return new ArrayList<>(List.of(contextType));

@@ -94,6 +94,8 @@ public final class NaparnikManualModeHook implements IStartup
     private static final String CMD_ACCEPT_LINE = "com.e1c.edt.ai.ui.commands.acceptline.ai"; //$NON-NLS-1$
 
     private static final String NAPARNIK_PACKAGE = "com.e1c.edt.ai"; //$NON-NLS-1$
+    /** Инструменты агента чата ({@code EditMcpTool} и др.). */
+    private static final String NAPARNIK_TOOLS_PACKAGE = "com.e1c.edt.ai.tools."; //$NON-NLS-1$
     private static final StackWalker STACK_WALKER = StackWalker.getInstance();
 
     private static final int MAX_ATTACH_ATTEMPTS = 100;
@@ -837,8 +839,11 @@ public final class NaparnikManualModeHook implements IStartup
             }
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
+            // Правка модуля агентом Напарника (EditMcpTool) — явное действие чата, не встроенное
+            // автодополнение: откатывать её нельзя (issue 956).
             boolean revert = PATCH_ENABLED
-                && isRestrictedPolicy() && naparnik && applyLeftMs() == 0 && pasteActive.get() == 0;
+                && isRestrictedPolicy() && naparnik && applyLeftMs() == 0 && pasteActive.get() == 0
+                && !stackHasNaparnikTool();
             if (!revert)
                 return;
             IDocument document = event.getDocument();
@@ -994,6 +999,12 @@ public final class NaparnikManualModeHook implements IStartup
      * не годится: он материализует весь стек целиком, а в Xtext-редакторе стеки глубокие.
      * {@link StackWalker} обходит кадры лениво и останавливается на первом подходящем.
      */
+    private static boolean stackHasNaparnikTool()
+    {
+        return STACK_WALKER.walk(
+            frames -> frames.anyMatch(frame -> frame.getClassName().startsWith(NAPARNIK_TOOLS_PACKAGE)));
+    }
+
     private static boolean stackHasNaparnik()
     {
         return STACK_WALKER.walk(

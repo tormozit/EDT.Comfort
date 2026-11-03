@@ -231,7 +231,7 @@ public final class CompileContextStatusHook implements IStartup
         int probe = Math.min(offset, root.getTotalEndOffset() - 1);
         while (probe >= 0)
         {
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(root, probe);
+            ILeafNode leaf = BslNodeLookup.leafAt(root, probe);
             if (leaf == null)
                 return null;
             if (!leaf.isHidden())

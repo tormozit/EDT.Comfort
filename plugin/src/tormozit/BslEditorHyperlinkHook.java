@@ -12,6 +12,8 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.OperationCanceledException;
+import org.eclipse.core.runtime.jobs.ISchedulingRule;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.Command;
@@ -82,6 +84,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.EditorPageDescriptor;
 import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
@@ -270,12 +273,12 @@ public final class BslEditorHyperlinkHook implements IStartup
             return null;
         try
         {
-            return document.readOnly(resource ->
+            return readModel(document, false, resource ->
             {
                 var target = BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
                 if (resource.getParseResult() == null)
                     return null;
-                ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
                 if (leaf == null || leaf.isHidden())
                     return null;
                 IRegion region = new Region(leaf.getOffset(), leaf.getLength());
@@ -413,12 +416,11 @@ public final class BslEditorHyperlinkHook implements IStartup
             return null;
         try
         {
-            return document.readOnly(resource ->
+            return readModel(document, false, resource ->
             {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
-                EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
-                    .resolveContainedElementAt(resource, offset);
+                EObject object = BslNodeLookup.resolveContainedElementAt(resource, offset);
                 StringLiteral literal = org.eclipse.xtext.EcoreUtil2.getContainerOfType(object, StringLiteral.class);
                 var target = literal == null ? null
                     : BslTempTableSessions.literalNameTarget(literal, org.eclipse.xtext.util.CancelIndicator.NullImpl);
@@ -449,7 +451,7 @@ public final class BslEditorHyperlinkHook implements IStartup
      * Ссылка ведёт на объект того фрагмента, что под указателем: на «Обработка1» в
      * «Обработка.Обработка1.Форма.Форма1» — на обработку, на «Форма1» — на форму.
      * {@code segmentOnly} — только когда фрагмент под указателем найден в конфигурации
-     * (без хвоста), и без ожидания блокировки документа: вызов идёт до штатного детектора.
+     * (без хвоста). tryReadOnly, как и readOnly, может ждать синхронизации модели EDT.
      */
     private static IHyperlink fullNameLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer,
         int offset, boolean inComment, boolean segmentOnly)
@@ -500,7 +502,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 return new Object[] { text.substring(start + skip, end), Integer.valueOf(leaf.getOffset() + start),
                     Integer.valueOf(skip), Integer.valueOf(hovered) };
             };
-            Object[] found = segmentOnly ? document.tryReadOnly(work) : document.readOnly(work);
+            Object[] found = readModel(document, segmentOnly, work);
             if (found == null)
                 return null;
             IV8ProjectManager manager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
@@ -595,7 +597,7 @@ public final class BslEditorHyperlinkHook implements IStartup
 
     private static ILeafNode literalLeaf(XtextResource resource, int offset)
     {
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
         return leaf != null && !leaf.isHidden()
             && NodeModelUtils.findActualSemanticObjectFor(leaf) instanceof StringLiteral ? leaf : null;
     }
@@ -611,7 +613,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             return null;
         try
         {
-            return document.readOnly(new IUnitOfWork<IHyperlink, XtextResource>()
+            return readModel(document, false, new IUnitOfWork<IHyperlink, XtextResource>()
             {
                 @Override
                 public IHyperlink exec(XtextResource resource) throws Exception
@@ -694,7 +696,7 @@ public final class BslEditorHyperlinkHook implements IStartup
 
     private static ILeafNode commentLeaf(XtextResource resource, int offset)
     {
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
         return leaf != null && leaf.isHidden() && leaf.getText().startsWith("//") ? leaf : null;
     }
 
@@ -708,6 +710,13 @@ public final class BslEditorHyperlinkHook implements IStartup
      * форм/методов сохраняются. URI объекта разрешаем в ResourceSet документа,
      * как в BslSideHintOutlineInstall.resolveHandlerTargetInResourceSet.
      */
+    private static <T> T readModel(IXtextDocument document, boolean tryOnly,
+        IUnitOfWork<T, XtextResource> work)
+    {
+        IUnitOfWork<T, XtextResource> indexed = resource -> BslNodeLookup.read(work, resource);
+        return tryOnly ? document.tryReadOnly(indexed) : document.readOnly(indexed);
+    }
+
     private static IHyperlink[] metadataLinks(ITextViewer viewer, IHyperlink[] links,
         BslXtextEditor source, IWorkbenchPage page)
     {
@@ -715,10 +724,9 @@ public final class BslEditorHyperlinkHook implements IStartup
             return links;
         try
         {
-            // Вызов идёт в UI-потоке при наведении. Штатный readOnly BSL-документа ждёт все
-            // задания разрешения ссылок модуля (Job.join) и вешает UI на время долгого расчёта.
-            // tryReadOnly такого ожидания не делает: занято — остаются штатные ссылки.
-            IHyperlink[] extended = document.tryReadOnly(resource ->
+            // tryReadOnly делегирует в readOnly (IReadAccess, Xtext 2.33): это не tryLock.
+            // Синхронизация BSL-документа может ждать задания разрешения ссылок модуля.
+            IHyperlink[] extended = readModel(document, true, resource ->
             {
                 if (resource == null)
                     return links;
@@ -754,6 +762,10 @@ public final class BslEditorHyperlinkHook implements IStartup
                         if (module != null && fileHasContent(module))
                             result.add(new FileHyperlink(link.getHyperlinkRegion(), "Модуль формы", module,
                                 source, page));
+                    }
+                    else if (object instanceof BasicTemplate)
+                    {
+                        result.add(new TypeHyperlink(link.getHyperlinkRegion(), "Макет", object, source, page));
                     }
                     else
                     {
@@ -1124,6 +1136,16 @@ public final class BslEditorHyperlinkHook implements IStartup
         private volatile DetectedLinks detected;
         /** Только UI-поток. */
         private Job pendingJob;
+        private long pendingStamp;
+        private int pendingOffset;
+        private boolean pendingMultiple;
+        private volatile long generation;
+        private volatile boolean disposed;
+        private final ISchedulingRule detectionRule = new ISchedulingRule()
+        {
+            @Override public boolean contains(ISchedulingRule rule) { return rule == this; }
+            @Override public boolean isConflicting(ISchedulingRule rule) { return rule == this; }
+        };
 
         @Override
         public IHyperlink[] detectHyperlinks(ITextViewer viewer, IRegion region, boolean multiple)
@@ -1137,17 +1159,16 @@ public final class BslEditorHyperlinkHook implements IStartup
                     () -> coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region));
             long stamp = document.getModificationStamp();
             DetectedLinks ready = detected;
-            if (ready != null && ready.stamp() == stamp && ready.offset() == region.getOffset()
-                && ready.multiple() == multiple)
+            if (ready != null && ready.stamp() == stamp && ready.multiple() == multiple
+                && ready.covers(region.getOffset()))
                 return ready.links() == null ? null : ready.links().clone();
             IHyperlink[] stock = coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region);
-            scheduleDetect(viewer, region, multiple, stock, document, stamp);
-            if (stock == null)
-                return null;
-            IHyperlink[] result = stock.clone();
-            for (int i = 0; i < result.length; i++)
-                if (result[i] instanceof XtextHyperlink link)
-                    result[i] = new HistoryHyperlink(link, source, page);
+            IHyperlink[] result = stock == null ? null : stock.clone();
+            if (result != null)
+                for (int i = 0; i < result.length; i++)
+                    if (result[i] instanceof XtextHyperlink link)
+                        result[i] = new HistoryHyperlink(link, source, page);
+            scheduleDetect(viewer, region, multiple, stock, result, document, stamp);
             return result;
         }
 
@@ -1174,10 +1195,18 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
 
         private void scheduleDetect(ITextViewer viewer, IRegion region, boolean multiple, IHyperlink[] stock,
-            IDocumentExtension4 document, long stamp)
+            IHyperlink[] shown, IDocumentExtension4 document, long stamp)
         {
+            if (disposed)
+                return;
+            if (pendingJob != null && pendingJob.getState() != Job.NONE && pendingStamp == stamp
+                && pendingOffset == region.getOffset() && pendingMultiple == multiple)
+            {
+                return;
+            }
             if (pendingJob != null)
                 pendingJob.cancel();
+            long requestedGeneration = ++generation;
             Job job = Job.create("Ссылки BSL-редактора", monitor -> //$NON-NLS-1$
             {
                 if (monitor.isCanceled() || document.getModificationStamp() != stamp)
@@ -1185,7 +1214,12 @@ public final class BslEditorHyperlinkHook implements IStartup
                 IHyperlink[] links;
                 try
                 {
-                    links = detect(viewer, region, multiple, () -> stock);
+                    links = BslNodeLookup.compute(monitor,
+                        () -> detect(viewer, region, multiple, () -> stock));
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    return;
                 }
                 catch (RuntimeException | LinkageError failure)
                 {
@@ -1196,15 +1230,31 @@ public final class BslEditorHyperlinkHook implements IStartup
                 DetectedLinks result = new DetectedLinks(stamp, region.getOffset(), multiple, links);
                 Display display = Display.getDefault();
                 if (display != null && !display.isDisposed())
-                    display.asyncExec(() -> publish(viewer, document, result));
+                {
+                    display.asyncExec(() ->
+                    {
+                        if (!disposed && generation == requestedGeneration)
+                            publish(viewer, document, result, shown);
+                    });
+                }
             });
             job.setSystem(true);
+            job.setRule(detectionRule);
             pendingJob = job;
+            pendingStamp = stamp;
+            pendingOffset = region.getOffset();
+            pendingMultiple = multiple;
             job.schedule();
         }
 
-        /** Готовый результат — в кэш и синтетическое движение указателя, чтобы менеджер его показал. */
-        private void publish(ITextViewer viewer, IDocumentExtension4 document, DetectedLinks result)
+        /**
+         * Готовый результат — в кэш и синтетическое движение указателя, чтобы менеджер его показал.
+         * Ctrl+клик без наведения с Ctrl ищет ссылки прямо в {@code mouseDown} и сразу открывает
+         * список из штатных {@code shown}; при открытом списке менеджер движение указателя
+         * не обрабатывает — подписи меняем в самом списке.
+         */
+        private void publish(ITextViewer viewer, IDocumentExtension4 document, DetectedLinks result,
+            IHyperlink[] shown)
         {
             if (document.getModificationStamp() != result.stamp())
                 return;
@@ -1222,19 +1272,23 @@ public final class BslEditorHyperlinkHook implements IStartup
                         new IHyperlink[] { new HistoryHyperlink(query, source, page) });
             }
             detected = result;
+            relabelShownLinks(text, shown, result.links());
             TextEditorCtrlClickSelectWordHook.pokeHyperlinkManager(text);
         }
 
         private IHyperlink[] detect(ITextViewer viewer, IRegion region, boolean multiple,
             Supplier<IHyperlink[]> stock)
         {
+            BslNodeLookup.checkCanceled();
             IHyperlink property = region == null ? null : propertyLink(source, page, viewer, region.getOffset());
             if (property != null)
                 return new IHyperlink[] { property };
+            BslNodeLookup.checkCanceled();
             // Штатные ссылки литерала («ПолучитьФорму») ведут на имя целиком: на «Обработка1»
             // в имени формы предложили бы форму.
             IHyperlink segment = region == null ? null : segmentLink(source, page, viewer, region.getOffset());
             IHyperlink[] links = segment != null ? new IHyperlink[] { segment } : stock.get();
+            BslNodeLookup.checkCanceled();
             if (links == null || links.length == 0)
             {
                 IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());
@@ -1243,6 +1297,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 links = new IHyperlink[] { type };
             }
             IHyperlink[] result = multiple ? metadataLinks(viewer, links, source, page) : links.clone();
+            BslNodeLookup.checkCanceled();
             if (multiple)
                 compactVariableLinks(viewer, result);
             for (int i = 0; i < result.length; i++)
@@ -1261,12 +1316,36 @@ public final class BslEditorHyperlinkHook implements IStartup
         @Override
         public void dispose()
         {
+            disposed = true;
+            generation++;
+            if (pendingJob != null)
+                pendingJob.cancel();
             if (delegate instanceof IHyperlinkDetectorExtension extension)
                 extension.dispose();
         }
     }
 
-    private record DetectedLinks(long stamp, int offset, boolean multiple, IHyperlink[] links) {}
+    private record DetectedLinks(long stamp, int offset, boolean multiple, IHyperlink[] links)
+    {
+        /**
+         * Ссылки покрывают всё слово под указателем, а не одно смещение: указатель на другой
+         * букве того же слова — тот же результат. Без ссылок области нет — только то же смещение.
+         */
+        boolean covers(int at)
+        {
+            if (at == offset)
+                return true;
+            if (links == null)
+                return false;
+            for (IHyperlink link : links)
+            {
+                IRegion area = link == null ? null : link.getHyperlinkRegion();
+                if (area == null || at < area.getOffset() || at > area.getOffset() + area.getLength())
+                    return false;
+            }
+            return links.length > 0;
+        }
+    }
 
     /** Подписи EDT обрезаны до 25 символов: восстанавливаем выражение из AST, issue 848. */
     private static void compactVariableLinks(ITextViewer viewer, IHyperlink[] links)
@@ -1362,16 +1441,110 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             gc.dispose();
         }
+        int contentWidth = shell.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x;
+        // Рамка и отступы одинаковы для исходных и новых подписей. Не меняем текст
+        // TableItem ради замера: нативная таблица сохраняет прежнюю ширину элементов.
+        int stockWidth = Math.max(1, contentWidth - contentTextWidth + stockTextWidth);
+        placeVariableLinks(shell, table, Math.min(contentWidth, stockWidth * 2));
+    }
+
+    /**
+     * Список, уже открытый из штатных ссылок {@code shown} (Ctrl+клик до досчёта в фоне):
+     * строки, чьи ссылки досчитаны, получают подписи {@link VariableHyperlink}. Данные строк
+     * не меняем — ими владеет TableViewer списка, а открытие у ссылок одно и то же.
+     */
+    private static void relabelShownLinks(StyledText text, IHyperlink[] shown, IHyperlink[] links)
+    {
+        if (shown == null || shown.length == 0 || links == null)
+            return;
+        java.util.Map<IHyperlink, String> labels = new java.util.IdentityHashMap<>();
+        for (IHyperlink link : links)
+            if (link instanceof VariableHyperlink variable && variable.delegate instanceof HistoryHyperlink history)
+                labels.put(history.delegate, variable.text);
+        if (labels.isEmpty())
+            return;
+        for (Shell shell : text.getShell().getShells())
+        {
+            if (shell.isDisposed() || !shell.isVisible() || (shell.getStyle() & SWT.TOOL) == 0)
+                continue;
+            Table table = shownLinksTable(shell, shown);
+            if (table == null)
+                continue;
+            int stockTextWidth = 0;
+            int contentTextWidth = 0;
+            int changed = 0;
+            GC gc = new GC(table);
+            try
+            {
+                gc.setFont(table.getFont());
+                for (TableItem item : table.getItems())
+                {
+                    String stockText = item.getText();
+                    String label = item.getData() instanceof HistoryHyperlink history
+                        ? labels.get(history.delegate) : null;
+                    if (label != null && !label.equals(stockText))
+                    {
+                        item.setText(label);
+                        changed++;
+                    }
+                    stockTextWidth = Math.max(stockTextWidth, gc.textExtent(stockText, SWT.DRAW_TRANSPARENT).x);
+                    contentTextWidth = Math.max(contentTextWidth,
+                        gc.textExtent(item.getText(), SWT.DRAW_TRANSPARENT).x);
+                }
+            }
+            finally
+            {
+                gc.dispose();
+            }
+            if (changed == 0)
+                return;
+            // Окно уже подогнано под штатные подписи. Не сужаем: нативная таблица
+            // не уменьшает ширину строк после setText — сужение дало бы прокрутку.
+            int width = shell.getBounds().width;
+            placeVariableLinks(shell, table,
+                Math.max(width, Math.min(width - stockTextWidth + contentTextWidth, width * 2)));
+            return;
+        }
+    }
+
+    /** Таблица открытого списка, все строки которого — ссылки {@code shown} (по экземпляру). */
+    private static Table shownLinksTable(Composite parent, IHyperlink[] shown)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Table table)
+            {
+                if (table.getItemCount() == 0)
+                    continue;
+                boolean all = true;
+                for (TableItem item : table.getItems())
+                {
+                    boolean found = false;
+                    for (IHyperlink link : shown)
+                        found |= item.getData() == link;
+                    all &= found;
+                }
+                if (all)
+                    return table;
+            }
+            else if (child instanceof Composite composite)
+            {
+                Table found = shownLinksTable(composite, shown);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private static void placeVariableLinks(Shell shell, Table table, int desiredWidth)
+    {
         if (table.getLayoutData() instanceof GridData data)
             data.horizontalAlignment = SWT.FILL;
         Rectangle bounds = shell.getBounds();
         Rectangle screen = shell.getMonitor().getClientArea();
         int viewportHeight = table.getClientArea().height;
-        int contentWidth = shell.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x;
-        // Рамка и отступы одинаковы для исходных и новых подписей. Не меняем текст
-        // TableItem ради замера: нативная таблица сохраняет прежнюю ширину элементов.
-        int stockWidth = Math.max(1, contentWidth - contentTextWidth + stockTextWidth);
-        int width = Math.min(contentWidth, Math.min(screen.width, stockWidth * 2));
+        int width = Math.min(desiredWidth, screen.width);
         int x = Math.max(screen.x, Math.min(bounds.x, screen.x + screen.width - width));
         shell.setBounds(x, bounds.y, width, bounds.height);
         shell.layout(true, true);

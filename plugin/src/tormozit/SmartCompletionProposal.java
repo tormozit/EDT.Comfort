@@ -18,6 +18,10 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension5;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.text.link.LinkedModeModel;
+import org.eclipse.jface.text.link.LinkedModeUI;
+import org.eclipse.jface.text.link.LinkedPosition;
+import org.eclipse.jface.text.link.LinkedPositionGroup;
 import org.eclipse.jface.resource.ColorRegistry;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.StyledString;
@@ -47,8 +51,8 @@ import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Обёртка proposal: кастомны только {@link #validate} и {@link #getStyledDisplayString()};
- * {@link #apply} — pass-through к delegate; если каретка перед {@code (}, вставка без {@code ()}.
+ * Обёртка proposal: умная фильтрация, представление и шаблоны вставки.
+ * При вставке вызова подбирает одноимённые аргументы; перед {@code (} вставляет только имя.
  * Каретка сразу после {@code =} с пробелом перед знаком — перед вставляемым словом тоже пробел.
  */
 public class SmartCompletionProposal implements
@@ -775,6 +779,8 @@ public class SmartCompletionProposal implements
                 return;
             if (tryApplyTemplate(document, null, caret, null))
                 return;
+            if (tryApplyPickedCall(document, null, caret, null))
+                return;
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, null, (char) 0, 0, caret);
@@ -808,6 +814,8 @@ public class SmartCompletionProposal implements
             if (tryApplyWordOnly(document, null, offset, null))
                 return;
             if (tryApplyTemplate(document, null, caret, null))
+                return;
+            if (tryApplyPickedCall(document, null, caret, null))
                 return;
             if (irApply)
             {
@@ -874,6 +882,8 @@ public class SmartCompletionProposal implements
             if (!irApply && viewer != null && tryApplyGeneralIrOverlapAdapter(viewer, offset))
                 return;
             if (tryApplyTemplate(document, viewer, caret, stateMask))
+                return;
+            if (tryApplyPickedCall(document, viewer, caret, stateMask))
                 return;
             if (irApply)
             {
@@ -1000,6 +1010,10 @@ public class SmartCompletionProposal implements
 
     private void beginProposalApply(IDocument document, boolean irApply, boolean replaceParentOverlap)
     {
+        ConfigurableCompletionProposal traced = asConfigurable(delegate);
+        Global.tempLog("call-arguments", "apply.begin class=" + delegate.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " ir=" + irApply + " replaceParent=" + replaceParentOverlap //$NON-NLS-1$ //$NON-NLS-2$
+            + " replacement=" + (traced != null ? EqualsSpacePad.readInsertText(traced) : null)); //$NON-NLS-1$
         PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
         if (irApply || replaceParentOverlap)
             IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
@@ -1726,6 +1740,7 @@ public class SmartCompletionProposal implements
             && needsWordOnlyInsert(cp, document, caret);
         if (!wordOnly)
             return false;
+        Global.tempLog("call-arguments", "apply.wordOnly caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
         int effectiveOffset = completionOffset >= 0 ? completionOffset : caret;
         // Полный replacement не вставляем, поэтому его DataEvent/LinkedMode неприменим:
         // позиции рассчитаны для новых скобок, а мы сохраняем уже существующие.
@@ -1781,6 +1796,74 @@ public class SmartCompletionProposal implements
         if (reloader != null)
             reloader.scheduleParamHintForExistingCall(templateSelection.x);
         return true;
+    }
+
+    /** Подбор сквозных аргументов ИР для штатного предложения EDT, без COM-сессии. */
+    private boolean tryApplyPickedCall(IDocument document, ITextViewer viewer, int caret, Integer stateMask)
+    {
+        ConfigurableCompletionProposal cp = asConfigurable(delegate);
+        Global.tempLog("call-arguments", "pick.enter caret=" + caret + " class=" + delegate.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " replacement=" + (cp != null ? cp.getReplacementString() : null)); //$NON-NLS-1$
+        if (cp == null || document == null || caret < 0 || caret > document.getLength()
+            || SmartContentAssistProcessor.isCommentAssistContext(document, caret))
+            return false;
+        String replacement = cp.getReplacementString();
+        int open = callSuffixStart(replacement);
+        int close = replacement != null ? replacement.lastIndexOf(')') : -1;
+        // Генераторы, литералы и содержательные шаблоны имеют собственную вставку.
+        if (open < 0 || close < open || !replacement.substring(open + 1, close).matches("[\\s,]*")) //$NON-NLS-1$
+            return false;
+        Global.tempLog("call-arguments", "pick caret=" + caret + " replacement=" + replacement); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        boolean inserted = false;
+        try
+        {
+            java.util.List<String> arguments = BslExpectedTypePremiums.pickCallArguments(document, caret, delegate);
+            Global.tempLog("call-arguments", "picked=" + arguments); //$NON-NLS-1$ //$NON-NLS-2$
+            if (arguments == null || arguments.isEmpty())
+                return false;
+            int start = cp.getReplacementOffset();
+            Point selection = viewer != null ? viewer.getSelectedRange() : null;
+            int length = caret - start + (selection != null ? selection.y : 0);
+            if (stateMask != null && (stateMask & COMPLETE_STATE_MASK) != 0)
+                length = cp.getReplaceContextLength();
+            if (start < 0 || length < 0 || start + length > document.getLength())
+                return false;
+            String text = replacement.substring(0, open + 1) + String.join(", ", arguments) //$NON-NLS-1$
+                + replacement.substring(close);
+            // Старый DataEvent хранит позиции пустых слотов. Вставка с подобранными
+            // аргументами получает свою модель с длинами фактических значений.
+            SmartContentAssistProcessor.clearCtorPendingApplyState();
+            IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+            document.replace(start, length, text);
+            inserted = true;
+            int position = start + open + 1;
+            templateSelection = new Point(position, arguments.get(0).length());
+            LinkedModeModel model = new LinkedModeModel();
+            for (int i = 0; i < arguments.size(); i++)
+            {
+                LinkedPositionGroup group = new LinkedPositionGroup();
+                group.addPosition(new LinkedPosition(document, position, arguments.get(i).length(), i));
+                model.addGroup(group);
+                position += arguments.get(i).length() + (i + 1 < arguments.size() ? 2 : 0);
+            }
+            model.forceInstall();
+            if (viewer != null)
+            {
+                LinkedModeUI ui = new LinkedModeUI(model, viewer);
+                ui.setExitPosition(viewer, position + 1, 0, Integer.MAX_VALUE);
+                ui.enter();
+            }
+            ContentAssistSessionReloader reloader = viewer instanceof SourceViewer source
+                ? ContentAssistSessionReloader.forViewer(source) : ContentAssistSessionReloader.getActiveReloader();
+            if (reloader != null)
+                reloader.scheduleParamHintForExistingCall(templateSelection.x);
+            return true;
+        }
+        catch (BadLocationException | RuntimeException error)
+        {
+            Global.tempLogException("call-arguments", "apply caret=" + caret + " inserted=" + inserted, error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return inserted;
+        }
     }
 
     private static ConfigurableCompletionProposal asConfigurable(ICompletionProposal proposal)

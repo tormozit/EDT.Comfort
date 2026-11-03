@@ -1017,6 +1017,10 @@ boolean inLiteral = endCaret >= 0
      */
     private void prepareStockLinkedModeBeforeAssistInsert(DocumentEvent event)
     {
+        Global.tempLog("call-arguments", "document.before offset=" + (event != null ? event.getOffset() : -1) //$NON-NLS-1$ //$NON-NLS-2$
+            + " text=" + (event != null ? event.getText() : null) //$NON-NLS-1$
+            + " selected=" + (lastAssistSelection != null ? lastAssistSelection.getClass().getName() : null) //$NON-NLS-1$
+            + " wrappedApply=" + SmartCompletionProposal.isAnyApplyInProgress()); //$NON-NLS-1$
         pendingBslDocumentListener = null;
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
@@ -1830,9 +1834,9 @@ boolean inLiteral = endCaret >= 0
             if (resource == null)
                 return "resourceNull"; //$NON-NLS-1$
             EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-            EObject obj = helper.resolveContainedElementAt(resource, caret);
+            EObject obj = BslNodeLookup.containedAt(helper, resource, caret);
             if (obj == null && caret > 0)
-                obj = helper.resolveContainedElementAt(resource, caret - 1);
+                obj = BslNodeLookup.containedAt(helper, resource, caret - 1);
             if (obj == null)
                 return "none"; //$NON-NLS-1$
             StringBuilder sb = new StringBuilder();

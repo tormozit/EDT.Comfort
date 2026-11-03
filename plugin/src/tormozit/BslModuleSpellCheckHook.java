@@ -1415,7 +1415,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                     break;
             }
             platformApiDeclaredNames = Collections.unmodifiableSet(declaredNames);
-            Global.tempLog("similar-name-fix", "catalog-v3 declared=" + declaredNames.size()); //$NON-NLS-1$ //$NON-NLS-2$
             PLATFORM_API_NAMES = names;
             return names;
         }
@@ -2690,7 +2689,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         private static List<Target> findTargets(XtextResource resource, int offset, String code)
         {
             URI uri = resource.getURI();
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+            ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
             if (uri == null || !uri.isPlatformResource() || leaf == null)
                 return List.of();
             IProject project = ResourcesPlugin.getWorkspace().getRoot()
@@ -3107,7 +3106,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             {
                 com._1c.g5.v8.dt.bsl.model.Method method = document.readOnly(
                     (IUnitOfWork<com._1c.g5.v8.dt.bsl.model.Method, XtextResource>) resource -> {
-                        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                        ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
                         EObject element = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
                         if (!isReturnCheck(resource, code, element instanceof com._1c.g5.v8.dt.bsl.model.Function))
                             return null;
@@ -3550,9 +3549,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 literalCheck = checkKind == 2;
                 unknownMethodCheck = checkKind == 3;
             }
-            Global.tempLog("similar-name-fix", "check code=" + code + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " unknownMethod=" + unknownMethodCheck + " queryField=" + queryFieldCheck //$NON-NLS-1$ //$NON-NLS-2$
-                + " onlyComfort=" + onlyComfortCheck); //$NON-NLS-1$
             if (literalCheck)
                 return similarLiteralProposal(document, offset, icon);
             if (onlyComfortCheck ? !queryFieldCheck
@@ -3562,7 +3558,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("similar-name-fix", "proposal failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -3573,7 +3568,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         return document.readOnly((IUnitOfWork<ICompletionProposal, XtextResource>) resource -> {
             if (resource.getParseResult() == null)
                 return null;
-            INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+            INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
             EObject semantic = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
             StringLiteral literal = semantic instanceof StringLiteral string ? string
                 : EcoreUtil2.getContainerOfType(semantic, StringLiteral.class);
@@ -3629,14 +3624,8 @@ public final class BslModuleSpellCheckHook implements IStartup
             return null;
         String typed = found.typed;
         NameMatch match = found.match;
-        String source = queryFields ? "queryFields" : "scopeOrTable"; //$NON-NLS-1$ //$NON-NLS-2$
         if (match == null && !queryFields)
-        {
-            source = "contentAssist"; //$NON-NLS-1$
             match = matchFromContentAssist(viewer, offset, typed);
-        }
-        Global.tempLog("similar-name-fix", "result-v2 typed=" + typed + " source=" + source //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " replacement=" + (match == null ? null : match.name)); //$NON-NLS-1$
         if (match == null)
             return null;
         if (match.exact)
@@ -3674,7 +3663,7 @@ public final class BslModuleSpellCheckHook implements IStartup
      */
     private static LockedNameLookup lookupNameUnderLock(XtextResource resource, int offset, boolean queryFields)
     {
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
+        ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(),
             offset);
         if (leaf == null)
         {
@@ -3695,14 +3684,8 @@ public final class BslModuleSpellCheckHook implements IStartup
         if (queryFields)
             return new LockedNameLookup(typed, matchInNames(BslQueryResultTypes.fieldNamesAt(resource, offset), typed));
         NameMatch match = matchFromScope(resource, leaf, typed);
-        String source = "scope"; //$NON-NLS-1$
         if (match == null)
-        {
-            source = "table"; //$NON-NLS-1$
             match = matchFromTable(resource, typed);
-        }
-        Global.tempLog("similar-name-fix", "lookup-v3 typed=" + typed + " source=" + source //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " candidate=" + (match == null ? null : match.name)); //$NON-NLS-1$
         return new LockedNameLookup(typed, match);
     }
 
@@ -3908,7 +3891,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("similar-name-fix", "contentAssist failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                // список подсказок недоступен - кандидатов из content assist нет
             }
         });
         ICompletionProposal[] raw = holder[0];
@@ -3927,8 +3910,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             // Подпись списка содержит написание имени для пользователя. Берём её
             // только для того же идентификатора, не затрагивая шаблоны и квалификаторы.
             String name = displayName.equalsIgnoreCase(replacementName) ? displayName : replacementName;
-            Global.tempLog("similar-name-fix", "assist-v2 replacement=" + replacementName //$NON-NLS-1$ //$NON-NLS-2$
-                + " display=" + displayName + " candidate=" + name); //$NON-NLS-1$ //$NON-NLS-2$
             baseNames.add(name);
         }
         return matchInNames(baseNames, typed);
@@ -3993,8 +3974,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         else if (declaration instanceof FormalParam param)
             name = param.getName();
         String result = name != null && indexedName.equalsIgnoreCase(name) ? name : indexedName;
-        Global.tempLog("similar-name-fix", "candidate indexed=" + indexedName + " declared=" + name //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " replacement=" + result); //$NON-NLS-1$
         return result;
     }
 

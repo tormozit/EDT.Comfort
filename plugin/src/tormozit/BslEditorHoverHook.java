@@ -767,7 +767,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             if (resource == null)
                 return info;
-            EObject source = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+            EObject source = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, offset);
             return ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource);
         });
         return recovered != null ? recovered : info;
@@ -1040,7 +1040,7 @@ public final class BslEditorHoverHook implements IStartup
                         IParseResult parseResult = resource != null ? resource.getParseResult() : null;
                         if (parseResult == null)
                             return null;
-                        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parseResult.getRootNode(), offset);
+                        ILeafNode leaf = BslNodeLookup.leafAt(parseResult.getRootNode(), offset);
                         if (leaf == null)
                             return null;
                         String token = leaf.getText();
@@ -1057,6 +1057,10 @@ public final class BslEditorHoverHook implements IStartup
                         else if (!caret && keywordValue != null && !keywordValue.isEmpty()
                             && Character.isLetter(keywordValue.charAt(0)) && !whitelisted)
                             reason = "keyword"; //$NON-NLS-1$
+                        // SEMICOLON — терминал, а не Keyword: на нём EDT возвращает
+                        // справку по внешней конструкции (например, Если).
+                        else if (!caret && ";".equals(token)) //$NON-NLS-1$
+                            reason = "semicolon"; //$NON-NLS-1$
                         else if (!caret && stringLiteral)
                             reason = "string"; //$NON-NLS-1$
                         else
@@ -1339,7 +1343,7 @@ public final class BslEditorHoverHook implements IStartup
                 return;
             document.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
                 EObject object = resource == null ? null
-                    : new EObjectAtOffsetHelper().resolveContainedElementAt(resource, region.getOffset());
+                    : BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, region.getOffset());
                 com._1c.g5.v8.dt.bsl.model.FeatureAccess access = null;
                 for (EObject current = object; current != null && access == null; current = current.eContainer())
                 {
@@ -1397,7 +1401,7 @@ public final class BslEditorHoverHook implements IStartup
                 return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
                     if (resource == null)
                         return null;
-                    EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource,
+                    EObject object = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource,
                         region.getOffset());
                     com._1c.g5.v8.dt.bsl.model.Method method = null;
                     for (EObject current = object; current != null && method == null; current = current.eContainer())
@@ -1405,7 +1409,7 @@ public final class BslEditorHoverHook implements IStartup
                             method = candidate;
                     if (method == null || method.getName() == null)
                         return null;
-                    ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
+                    ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(),
                         region.getOffset());
                     if (leaf == null || !method.getName().equalsIgnoreCase(leaf.getText()))
                         return null;
@@ -1610,7 +1614,7 @@ public final class BslEditorHoverHook implements IStartup
             int hoverStart = hoverRegion.getOffset();
             int hoverEnd = hoverStart + hoverRegion.getLength();
             EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-            EObject obj = helper.resolveContainedElementAt(resource, hoverStart);
+            EObject obj = BslNodeLookup.containedAt(helper, resource, hoverStart);
             for (EObject cur = obj; cur != null; cur = cur.eContainer())
             {
                 StaticFeatureAccess access = asCreatingAccess(cur);
@@ -1647,7 +1651,7 @@ public final class BslEditorHoverHook implements IStartup
         {
             org.eclipse.xtext.resource.EObjectAtOffsetHelper helper =
                 new org.eclipse.xtext.resource.EObjectAtOffsetHelper();
-            org.eclipse.emf.ecore.EObject obj = helper.resolveContainedElementAt(resource, caret);
+            org.eclipse.emf.ecore.EObject obj = BslNodeLookup.containedAt(helper, resource, caret);
             for (org.eclipse.emf.ecore.EObject cur = obj; cur != null; cur = cur.eContainer())
             {
                 if (cur instanceof com._1c.g5.v8.dt.bsl.model.Invocation

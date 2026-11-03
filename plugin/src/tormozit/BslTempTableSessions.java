@@ -1113,8 +1113,7 @@ public final class BslTempTableSessions
         {
             if (resource == null)
                 return EMPTY;
-            EObject object = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
-                .resolveContainedElementAt(resource, openQuote + 1);
+            EObject object = BslNodeLookup.containedAt(new org.eclipse.xtext.resource.EObjectAtOffsetHelper(), resource, openQuote + 1);
             StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
             var lines = literal == null ? List.<INode>of()
                 : NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);

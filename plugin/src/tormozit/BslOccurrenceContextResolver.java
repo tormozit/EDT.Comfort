@@ -1123,7 +1123,7 @@ public final class BslOccurrenceContextResolver
     {
         if (resource.getParseResult() == null || resource.getParseResult().getRootNode() == null)
             return null;
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
         return leaf != null ? leaf.getSemanticElement() : null;
     }
 

@@ -400,9 +400,9 @@ public class SmartOutlineHook implements IStartup {
     private static void applySmartSearch(TreeViewer viewer, Control filterControl, String shellTitle,
             String dialogName, Object dialog, Shell patchedShell)
     {
-        for (ViewerFilter filter : viewer.getFilters()) {
-            viewer.removeFilter(filter);
-        }
+        // Один refresh вместо refresh на каждый фильтр (большая схема модуля).
+        if (viewer.getFilters().length > 0)
+            viewer.setFilters(new ViewerFilter[0]);
 
         IBaseLabelProvider rawLp = resolveNativeLabelProvider(viewer, dialog, viewer.getLabelProvider());
         restoreCheckStateProvider(viewer, dialog);

@@ -194,7 +194,7 @@ public final class DebugInspectHandler extends AbstractHandler
             IParseResult parseResult = resource == null ? null : resource.getParseResult();
             if (parseResult == null || parseResult.getRootNode() == null)
                 return null;
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parseResult.getRootNode(), offset);
+            ILeafNode leaf = BslNodeLookup.leafAt(parseResult.getRootNode(), offset);
             if (leaf == null || leaf.isHidden())
                 return null;
 

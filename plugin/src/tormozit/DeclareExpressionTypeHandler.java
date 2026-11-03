@@ -147,7 +147,7 @@ public final class DeclareExpressionTypeHandler
             if (caret > 0 && Character.isJavaIdentifierPart(document.getChar(caret - 1))
                 && (caret == document.getLength() || !Character.isJavaIdentifierPart(document.getChar(caret))))
                 lookup = caret - 1;
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), lookup);
+            ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), lookup);
             if (leaf == null)
                 return null;
             EObject object = NodeModelUtils.findActualSemanticObjectFor(leaf);
@@ -470,6 +470,9 @@ public final class DeclareExpressionTypeHandler
                     int limit = line.getOffset() + line.getLength();
                     while (offset < limit && Character.isWhitespace(document.getChar(offset)))
                         offset++;
+                    Edit link = linkTypeEdit(document, offset, limit);
+                    if (link != null)
+                        return link;
                     if (!old)
                     {
                         if (offset < limit && document.getChar(offset) == '-')
@@ -495,6 +498,8 @@ public final class DeclareExpressionTypeHandler
             {
                 IRegion line = document.getLineInformationOfOffset(starts.get(section.getLineNumber()));
                 end = line.getOffset() + line.getLength();
+                if (parameter != null)
+                    end = parameterInsertOffset(document, comment, parameter, starts, end);
                 if (parameter == null && section.getLineNumber() + 1 < starts.size())
                 {
                     int next = starts.get(section.getLineNumber() + 1);
@@ -558,6 +563,89 @@ public final class DeclareExpressionTypeHandler
                 selection++;
             }
             return new Edit(end, text, selection, 0);
+        }
+
+        /**
+         * Тип, заданный ссылкой «см. Цель» сразу после имени параметра: у поля нет своей TypeSection,
+         * поэтому он не виден через {@link #targetType}. Выделяем ссылку целиком как старый тип.
+         */
+        private static Edit linkTypeEdit(IDocument document, int offset, int limit) throws BadLocationException
+        {
+            int pos = offset;
+            while (pos < limit && (document.getChar(pos) == '-' || document.getChar(pos) == '['
+                || Character.isWhitespace(document.getChar(pos))))
+                pos++;
+            String rest = document.get(pos, limit - pos);
+            String lower = rest.toLowerCase(java.util.Locale.ROOT);
+            int keyword = lower.startsWith("см.") ? 3 : lower.startsWith("see ") ? 4 : 0;
+            if (keyword == 0)
+                return null;
+            int end = keyword;
+            while (end < rest.length() && Character.isWhitespace(rest.charAt(end)))
+                end++;
+            int targetStart = end;
+            while (end < rest.length() && !Character.isWhitespace(rest.charAt(end)) && rest.charAt(end) != ']'
+                && rest.charAt(end) != ',')
+                end++;
+            if (end == targetStart)
+                return null;
+            return new Edit(0, "", pos, end);
+        }
+
+        /**
+         * Место вставки описания нового параметра в раздел «Параметры:» по порядку сигнатуры: после
+         * ближайшего предыдущего уже описанного параметра (вместе с его вложенными строками), иначе перед
+         * ближайшим следующим, иначе в конец раздела. Возвращает конец строки, после которой вставляем.
+         */
+        private static int parameterInsertOffset(IDocument document, BslDocumentationComment comment,
+            FormalParam parameter, List<Integer> starts, int headerEnd) throws BadLocationException
+        {
+            var section = comment.getParametersSection();
+            int header = section.getLineNumber();
+            int sectionLast = starts.size() - 1;
+            for (var next : new Object[] { comment.getReturnSection(), comment.getExampleSection(),
+                comment.getCallOptionsSection() })
+            {
+                int nextLine = next instanceof BslDocumentationComment.Section other ? other.getLineNumber() : -1;
+                if (nextLine > header)
+                    sectionLast = Math.min(sectionLast, nextLine - 1);
+            }
+            List<FormalParam> signature = parameter.eContainer() instanceof Method method
+                ? method.getFormalParams() : List.of();
+            int index = signature.indexOf(parameter);
+            for (int i = index - 1; i >= 0; i--)
+            {
+                var field = section.getParameterByName(signature.get(i).getName());
+                if (field == null)
+                    continue;
+                int upper = sectionLast;
+                for (var other : section.getParameterDefinitions())
+                    if (other.getLineNumber() > field.getLineNumber())
+                        upper = Math.min(upper, other.getLineNumber() - 1);
+                return lastNonBlankLineEnd(document, starts, field.getLineNumber(), upper, headerEnd);
+            }
+            for (int i = index + 1; i < signature.size(); i++)
+            {
+                var field = section.getParameterByName(signature.get(i).getName());
+                if (field == null)
+                    continue;
+                return lastNonBlankLineEnd(document, starts, header, field.getLineNumber() - 1, headerEnd);
+            }
+            return lastNonBlankLineEnd(document, starts, header, sectionLast, headerEnd);
+        }
+
+        /** Конец последней непустой строки в диапазоне {@code (from..upper]}; иначе — {@code fallback}. */
+        private static int lastNonBlankLineEnd(IDocument document, List<Integer> starts, int from, int upper,
+            int fallback) throws BadLocationException
+        {
+            for (int last = upper; last >= from; last--)
+            {
+                IRegion line = document.getLineInformationOfOffset(starts.get(last));
+                String content = document.get(starts.get(last), line.getOffset() + line.getLength() - starts.get(last));
+                if (last == from || !content.substring(2).isBlank())
+                    return line.getOffset() + line.getLength();
+            }
+            return fallback;
         }
 
         /** Копируем пробелы и табуляции после // без пересчёта в экранные колонки. */

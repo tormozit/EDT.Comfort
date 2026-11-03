@@ -97,7 +97,7 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
             if (resource == null || resource.getParseResult() == null)
                 return null;
             var root = resource.getParseResult().getRootNode();
-            var leaf = NodeModelUtils.findLeafNodeAtOffset(root, selection.x);
+            var leaf = BslNodeLookup.leafAt(root, selection.x);
             if (leaf == null)
                 return null;
             // Круглые/квадратные скобки штатный обработчик проверяет раньше логических.

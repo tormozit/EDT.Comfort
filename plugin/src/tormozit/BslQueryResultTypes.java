@@ -180,14 +180,14 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         if (resource.getContents().isEmpty()
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(resource.getContents().get(0)))
             return false;
-        EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+        EObject object = BslNodeLookup.resolveContainedElementAt(resource, offset);
         DynamicFeatureAccess access = EcoreUtil2.getContainerOfType(object, DynamicFeatureAccess.class);
         Method method = access == null ? null : EcoreUtil2.getContainerOfType(access, Method.class);
         if (method == null || access.eContainer() instanceof Invocation invocation
             && invocation.getMethodAccess() == access)
             return false;
         ICompositeNode node = NodeModelUtils.findActualNodeFor(access);
-        var leaf = node == null ? null : NodeModelUtils.findLeafNodeAtOffset(node, offset);
+        var leaf = node == null ? null : BslNodeLookup.findLeafNodeAtOffset(node, offset);
         if (leaf == null || leaf.isHidden() || !leaf.getText().equalsIgnoreCase(access.getName()))
             return false;
         Plan plan = new Plan(method, ""); //$NON-NLS-1$
@@ -208,7 +208,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return List.of();
         synchronized (lock)
         {
-            EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+            EObject object = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, offset);
             DynamicFeatureAccess access = EcoreUtil2.getContainerOfType(object, DynamicFeatureAccess.class);
             Method method = access == null ? null : EcoreUtil2.getContainerOfType(access, Method.class);
             Session session = session(resource, false);
@@ -282,7 +282,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             return null;
         }
-        EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+        EObject object = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, offset);
         StringLiteral argument = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
         if (argument == null || !(argument.eContainer() instanceof Invocation invocation)
             || invocation.getParams().indexOf(argument) != 0
@@ -506,7 +506,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 resource.getContents().isEmpty() ? null : resource.getContents().get(0)))
             return;
         Method method = EcoreUtil2.getContainerOfType(
-            new EObjectAtOffsetHelper().resolveContainedElementAt(xtext, offset), Method.class);
+            BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), xtext, offset), Method.class);
         ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
         if (node == null)
             return;

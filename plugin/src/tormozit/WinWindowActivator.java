@@ -1132,6 +1132,8 @@ public final class WinWindowActivator
 
     private static void showAndActivate(HWND hwnd)
     {
+        Global.tempLog("error-dialog-964", "activate begin target=" + hwnd //$NON-NLS-1$ //$NON-NLS-2$
+            + " foreground=" + User32.INSTANCE.GetForegroundWindow()); //$NON-NLS-1$
         if (isMinimized(hwnd))
             User32.INSTANCE.ShowWindow(hwnd, WinUser.SW_RESTORE);
         else
@@ -1142,18 +1144,28 @@ public final class WinWindowActivator
         int targetThreadId = User32.INSTANCE.GetWindowThreadProcessId(hwnd, null);
 
         boolean attached = fgThreadId != 0 && targetThreadId != 0 && fgThreadId != targetThreadId;
+        Global.tempLog("error-dialog-964", "activate after-show target=" + hwnd + " foreground=" + fg //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " foregroundThread=" + fgThreadId + " targetThread=" + targetThreadId + " attachNeeded=" + attached); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (attached)
-            User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), true);
+        {
+            boolean result = User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), true);
+            Global.tempLog("error-dialog-964", "attach result=" + result + " error=" + Native.getLastError()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
 
         try
         {
             User32.INSTANCE.BringWindowToTop(hwnd);
             User32.INSTANCE.SetForegroundWindow(hwnd);
+            Global.tempLog("error-dialog-964", "activate end target=" + hwnd //$NON-NLS-1$ //$NON-NLS-2$
+                + " foreground=" + User32.INSTANCE.GetForegroundWindow()); //$NON-NLS-1$
         }
         finally
         {
             if (attached)
-                User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), false);
+            {
+                boolean result = User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), false);
+                Global.tempLog("error-dialog-964", "detach result=" + result + " error=" + Native.getLastError()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
         }
     }
 }

@@ -548,7 +548,6 @@ final class QueryBracketSupport
         {
             if (editor == null || decoration == null || !PlatformUI.isWorkbenchRunning())
             {
-                Global.tempLog("query-bracket-pair", "repaint skip unbound"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
@@ -559,8 +558,6 @@ final class QueryBracketSupport
                 // После dispose рисовальщик сбрасывает fMatcher — тогда рисовать нечего.
                 boolean ours = painter instanceof MatchingCharacterPainter
                     && Global.getField(painter, "fMatcher") == this; //$NON-NLS-1$
-                Global.tempLog("query-bracket-pair", "repaint widget=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (widget != null && !widget.isDisposed()) + " painter=" + (painter != null) + " ours=" + ours); //$NON-NLS-1$ //$NON-NLS-2$
                 if (widget != null && !widget.isDisposed() && ours)
                     ((MatchingCharacterPainter)painter).paint(IPainter.INTERNAL);
             });

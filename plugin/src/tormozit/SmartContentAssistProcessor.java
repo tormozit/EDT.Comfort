@@ -9999,6 +9999,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                             }
                         }
                     }
+                    // До снятия метки задания и публикации: повторный запрос не должен
+                    // запустить второй расчёт, пока готовится базовая часть списка.
+                    if (raw != null && !monitor.isCanceled()
+                        && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
+                        raw = BslExpectedTypePremiums.prepareMemberList(doc, probeOffset, raw);
                     // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
                     // неудачи повторный расчёт для той же точки уже не запустится.
                     if (memberStockBackgroundGen == contextGen
@@ -11718,9 +11723,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         try
         {
             EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-            EObject obj = helper.resolveContainedElementAt(resource, caret);
+            EObject obj = BslNodeLookup.containedAt(helper, resource, caret);
             if (obj == null && caret > 0)
-                obj = helper.resolveContainedElementAt(resource, caret - 1);
+                obj = BslNodeLookup.containedAt(helper, resource, caret - 1);
             Set<EObject> seen = Collections.newSetFromMap(new IdentityHashMap<>());
             while (obj != null && !obj.eIsProxy() && !(obj instanceof StaticFeatureAccess)
                 && seen.add(obj))
@@ -11942,8 +11947,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         int c2 = BslExpectedTypePremiums.premiumOf(p2);
         if (c1 != c2)
             return Integer.compare(c2, c1);
-        boolean added1 = unwrapProposal(p1) instanceof BslAddedWordProposal;
-        boolean added2 = unwrapProposal(p2) instanceof BslAddedWordProposal;
+        boolean added1 = unwrapProposal(p1) instanceof BslAddedWordProposal word1 && !word1.isRankedWithStock();
+        boolean added2 = unwrapProposal(p2) instanceof BslAddedWordProposal word2 && !word2.isRankedWithStock();
         return added1 == added2 ? 0 : added1 ? -1 : 1;
     }
 
@@ -12750,11 +12755,11 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             ICompositeNode root = resource.getParseResult().getRootNode();
             if (root == null)
                 return null;
-            INode at = NodeModelUtils.findLeafNodeAtOffset(root, offset);
+            INode at = BslNodeLookup.leafAt(root, offset);
             if (at != null)
                 return at;
             if (offset > 0)
-                return NodeModelUtils.findLeafNodeAtOffset(root, offset - 1);
+                return BslNodeLookup.leafAt(root, offset - 1);
             return null;
         }
 

@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.List;
+
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
@@ -79,6 +81,11 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     private final boolean projectWord;
     /** Слово провайдера литералов: живёт в его списке, вне снимка премий BSL. */
     private boolean suppliedByLiteralProvider;
+    /** Слово ранжируется наравне со строками EDT: при равной премии не поднимается выше них. */
+    private boolean rankedWithStock;
+    /** Член найден в тексте метода, его наличие у приёмника EDT не подтверждает. */
+    private boolean ghostMember;
+    private List<String> inferredTypes = List.of();
     private String additionalInfo;
     private Point selection;
     private int extractOffset = -1;
@@ -118,11 +125,41 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         return proposal;
     }
 
+    static BslAddedWordProposal ghostMember(String name, boolean method, List<String> types)
+    {
+        BslAddedWordProposal proposal = new BslAddedWordProposal(name, method ? Kind.METHOD : Kind.PROPERTY,
+            method ? name + "(<?>)" : name, Absorb.WORD, -1, null, null, false, true, false); //$NON-NLS-1$
+        proposal.ghostMember = true;
+        proposal.inferredTypes = List.copyOf(types);
+        return proposal.rankedWithStock();
+    }
+
     /** Описание синтетического слова, независимое от текста вставки. */
     BslAddedWordProposal withAdditionalInfo(String info)
     {
         additionalInfo = info;
         return this;
+    }
+
+    BslAddedWordProposal rankedWithStock()
+    {
+        rankedWithStock = true;
+        return this;
+    }
+
+    boolean isRankedWithStock()
+    {
+        return rankedWithStock;
+    }
+
+    boolean isGhostMember()
+    {
+        return ghostMember;
+    }
+
+    List<String> getInferredTypes()
+    {
+        return inferredTypes;
     }
 
     boolean isSuppliedByLiteralProvider()
@@ -423,7 +460,12 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     @Override
     public String getDisplayString()
     {
-        return word;
+        return word + typeSuffix();
+    }
+
+    private String typeSuffix()
+    {
+        return inferredTypes.isEmpty() ? "" : " : <" + String.join(" | ", inferredTypes) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     @Override
@@ -432,12 +474,38 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         StyledString styled = new StyledString(word);
         SmartCodeMatcher matcher = new SmartCodeMatcher(SmartFilterTracker.getCurrentFilter());
         SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(word));
+        styled.append(typeSuffix(), StyledString.DECORATIONS_STYLER);
         return styled;
     }
 
     @Override
     public Image getImage()
     {
+        if (ghostMember)
+        {
+            String key = "tormozit.completion.ghostMember"; //$NON-NLS-1$
+            var registry = Activator.getDefault().getImageRegistry();
+            if (registry.getDescriptor(key) == null)
+            {
+                // PLUGIN_ID — ключ настроек, а не Bundle-SymbolicName.
+                var url = Activator.getDefault().getBundle().getEntry("icons/obj16/ghost_member.png"); //$NON-NLS-1$
+                if (url != null)
+                {
+                    var descriptor = org.eclipse.jface.resource.ImageDescriptor.createFromURL(url);
+                    var data = descriptor.getImageData(100);
+                    if (data != null)
+                    {
+                        // Приглушённый силуэт: различим на обеих темах, не перетягивает внимание с имени.
+                        for (int y = 0; y < data.height; y++)
+                            for (int x = 0; x < data.width; x++)
+                                data.setAlpha(x, y, data.getAlpha(x, y) / 2);
+                        descriptor = org.eclipse.jface.resource.ImageDescriptor.createFromImageData(data);
+                    }
+                    registry.put(key, descriptor);
+                }
+            }
+            return registry.get(key);
+        }
         return BslSharedImages.getImage(kind == Kind.METHOD ? BslSharedImages.IMG_EXTERNAL_FUNC
             : kind == Kind.PROPERTY ? BslSharedImages.IMG_EXTERNAL_PROPERTY : BslSharedImages.IMG_STATEMENT_BLOCK);
     }
@@ -446,6 +514,11 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     @Override
     public String getAdditionalProposalInfo()
     {
+        if (ghostMember)
+        {
+            return "Добавлено, т.к. использовано в других выражениях метода" //$NON-NLS-1$
+                + (inferredTypes.isEmpty() ? "" : "\n\nТип: <" + String.join(" | ", inferredTypes) + ">"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        }
         if (additionalInfo != null)
         {
             Global.tempLog("common-module-group-hint", "side word=" + word); //$NON-NLS-1$ //$NON-NLS-2$

@@ -74,6 +74,7 @@ public class Activator extends AbstractUIPlugin
         instance = this;
         RightsEditDialogHook.start(context);
         BuiltinCheckReplacements.start(context);
+        UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
         CheckThreadPriority.start();
@@ -88,6 +89,7 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentComputedTypes.installWeavingHook();
         BslDocCommentDescriptionFix.installWeavingHook();
         BslDocCommentTypeMerge.installWeavingHook();
+        BslTemplateTypes.installWeavingHook();
         BslQueryLiteralSupport.installCheckWeavingHook();
         BslOccurrenceMarkerHook.installLiteralCallbacks();
         BslEditorFoldingHook.install();
@@ -231,7 +233,9 @@ public class Activator extends AbstractUIPlugin
         BslDocCommentDescriptionFix.install();
         BslFormTypeContextEnrichment.installAttributeTypes();
         BslTypesComputerHook.install();
+        BslTemplateTypes.install();
         BslDocCommentTypeMerge.install();
+        BslLiteralValues.installTypeNameCache();
         BslXtextDocumentHook.install();
         QueryParameterAutoCloseFix.install();
     }
@@ -239,9 +243,11 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        BslLiteralValues.stopTypeNameCache();
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
+        UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
         IRApplication.disconnectAll();
@@ -270,6 +276,8 @@ public class Activator extends AbstractUIPlugin
         /** Суффикс ключа очереди: отложенные шлюзом контексты не вытесняют прочие уведомления проекта. */
         private static final String GATE_KEY = "\tgate"; //$NON-NLS-1$
         private static final long INTERVAL_NS = 60_000_000_000L;
+        /** Порог шлюза раннего бандла ({@code MassChanges.THRESHOLD}): меньшее число отложенных объектов не предлагаем. */
+        private static final int GATE_OFFER_MIN_OBJECTS = 100;
         private static final java.util.concurrent.ConcurrentMap<String, Object[]> pending =
             new java.util.concurrent.ConcurrentHashMap<>();
         private static final java.util.concurrent.atomic.AtomicBoolean posted =
@@ -417,8 +425,9 @@ public class Activator extends AbstractUIPlugin
                         DeferredCheckContexts.add(project, contexts);
                         int objects = DeferredCheckContexts.objectCount(project);
                         Display display = Display.getDefault();
-                        // Всё отложенное уже прошло шлюз (например, объект открыли) — предлагать нечего
-                        if (objects > 0 && display != null && !display.isDisposed())
+                        // Всё отложенное уже прошло шлюз (например, объект открыли) — предлагать нечего;
+                        // меньше порога — отложено штатным «Отключить массовые проверки», не шлюзом
+                        if (objects >= GATE_OFFER_MIN_OBJECTS && display != null && !display.isDisposed())
                             display.asyncExec(() -> showGateOffer(project, objects, String.valueOf(event[1]), autoHide));
                         return org.eclipse.core.runtime.Status.OK_STATUS;
                     });
@@ -671,6 +680,93 @@ public class Activator extends AbstractUIPlugin
         {
             // Уже преобразованный класс продолжает обращаться к callback после остановки бандла.
             System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)ICheckSettings::isEnabled);
+        }
+    }
+
+    /**
+     * Проверки (любые, штатные и Комфорта) не держат UI. Проверка открытого модуля идёт в задании проверки редактора
+     * внутри {@code readOnly} документа BSL — это монитор одного объекта на документ, и любое чтение
+     * документа из UI (переход к определению, закрытие редактора) ждёт конца всего прохода проверок.
+     * Ранний бандл ({@code CheckDurations}) отдаёт каждой проверке монитор из этой функции. Когда поток
+     * UI ждёт монитор, захваченный потоком проверки (опрос — перед запуском каждой проверки и при каждом
+     * {@code isCanceled} не чаще {@link #PROBE_PERIOD_NS}), проверка считается отменённой, задание
+     * проверки отменяется (аннотации и маркеры остаются прежними, монитор документа освобождается)
+     * и планируется заново через {@link #DELAY_MS}. Проверки вне задания проверки редактора
+     * (полная перепроверка, производные данные) не трогаются: их некому перезапустить.
+     */
+    private static final class UiWaitCheckDeferral
+    {
+        private static final String CALLBACK = "tormozit.checkDuration.monitor"; //$NON-NLS-1$
+        private static final long PROBE_PERIOD_NS = 50_000_000L;
+        private static final long DELAY_MS = 1_000L;
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)(check, monitor) ->
+            {
+                if (check == null || !(monitor instanceof org.eclipse.core.runtime.IProgressMonitor progress))
+                    return monitor;
+                Monitor wrapped = new Monitor(progress);
+                // Проверка перед запуском: штатная проверка может не опрашивать монитор вовсе.
+                wrapped.isCanceled();
+                return wrapped;
+            });
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный CheckExecutor продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)(check, monitor) -> monitor);
+        }
+
+        /** Поток UI ждёт монитор или блокировку, которыми владеет текущий поток. */
+        private static boolean uiWaitsForCurrentThread()
+        {
+            if (!org.eclipse.ui.PlatformUI.isWorkbenchRunning())
+                return false;
+            Display display = org.eclipse.ui.PlatformUI.getWorkbench().getDisplay();
+            Thread ui = display == null || display.isDisposed() ? null : display.getThread();
+            if (ui == null || ui == Thread.currentThread())
+                return false;
+            Thread.State state = ui.getState();
+            if (state != Thread.State.BLOCKED && state != Thread.State.WAITING && state != Thread.State.TIMED_WAITING)
+                return false;
+            java.lang.management.ThreadInfo info =
+                java.lang.management.ManagementFactory.getThreadMXBean().getThreadInfo(ui.getId());
+            return info != null && info.getLockOwnerId() == Thread.currentThread().getId();
+        }
+
+        private static final class Monitor extends org.eclipse.core.runtime.ProgressMonitorWrapper
+        {
+            private long nextProbe = System.nanoTime();
+            private volatile boolean deferred;
+
+            Monitor(org.eclipse.core.runtime.IProgressMonitor monitor)
+            {
+                super(monitor);
+            }
+
+            @Override
+            public boolean isCanceled()
+            {
+                if (deferred || super.isCanceled())
+                    return true;
+                long now = System.nanoTime();
+                if (now - nextProbe < 0)
+                    return false;
+                nextProbe = now + PROBE_PERIOD_NS;
+                if (!uiWaitsForCurrentThread())
+                    return false;
+                org.eclipse.core.runtime.jobs.Job job = org.eclipse.core.runtime.jobs.Job.getJobManager().currentJob();
+                boolean editorValidation = job != null && job.getClass().getName().endsWith("ValidationJob"); //$NON-NLS-1$
+                if (!editorValidation)
+                    return false;
+                deferred = true;
+                setCanceled(true);
+                job.cancel();
+                job.schedule(DELAY_MS);
+                return true;
+            }
         }
     }
 

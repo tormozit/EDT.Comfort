@@ -57,24 +57,13 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
     protected void check(Object object, ResultAcceptor acceptor, ICheckParameters parameters,
         IProgressMonitor monitor)
     {
-        if (TEMPORARILY_DISABLED_FOR_CPU_COMPARISON)
-        {
+        if (TEMPORARILY_DISABLED_FOR_CPU_COMPARISON || !TypeUtil.isStringLiteralContentTypesEnabled())
             return;
-        }
-        if (!TypeUtil.isStringLiteralContentTypesEnabled())
-        {
-            return;
-        }
         if (!(object instanceof Module module) || !(module.eResource() instanceof XtextResource)
             || monitor.isCanceled())
-        {
             return;
-        }
         if (OpenModulesOnly.skip(module, parameters))
-        {
             return;
-        }
-        // Один проход на модуль: узлы, текст и исходные методы общие для всех литералов модуля.
         BslLiteralValues.Pass pass = new BslLiteralValues.Pass();
         TreeIterator<EObject> all = module.eAllContents();
         while (all.hasNext() && !monitor.isCanceled() && TypeUtil.isStringLiteralContentTypesEnabled())
@@ -85,7 +74,8 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
             for (String value : BslLiteralValues.unknownLiteralValues(literal,
                 () -> monitor.isCanceled() || !TypeUtil.isStringLiteralContentTypesEnabled(), pass))
             {
-                acceptor.addIssue("Литерал «" + value + "» отсутствует в списке допустимых значений", literal);
+                String message = "Литерал «" + value + "» отсутствует в списке допустимых значений";
+                acceptor.addIssue(message, literal);
             }
             for (String message : BslLiteralValues.stockOutsideMessages(literal))
                 acceptor.addIssue(message, literal);

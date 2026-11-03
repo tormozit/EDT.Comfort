@@ -234,6 +234,8 @@ public final class ProblemViewHook implements IStartup
     private static final Map<IViewPart, IProject> comfortAppliedProject = new WeakHashMap<>();
     /** Штатные имена панели по {@code MPart} / {@code MPartDescriptor} — см. {@link #stockLabel}. */
     private static final Map<Object, String> stockLabels = new WeakHashMap<>();
+    /** Окна, где уже стоит слушатель частей: активация окна (закрытие каждого всплывающего окна) не добавляет новый. */
+    private static final Map<IWorkbenchWindow, Boolean> hookedWindows = new WeakHashMap<>();
 
     private static volatile boolean installed;
 
@@ -433,7 +435,7 @@ public final class ProblemViewHook implements IStartup
 
     private static void hookWindow(IWorkbenchWindow window)
     {
-        if (window == null)
+        if (window == null || hookedWindows.put(window, Boolean.TRUE) != null)
             return;
         for (IWorkbenchPage page : window.getPages())
         {

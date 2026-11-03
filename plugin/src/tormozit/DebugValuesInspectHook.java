@@ -116,6 +116,7 @@ public final class DebugValuesInspectHook implements IStartup
             return;
         }
 
+        OutputListCommand.attach(table);
         ensureMenuListener(view, table, menu);
         scheduleMenuAugment(table, view);
         DebugValuesDebug.perfSlow("MenuDetect", start, DebugValuesDebug.tableBrief(table)); //$NON-NLS-1$

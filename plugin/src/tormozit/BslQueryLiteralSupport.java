@@ -301,7 +301,12 @@ final class BslQueryLiteralSupport
                     || !doc.get().equals(resource.getParseResult().getRootNode().getText()))
                     return null;
                 Map<Integer, String> indices = new HashMap<>();
-                var objects = resource.getAllContents();
+                // Не resource.getAllContents(): getContents() ставит производное состояние BSL
+                // (ForkJoin на десятки секунд для большого модуля) прямо в UI при открытии редактора.
+                var root = resource.getParseResult().getRootASTElement();
+                if (root == null)
+                    return null;
+                var objects = root.eAllContents();
                 while (objects.hasNext())
                 {
                     if (Thread.currentThread().isInterrupted())
@@ -1129,7 +1134,7 @@ final class BslQueryLiteralSupport
         if (parsed == null || !parsed.isQuery() || module.getParseResult() == null)
             return ""; //$NON-NLS-1$
         var helper = module.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
-        StringLiteral literal = EcoreUtil2.getContainerOfType(helper.resolveContainedElementAt(module, offset),
+        StringLiteral literal = EcoreUtil2.getContainerOfType(BslNodeLookup.containedAt(helper, module, offset),
             StringLiteral.class);
         if (literal == null)
             return ""; //$NON-NLS-1$
@@ -1344,11 +1349,7 @@ final class BslQueryLiteralSupport
         {
             if (stamped.getModificationStamp() != cache.stamp())
                 return Status.OK_STATUS;
-            long started = System.nanoTime();
             IRegion pair = queryBracketPair(doc, offset);
-            Global.tempLog("query-bracket-pair", "job offset=" + offset + " ms=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (System.nanoTime() - started) / 1_000_000L + " pair=" + pair //$NON-NLS-1$
-                + " stale=" + (stamped.getModificationStamp() != cache.stamp())); //$NON-NLS-1$
             // Текст сменился во время расчёта — пара может относиться к старому тексту.
             if (stamped.getModificationStamp() != cache.stamp())
                 return Status.OK_STATUS;
@@ -1365,27 +1366,14 @@ final class BslQueryLiteralSupport
             return null;
         return xtext.tryReadOnly(resource ->
         {
-            try
+            if (resource == null || resource.getParseResult() == null)
             {
-                if (resource == null || resource.getParseResult() == null)
-                {
-                    Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " resource=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (resource == null ? "null" : "noParse")); //$NON-NLS-1$ //$NON-NLS-2$
-                    return null;
-                }
-                var helper = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
-                EObject object = helper.resolveContainedElementAt(resource, offset);
-                StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
-                Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
-                    + " object=" + (object == null ? "null" : object.eClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " literal=" + (literal != null)); //$NON-NLS-1$
-                return literal == null ? null : QueryBrackets.find(literal, offset, symbols);
+                return null;
             }
-            catch (RuntimeException error)
-            {
-                Global.tempLog("query-bracket-pair", "ranges offset=" + offset + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
-                throw error;
-            }
+            var helper = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
+            EObject object = BslNodeLookup.containedAt(helper, resource, offset);
+            StringLiteral literal = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
+            return literal == null ? null : QueryBrackets.find(literal, offset, symbols);
         });
     }
 
@@ -1397,7 +1385,6 @@ final class BslQueryLiteralSupport
             var lines = NodeModelUtils.findNodesForFeature(literal, BslPackage.Literals.STRING_LITERAL__LINES);
             if (lines.isEmpty())
             {
-                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " lines=0"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
             DefaultStringLiteralTextProvider text = new DefaultStringLiteralTextProvider(literal);
@@ -1416,35 +1403,15 @@ final class BslQueryLiteralSupport
             }
             if (validation == null)
             {
-                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
-                    + " validation=none query=" + escapeForLog(query)); //$NON-NLS-1$
                 return null;
             }
             int base = lines.get(0).getOffset();
             int rawQueryOffset = queryOffset(text, literal, base, moduleOffset, query.length());
             if (rawQueryOffset < 0)
             {
-                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
-                    + " base=" + base + " queryOffset=-1 query=" + escapeForLog(query)); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             }
             int queryOffset = lineEndingOffset(query, rawQueryOffset, validation.query());
-            {
-                StringBuilder map = new StringBuilder();
-                for (int i = Math.max(0, rawQueryOffset - 3); i <= Math.min(query.length() - 1, rawQueryOffset + 3); i++)
-                {
-                    var location = text.getLocation(i);
-                    map.append(i).append(':').append(escapeForLog(String.valueOf(query.charAt(i)))).append("->") //$NON-NLS-1$
-                        .append(location == null ? "null" : String.valueOf(base + location.getSecond())).append(' '); //$NON-NLS-1$
-                }
-                StringBuilder pairs = new StringBuilder();
-                for (int[] pair : validation.pairs())
-                    pairs.append(pair[0]).append('-').append(pair[1]).append(' ');
-                Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " symbols=" + symbols //$NON-NLS-1$ //$NON-NLS-2$
-                    + " base=" + base + " raw=" + rawQueryOffset + " q=" + queryOffset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " map=[" + map + "] pairs=[" + pairs + "] query=" + escapeForLog(query) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " validated=" + escapeForLog(validation.query())); //$NON-NLS-1$
-            }
             List<int[]> selected = null;
             if (symbols)
             {
@@ -1481,17 +1448,7 @@ final class BslQueryLiteralSupport
                     return null;
                 result.add(new int[] { base + from.getSecond(), to.getSecond() - from.getSecond() + 1 });
             }
-            StringBuilder found = new StringBuilder();
-            for (int[] range : result)
-                found.append(range[0]).append(':').append(range[1]).append(' ');
-            Global.tempLog("query-bracket-pair", "module=" + moduleOffset + " result=[" + found + "]"); //$NON-NLS-1$ //$NON-NLS-2$
             return result;
-        }
-
-        private static String escapeForLog(String value)
-        {
-            return value == null ? "null" //$NON-NLS-1$
-                : value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
         }
 
         /** Единственное различие представлений — LF в живой проверке и CRLF у провайдера BSL. */
@@ -2104,7 +2061,7 @@ final class BslQueryLiteralSupport
                         {
                             parentNames = queryParentType(resource, offset - 2);
                         }
-                        var leaf = NodeModelUtils.findLeafNodeAtOffset(root,
+                        var leaf = BslNodeLookup.leafAt(root,
                             Math.min(offset, Math.max(0, root.getLength() - 1)));
                         LogicalCompareOperatorExpression comparison = null;
                         for (org.eclipse.xtext.nodemodel.INode node = leaf; node != null; node = node.getParent())
@@ -2496,7 +2453,7 @@ final class BslQueryLiteralSupport
             String keyword = embedded.getDocument().readOnly(resource -> {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
-                var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), lit.probeIndex);
+                var leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), lit.probeIndex);
                 if (leaf == null || leaf.isHidden())
                     return null;
                 // FunctionWord допускает ID: ПОДСТРОКА, ЕСТЬNULL и другие функции
@@ -2700,7 +2657,7 @@ final class BslQueryLiteralSupport
                     {
                         return null;
                     }
-                    var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                    var leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
                     if (leaf == null || leaf.isHidden())
                     {
                         return null;
@@ -2770,7 +2727,7 @@ final class BslQueryLiteralSupport
             {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
-                var leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), lit.probeIndex);
+                var leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), lit.probeIndex);
                 if (leaf == null || leaf.isHidden())
                     return null;
                 word[0] = leaf.getOffset();
@@ -3924,7 +3881,7 @@ final class BslQueryLiteralSupport
             {
                 int openQuote = literal[0];
                 int closeQuote = literal[1];
-                EObject object = helper.resolveContainedElementAt(resource, openQuote + 1);
+                EObject object = BslNodeLookup.containedAt(helper, resource, openQuote + 1);
                 StringLiteral model = EcoreUtil2.getContainerOfType(object, StringLiteral.class);
                 var nodes = model == null ? List.<org.eclipse.xtext.nodemodel.INode>of()
                     : NodeModelUtils.findNodesForFeature(model, BslPackage.Literals.STRING_LITERAL__LINES);

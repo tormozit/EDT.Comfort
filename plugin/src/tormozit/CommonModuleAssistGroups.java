@@ -296,9 +296,9 @@ final class CommonModuleAssistGroups
     {
         if (resource.getParseResult() == null)
             return null;
-        INode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+        INode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
         if (leaf == null && offset > 0)
-            leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset - 1);
+            leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset - 1);
         EObject semantic = leaf != null ? leaf.getSemanticElement() : null;
         return semantic != null ? EcoreUtil2.getContainerOfType(semantic, Method.class) : null;
     }

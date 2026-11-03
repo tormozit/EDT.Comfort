@@ -193,6 +193,8 @@ final class FormItemTypes
 
     private static List<TypeItem> extensions(TypeItem base, String baseName, String[] prefixes)
     {
+        // Расширения и их члены сохраняют исходные environments: штатный поиск отбирает
+        // доступные варианты по фактическим контекстам компиляции, без раннего слияния имён.
         URI baseUri = EcoreUtil.getURI(base).trimFragment();
         String key = String.valueOf(baseUri);
         List<TypeItem> cached = EXTENSIONS.get(key);

@@ -31,7 +31,11 @@ import com._1c.g5.v8.dt.mcore.Event;
 import java.util.Iterator;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.ISchedulingRule;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
@@ -74,6 +78,24 @@ public final class BslSideHintOutlineInstall
     /** Sync по выделению BSL-редактора перед {@code ЗаполнитьТаблицуСлов} в outline. */
     private static final int WORDS_TABLE_SYNC_CARET_OFFSET = IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
     private static final int DEBOUNCE_MS = OpenStrategy.getPostSelectionDelay();
+    /** Расчёты подсказки идут по одному: устаревшие выходят на старте, не копя потоки в ожидании блокировки. */
+    private static final ISchedulingRule HINT_RULE = new ISchedulingRule()
+    {
+
+        @Override
+        public boolean contains(ISchedulingRule rule)
+        {
+
+            return rule == this;
+        }
+
+        @Override
+        public boolean isConflicting(ISchedulingRule rule)
+        {
+
+            return rule == this;
+        }
+    };
     private BslSideHintOutlineInstall() {}
 
     public static void installIfBsl(TreeViewer viewer, Object contextHost, String dialogName)
@@ -287,7 +309,63 @@ public final class BslSideHintOutlineInstall
             return;
         }
 
-        BslItemSideHint hint = BslSideHintResolver.fromOutlineElement(element, textViewer);
+        // Подсказка берёт readOnly документа Xtext: в UI-потоке это ожидание конца переразбора модуля.
+        final int[] generation = tree.getData("tormozit.bslSideHintGeneration") instanceof int[] g ? g : null; //$NON-NLS-1$
+        final int hintGen = gen >= 0 ? gen : resolveGeneration(tree, -1);
+        IProgressMonitor staleMonitor = new NullProgressMonitor()
+        {
+
+            @Override
+            public boolean isCanceled()
+            {
+
+                return super.isCanceled() || generation != null && generation[0] != hintGen;
+            }
+        };
+        Display display = tree.getDisplay();
+        Job job = new Job("Комфорт: подсказка быстрой схемы") //$NON-NLS-1$
+        {
+
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+
+                if (staleMonitor.isCanceled())
+                    return Status.CANCEL_STATUS;
+                BslItemSideHint hint = null;
+                try
+                {
+
+                    hint = BslSideHintResolver.fromOutlineElement(element, textViewer, staleMonitor);
+                }
+
+                catch (Exception e)
+                {
+
+                    BslSideHintDebug.problem("hint job: " + e.getMessage()); //$NON-NLS-1$
+                }
+
+                final BslItemSideHint result = hint;
+                if (display.isDisposed() || staleMonitor.isCanceled())
+                    return Status.CANCEL_STATUS;
+                display.asyncExec(() -> {
+
+                    if (tree.isDisposed() || staleMonitor.isCanceled())
+                        return;
+                    finishHintForElement(tree, presenter, contextHost, element, gen, result);
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setRule(HINT_RULE);
+        job.schedule();
+    }
+
+    private static void finishHintForElement(Tree tree, BslSideHintPresenter presenter, Object contextHost,
+            Object element, int gen, BslItemSideHint hint)
+    {
+
         if (gen >= 0 && !isCurrentGeneration(tree, gen))
             return;
         if (hint == null || hint.isEmpty())
