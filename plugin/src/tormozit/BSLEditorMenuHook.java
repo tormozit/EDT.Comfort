@@ -161,6 +161,8 @@ public class BSLEditorMenuHook implements IStartup
                 IEditorPart ed = ref.getEditor(false);
                 if (ed != null) hookEditorIfNeeded(ed);
             }
+            if (page.getActiveEditor() != null)
+                BslTypeCatalog.activate(page.getActiveEditor());
         }
 
         // Будущие редакторы
@@ -180,7 +182,10 @@ public class BSLEditorMenuHook implements IStartup
                     return;
                 IEditorPart ed = ((IEditorReference) r).getEditor(false);
                 if (ed != null)
+                {
                     hookEditorIfNeeded(ed);
+                    BslTypeCatalog.activate(ed);
+                }
             }
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r)       {}
@@ -490,7 +495,10 @@ public class BSLEditorMenuHook implements IStartup
                             ((DtGranularEditorXtextEditorPage<?>) selectedPage)
                                 .getEmbeddedEditor();
                         if (embedded instanceof BslXtextEditor)
+                        {
                             hookBslEditor((BslXtextEditor) embedded);
+                            BslTypeCatalog.activate(embedded);
+                        }
                     }
                 }
             };

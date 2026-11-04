@@ -123,7 +123,28 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
                 Global.log(TAG, "executeSearch: searchString=null offset=" + widgetSelRange.x);
             return null;
         }
-        return executeSearchWithString(viewer, textWidget, searchString, forward, false, true);
+        ITextEditor navigationEditor = resolveNavigationEditor(textWidget);
+        Global.markNavigationLocation(navigationEditor);
+        try
+        {
+            return executeSearchWithString(viewer, textWidget, searchString, forward, false, true);
+        }
+        finally
+        {
+            Global.markNavigationLocation(navigationEditor);
+        }
+    }
+
+    /** Редактор именно этого поля: поиск в диалогах и панелях не меняет его историю. */
+    static ITextEditor resolveNavigationEditor(StyledText textWidget)
+    {
+        if (textWidget == null || textWidget.isDisposed() || !PlatformUI.isWorkbenchRunning())
+            return null;
+        var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        var page = window != null ? window.getActivePage() : null;
+        ITextEditor editor = page != null ? TextEditor.resolveTextEditor(page.getActiveEditor()) : null;
+        ISourceViewer sourceViewer = editor != null ? TextEditor.getSourceViewer(editor) : null;
+        return sourceViewer != null && sourceViewer.getTextWidget() == textWidget ? editor : null;
     }
 
     /**

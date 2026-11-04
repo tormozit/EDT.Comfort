@@ -689,7 +689,11 @@ public class SmartCompletionProposal implements
         if (delegate instanceof SmartCompletionProposal)
             return ""; //$NON-NLS-1$
         String raw = delegate.getDisplayString();
-        return localizeDisplayTypes(raw);
+        String display = localizeDisplayTypes(raw);
+        if (delegate instanceof ConfigurableCompletionProposal configurable)
+            display = BslFormDataTypes.decorateProposal(display,
+                Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
+        return display;
 
     }
 

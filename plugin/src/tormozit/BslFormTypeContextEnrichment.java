@@ -17,6 +17,11 @@ import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.naming.QualifiedName;
+import org.eclipse.xtext.resource.EObjectDescription;
+import org.eclipse.xtext.resource.IEObjectDescription;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.scoping.IScope;
 
 import com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem;
 import org.objectweb.asm.ClassReader;
@@ -33,6 +38,7 @@ import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
 import com._1c.g5.v8.dt.bsl.model.Method;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
@@ -333,6 +339,21 @@ public final class BslFormTypeContextEnrichment
     public static boolean isStaticGetOrOpenFormMethod(String name)
     {
         return isStaticGetFormMethod(name) || isStaticOpenFormMethod(name);
+    }
+
+    /**
+     * EDT 28.0.1.v202605050943 ищет имя в scope форм без разрешения роли (issue 980).
+     * На промахе используем общий поиск формы; тип по BasicForm дальше считает сама EDT.
+     */
+    public static IEObjectDescription findForm(IScope scope, QualifiedName name, Invocation invocation)
+    {
+        IEObjectDescription found = scope.getSingleElement(name);
+        if (found != null || name.getSegmentCount() != 3
+            || !BslLiteralValues.STANDARD_FORMS.containsKey(name.getLastSegment())
+            || !(invocation.eResource() instanceof XtextResource resource))
+            return found;
+        var form = BslLiteralValues.basicFormByName(name.toString(), resource);
+        return form != null ? EObjectDescription.create(name, form) : null;
     }
 
     /** Обогащает типы формы экспортом модуля; список тот же экземпляр. */
@@ -664,6 +685,20 @@ public final class BslFormTypeContextEnrichment
         public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
             boolean isInterface)
         {
+            // Стек уже содержит scope и QualifiedName. Добавляем контекст вызова,
+            // чтобы общий поиск разрешал основную форму в том же проекте.
+            if (opcode == Opcodes.INVOKEINTERFACE
+                && "org/eclipse/xtext/scoping/IScope".equals(owner) //$NON-NLS-1$
+                && "getSingleElement".equals(name) //$NON-NLS-1$
+                && "(Lorg/eclipse/xtext/naming/QualifiedName;)Lorg/eclipse/xtext/resource/IEObjectDescription;" //$NON-NLS-1$
+                    .equals(descriptor))
+            {
+                super.visitVarInsn(Opcodes.ALOAD, 1);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "findForm", //$NON-NLS-1$
+                    "(Lorg/eclipse/xtext/scoping/IScope;Lorg/eclipse/xtext/naming/QualifiedName;Lcom/_1c/g5/v8/dt/bsl/model/Invocation;)Lorg/eclipse/xtext/resource/IEObjectDescription;", false); //$NON-NLS-1$
+                touched.set(true);
+                return;
+            }
             if (sawOpenFormLdc
                 && opcode == Opcodes.INVOKEVIRTUAL
                 && "equalsIgnoreCase".equals(name)) //$NON-NLS-1$

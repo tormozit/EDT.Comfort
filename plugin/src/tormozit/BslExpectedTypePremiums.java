@@ -29,6 +29,7 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
@@ -90,6 +91,7 @@ import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.ModuleType;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.model.ReturnStatement;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
@@ -98,9 +100,11 @@ import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.form.model.FormVisualEntity;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Parameter;
@@ -110,6 +114,9 @@ import com._1c.g5.v8.dt.mcore.TypeContainer;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environment;
 import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -284,7 +291,7 @@ final class BslExpectedTypePremiums
     private record Scene(Expectation expectation, String statisticsContext, boolean insideExpression,
         Map<String, Integer> frequencies, String receiverLine, String expectedTypeText, Map<String, String> predefinedTypes,
         Facts facts, List<String> literalTypes, List<String> parentDisplayTypes, Map<String, String> memberNames,
-        Map<String, List<String>> memberTypes)
+        Map<String, List<String>> memberTypes, String legacyStatisticsContext, String specializedParentLabel)
     {
         /** Типы приёмника без слишком широких ({@link #BROAD_TYPES}), в нижнем регистре. */
         Set<String> strongReceiverTypes()
@@ -1194,7 +1201,7 @@ final class BslExpectedTypePremiums
             // Здесь строки списка — имена типов, а не значения/конструкции встроенного языка.
             // ИменаВложенныхТипов не проходят фильтр Expectation: «Неопределено» тоже имя типа.
             return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
-                Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of());
+                Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of(), null, null);
         }
         if (timing != null)
             timing.phase("literalProbe"); //$NON-NLS-1$
@@ -1210,7 +1217,10 @@ final class BslExpectedTypePremiums
             : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
         if (timing != null)
             timing.phase("parentTypes"); //$NON-NLS-1$
-        String statisticsContext = statisticsContext(context, typeNames(parentTypes));
+        String statisticsContext = statisticsContext(resource, context, parentTypes);
+        String legacyStatisticsContext = statisticsContext != null && !statisticsContext.startsWith("Форма.") //$NON-NLS-1$
+            && !context.parent().isEmpty() ? formStatisticsContext(resource,
+                findExpression(resource, context.start(), context.anchor() - 1), context.anchor() - 1) : null;
         boolean insideExpression = insideExpression(context, site);
         if (timing != null)
             timing.phase("statisticsContext"); //$NON-NLS-1$
@@ -1235,10 +1245,27 @@ final class BslExpectedTypePremiums
         if (timing != null)
             timing.phase("facts"); //$NON-NLS-1$
         List<String> parentDisplayTypes = displayTypeNames(parentTypes, resource);
+        Set<String> specializedParents = new LinkedHashSet<>();
+        for (TypeItem item : parentTypes)
+        {
+            String form = BslFormTypePresentation.text(item);
+            if (form != null)
+                specializedParents.add(form);
+        }
+        if (specializedParents.isEmpty())
+            for (TypeItem item : FormItemTypes.displayTypes(parentTypes))
+                if (FormItemTypes.isPresentationExtension(item))
+                    specializedParents.add(FunctionReturnTypes.typeName(item));
+        Global.tempLog("form-type-presentation", "parent labels=" + parentDisplayTypes //$NON-NLS-1$ //$NON-NLS-2$
+            + " specialized=" + specializedParents + " statistics=" + statisticsContext); //$NON-NLS-1$ //$NON-NLS-2$
+        String specializedParentLabel = specializedParents.size() == 1 ? specializedParents.iterator().next() : null;
+        Global.tempLog("form-type-presentation", "parent=" + context.parent() + " types=" + typeNames(parentTypes) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " display=" + parentDisplayTypes + " specialized=" + specializedParentLabel); //$NON-NLS-1$ //$NON-NLS-2$
         if (timing != null)
             timing.phase("parentLabels"); //$NON-NLS-1$
         return new Scene(expectation, statisticsContext, insideExpression, frequencies, receiverLine, expectedTypeText,
-            predefined, facts, List.of(), parentDisplayTypes, memberNames, memberTypes);
+            predefined, facts, List.of(), parentDisplayTypes, memberNames, memberTypes, legacyStatisticsContext,
+            specializedParentLabel);
     }
 
     /** Приставка ключа {@link Scene#predefinedTypes} для предопределённых значений ссылочного типа. */
@@ -2684,15 +2711,160 @@ final class BslExpectedTypePremiums
     // ------------------------------------------------------------------------------------------
 
     /** {@code ТипКонтекстаСтатистики}: без родителя — {@value #GLOBAL_CONTEXT}, иначе тип родителя. */
-    private static String statisticsContext(Context context, List<String> names)
+    private static String statisticsContext(XtextResource resource, Context context, List<TypeItem> parentTypes)
     {
         if (context.parent().isEmpty())
             return GLOBAL_CONTEXT;
+        // У Метаданные EDT не всегда вычисляет тип незавершённого выражения.
+        // Путь сохраняет коллекцию и конкретный объект, а корень общий для проектов.
+        String[] path = context.parent().split("\\."); //$NON-NLS-1$
+        if (path[0].equalsIgnoreCase("Метаданные") || path[0].equalsIgnoreCase("Metadata")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            path[0] = "Метаданные"; //$NON-NLS-1$
+            if (path.length > 1)
+            {
+                String collection = MdTypeMapping.folderToGroupPlural(path[1]);
+                if (collection != null)
+                    path[1] = collection;
+            }
+            return String.join(".", path); //$NON-NLS-1$
+        }
+        Expression parent = findExpression(resource, context.start(), context.anchor() - 1);
+        String itemType = formItemStatisticsContext(parent);
+        if (itemType != null)
+            return itemType;
+        // У обычного значения (в том числе в реквизите формы) состав штатных членов общий.
+        for (String name : typeNames(parentTypes))
+        {
+            if (UNDEFINED.equalsIgnoreCase(name))
+                continue;
+            PlatformChoiceMembers members = platformChoiceMembers(name);
+            if (members != null && members.dynamicProperties() && !members.formCollection())
+                return name;
+        }
+        String form = formStatisticsContext(resource, parent, context.anchor() - 1);
+        if (form != null)
+            return form;
+        List<String> names = typeNames(parentTypes);
         if (names.isEmpty())
             return null;
         String name = names.get(0);
         // Конкретный тип с метаданными — полностью, иначе до пробела
         return name.indexOf('.') >= 0 || name.indexOf('[') >= 0 ? name : firstFragment(name, ' ');
+    }
+
+    /** DerivedProperty элемента хранит ссылку на FormVisualEntity — это связь модели EDT, не имя в тексте. */
+    private static String formItemStatisticsContext(Expression expression)
+    {
+        if (!(expression instanceof FeatureAccess access))
+            return null;
+        for (FeatureEntry entry : featureEntries(access))
+        {
+            if (!(entry.getFeature() instanceof DerivedProperty property)
+                || !(property.getSource() instanceof FormVisualEntity item) || item.eIsProxy())
+                continue;
+            List<Type> types = PropertySheetPlatformPropertyResolver.formItemPlatformTypes(item);
+            if (types.isEmpty())
+                continue;
+            String name = typeName(types.get(types.size() - 1));
+            if (name.isEmpty())
+                continue;
+            Set<String> properties = new HashSet<>();
+            Set<String> methods = new HashSet<>();
+            for (Type type : types)
+            {
+                PlatformChoiceMembers members = platformChoiceMembers(typeName(type));
+                if (members != null)
+                {
+                    properties.addAll(members.properties());
+                    methods.addAll(members.methods());
+                }
+            }
+            synchronized (BslExpectedTypePremiums.class)
+            {
+                // Расширение дополняет базовый тип: его ключ включает также базовые члены.
+                PLATFORM_CHOICE_MEMBERS.put(lower(name), new PlatformChoiceMembers(Set.copyOf(properties),
+                    Set.copyOf(methods), true, false));
+            }
+            Global.tempLog("assist-choice-statistics", "formItemType=" + name + " types=" + typeNames(new ArrayList<>(types))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return name;
+        }
+        return null;
+    }
+
+    /** Конкретная форма и путь свойств от неё, независимо от имени переменной формы. */
+    private static String formStatisticsContext(XtextResource resource, Expression expression, int offset)
+    {
+        if (expression == null)
+            return null;
+        Set<ContextDef> visited = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (TypeItem item : expressionTypeItems(resource, expression, offset))
+        {
+            Type type = resolveType(resource, item);
+            AbstractForm form = type != null ? statisticsForm(type.getContextDef(), visited) : null;
+            String key = formStatisticsKey(form);
+            if (key != null)
+                return key;
+        }
+        if (expression instanceof DynamicFeatureAccess access)
+        {
+            String source = formStatisticsContext(resource, access.getSource(), offset);
+            if (source == null)
+                return null;
+            for (FeatureEntry entry : access.getFeatureEntries())
+                if (entry.getFeature() instanceof Property property && !property.eIsProxy())
+                    return source + '.' + statisticsPropertyName(property);
+        }
+        else if (expression instanceof StaticFeatureAccess access)
+        {
+            Module module = resource.getContents().isEmpty() ? null
+                : resource.getContents().get(0) instanceof Module found ? found : null;
+            if (module != null && module.getOwner() instanceof AbstractForm form && !form.eIsProxy()
+                && form.getFormContext() != null)
+            {
+                for (FeatureEntry entry : access.getFeatureEntries())
+                    if (entry.getFeature() instanceof Property property
+                        && form.getFormContext().allProperties().contains(property))
+                    {
+                        String key = formStatisticsKey(form);
+                        if (key != null)
+                            return key + '.' + statisticsPropertyName(property);
+                    }
+            }
+        }
+        return null;
+    }
+
+    private static String statisticsPropertyName(Property property)
+    {
+        return property.getNameRu() != null && !property.getNameRu().isEmpty()
+            ? property.getNameRu() : property.getName();
+    }
+
+    private static AbstractForm statisticsForm(ContextDef context, Set<ContextDef> visited)
+    {
+        if (context == null || context.eIsProxy() || !visited.add(context))
+            return null;
+        if (context.eContainer() instanceof AbstractForm form)
+            return form;
+        for (ContextDef ref : context.getRefContextDefs())
+        {
+            AbstractForm form = statisticsForm(ref, visited);
+            if (form != null)
+                return form;
+        }
+        return null;
+    }
+
+    private static String formStatisticsKey(AbstractForm form)
+    {
+        BasicForm md = form != null && !form.eIsProxy() ? form.getMdForm() : null;
+        if (md == null || md.eIsProxy() || md.getName() == null)
+            return null;
+        if (md.eContainer() instanceof MdObject owner && !"Configuration".equals(owner.eClass().getName())) //$NON-NLS-1$
+            return "Форма." + MdTypeMapping.anyToRu(owner.eClass().getName()) + '.' + owner.getName() //$NON-NLS-1$
+                + ".Форма." + md.getName(); //$NON-NLS-1$
+        return "Форма.ОбщаяФорма." + md.getName(); //$NON-NLS-1$
     }
 
     /** {@code ЛиВнутриВыражения} для встроенного языка. */
@@ -2881,9 +3053,32 @@ final class BslExpectedTypePremiums
             weightPremiums(result, words, scene.frequencies(), words.size(), true);
         if (scene.statisticsContext() != null)
         {
+            ChoiceStatistics.migrateFormContext(project, scene.legacyStatisticsContext(), scene.statisticsContext());
             if (!GLOBAL_CONTEXT.equals(scene.statisticsContext()))
-                weightPremiums(result, words, ChoiceStatistics.weights(project, scene.statisticsContext(),
-                    scene.insideExpression(), MODULE_LANGUAGE), words.size(), !context.parent().isEmpty());
+            {
+                Map<String, Integer> weights = ChoiceStatistics.weights(project, scene.statisticsContext(),
+                    scene.insideExpression(), MODULE_LANGUAGE);
+                Map<String, Map<String, Integer>> sharedWeights = new HashMap<>();
+                for (ICompletionProposal proposal : list)
+                {
+                    String sharedContext = statisticsContextForChoice(scene.statisticsContext(), proposal);
+                    if (sharedContext.equals(scene.statisticsContext()))
+                        continue;
+                    Map<String, Integer> shared = sharedWeights.computeIfAbsent(sharedContext, key -> {
+                        ChoiceStatistics.migrateFormContext(project, scene.statisticsContext(), key);
+                        return ChoiceStatistics.weights(project, key, scene.insideExpression(), MODULE_LANGUAGE);
+                    });
+                    String word = lower(SmartContentAssistProcessor.filterMatchName(proposal));
+                    for (String prefix : List.of("m:", "p:")) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        weights.remove(prefix + word);
+                        Integer count = shared.get(prefix + word);
+                        if (count != null)
+                            weights.put(prefix + word, count);
+                    }
+                }
+                weightPremiums(result, words, weights, words.size(), !context.parent().isEmpty());
+            }
             if (context.parent().isEmpty())
                 weightPremiums(result, words, ChoiceStatistics.weights(project, GLOBAL_CONTEXT,
                     scene.insideExpression(), MODULE_LANGUAGE), words.size(), false);
@@ -4965,15 +5160,25 @@ final class BslExpectedTypePremiums
     /** Порядок только для показа: общий с подсказками и полями типа, без смены главного типа в Facts. */
     private static List<String> displayTypeNames(List<TypeItem> items, XtextResource resource)
     {
-        if (items.size() < 2 || resource.getContents().isEmpty())
-            return typeNames(items);
-        int[] order = TypeDescriptionPresentationHook.displayOrder(items, resource.getContents().get(0));
-        if (order == null)
-            return typeNames(items);
-        List<TypeItem> ordered = new ArrayList<>(items.size());
-        for (int index : order)
-            ordered.add(items.get(index));
-        return typeNames(ordered);
+        EObject root = BslNodeLookup.rootAst(resource);
+        int[] order = items.size() >= 2 && root != null
+            ? TypeDescriptionPresentationHook.displayOrder(items, root) : null;
+        List<TypeItem> ordered = items;
+        if (order != null)
+        {
+            ordered = new ArrayList<>(items.size());
+            for (int index : order)
+                ordered.add(items.get(index));
+        }
+        List<String> names = new ArrayList<>();
+        for (TypeItem item : ordered)
+        {
+            // Только подпись: Facts и сравнение типов по-прежнему используют базовые имена.
+            String name = FunctionReturnTypes.typeName(item);
+            if (name != null && !name.isEmpty() && !containsIgnoreCase(names, name))
+                names.add(name);
+        }
+        return names;
     }
 
     private static List<String> typeNames(List<TypeItem> items)
@@ -5067,6 +5272,8 @@ final class BslExpectedTypePremiums
         @Override
         public void applied(ICompletionProposal proposal)
         {
+            Global.tempLog("assist-choice-statistics", "applied " //$NON-NLS-1$ //$NON-NLS-2$
+                + (proposal != null ? proposal.getDisplayString() : null));
             try
             {
                 BslQueryLiteralSupport.QueryChoice query = proposal != null ? BslQueryLiteralSupport.choiceOf(proposal) : null;
@@ -5099,10 +5306,22 @@ final class BslExpectedTypePremiums
                     BslCompletionSideHintResolver.resolveElementKind(proposal));
                 List<String> types = proposalTypes(proposal, snapshot.scene().predefinedTypes());
                 // Конструкции и литералы — в глобальный контекст
-                String context = info == null && types.isEmpty() && !method ? GLOBAL_CONTEXT
-                    : snapshot.scene().statisticsContext();
-                boolean projectWord = context.indexOf('.') >= 0
-                    || !isPlatformWord(proposal, info, snapshot.scene().predefinedTypes());
+                String context = statisticsContextForChoice(snapshot.scene().statisticsContext(), proposal);
+                PlatformChoiceMembers members = platformChoiceMembers(context);
+                List<String> parentTypes = snapshot.scene().facts() != null ? snapshot.scene().facts().parentTypes() : List.of();
+                PlatformChoiceMembers parentMembers = members != null || parentTypes.isEmpty() ? members
+                    : platformChoiceMembers(parentTypes.get(0));
+                boolean dynamic = isDynamicChoice(parentMembers, word, method)
+                    && !(context.startsWith("Форма.") && parentMembers.formCollection()); //$NON-NLS-1$
+                boolean projectWord = isProjectChoice(context, word, method, members,
+                    isKnownPlatformChoice(context, word, method)
+                        || isPlatformWord(proposal, statisticsFeature(info), snapshot.scene().predefinedTypes()));
+                Global.tempLog("assist-choice-statistics", "context=" + context + " word=" + word //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " method=" + method + " dynamic=" + dynamic + " project=" + projectWord //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " parentTypes=" + parentTypes + " members=" + members //$NON-NLS-1$ //$NON-NLS-2$
+                    + " info=" + (info != null ? info.getClass().getName() : null)); //$NON-NLS-1$
+                if (dynamic)
+                    return;
                 // Без проекта слову проекта места нет: в таблицу рабочей области оно не пишется
                 if (projectWord && snapshot.project() == null)
                     return;
@@ -5111,7 +5330,7 @@ final class BslExpectedTypePremiums
             }
             catch (RuntimeException e)
             {
-                // Статистика выбора необязательна.
+                Global.tempLogException("assist-choice-statistics", "applied failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -5130,6 +5349,126 @@ final class BslExpectedTypePremiums
             ChoiceStatistics.record(projectWord ? query.project() : null, query.context(), word, method,
                 query.platformWord() && !method, QUERY_LANGUAGE);
         }
+    }
+
+    /** Обёртки EDT сохраняют исходный элемент; сами обёртки не принадлежат описанию платформы. */
+    private static Object statisticsFeature(Object info)
+    {
+        if (info instanceof FeatureEntry entry)
+            return statisticsFeature(entry.getFeature());
+        if (info instanceof ParamSet set)
+            return statisticsFeature(set.eContainer());
+        if (info instanceof ProposalElement element)
+        {
+            for (EObject item : element.getList())
+            {
+                Object feature = statisticsFeature(item);
+                if (feature instanceof Property || feature instanceof com._1c.g5.v8.dt.mcore.Method)
+                    return feature;
+            }
+        }
+        return info;
+    }
+
+    /** У составных проектных контекстов стандартные члены принадлежат общему типу платформы. */
+    private static String statisticsContextForChoice(String context, ICompletionProposal proposal)
+    {
+        if (context == null || context.indexOf('.') < 0)
+            return context;
+        Object info = statisticsFeature(proposalInfo(proposal));
+        if (!(info instanceof EObject feature) || feature.eIsProxy()
+            || !BslModuleSpellCheckHook.isPlatformElement(feature)
+            || feature instanceof Property property && property.isDependsOnMetadata())
+            return context;
+        Type owner = EcoreUtil2.getContainerOfType(feature, Type.class);
+        String name = owner != null ? typeName(owner) : null;
+        return name != null && platformChoiceMembers(name) != null ? name : context;
+    }
+
+    /** Только имена: модель платформы не переносится из фонового расчёта в UI. */
+    private record PlatformChoiceMembers(Set<String> properties, Set<String> methods, boolean dynamicProperties,
+        boolean formCollection)
+    {
+        boolean contains(String word, boolean method)
+        {
+            return (method ? methods : properties).contains(lower(word));
+        }
+    }
+
+    private static final Map<String, PlatformChoiceMembers> PLATFORM_CHOICE_MEMBERS = new HashMap<>();
+
+    private static synchronized PlatformChoiceMembers platformChoiceMembers(String context)
+    {
+        if (context == null || context.indexOf('.') >= 0 || GLOBAL_CONTEXT.equals(context))
+            return null;
+        String name = firstFragment(firstFragment(context, ' '), '[');
+        String key = lower(name);
+        PlatformChoiceMembers cached = PLATFORM_CHOICE_MEMBERS.get(key);
+        if (cached != null)
+            return cached;
+        IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, Version.LATEST);
+        var description = provider != null ? provider.getEObjectDescription(name) : null;
+        if (description == null)
+            return null;
+        EObject resolved = EcoreUtil.resolve(description.getEObjectOrProxy(), new ResourceSetImpl());
+        if (!(resolved instanceof Type type) || type.eIsProxy() || type.getContextDef() == null)
+            return null;
+        Set<String> properties = new HashSet<>();
+        Set<String> methods = new HashSet<>();
+        for (Property property : type.getContextDef().allProperties())
+        {
+            // В описании EDT у FieldName пропущен dependsOnMetadata, но это шаблон поля выборки.
+            if (!property.isDependsOnMetadata()
+                && !("QueryResultSelection".equals(type.getName()) && "FieldName".equals(property.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                properties.add(lower(nullToEmpty(property.getName())));
+                properties.add(lower(nullToEmpty(property.getNameRu())));
+            }
+        }
+        for (com._1c.g5.v8.dt.mcore.Method method : type.getContextDef().allMethods())
+        {
+            methods.add(lower(nullToEmpty(method.getName())));
+            methods.add(lower(nullToEmpty(method.getNameRu())));
+        }
+        // Имена объектов конфигурации поставляет EDT по метаданным. Остальные свойства сверх
+        // описания платформы — поля конкретного значения (включая FieldName без dependsOnMetadata).
+        boolean metadata = DynamicFeatureAccessComputer.DynamicPropertyTypeNameMapper.INSTANCE
+            .getDynamicPropertyTypeNameMapping().containsKey(type.getName());
+        boolean formCollection = Set.of("FormAllItems", "FormItems", "FormCommands").contains(type.getName()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        PlatformChoiceMembers result = new PlatformChoiceMembers(Set.copyOf(properties), Set.copyOf(methods), !metadata,
+            formCollection);
+        PLATFORM_CHOICE_MEMBERS.put(key, result);
+        return result;
+    }
+
+    private static boolean isDynamicChoice(PlatformChoiceMembers members, String word, boolean method)
+    {
+        return !method && members != null && members.dynamicProperties() && !members.contains(word, false);
+    }
+
+    private static boolean isProjectChoice(String context, String word, boolean method, PlatformChoiceMembers members,
+        boolean platformWord)
+    {
+        return !"Метаданные".equals(context) && (context.indexOf('.') >= 0 //$NON-NLS-1$
+            || !(members != null && members.contains(word, method)) && !platformWord);
+    }
+
+    /** Проверяется и для новых выборов, и для ранее сохранённых строк без объекта предложения EDT. */
+    private static boolean isKnownPlatformChoice(String context, String word, boolean method)
+    {
+        if (GLOBAL_CONTEXT.equals(context))
+        {
+            // Имена типов (в том числе шаблонных и наборов типов) EDT предлагает без типа значения.
+            if (!method && (platformTypeName(word) != null || MdTypeMapping.isKnownMdRootType(word)))
+                return true;
+            IEObjectProvider provider = IEObjectProvider.Registry.INSTANCE.get(
+                method ? McorePackage.Literals.METHOD : McorePackage.Literals.PROPERTY, Version.LATEST);
+            return provider != null && provider.getEObjectDescription(word) != null;
+        }
+        if ("Метаданные".equals(context)) //$NON-NLS-1$
+            return true;
+        PlatformChoiceMembers members = platformChoiceMembers(context);
+        return members != null && members.contains(word, method);
     }
 
     /**
@@ -5159,6 +5498,7 @@ final class BslExpectedTypePremiums
     private static final class ChoiceStatistics
     {
         private static final String FILE_NAME = "assist-choice-statistics.tsv"; //$NON-NLS-1$
+        private static final String FORMAT_MARKER = "# comfort-choice-statistics: 3"; //$NON-NLS-1$
         private static final long SAVE_DELAY_MS = 2000L;
         /**
          * Файл → строки {@code контекст\tслово\tметод\tбезЗначения[\tязык] → вес}; язык модуля не пишется
@@ -5199,6 +5539,40 @@ final class BslExpectedTypePremiums
             table(file).merge(key(context, word, method, withoutValue, language), 1, Integer::sum);
             DIRTY.add(file);
             scheduleSave();
+        }
+
+        /** Тип конкретного элемента уже установлен по модели; переносим только подтверждённые штатные члены. */
+        static synchronized void migrateFormContext(IProject project, String previousContext, String context)
+        {
+            if (previousContext == null || previousContext.equals(context))
+                return;
+            File source = projectFile(project);
+            File target = platformFile();
+            PlatformChoiceMembers members = platformChoiceMembers(context);
+            if (source == null || target == null || members == null)
+                return;
+            Map<String, Integer> sourceRows = table(source);
+            int moved = 0;
+            for (var iterator = sourceRows.entrySet().iterator(); iterator.hasNext();)
+            {
+                Map.Entry<String, Integer> row = iterator.next();
+                String[] parts = row.getKey().split("\t", -1); //$NON-NLS-1$
+                if (parts.length < 4 || language(parts) != MODULE_LANGUAGE
+                    || !parts[0].equalsIgnoreCase(previousContext) || !members.contains(parts[1], "1".equals(parts[2]))) //$NON-NLS-1$
+                    continue;
+                String key = context + row.getKey().substring(row.getKey().indexOf('\t'));
+                table(target).merge(key, row.getValue(), Integer::sum);
+                iterator.remove();
+                moved++;
+            }
+            Global.tempLog("assist-choice-statistics", "formMigration source=" + previousContext //$NON-NLS-1$ //$NON-NLS-2$
+                + " target=" + context + " moved=" + moved); //$NON-NLS-1$ //$NON-NLS-2$
+            if (moved > 0)
+            {
+                DIRTY.add(source);
+                DIRTY.add(target);
+                scheduleSave();
+            }
         }
 
         private static String key(String context, String word, boolean method, boolean withoutValue, int language)
@@ -5283,7 +5657,15 @@ final class BslExpectedTypePremiums
 
         private static Map<String, Integer> table(File file)
         {
-            return TABLES.computeIfAbsent(file, ChoiceStatistics::load);
+            Map<String, Integer> rows = TABLES.get(file);
+            if (rows == null)
+            {
+                // Миграция проекта может загрузить таблицу рабочей области: computeIfAbsent
+                // запрещает такую вложенную модификацию той же HashMap.
+                rows = load(file);
+                TABLES.put(file, rows);
+            }
+            return rows;
         }
 
         private static Map<String, Integer> load(File file)
@@ -5291,11 +5673,17 @@ final class BslExpectedTypePremiums
             Map<String, Integer> rows = new HashMap<>();
             if (!file.isFile())
                 return rows;
+            boolean migrated = false;
             try (BufferedReader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8))
             {
                 String line;
                 while ((line = reader.readLine()) != null)
                 {
+                    if (FORMAT_MARKER.equals(line))
+                    {
+                        migrated = true;
+                        continue;
+                    }
                     int tab = line.lastIndexOf('\t');
                     if (tab <= 0)
                         continue;
@@ -5312,6 +5700,39 @@ final class BslExpectedTypePremiums
             catch (IOException e)
             {
                 Global.logError(LOG, "загрузка статистики выбора " + file, e); //$NON-NLS-1$
+                return rows;
+            }
+            if (!migrated)
+            {
+                int previousSize = rows.size();
+                rows.keySet().removeIf(key -> {
+                    String[] parts = key.split("\t", -1); //$NON-NLS-1$
+                    return parts.length >= 4 && language(parts) == MODULE_LANGUAGE
+                        && isDynamicChoice(platformChoiceMembers(parts[0]), parts[1], "1".equals(parts[2])); //$NON-NLS-1$
+                });
+                int removed = previousSize - rows.size();
+                File platform = platformFile();
+                int moved = 0;
+                if (platform != null && !platform.equals(file))
+                {
+                    for (var iterator = rows.entrySet().iterator(); iterator.hasNext();)
+                    {
+                        Map.Entry<String, Integer> row = iterator.next();
+                        String[] parts = row.getKey().split("\t", -1); //$NON-NLS-1$
+                        if (parts.length >= 4 && language(parts) == MODULE_LANGUAGE
+                            && isKnownPlatformChoice(parts[0], parts[1], "1".equals(parts[2]))) //$NON-NLS-1$
+                        {
+                            table(platform).merge(row.getKey(), row.getValue(), Integer::sum);
+                            iterator.remove();
+                            DIRTY.add(platform);
+                            moved++;
+                        }
+                    }
+                }
+                Global.tempLog("assist-choice-statistics", "migration file=" + file + " removed=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + removed + " movedToWorkspace=" + moved + " remaining=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                DIRTY.add(file);
+                scheduleSave();
             }
             return rows;
         }
@@ -5346,6 +5767,7 @@ final class BslExpectedTypePremiums
                     file.getParentFile().mkdirs();
                     try (Writer writer = Files.newBufferedWriter(file.toPath(), StandardCharsets.UTF_8))
                     {
+                        writer.write(FORMAT_MARKER + '\n');
                         for (Map.Entry<String, Integer> row : rows.entrySet())
                             writer.write(row.getKey() + '\t' + row.getValue() + '\n');
                     }

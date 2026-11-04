@@ -322,8 +322,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int ctorTypeCatalogAnchor = Integer.MIN_VALUE;
     /** Набор контекстов компиляции, для которого посчитан каталог; {@code null} — неизвестен. */
     private String ctorTypeCatalogEnvKey;
-    /** Разбор модуля, которому принадлежат предложения каталога (см. {@code ctorCatalogModelGen}). */
-    private int ctorTypeCatalogGen = -1;
+    private long ctorTypeCatalogRevision = Long.MIN_VALUE;
     /** Снимок диапазонов с контекстами компиляции; собирает {@link #rebuildEnvRanges}. */
     private volatile EnvRanges envRanges;
     private org.eclipse.xtext.ui.editor.model.IXtextModelListener envRangesListener;
@@ -338,6 +337,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Каретка/документ для снятия «призрака» с рабочего потока (без {@code StyledText}). */
     private static final ThreadLocal<IDocument> GHOST_DOC = new ThreadLocal<>();
     private static final ThreadLocal<Integer> GHOST_CARET = new ThreadLocal<>();
+
+    /** Временная диагностика самого перепарсинга, а не только ожидающего его читателя. */
+    static AutoCloseable traceModelSync(org.eclipse.core.runtime.jobs.Job job)
+    {
+        return new AssistOpeningTrace("modelSync job=" + System.identityHashCode(job)); //$NON-NLS-1$
+    }
+
+    static AutoCloseable traceBackgroundModelRead(IDocument document)
+    {
+        return new AssistOpeningTrace("lowRead document=" + System.identityHashCode(document)); //$NON-NLS-1$
+    }
 
     /** Временный замер открытия со стеками: каждый активный расчёт, без порогов длительности. */
     private static final class AssistOpeningTrace implements AutoCloseable
@@ -577,6 +587,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      * всегда пустым.
      */
     private volatile int liveAssistCaret = -1;
+    private record LiveAssistPosition(IDocument document, int caret, int contextKey) {}
+    private volatile LiveAssistPosition liveAssistPosition;
     /** Причина последнего отказа от фона: нужна вызывающему на UI. */
     private static volatile String lastWordListSkip = ""; //$NON-NLS-1$
     private int wordListFailedKey = Integer.MIN_VALUE;
@@ -1404,6 +1416,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     public void invalidateCache()
     {
+        Global.tempLog("assist-cache", "invalidate key=" + fullListContextKey + " ready=" + fullListReady //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " count=" + fullListCache.length + " caller=" //$NON-NLS-1$ //$NON-NLS-2$
+            + java.util.Arrays.stream(Thread.currentThread().getStackTrace()).skip(2).limit(5)
+                .map(StackTraceElement::toString).collect(java.util.stream.Collectors.joining(" <- "))); //$NON-NLS-1$
         fullListReady = false;
         fullListComplete = false;
         assignFullListCache(EMPTY);
@@ -1985,6 +2001,7 @@ return;
             uiBlockLog("wordList.kickDoc.skip", "why=noDoc caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
+        liveAssistPosition = new LiveAssistPosition(doc, caret, computeFullListContextKey(doc, caret));
         liveAssistCaret = caret;
         ensureEnvRangesListener(viewer);
         if (isStringLiteralAssistContext(doc, caret))
@@ -3146,8 +3163,9 @@ return;
             wordListBackgroundJob = null;
             wordListEpoch++;
         }
-        org.eclipse.swt.custom.StyledText text = viewer.getTextWidget() instanceof org.eclipse.swt.custom.StyledText st
-            && !st.isDisposed() ? st : null;
+        org.eclipse.swt.custom.StyledText text = viewer.getTextWidget();
+        if (text != null && text.isDisposed())
+            text = null;
         org.eclipse.swt.widgets.Display display = text != null ? text.getDisplay() : null;
         if (display == null)
             return wordListSkip("noDisplay"); //$NON-NLS-1$
@@ -3191,6 +3209,7 @@ return;
                 java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                 int attempts = 0;
                 int lastProbe = offset;
+                boolean[] premiumsPrepared = { false };
                 // «Новый <тип>»: список типов зависит только от контекстов компиляции,
                 // поэтому он считается один раз на набор и лежит в общем каталоге.
                 boolean ctorProbe = false;
@@ -3257,9 +3276,38 @@ return;
                     try
                     {
                         final int probeOffset = probe;
+                        final int probeAttempt = attempts;
+                        premiumsPrepared[0] = false;
                         provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
-                        raw = BslDataEventGuard.runIsolated(
-                            () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                        // Не отпускать модель между предложениями и премиями: иначе EDT
+                        // запускает синхронизацию, которую премии тут же вынуждены ждать.
+                        raw = ContentAssistSessionReloader.withModelSyncHeld(doc,
+                            () -> monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen,
+                            () -> {
+                                ICompletionProposal[] proposals = BslDataEventGuard.runIsolated(
+                                    () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                                openTiming.accept("probe.end", "attempt=" + probeAttempt + " count=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                    + (proposals == null ? -1 : proposals.length));
+                                if (proposals != null && proposals.length > 0 && delegateAssistMode() != 2
+                                    && !monitor.isCanceled() && epoch == wordListEpoch && gen == memberStockContextGen)
+                                {
+                                    GHOST_DOC.set(doc);
+                                    GHOST_CARET.set(Integer.valueOf(probeOffset));
+                                    try
+                                    {
+                                        openTiming.accept("premiums.begin", "count=" + proposals.length); //$NON-NLS-1$ //$NON-NLS-2$
+                                        BslExpectedTypePremiums.ensure(doc, probeOffset, proposals);
+                                        openTiming.accept("premiums.end", "count=" + proposals.length); //$NON-NLS-1$ //$NON-NLS-2$
+                                        premiumsPrepared[0] = true;
+                                    }
+                                    finally
+                                    {
+                                        GHOST_DOC.remove();
+                                        GHOST_CARET.remove();
+                                    }
+                                }
+                                return proposals;
+                            });
                         provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
                         events = BslDataEventGuard.drainIsolated(doc);
                         if (ctorKey != null && raw != null && countNoLinkModelProposals(raw) > 0)
@@ -3288,7 +3336,6 @@ return;
                     // (mode 1) вернул пусто, а второй даёт лишь то, что не зависит от
                     // режима. Такой список брать за словарь нельзя: замер 12.09.2026
                     // 15:12 — 34 пункта без «Сообщить» вместо 1783, окно не открылось.
-                    openTiming.accept("probe.end", "attempt=" + attempts + " count=" + (raw == null ? -1 : raw.length)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     boolean secondPass = delegateAssistMode() == 2;
                     if (secondPass)
                     {
@@ -3314,6 +3361,8 @@ return;
                     }
                 }
                 final ICompletionProposal[] result = raw == null ? EMPTY : raw;
+                if (monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen)
+                    return Status.CANCEL_STATUS;
                 final java.util.Map<Object, Object> dataEvents = events;
                 ICompletionProposal[] popup = result;
                 String popupFilter = ""; //$NON-NLS-1$
@@ -3329,9 +3378,12 @@ return;
                     try
                     {
                         // Премии ожидаемого типа — здесь, в фоне: в UI-потоке они только читаются.
-                        openTiming.accept("premiums.begin", "count=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
-                        BslExpectedTypePremiums.ensure(liveDoc, lastProbe, result);
-                        openTiming.accept("premiums.end", "count=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
+                        if (!premiumsPrepared[0])
+                        {
+                            openTiming.accept("premiums.begin", "count=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
+                            BslExpectedTypePremiums.ensure(liveDoc, lastProbe, result);
+                            openTiming.accept("premiums.end", "count=" + result.length); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
                         long tFilter = System.nanoTime();
                         popup = popupFilter.isEmpty()
                             ? buildDelegateOrderedList(result) : filterAndSort(result, popupFilter);
@@ -3973,6 +4025,9 @@ return;
             || isAmpersandAnnotationFilter(doc, resolveWidgetCaret(viewer))
             || isAfterNewKeyword(doc, resolveWidgetCaret(viewer)))
             return;
+        int refreshCaret = resolveWidgetCaret(viewer);
+        liveAssistPosition = new LiveAssistPosition(doc, refreshCaret,
+            computeFullListContextKey(doc, refreshCaret));
         org.eclipse.swt.widgets.Display display = source.getTextWidget().getDisplay();
         if (wordListModelRefreshJob != null)
             wordListModelRefreshJob.cancel();
@@ -3980,10 +4035,21 @@ return;
         {
             private boolean stale(IProgressMonitor monitor)
             {
-                int caret = liveAssistCaret;
-                return monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen
-                    || viewer.getDocument() != doc || caret < 0
-                    || computeFullListContextKey(doc, caret) != key;
+                // Документ уже мог измениться, а каретка события ещё не опубликована.
+                // Вычислять по этой паре ключ в фоне нельзя: удаление буквы отменяло
+                // единственную догрузку, оставляя в окне временный усечённый список.
+                LiveAssistPosition position = liveAssistPosition;
+                boolean stale = monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen
+                    || position == null || position.document() != doc || position.caret() < 0
+                    || position.contextKey() != key;
+                if (stale)
+                    Global.tempLog("completion-model-refresh", "stale key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                        + " canceled=" + monitor.isCanceled() + " epoch=" + epoch + "/" + wordListEpoch //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " gen=" + gen + "/" + memberStockContextGen //$NON-NLS-1$ //$NON-NLS-2$
+                        + " liveKey=" + (position != null ? position.contextKey() : Integer.MIN_VALUE) //$NON-NLS-1$
+                        + " caret=" + (position != null ? position.caret() : -1) //$NON-NLS-1$
+                        + " sameDocument=" + (position != null && position.document() == doc)); //$NON-NLS-1$
+                return stale;
             }
 
             @Override
@@ -3991,6 +4057,7 @@ return;
             {
                 BslXtextDocumentHook.markAssistBackground(true);
                 DELEGATE_STALE_CHECK.set(() -> stale(monitor));
+                Global.tempLog("completion-model-refresh", "begin key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                 try
                 {
                     while (!stale(monitor))
@@ -3999,6 +4066,8 @@ return;
                         ICompletionProposal[] raw = BslDataEventGuard.runIsolated(
                             () -> computeDelegateListOnReadyModel(viewer, -key - 1, () -> stale(monitor)));
                         java.util.Map<Object, Object> events = BslDataEventGuard.drainIsolated(doc);
+                        Global.tempLog("completion-model-refresh", "computed key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+                            + " count=" + (raw != null ? raw.length : -1)); //$NON-NLS-1$
                         if (stale(monitor))
                             return Status.CANCEL_STATUS;
                         // Потолок одного ожидания не означает, что модель не станет готова:
@@ -4031,7 +4100,7 @@ return;
                             // Зонд в начале слова дал широкую базу. Фильтр берётся заново
                             // при обновлении popup, поэтому ввод во время ожидания сохраняется.
                             rememberRecoveredDelegateList(viewer, caret, "", raw); //$NON-NLS-1$
-                            ContentAssistPopupSync.recomputePopupListPreservingSelection(assistant, source,
+                            ContentAssistPopupSync.recomputePopupList(assistant, source,
                                 SmartContentAssistProcessor.this);
                         });
                         return Status.OK_STATUS;
@@ -4040,6 +4109,7 @@ return;
                 }
                 catch (Exception | LinkageError | StackOverflowError e)
                 {
+                    Global.tempLog("completion-model-refresh", "failure key=" + key + " error=" + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     return Status.CANCEL_STATUS;
                 }
                 finally
@@ -4216,7 +4286,13 @@ return probeDelegateOnce(viewer, offset);
                     repairPopupListFromMemberStock(doc, caret);
             }
             if (!isCacheValidForCaret(doc, caret) || fullListCache.length == 0)
+            {
+                Global.tempLog("assist-cache", "cacheOnly.reject ready=" + fullListReady //$NON-NLS-1$ //$NON-NLS-2$
+                    + " count=" + fullListCache.length + " savedKey=" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                    + " liveKey=" + computeFullListContextKey(doc, caret) + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+                logEmptyPopup(viewer, doc, caret, filter, fullListCache.length);
                 return EMPTY;
+            }
             ICompletionProposal[] cached;
             try
             {
@@ -4250,7 +4326,10 @@ return probeDelegateOnce(viewer, offset);
                     + " n=" + cached.length); //$NON-NLS-1$
             }
             if (cached.length == 0 && !filter.isEmpty())
+            {
+                logEmptyPopup(viewer, doc, caret, filter, fullListCache.length);
                 scheduleCacheOnlyRefetch(viewer, doc, caret, filter);
+            }
             return dropTypedEcho(cached, filter);
         }
         int literalCaret = resolveInvocationCaret(viewer, offset);
@@ -5557,8 +5636,16 @@ return EMPTY;
         // В обёртках, как список слов (см. storeLiteralArgList).
         literalArgList = buildDelegateOrderedList(list);
         literalArgListConfirmed = true;
+        boolean activePopup = ContentAssistSessionReloader.getActiveProcessor() == this
+            && ContentAssistSessionReloader.getActiveViewer() == viewer && isPopupVisible();
+        Global.tempLog("assist-literal-publish", "quote=" + quote + " count=" + list.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " callback=" + (onReady != null) + " activePopup=" + activePopup); //$NON-NLS-1$ //$NON-NLS-2$
         if (onReady != null)
             onReady.run();
+        else if (activePopup)
+            // manualFullBase приходит без onReady: обновить уже открытый список тем же
+            // алгоритмом, которым публикуются ИР и премии, из новой базы литерала.
+            ContentAssistSessionReloader.refreshPopupIfOpen(liveCaret);
     }
 
     private ICompletionProposal[] computeLiteralPassthroughImpl(ITextViewer viewer, int offset, int caret)
@@ -7017,8 +7104,14 @@ return stripEmptyPlaceholderProposals(result);
                     if (assistant != null && processor != null
                         && ContentAssistPopupSync.isPopupVisible(assistant))
                     {
+                        int selectedBefore = ContentAssistPopupSync.selectedProposalIndex(assistant);
+                        Global.tempLog("completion-constructor-selection", "refresh.begin selected=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + selectedBefore + " filter=" + SmartFilterTracker.getCurrentFilter()); //$NON-NLS-1$
                         ContentAssistPopupSync.invalidateSyncSnapshot();
                         ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
+                        Global.tempLog("completion-constructor-selection", "refresh.end selectedBefore=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + selectedBefore + " selectedAfter=" //$NON-NLS-1$
+                            + ContentAssistPopupSync.selectedProposalIndex(assistant));
                     }
                 });
                 return Status.OK_STATUS;
@@ -8335,38 +8428,30 @@ return result;
      * находится, и каретка встаёт в конец.
      */
     private record CachedProposals(ICompletionProposal[] list,
-                                   java.util.Map<Object, Object> dataEvents)
+                                   java.util.Map<Object, Object> dataEvents, long revision)
     {}
 
-    /**
-     * Разбор модуля, для которого посчитаны лежащие в кэше предложения.
-     *
-     * <p>Предложение EDT держит ссылки на модель своего разбора. После перепарсинга они
-     * становятся прокси в исчезнувшее состояние, и любое обращение к предложению уходит в
-     * рекурсию EDT: {@code BslResource.getEObject} → {@code installProxiesForBlock} →
-     * {@code BslLazyUriEncoder.appendShortFragment} → {@code eResolveProxy} → снова
-     * {@code getEObject}. В журнале это {@code StackOverflowError} на 1024 кадра одного
-     * цикла (12.09.2026 11:22 и 11:36). Поэтому кэш живёт ровно до следующего разбора.
-     */
-    private volatile int ctorCatalogModelGen;
-    private int ctorCatalogGenOfEntries = -1;
+    // Полный каталог принадлежит набору окружений, а не поколению AST.
 
     private CachedProposals ctorCatalogGet(String key)
     {
         if (key == null)
             return null;
-        if (ctorCatalogGenOfEntries != ctorCatalogModelGen)
+        CachedProposals cached = ctorCatalogByEnv.get(key);
+        if (cached != null && cached.revision() != ctorCatalogRevision(key))
         {
-            if (!ctorCatalogByEnv.isEmpty())
-            {
-                uiBlockLog("ctorCatalog.expire", "gen=" + ctorCatalogGenOfEntries //$NON-NLS-1$ //$NON-NLS-2$
-                    + " now=" + ctorCatalogModelGen + " n=" + ctorCatalogByEnv.size()); //$NON-NLS-1$ //$NON-NLS-2$
-                ctorCatalogByEnv.clear();
-            }
-            ctorCatalogGenOfEntries = ctorCatalogModelGen;
-            return null;
+            ctorCatalogByEnv.remove(key);
+            cached = null;
         }
-        return ctorCatalogByEnv.get(key);
+        Global.tempLog("completion-constructor-cache", "lookup key=" + key //$NON-NLS-1$ //$NON-NLS-2$
+            + " count=" + (cached != null ? cached.list().length : 0)); //$NON-NLS-1$
+        return cached;
+    }
+
+    private static long ctorCatalogRevision(String key)
+    {
+        int separator = key != null ? key.indexOf('|') : -1;
+        return separator >= 0 ? BslTypeCatalog.revision(key.substring(0, separator)) : Long.MIN_VALUE;
     }
 
     /**
@@ -8423,19 +8508,15 @@ return result;
     {
         if (key == null || list == null || list.length == 0)
             return;
-        if (ctorCatalogGenOfEntries != ctorCatalogModelGen)
-        {
-            ctorCatalogByEnv.clear();
-            ctorCatalogGenOfEntries = ctorCatalogModelGen;
-        }
         CachedProposals saved = ctorCatalogByEnv.get(key);
         // Полнее — значит правильнее: усечённый ответ (разбор не догнал текст) не должен
         // вытеснять уже посчитанный полный список.
-        if (saved != null && saved.list().length >= list.length)
+        long revision = ctorCatalogRevision(key);
+        if (saved != null && saved.revision() == revision && saved.list().length >= list.length)
             return;
         ctorCatalogByEnv.put(key, new CachedProposals(list,
             dataEvents == null ? java.util.Collections.emptyMap()
-                : new java.util.LinkedHashMap<>(dataEvents)));
+                : new java.util.LinkedHashMap<>(dataEvents), revision));
     }
 
     /**
@@ -8527,11 +8608,8 @@ return result;
                 ends[i] = bounds.get(i)[1];
             }
             envRanges = new EnvRanges(starts, ends, keys.toArray(new String[0]));
-            // Новый разбор — прежние предложения в кэше стали ссылками в исчезнувшее
-            // состояние модели (см. ctorCatalogModelGen).
-            ctorCatalogModelGen++;
             uiBlockLog("envRanges.build", "n=" + n //$NON-NLS-1$ //$NON-NLS-2$
-                + " project=" + project + " gen=" + ctorCatalogModelGen); //$NON-NLS-1$ //$NON-NLS-2$
+                + " project=" + project); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError e)
         {
@@ -8625,7 +8703,7 @@ return result;
         ctorTypeCatalog = unwrapProposals(result);
         ctorTypeCatalogPrefix = newPrefix;
         ctorTypeCatalogEnvKey = envKey;
-        ctorTypeCatalogGen = ctorCatalogModelGen;
+        ctorTypeCatalogRevision = ctorCatalogRevision(envKey);
         ctorTypeCatalogAnchor = computeFullListContextKey(document, offset);
         fullListComplete = true;
         uiBlockLog("ctorCatalog.remember", "n=" + ctorTypeCatalog.length //$NON-NLS-1$ //$NON-NLS-2$
@@ -8653,6 +8731,11 @@ return result;
         if (liveEnvKey != null)
         {
             CachedProposals shared = ctorCatalogGet(liveEnvKey);
+            // Сессия EDT могла очистить карту вставки при закрытии предыдущего окна.
+            // Возвращать записи надо при каждом использовании каталога, а не только
+            // когда список впервые принят из общего кэша.
+            if (shared != null && !shared.dataEvents().isEmpty())
+                BslDataEventGuard.mergeIntoReal(document, shared.dataEvents());
             if (shared != null && shared.list().length > 0
                 && (!liveEnvKey.equals(ctorTypeCatalogEnvKey)
                     || ctorTypeCatalog.length < shared.list().length))
@@ -8660,12 +8743,8 @@ return result;
                 ctorTypeCatalog = shared.list();
                 ctorTypeCatalogPrefix = ""; //$NON-NLS-1$
                 ctorTypeCatalogEnvKey = liveEnvKey;
-                ctorTypeCatalogGen = ctorCatalogModelGen;
+                ctorTypeCatalogRevision = shared.revision();
                 ctorTypeCatalogAnchor = computeFullListContextKey(document, offset);
-                // Вместе со списком возвращаем его записи DataEvent — иначе вставка из
-                // этого списка не поднимет LinkedMode.
-                if (!shared.dataEvents().isEmpty())
-                    BslDataEventGuard.mergeIntoReal(document, shared.dataEvents());
                 uiBlockLog("ctorCatalog.shared", "key=" + liveEnvKey //$NON-NLS-1$ //$NON-NLS-2$
                     + " n=" + shared.list().length //$NON-NLS-1$
                     + " events=" + shared.dataEvents().size()); //$NON-NLS-1$
@@ -8673,13 +8752,24 @@ return result;
         }
         if (ctorTypeCatalog.length == 0)
             return false;
-        // Предложения из прошлого разбора — ссылки в исчезнувшее состояние модели.
-        if (ctorTypeCatalogGen != ctorCatalogModelGen)
+        if (ctorTypeCatalogEnvKey != null
+            && ctorTypeCatalogRevision != ctorCatalogRevision(ctorTypeCatalogEnvKey))
         {
-            uiBlockLog("ctorCatalog.skip", "why=otherParse saved=" + ctorTypeCatalogGen //$NON-NLS-1$ //$NON-NLS-2$
-                + " now=" + ctorCatalogModelGen); //$NON-NLS-1$
             ctorTypeCatalog = EMPTY;
             ctorTypeCatalogEnvKey = null;
+            if (countNoLinkModelProposals(fullListCache) > 0)
+            {
+                assignFullListCache(EMPTY);
+                fullListReady = false;
+                fullListComplete = false;
+            }
+            return false;
+        }
+        if (ctorTypeCatalogEnvKey != null && liveEnvKey != null
+            && !ctorTypeCatalogEnvKey.equals(liveEnvKey))
+        {
+            Global.tempLog("completion-constructor-cache", "reject savedEnv=" + ctorTypeCatalogEnvKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " liveEnv=" + liveEnvKey); //$NON-NLS-1$
             return false;
         }
         String prefix = computeIdentifierFilter(document, offset);
@@ -9726,7 +9816,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     {
         if (!(doc instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument xtext) || stale.getAsBoolean())
             return;
-        xtext.readOnly(resource ->
+        // Связанный модуль не прогоняем через readOnly: оно догоняет и хвост фильтра.
+        if (Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyPeekAst(xtext,
+            resource -> resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl && bsl.isLinkedBatch())))
+            return;
+        ContentAssistSessionReloader.readOnlyForContentAssist(xtext, resource ->
         {
             if (!(resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl) || bsl.isLinkedBatch()
                 || stale.getAsBoolean())
@@ -10061,43 +10155,38 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         ModelWaitProgress waitProgress = new ModelWaitProgress();
                         ContentAssistPopupUi.setRecomputeStatus(viewer, SmartContentAssistProcessor.this,
                             ModelWaitProgress.STATUS);
-                        boolean modelReady;
+                        attempts++;
                         try
                         {
                             java.util.function.BooleanSupplier stale = () -> monitor.isCanceled()
                                 || memberStockBackgroundDot != dotContextKey || contextGen != memberStockContextGen;
-                            modelReady = ContentAssistSessionReloader.waitModelReadyUpTo(doc, probeOffset, stale);
-                            if (modelReady)
-                                linkModuleIfNeeded(viewer, doc, stale);
-                        }
-                        finally
-                        {
-                            waitProgress.finish();
-                            ContentAssistPopupUi.setRecomputeStatus(viewer, SmartContentAssistProcessor.this, null);
-                        }
-                        if (!modelReady)
-                        {
-                            // Как отказ по устареванию в probeDelegateOnce: метку точки снимет
-                            // общий выход ниже.
-                            raw = null;
-                            break;
-                        }
-                        attempts++;
-                        try
-                        {
-                            // Без внешнего readOnly: штатный процессор внутри сам берёт
-                            // readOnlyForContentAssist. Внешняя обёртка на фоновом потоке даёт
-                            // «устаревшее состояние» и null — этим и была бесполезна прошлая
-                            // фоновая загрузка.
-                            raw = BslDataEventGuard.runIsolated(
-                                () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
-                            // Забираем DataEvent, записанный расчётом в теневую карту: по нему
-                            // EDT поднимает LinkedMode при вставке. Забирать только здесь, на
-                            // фоновом потоке — теневая карта привязана к потоку.
+                            // Проверка модели, штатный список и его база — под одним удержанием.
+                            // Хвост фильтра после точки не требует нового списка членов.
+                            raw = ContentAssistSessionReloader.withMemberModelReady(
+                                (IXtextDocument) doc, probeOffset, stale, () ->
+                                {
+                                    linkModuleIfNeeded(viewer, doc, stale);
+                                    long nativeStarted = System.nanoTime();
+                                    ICompletionProposal[] list = BslDataEventGuard.runIsolated(
+                                        () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                                    long nativeFinished = System.nanoTime();
+                                    if (list != null && list.length > 0 && !containsOnlyTemplateProposals(list)
+                                        && !stale.getAsBoolean()
+                                        && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
+                                        list = BslExpectedTypePremiums.prepareMemberList(doc, probeOffset, list);
+                                    Global.tempLog("assist-member-opening", "computed dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
+                                        + " nativeMs=" + ((nativeFinished - nativeStarted) / 1_000_000.0) //$NON-NLS-1$
+                                        + " baseMs=" + ((System.nanoTime() - nativeFinished) / 1_000_000.0) //$NON-NLS-1$
+                                        + " count=" + (list == null ? -1 : list.length)); //$NON-NLS-1$
+                                    return list;
+                                });
                             dataEvents = BslDataEventGuard.drainIsolated(doc);
+                            if (raw == null)
+                                break;
                         }
                         catch (Exception | LinkageError e)
                         {
+                            Global.tempLog("assist-member-opening", "failed dot=" + dotContextKey + " error=" + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                             // Отмена от EDT (новый расчёт пометил документ устаревшим) —
                             // это не «пусто», повторять нечего: расчёт уже не нужен.
                             if (isCanceledByNewerRequest(e))
@@ -10107,6 +10196,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                 return Status.CANCEL_STATUS;
                             }
                             raw = EMPTY;
+                        }
+                        finally
+                        {
+                            waitProgress.finish();
+                            ContentAssistPopupUi.setRecomputeStatus(viewer, SmartContentAssistProcessor.this, null);
                         }
                         // Шаблон (например «кстр») не является членом получателя.
                         // Такой ответ не подтверждает готовность базы: используем те же
@@ -10136,7 +10230,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     }
                     // До снятия метки задания и публикации: повторный запрос не должен
                     // запустить второй расчёт, пока готовится базовая часть списка.
-                    if (raw != null && !monitor.isCanceled()
+                    if (group != null && raw != null && !monitor.isCanceled()
                         && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
                         raw = BslExpectedTypePremiums.prepareMemberList(doc, probeOffset, raw);
                     // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
@@ -12092,7 +12186,15 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             return Integer.compare(c2, c1);
         boolean added1 = unwrapProposal(p1) instanceof BslAddedWordProposal word1 && !word1.isRankedWithStock();
         boolean added2 = unwrapProposal(p2) instanceof BslAddedWordProposal word2 && !word2.isRankedWithStock();
-        return added1 == added2 ? 0 : added1 ? -1 : 1;
+        if (added1 != added2)
+            return added1 ? -1 : 1;
+        // При равных премиях «Истина» выше «Ложь», независимо от исходного порядка EDT.
+        // Отдельный ключ для всех строк сохраняет транзитивность компаратора.
+        boolean true1 = "Истина".equalsIgnoreCase(filterMatchName(p1)) //$NON-NLS-1$
+            || "True".equalsIgnoreCase(filterMatchName(p1)); //$NON-NLS-1$
+        boolean true2 = "Истина".equalsIgnoreCase(filterMatchName(p2)) //$NON-NLS-1$
+            || "True".equalsIgnoreCase(filterMatchName(p2)); //$NON-NLS-1$
+        return true1 == true2 ? 0 : true1 ? -1 : 1;
     }
 
     static int computeNameScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
@@ -12189,6 +12291,29 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
     static String displayString(ICompletionProposal p)
     {
         return (p == null) ? null : p.getDisplayString();
+    }
+
+    private static void logEmptyPopup(ITextViewer viewer, IDocument doc, int caret, String filter, int count)
+    {
+        try
+        {
+            int widgetCaret = resolveWidgetCaret(viewer);
+            int begin = Math.max(0, Math.min(caret, doc.getLength()) - 32);
+            int end = Math.min(doc.getLength(), Math.max(0, caret) + 32);
+            String around = doc.get(begin, end - begin).replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            String codePoints = filter.codePoints().mapToObj(value -> Integer.toHexString(value))
+                .collect(java.util.stream.Collectors.joining(",")); //$NON-NLS-1$
+            Global.tempLog("assist-empty-popup", "caret=" + caret + " widgetCaret=" + widgetCaret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " stamp=" + (doc instanceof IDocumentExtension4 ext ? ext.getModificationStamp() : -1) //$NON-NLS-1$
+                + " count=" + count + " filter=[" + filter + "] codePoints=" + codePoints //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " widgetFilter=[" + computeIdentifierFilter(doc, widgetCaret) //$NON-NLS-1$
+                + "] trackedFilter=[" + SmartFilterTracker.getCurrentFilter() + "] aroundStart=" + begin //$NON-NLS-1$ //$NON-NLS-2$
+                + " around=[" + around + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception error)
+        {
+            Global.tempLog("assist-empty-popup", "diagnostic.error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /** Префикс идентификатора только слева от каретки (не захватывает текст справа). */
@@ -12764,7 +12889,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             if (types == null)
                 return ""; //$NON-NLS-1$
             StringBuilder sb = new StringBuilder();
-            for (TypeItem type : types)
+            for (TypeItem type : FormItemTypes.displayTypes(types))
             {
                 if (type == null)
                     continue;
@@ -12911,7 +13036,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             if (expression == null || expression.getTypes().isEmpty())
                 return ""; //$NON-NLS-1$
             StringBuilder sb = new StringBuilder();
-            for (TypeItem type : expression.getTypes())
+            for (TypeItem type : FormItemTypes.displayTypes(expression.getTypes()))
             {
                 if (type == null)
                     continue;
@@ -12955,6 +13080,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
         private static String formatTypeItem(TypeItem type)
         {
+            type = FormItemTypes.displayType(type);
             if (type instanceof DuallyNamedElement)
             {
                 String ru = ((DuallyNamedElement) type).getNameRu();

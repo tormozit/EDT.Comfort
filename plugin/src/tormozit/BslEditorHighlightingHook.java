@@ -80,12 +80,26 @@ public final class BslEditorHighlightingHook implements IStartup
     /** Debounce Job'ов apply: partOpened+Activated+BroughtToTop иначе дают тройной залп. */
     private static final Map<Object, Job> pendingApplyJobs = new IdentityHashMap<>();
     private static final long APPLY_DEBOUNCE_MS = 50L;
+    private static final String MODEL_CALLBACK = "tormozit.bslHighlighting.modelChanged"; //$NON-NLS-1$
+
 
     @Override
     public void earlyStartup()
     {
         if (!installed.compareAndSet(false, true))
             return;
+
+        System.getProperties().put(MODEL_CALLBACK,
+            (java.util.function.BiPredicate<Object, Object>) (reconciler, resource) -> {
+                if (!(reconciler instanceof HighlightingReconciler hr) || !(resource instanceof XtextResource))
+                    return false;
+                XtextSourceViewer source = resolveSourceViewer(hr);
+                if (source == null || source.getXtextDocument() == null)
+                    return false;
+                Global.tempLog("assist-highlighting", "deferred thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                applyHighlightingNow(reconciler);
+                return true;
+            });
 
         PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
             Display.getCurrent().addFilter(SWT.Paint, event -> {
@@ -177,16 +191,11 @@ public final class BslEditorHighlightingHook implements IStartup
                             if (monitor.isCanceled())
                                 return Status.CANCEL_STATUS;
 
-                            document.tryReadOnly(resource ->
-                            {
-                                if (monitor.isCanceled())
-                                    return Boolean.FALSE;
-                                runFullHighlightingApply(hr, resource, monitor);
-                                return Boolean.TRUE;
-                            });
+                            runFullHighlightingApply(hr, document, monitor);
                         }
                         catch (Exception e)
                         {
+                            Global.tempLog("assist-highlighting", "job failed=" + e); //$NON-NLS-1$ //$NON-NLS-2$
                             Global.log(TAG, "applyHighlightingNow job failed: " //$NON-NLS-1$
                                 + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$
                         }
@@ -195,7 +204,15 @@ public final class BslEditorHighlightingHook implements IStartup
                             synchronized (pendingApplyJobs)
                             {
                                 if (pendingApplyJobs.get(hr) == this)
+                                {
                                     pendingApplyJobs.remove(hr);
+                                    // Уступив подсказке, не теряем последнее обновление раскраски.
+                                    if (monitor.isCanceled() && resolveSourceViewer(hr) == sourceViewer
+                                        && sourceViewer.getDocument() == document
+                                        && sourceViewer.getTextWidget() != null
+                                        && !sourceViewer.getTextWidget().isDisposed())
+                                        applyHighlightingNow(hr);
+                                }
                             }
                         }
                         return Status.OK_STATUS;
@@ -237,7 +254,7 @@ public final class BslEditorHighlightingHook implements IStartup
      * параллельный native reconcile не вошёл в середину.
      */
     @SuppressWarnings("unchecked")
-    private static void runFullHighlightingApply(HighlightingReconciler hr, XtextResource resource,
+    private static void runFullHighlightingApply(HighlightingReconciler hr, IXtextDocument document,
         IProgressMonitor monitor)
     {
         Field reconcileLockField = findField(HighlightingReconciler.class, "fReconcileLock"); //$NON-NLS-1$
@@ -256,6 +273,7 @@ public final class BslEditorHighlightingHook implements IStartup
             || addedField == null || removedField == null || startMethod == null
             || reconcileMethod == null || updateMethod == null || stopMethod == null)
         {
+            Global.tempLog("assist-highlighting", "reflection members missing"); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "runFullHighlightingApply: reflection members missing"); //$NON-NLS-1$
             return;
         }
@@ -279,7 +297,10 @@ public final class BslEditorHighlightingHook implements IStartup
             synchronized (lock)
             {
                 if (reconcilingField.getBoolean(hr))
+                {
+                    monitor.setCanceled(true);
                     return;
+                }
                 reconcilingField.setBoolean(hr, true);
             }
 
@@ -302,22 +323,42 @@ public final class BslEditorHighlightingHook implements IStartup
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
                     return;
 
-                resetDelegateStamp(hr);
-                reconcileMethod.invoke(hr, resource, CancelIndicator.NullImpl);
-                if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
+                long started = System.nanoTime();
+                HighlightingRead prepared = ContentAssistSessionReloader.readOnlyLowPriority(document, monitor,
+                    resource -> {
+                        if (monitor.isCanceled() || resource == null || resource.getParseResult() == null
+                            || resource.getParseResult().getRootNode() == null
+                            || !resource.getParseResult().getRootNode().getText().equals(document.get()))
+                        {
+                            monitor.setCanceled(true);
+                            return null;
+                        }
+                        resetDelegateStamp(hr);
+                        reconcileMethod.invoke(hr, resource, (CancelIndicator) monitor::isCanceled);
+                        return new HighlightingRead(resource,
+                            ((org.eclipse.jface.text.IDocumentExtension4) document).getModificationStamp(),
+                            new ArrayList<>((List<AttributedPosition>) addedField.get(hr)),
+                            new ArrayList<>((List<AttributedPosition>) removedField.get(hr)));
+                    });
+                Global.tempLog("assist-highlighting", "read ms=" + ((System.nanoTime() - started) / 1_000_000.0) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
+                if (prepared == null || presenter.isCanceled() || monitor.isCanceled())
                     return;
-
-                List<AttributedPosition> added =
-                    (List<AttributedPosition>)addedField.get(hr);
-                List<AttributedPosition> removed =
-                    (List<AttributedPosition>)removedField.get(hr);
+                // Текстовая presentation использует готовые позиции, а не AST. Модель уже свободна.
+                List<AttributedPosition> added = prepared.added();
+                List<AttributedPosition> removed = prepared.removed();
                 TextPresentation textPresentation = presenter.createPresentation(added, removed);
                 if (textPresentation == null
                     || presenter.isCanceled()
                     || (monitor != null && monitor.isCanceled()))
                     return;
 
-                updateMethod.invoke(hr, textPresentation, added, removed, resource);
+                if (prepared.stamp() != ((org.eclipse.jface.text.IDocumentExtension4) document).getModificationStamp())
+                {
+                    monitor.setCanceled(true);
+                    return;
+                }
+                updateMethod.invoke(hr, textPresentation, added, removed, prepared.resource());
             }
             finally
             {
@@ -339,10 +380,14 @@ public final class BslEditorHighlightingHook implements IStartup
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            Global.tempLog("assist-highlighting", "apply failed=" + cause); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "runFullHighlightingApply failed: " //$NON-NLS-1$
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
         }
     }
+
+    private record HighlightingRead(XtextResource resource, long stamp,
+        List<AttributedPosition> added, List<AttributedPosition> removed) {}
 
     /**
      * Штатный {@code BslSemanticHighlightingCalculator} ничего не отдаёт, если

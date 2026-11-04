@@ -92,7 +92,6 @@ public final class ContentAssistPopupSync
     private static final ThreadLocal<Boolean> SHOW_PROPOSALS_GUARD = new ThreadLocal<>();
     /** fix12: session open literal no-IR — full smart recompute вместо literalStockOnly. */
     private static final ThreadLocal<Boolean> FORCE_SMART_LITERAL_OPEN = new ThreadLocal<>();
-    private static final ThreadLocal<Boolean> PRESERVE_SELECTION_ON_REFRESH = new ThreadLocal<>();
     /** H74/H75: sessionOpen | toggle | debounce */
     private static final ThreadLocal<String> RECOMPUTE_TRIGGER = new ThreadLocal<>();
     private static final AtomicInteger literalAutoSmartRouteLogs = new AtomicInteger();
@@ -568,24 +567,6 @@ public final class ContentAssistPopupSync
         return Boolean.TRUE.equals(RECOMPUTE_GUARD.get());
     }
 
-    static boolean recomputePopupListPreservingSelection(ContentAssistant assistant, SourceViewer viewer,
-        SmartContentAssistProcessor processor)
-    {
-        Boolean previous = PRESERVE_SELECTION_ON_REFRESH.get();
-        PRESERVE_SELECTION_ON_REFRESH.set(Boolean.TRUE);
-        try
-        {
-            return recomputePopupList(assistant, viewer, processor);
-        }
-        finally
-        {
-            if (previous == null)
-                PRESERVE_SELECTION_ON_REFRESH.remove();
-            else
-                PRESERVE_SELECTION_ON_REFRESH.set(previous);
-        }
-    }
-
     public static boolean recomputePopupList(ContentAssistant assistant, SourceViewer viewer,
                                              SmartContentAssistProcessor processor)
     {
@@ -708,16 +689,16 @@ proposals = processor.computeForPopupRefresh(viewer, caret);
         }
 final int fullProposalCount = proposals.length;
 
-        final boolean fastIrMergeReset =
-            ContentAssistSessionReloader.shouldResetSelectionAfterIrMerge(
-                SmartContentAssistProcessor.firstProposalDedupKey(proposals));
         ContentAssistSessionReloader mergeReloader =
             ContentAssistSessionReloader.getActiveReloader();
         final boolean forceIrMergeReplace = mergeReloader != null
             && mergeReloader.isIrMergeGenerationBumpPending();
-        final boolean resetToFirst = !Boolean.TRUE.equals(PRESERVE_SELECTION_ON_REFRESH.get()) && (restoreAfterFilterToggle
+        final boolean resetToFirst = restoreAfterFilterToggle
             ? SmartAssistFilterState.isSmartFilterEnabled()
-            : (shouldResetSelectionToFirst() || fastIrMergeReset));
+            : shouldResetSelectionOnRefresh(saved);
+        Global.tempLog("completion-selection", "refresh selectedBefore=" + saved.index //$NON-NLS-1$ //$NON-NLS-2$
+            + " selectedKey=" + saved.displayKey + " resetToFirst=" + resetToFirst //$NON-NLS-1$ //$NON-NLS-2$
+            + " count=" + proposals.length + " filter=" + filter); //$NON-NLS-1$ //$NON-NLS-2$
         filter = SmartFilterTracker.getCurrentFilter();
         boolean smartEnabled = SmartAssistFilterState.isSmartFilterEnabled();
         if (!filter.equals(lastSyncedFilter))
@@ -731,7 +712,7 @@ final int fullProposalCount = proposals.length;
             && mergeGen == lastSyncedIrMergeGen
             && !forceIrMergeReplace)
         {
-if (fastIrMergeReset)
+if (resetToFirst)
             {
                 try
                 {
@@ -1289,10 +1270,11 @@ if (processor != null && processor.isIrWordsResolvedForContext()
 
     }
 
-    private static boolean shouldResetSelectionToFirst()
+    private static boolean shouldResetSelectionOnRefresh(SavedSelection saved)
     {
-        return SmartAssistFilterState.isSmartFilterEnabled()
-            && !SmartFilterTracker.getCurrentFilter().isEmpty();
+        // Общее правило прежнего слияния с ИР: первые строки следуют за новым
+        // приоритетом; выбранное ниже предложение сохраняется при любом обновлении.
+        return saved == null || saved.index <= 1;
     }
 
     private static int tableItemCount(Object popup)
@@ -4773,23 +4755,17 @@ ensureFilterPending(popup);
     {
         if (list == null || list.isEmpty() || selectProposalMethod == null)
             return;
+        // Включая обновления списка членов на месте: источник списка не выбирает политику.
+        if (!restoreAfterFilterToggle)
+            resetToFirst = shouldResetSelectionOnRefresh(saved);
         if (resetToFirst)
             selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
-        else if (restoreAfterFilterToggle)
-            restoreSelection(popup, saved, list);
-        else if (!SmartAssistFilterState.isSmartFilterEnabled())
-        {
-            String prefix = SmartFilterTracker.getCurrentFilter();
-            if (prefix != null && !prefix.isEmpty())
-            {
-                int idx = findFirstPrefixMatchIndex(list, prefix);
-                selectProposalAtIndex(popup, idx >= 0 ? idx : NaparnikAssistRow.defaultIndex(list));
-            }
-            else
-                restoreSelection(popup, saved, list);
-        }
         else
             restoreSelection(popup, saved, list);
+        Table table = getProposalTable(popup);
+        Global.tempLog("completion-selection", "apply selectedBefore=" + (saved != null ? saved.index : -1) //$NON-NLS-1$ //$NON-NLS-2$
+            + " resetToFirst=" + resetToFirst + " selectedAfter=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (table != null && !table.isDisposed() ? table.getSelectionIndex() : -1));
 
     }
 

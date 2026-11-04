@@ -18,10 +18,6 @@ import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.IResourceChangeEvent;
-import org.eclipse.core.resources.IResourceChangeListener;
-import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -46,11 +42,6 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.Tuples;
 
-import com._1c.g5.v8.bm.core.event.BmEvent;
-import com._1c.g5.v8.bm.integration.IBmModel;
-import com._1c.g5.v8.bm.integration.event.IBmSyncEventListener;
-import com._1c.g5.v8.dt.core.platform.IBmModelManager;
-import com._1c.g5.modeling.xtext.scoping.ISlicedScope;
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
@@ -168,6 +159,20 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static final Pattern DYNAMIC_CALL_PREFIX = Pattern.compile("([\\p{L}_][\\p{L}\\p{N}_]*)\\."); //$NON-NLS-1$
 
     private static final ThreadLocal<Request> REQUEST = new ThreadLocal<>();
+
+    /** Общий поиск формы для строковых подсказок и штатного вычислителя типов EDT. */
+    static BasicForm basicFormByName(String fullName, XtextResource resource)
+    {
+        return new Analysis(resource, false, false, "", -1).basicFormByName(fullName); //$NON-NLS-1$
+    }
+
+    /** Основная форма объекта по имени роли; null, если роль неизвестна или форма не назначена. */
+    static BasicForm roleForm(MdObject owner, String role)
+    {
+        String feature = STANDARD_FORMS.get(lower(role));
+        EStructuralFeature structural = feature == null ? null : owner.eClass().getEStructuralFeature(feature);
+        return structural != null && owner.eGet(structural) instanceof BasicForm form ? form : null;
+    }
 
     /**
      * ПроверитьВыраженияУровня из ирКлсПолеТекстаПрограммы: только непустой полный список,
@@ -513,7 +518,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static void describeProposal(ConfigurableCompletionProposal proposal, Object info,
         ITextViewer viewer, XtextResource resource, IEObjectHover hover)
     {
-        if (Global.getField(proposal, "additionalProposalInfo") == null) //$NON-NLS-1$
+        // Описание значения с известным типом точнее служебного описания строки EDT.
+        if (info instanceof Property property && !property.getTypes().isEmpty()
+            || Global.getField(proposal, "additionalProposalInfo") == null) //$NON-NLS-1$
             proposal.setAdditionalProposalInfo(info);
         if (Global.getField(proposal, "hover") == null && hover != null) //$NON-NLS-1$
         {
@@ -754,16 +761,33 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 .getResourceServiceProvider(resource.getURI());
             hover = services != null ? services.get(IEObjectHover.class) : null;
         }
+        Map<String, Object> valueInfos = new HashMap<>();
+        for (var entry : request.infos.entrySet())
+        {
+            String value = entry.getKey();
+            if (value.startsWith("\"")) //$NON-NLS-1$
+                value = value.substring(1);
+            valueInfos.putIfAbsent(lower(value.trim()), entry.getValue());
+        }
+        int infoQuote = literalQuote(doc, offset);
+        Global.tempLog("assist-literal-types", "finish proposals=" + result.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " infos=" + request.infos.size() + " quote=" + infoQuote); //$NON-NLS-1$ //$NON-NLS-2$
+
         for (ICompletionProposal proposal : result)
         {
             if (!(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable))
                 continue;
             Object info = request.infos.get(configurable.getReplacementString());
+            if (info == null && infoQuote >= 0)
+                info = valueInfos.get(dedupeKey(configurable, doc, infoQuote));
             if (info == null && request.added.contains(configurable))
                 info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
             if (info == null)
                 continue;
             describeProposal(configurable, info, viewer, resource, hover);
+            Global.tempLog("assist-literal-types", "replacement=" + configurable.getReplacementString() //$NON-NLS-1$ //$NON-NLS-2$
+                + " type=" + (info instanceof Property property //$NON-NLS-1$
+                    ? FunctionReturnTypes.typeSetText(property.getTypes()) : info.getClass().getName()));
         }
         int quote = literalQuote(doc, offset);
         if (quote >= 0 && !request.fullValues.isEmpty())
@@ -1104,339 +1128,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
     static void installTypeNameCache()
     {
-        TypeNameCache.install();
+        BslTypeCatalog.install();
     }
 
     static void stopTypeNameCache()
     {
-        TypeNameCache.stop();
+        BslTypeCatalog.stop();
     }
-
-    /** Общий каталог проверки и штатного автодополнения; bsl.ui 22.0.0.v202605050943. */
-    private static final class TypeNameCache
-    {
-        private static final String CALLBACK = "tormozit.stringLiteralTypeNames.proposals";
-        private static final String PROVIDERS = "com._1c.g5.v8.dt.bsl.ui.internal.contentassist.stringliteral.";
-        private static final Map<IProject, ProjectCatalog> PROJECTS = Collections.synchronizedMap(new WeakHashMap<>());
-        private static final IResourceChangeListener WORKSPACE_LISTENER = TypeNameCache::workspaceChanged;
-
-        static void install()
-        {
-            System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)TypeNameCache::proposals);
-            ResourcesPlugin.getWorkspace().addResourceChangeListener(WORKSPACE_LISTENER,
-                IResourceChangeEvent.POST_CHANGE | IResourceChangeEvent.PRE_CLOSE | IResourceChangeEvent.PRE_DELETE);
-        }
-
-        static void stop()
-        {
-            System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)args -> null);
-            ResourcesPlugin.getWorkspace().removeResourceChangeListener(WORKSPACE_LISTENER);
-            List<ProjectCatalog> catalogs;
-            synchronized (PROJECTS)
-            {
-                catalogs = new ArrayList<>(PROJECTS.values());
-                PROJECTS.clear();
-            }
-            catalogs.forEach(ProjectCatalog::close);
-        }
-
-        private static Object proposals(Object[] args)
-        {
-            try
-            {
-                Object provider = args[0];
-                String name = provider.getClass().getName();
-                boolean constructor = name.equals(PROVIDERS + "StringLiteralProposalProviderFuncCtor");
-                boolean description = name.equals(PROVIDERS + "StringLiteralProposalProviderTypeDescription");
-                if (!constructor && !description && !name.equals(PROVIDERS + "StringLiteralProposalProviderMethodType"))
-                    return null;
-                var bundle = org.osgi.framework.FrameworkUtil.getBundle(provider.getClass());
-                if (bundle == null || !bundle.getVersion().toString().equals("22.0.0.v202605050943"))
-                    return null;
-                EObject context = (EObject)args[1];
-                if (!(context.eResource() instanceof XtextResource resource) || !(args[2] instanceof String typed))
-                    return null;
-                IV8Project v8 = v8Project(resource);
-                IProject project = v8 != null ? v8.getProject() : null;
-                IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
-                IBmModel model = project != null && models != null ? models.getModel(project) : null;
-                if (project == null || model == null || model.isDisposed())
-                    return null;
-                Method method = EcoreUtil2.getContainerOfType(context, Method.class);
-                Module module = EcoreUtil2.getContainerOfType(context, Module.class);
-                Environments environments = method != null ? method.environments()
-                    : module != null ? module.environments() : null;
-                if (environments == null)
-                    return null;
-                if (v8 instanceof com._1c.g5.v8.dt.core.platform.IDependentProject dependent
-                    && dependent.getParent() != null)
-                {
-                    IProject parent = dependent.getParent().getProject();
-                    IBmModel parentModel = parent != null ? models.getModel(parent) : null;
-                    if (parentModel == null || parentModel.isDisposed())
-                        return null;
-                    ProjectCatalog parentCatalog;
-                    synchronized (PROJECTS)
-                    {
-                        parentCatalog = PROJECTS.computeIfAbsent(parent, key -> new ProjectCatalog(key.getName()));
-                    }
-                    // Изменение базовой конфигурации должно сбрасывать каталог расширения,
-                    // даже если сам каталог базового проекта ещё ни разу не запрашивали.
-                    parentCatalog.watch(parentModel);
-                }
-                boolean russian = (Boolean)args[5];
-                ProjectCatalog projectCatalog;
-                synchronized (PROJECTS)
-                {
-                    projectCatalog = PROJECTS.computeIfAbsent(project, key -> new ProjectCatalog(key.getName()));
-                }
-                projectCatalog.watch(model);
-                CatalogState state = projectCatalog.state;
-                TypeNameKey key = new TypeNameKey(environments, constructor);
-                LanguageCatalog catalog = state.catalogs.computeIfAbsent(key, unused -> new LanguageCatalog());
-                int language = russian ? 0 : 1;
-                NameIndex index = catalog.languages.get(language);
-                boolean hit = index != null;
-                if (!hit)
-                {
-                    index = build(context, (IScopeProvider)args[3], (IIndexSlicePredicateService)args[4],
-                        russian, constructor);
-                    // Публикуется только готовый каталог. Строим без замка: другой расчёт может держать AST.
-                    catalog.languages.compareAndSet(language, null, index);
-                    index = catalog.languages.get(language);
-                }
-                String token = typed;
-                String before = "";
-                if (description)
-                {
-                    String[] parts = typed.split(",");
-                    if (parts.length == 0)
-                        return List.of();
-                    token = parts[parts.length - 1].trim();
-                    before = typed.substring(0, typed.lastIndexOf(token));
-                }
-                int dot = token.lastIndexOf('.');
-                String parent = dot >= 0 ? token.substring(0, dot) : "";
-                List<NameOption> options = (description ? index.description : index.ordinary)
-                    .getOrDefault(parent, List.of());
-                List<Triple<String, String, IBslStringLiteralProposalImageProvider>> result = new ArrayList<>(options.size());
-                for (NameOption option : options)
-                    result.add(Tuples.create("\"" + before + option.text, option.label,
-                        IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
-                return result;
-            }
-            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
-            {
-                throw canceled;
-            }
-            catch (RuntimeException | LinkageError failure)
-            {
-                return null;
-            }
-        }
-
-        private static NameIndex build(EObject context, IScopeProvider scopes, IIndexSlicePredicateService slices,
-            boolean russian, boolean constructor)
-        {
-            IScope scope = scopes.getScope(context, McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
-            var filter = slices.getPredicate(russian ? "indexSliceScriptRu" : "indexSliceScriptIntnl");
-            Map<String, Map<String, NameOption>> ordinary = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            Map<String, Map<String, NameOption>> description = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            for (IEObjectDescription item : ((ISlicedScope)scope).getAllElements(List.of(filter)))
-            {
-                if (Thread.currentThread().isInterrupted())
-                    throw new org.eclipse.core.runtime.OperationCanceledException();
-                if (item.getUserData("MetaType") != null || item.getEClass() == McorePackage.Literals.TYPE_SET)
-                    continue;
-                boolean plainType = item.getEClass() == McorePackage.Literals.TYPE;
-                if (constructor && (!plainType || !((Type)item.getEObjectOrProxy()).isCreatedByNewOperator()))
-                    continue;
-                QualifiedName name = item.getQualifiedName();
-                String parent = "";
-                for (int segment = 0; segment < name.getSegmentCount(); segment++)
-                {
-                    String label = name.getSegment(segment);
-                    String text = parent.isEmpty() ? label : parent + "." + label;
-                    NameOption option = new NameOption(text, label);
-                    description.computeIfAbsent(parent, unused -> new LinkedHashMap<>())
-                        .putIfAbsent(lower(text), option);
-                    if (plainType)
-                        ordinary.computeIfAbsent(parent, unused -> new LinkedHashMap<>())
-                            .putIfAbsent(lower(text), option);
-                    parent = text;
-                }
-            }
-            return new NameIndex(freeze(ordinary), freeze(description));
-        }
-
-        private static Map<String, List<NameOption>> freeze(Map<String, Map<String, NameOption>> source)
-        {
-            Map<String, List<NameOption>> result = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            source.forEach((parent, options) -> result.put(parent, List.copyOf(options.values())));
-            return Collections.unmodifiableMap(result);
-        }
-
-        private static void invalidateProjects(String reason)
-        {
-            List<ProjectCatalog> catalogs;
-            synchronized (PROJECTS)
-            {
-                catalogs = new ArrayList<>(PROJECTS.values());
-            }
-            // Зависимые проекты и расширения тоже могут использовать типы изменённой конфигурации.
-            catalogs.forEach(catalog -> catalog.invalidate(reason));
-        }
-
-        private static void workspaceChanged(IResourceChangeEvent event)
-        {
-            if (event.getType() != IResourceChangeEvent.POST_CHANGE)
-            {
-                if (event.getResource() instanceof IProject project)
-                {
-                    ProjectCatalog removed = PROJECTS.remove(project);
-                    if (removed != null)
-                        removed.close();
-                    invalidateProjects("projectClosed:" + project.getName());
-                }
-                return;
-            }
-            if (event.getDelta() == null)
-                return;
-            for (var delta : event.getDelta().getAffectedChildren())
-                if (delta.getResource() instanceof IProject project
-                    && (delta.findMember(new org.eclipse.core.runtime.Path(".settings")) != null
-                        || delta.findMember(new org.eclipse.core.runtime.Path(".project")) != null
-                        || (delta.getFlags() & org.eclipse.core.resources.IResourceDelta.OPEN) != 0))
-                {
-                    invalidateProjects("projectSettings:" + project.getName());
-                }
-        }
-
-        private static record TypeNameKey(Environments environments, boolean constructor)
-        {
-        }
-
-        private static record NameOption(String text, String label)
-        {
-        }
-
-        private static record NameIndex(Map<String, List<NameOption>> ordinary,
-            Map<String, List<NameOption>> description)
-        {
-        }
-
-        private static final class LanguageCatalog
-        {
-            final java.util.concurrent.atomic.AtomicReferenceArray<NameIndex> languages =
-                new java.util.concurrent.atomic.AtomicReferenceArray<>(2);
-        }
-
-        private static final class CatalogState
-        {
-            final long generation;
-            final Map<TypeNameKey, LanguageCatalog> catalogs = new ConcurrentHashMap<>();
-
-            CatalogState(long generation)
-            {
-                this.generation = generation;
-            }
-        }
-
-        private static final class ProjectCatalog
-        {
-            final String projectName;
-            volatile CatalogState state = new CatalogState(0);
-            private java.lang.ref.WeakReference<IBmModel> model = new java.lang.ref.WeakReference<>(null);
-            private final IBmSyncEventListener listener = this::metadataChanged;
-
-            ProjectCatalog(String projectName)
-            {
-                this.projectName = projectName;
-            }
-
-            synchronized void watch(IBmModel current)
-            {
-                if (model.get() == current)
-                    return;
-                close();
-                current.addSyncEventListener(listener);
-                model = new java.lang.ref.WeakReference<>(current);
-                invalidate("modelChanged");
-            }
-
-            synchronized void close()
-            {
-                IBmModel previous = model.get();
-                if (previous != null && !previous.isDisposed())
-                    previous.removeSyncEventListener(listener);
-                model.clear();
-                invalidate("close");
-            }
-
-            void invalidate(String reason)
-            {
-                // Новый объект состояния: расчёт, начавшийся до события, не заполнит новый каталог.
-                CatalogState previous = state;
-                state = new CatalogState(previous.generation + 1);
-            }
-
-            private static boolean metadata(Object object)
-            {
-                return object instanceof EObject node
-                    && node.eClass().getEPackage() == com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.eINSTANCE;
-            }
-
-            private void metadataChanged(BmEvent event)
-            {
-                try
-                {
-                    onMetadataChanged(event);
-                }
-                catch (RuntimeException | LinkageError failure)
-                {
-                    metadataInvalidated("listenerFailure");
-                }
-            }
-
-            private void metadataInvalidated(String reason)
-            {
-                invalidateProjects("metadata:" + projectName + ":" + reason);
-            }
-
-            private void onMetadataChanged(BmEvent event)
-            {
-                if (event.getChangeEvents() != null)
-                    for (var change : event.getChangeEvents().values())
-                        if (metadata(change.getObject()))
-                        {
-                            metadataInvalidated(change.isFqnChanged() ? "rename:" + change.getOldFqn() : "metadataChange");
-                            return;
-                        }
-                var association = event.getAssociationEvent();
-                if (association == null)
-                    return;
-                if (association.getAssociated() != null)
-                    for (Object object : association.getAssociated())
-                        if (metadata(object))
-                        {
-                            metadataInvalidated("metadataAdded");
-                            return;
-                        }
-                if (association.getDeassociated() != null)
-                    for (Object object : association.getDeassociated())
-                        if (metadata(object))
-                        {
-                            metadataInvalidated("metadataRemoved");
-                            return;
-                        }
-                // При удалении BM может передать только идентификаторы уже отсоединённых объектов.
-                if (association.isDeassociated()
-                    && (association.getDeassociated() == null || association.getDeassociated().isEmpty()))
-                    metadataInvalidated("removedIds");
-            }
-        }
-    }
-
 
     private static final CallTarget NO_CALL_TARGET = new CallTarget(null, null, List.of(), null);
 
@@ -3322,8 +3020,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (item == null)
                 return ""; //$NON-NLS-1$
-            String name = item instanceof DuallyNamedElement dually && dually.getNameRu() != null
-                && !dually.getNameRu().isEmpty() ? dually.getNameRu() : item.getName();
+            String name = item.getNameRu() != null && !item.getNameRu().isEmpty()
+                ? item.getNameRu() : item.getName();
             return name != null ? SmartContentAssistProcessor.localizeAssistTypeSegment(name) : ""; //$NON-NLS-1$
         }
 
@@ -3547,6 +3245,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Форма по имени из {@code ОткрытьФорму}: «Справочник.Х.ФормаОбъекта», «…Форма.Имя», «ОбщаяФорма.Имя». */
         Form formByName(String fullName)
         {
+            BasicForm basic = basicFormByName(fullName);
+            return basic != null ? formOf(basic) : null;
+        }
+
+        BasicForm basicFormByName(String fullName)
+        {
             String[] parts = fullName.split("\\."); //$NON-NLS-1$
             if (parts.length < 2 || configuration() == null)
                 return null;
@@ -3554,7 +3258,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 for (var common : configuration().getCommonForms())
                     if (parts[1].equalsIgnoreCase(common.getName()))
-                        return formOf(common);
+                        return common;
                 return null;
             }
             MdObject md = mdByKind(parts[0], parts[1]);
@@ -3564,11 +3268,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 for (Object child : list(md, "forms")) //$NON-NLS-1$
                     if (child instanceof BasicForm basic && parts[3].equalsIgnoreCase(basic.getName()))
-                        return formOf(basic);
+                        return basic;
                 return null;
             }
-            String feature = STANDARD_FORMS.get(lower(parts[2]));
-            return feature != null ? defaultForm(md, feature) : null;
+            return roleForm(md, parts[2]);
         }
 
         /**
@@ -3754,6 +3457,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         MdObject mdByKind(String kind, String name)
         {
             String folder = MdTypeMapping.anyToFolder(kind);
+            // Штатный вычислитель форм передаёт имя целиком в нижнем регистре.
+            if (folder == null)
+                for (var entry : MdTypeMapping.RU_TO_FOLDER.entrySet())
+                    if (kind.equalsIgnoreCase(entry.getKey()))
+                    {
+                        folder = entry.getValue();
+                        break;
+                    }
+            if (folder == null)
+                for (var entry : MdTypeMapping.EN_SING_TO_FOLDER.entrySet())
+                    if (kind.equalsIgnoreCase(entry.getKey()))
+                    {
+                        folder = entry.getValue();
+                        break;
+                    }
             if (folder == null || configuration() == null)
                 return null;
             for (Object item : list(configuration(), Character.toLowerCase(folder.charAt(0)) + folder.substring(1)))

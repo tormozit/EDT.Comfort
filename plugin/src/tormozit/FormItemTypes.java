@@ -2,8 +2,12 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.emf.common.util.URI;
@@ -11,8 +15,11 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.resource.IEObjectDescription;
 
+import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.Version;
 
@@ -28,7 +35,7 @@ import com._1c.g5.v8.dt.platform.version.Version;
  *
  * <p>Применяется на входе поиска членов: в раннем бандле это вплетение в {@code DynamicFeatureAccessComputer}
  * (автодополнение, проверка неизвестного члена, подсказки), в {@link BslLiteralValues} — значения литерала со
- * свойствами. Сами типы выражений и их подписи не меняются.
+ * свойствами. Для подписей известный тип-расширение выбирается отдельно, без изменения модели выражения.
  */
 final class FormItemTypes
 {
@@ -46,6 +53,91 @@ final class FormItemTypes
 
     private FormItemTypes()
     {
+    }
+
+    /** Только представление: EDT хранит известное расширение в refContextDefs копии базового типа. */
+    static TypeItem displayType(TypeItem item)
+    {
+        if (!(item instanceof Type type) || type.eIsProxy())
+            return item;
+        String base = McoreUtil.getTypeName(item);
+        if (!isPresentationBase(base))
+            return item;
+        // Конкретная форма несёт путь к метаданным, которого нет у платформенного расширения.
+        if (BslFormTypePresentation.text(item) != null)
+            return item;
+        Map<String, TypeItem> extensions = new LinkedHashMap<>();
+        Set<ContextDef> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        collectDisplayExtensions(type.getContextDef(), base, extensions, visited);
+        // Несколько расширений — объединение вариантов, конкретный вид не установлен.
+        return extensions.size() == 1 ? extensions.values().iterator().next() : item;
+    }
+
+    /** В явном списке «базовый + единственное расширение» показывается расширение. */
+    static List<TypeItem> displayTypes(Iterable<? extends TypeItem> types)
+    {
+        List<TypeItem> original = new ArrayList<>();
+        for (TypeItem item : types)
+            if (item != null)
+                original.add(item);
+        List<TypeItem> result = new ArrayList<>();
+        for (TypeItem item : original)
+        {
+            TypeItem shown = displayType(item);
+            String base = McoreUtil.getTypeName(shown);
+            if (isPresentationBase(base) && BslFormTypePresentation.text(shown) == null)
+            {
+                Map<String, TypeItem> extensions = new LinkedHashMap<>();
+                for (TypeItem candidate : original)
+                {
+                    String name = McoreUtil.getTypeName(candidate);
+                    if (isPresentationExtensionOf(name, base))
+                        extensions.putIfAbsent(name, candidate);
+                }
+                if (extensions.size() == 1)
+                    shown = extensions.values().iterator().next();
+            }
+            if (!result.contains(shown))
+                result.add(shown);
+        }
+        return result;
+    }
+
+    private static void collectDisplayExtensions(ContextDef context, String base, Map<String, TypeItem> extensions,
+        Set<ContextDef> visited)
+    {
+        if (context == null || context.eIsProxy() || !visited.add(context))
+            return;
+        if (context.eContainer() instanceof Type type)
+        {
+            String name = McoreUtil.getTypeName(type);
+            if (isPresentationExtensionOf(name, base))
+                extensions.putIfAbsent(name, type);
+        }
+        for (ContextDef ref : context.getRefContextDefs())
+            collectDisplayExtensions(ref, base, extensions, visited);
+    }
+
+    private static boolean isPresentationBase(String name)
+    {
+        return name != null && (FAMILIES.containsKey(name) || FORM_BASE.equals(name) || MANAGED_FORM.equals(name));
+    }
+
+    private static boolean isPresentationExtensionOf(String name, String base)
+    {
+        return isExtensionOf(name, base) || name != null && (FORM_BASE.equals(base) || MANAGED_FORM.equals(base))
+            && (name.startsWith("ManagedFormExtensionFor") || name.startsWith("ClientApplicationFormExtensionFor")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static boolean isPresentationExtension(TypeItem item)
+    {
+        String name = item != null ? McoreUtil.getTypeName(item) : null;
+        if (isPresentationExtensionOf(name, FORM_BASE))
+            return true;
+        for (String base : FAMILIES.keySet())
+            if (isExtensionOf(name, base))
+                return true;
+        return false;
     }
 
     /** Функция вплетения: {@code {типы, ресурс}} → те же или дополненные типы. */

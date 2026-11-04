@@ -328,6 +328,7 @@ final class TypeDescriptionPresentationHook
     private static TypeOrder typeOrder(TypeItem item, boolean english, SelectedClassifiers classifiers,
         boolean unclassifiedLast) throws ReflectiveOperationException
     {
+        item = FormItemTypes.displayType(item);
         String name = McoreUtil.getTypeName(item);
         if (name == null || name.isBlank())
             return null;

@@ -388,7 +388,19 @@ final class FunctionReturnTypes
             try
             {
                 if (index != null)
-                    computeIndex(index);
+                {
+                    // Чужие модели сериализуются только на этом пути. Чтение открытого
+                    // документа ниже берёт его собственное правило синхронизации.
+                    Job.getJobManager().beginRule(ForeignModuleModel.SERIAL, monitor);
+                    try
+                    {
+                        computeIndex(index);
+                    }
+                    finally
+                    {
+                        Job.getJobManager().endRule(ForeignModuleModel.SERIAL);
+                    }
+                }
                 else if (request != null)
                     compute(request);
             }
@@ -410,7 +422,6 @@ final class FunctionReturnTypes
     {
         WORKER.setSystem(true);
         WORKER.setPriority(Job.INTERACTIVE);
-        WORKER.setRule(ForeignModuleModel.SERIAL);
     }
 
     private FunctionReturnTypes()
@@ -1644,10 +1655,17 @@ final class FunctionReturnTypes
         if (request.nativeDocument() != null)
         {
             List<Pending> pending = new java.util.ArrayList<>();
+            boolean[] staleModel = { false };
+            long started = System.nanoTime();
             try
             {
-                request.nativeDocument().readOnly(resource ->
+                ContentAssistSessionReloader.readOnlyForContentAssist(request.nativeDocument(), resource ->
                 {
+                    if (!nativeModelMatches(request.nativeDocument(), resource))
+                    {
+                        staleModel[0] = true;
+                        return null;
+                    }
                     String actualStamp = ForeignModuleModel.stamp(request.file(), request.nativeDocument());
                     if (!request.stamp().equals(actualStamp))
                         return null;
@@ -1656,10 +1674,18 @@ final class FunctionReturnTypes
             }
             catch (Throwable error)
             {
+                Global.tempLog("assist-type-reader", "failed key=" + request.key() + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 // Запрос окончится как неизвестный (ниже).
             }
+            Global.tempLog("assist-type-reader", "read key=" + request.key() + " stale=" + staleModel[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
             if (!requestStillCurrent(request))
                 return;
+            if (staleModel[0])
+            {
+                retryAfterNativeModel(request);
+                return;
+            }
             resolvePending(request, pending);
             if (!requestStillCurrent(request))
                 return;
@@ -1668,6 +1694,51 @@ final class FunctionReturnTypes
             if (!hasCompletedResult(request))
                 finishUnknown(request);
         }
+    }
+
+    private static boolean nativeModelMatches(IXtextDocument document, XtextResource resource)
+    {
+        var parse = resource != null ? resource.getParseResult() : null;
+        var root = parse != null ? parse.getRootNode() : null;
+        return root != null && root.getText().equals(document.get());
+    }
+
+    /** Отставшая модель не означает неизвестный тип; повтор — по уведомлению о готовом разборе. */
+    private static void retryAfterNativeModel(Request request)
+    {
+        IXtextDocument document = request.nativeDocument();
+        var done = new java.util.concurrent.atomic.AtomicBoolean();
+        org.eclipse.xtext.ui.editor.model.IXtextModelListener listener =
+            new org.eclipse.xtext.ui.editor.model.IXtextModelListener()
+        {
+            @Override
+            public void modelChanged(XtextResource resource)
+            {
+                boolean current = requestStillCurrent(request);
+                if (current && !nativeModelMatches(document, resource))
+                    return;
+                if (!done.compareAndSet(false, true))
+                    return;
+                document.removeModelListener(this);
+                if (current)
+                {
+                    synchronized (QUEUE)
+                    {
+                        // За время уведомления мог появиться новый запрос того же элемента.
+                        if (!requestStillCurrent(request)
+                            || !REQUEST_STAMPS.remove(request.key(), request.state()))
+                            return;
+                        enqueue(request, true);
+                    }
+                }
+            }
+        };
+        document.addModelListener(listener);
+        // Разбор мог завершиться между чтением и установкой слушателя.
+        ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+            listener.modelChanged(resource);
+            return null;
+        });
     }
 
     private static void finishUnknown(Request request)
@@ -1845,8 +1916,9 @@ final class FunctionReturnTypes
     private static Integer readyFromNative(Resource resource, Request request, Set<String> done,
         List<Pending> pending)
     {
-        com._1c.g5.v8.dt.bsl.model.Module module = moduleOf(resource);
-        if (module == null)
+        // Только готовый корень: getContents() может установить производные типы всего модуля.
+        var root = BslNodeLookup.rootAst(resource);
+        if (!(root instanceof com._1c.g5.v8.dt.bsl.model.Module module))
             return null;
         // Штамп — того состояния, которое читается сейчас, под блокировкой.
         String stamp = ForeignModuleModel.stamp(request.file(), request.nativeDocument());
@@ -2273,7 +2345,7 @@ final class FunctionReturnTypes
     /** Текст того же набора типов, который EDT показывает ссылками в боковой подсказке. */
     static String typeSetText(List<TypeItem> types)
     {
-        return formatTypeNames(types.stream().map(FunctionReturnTypes::typeName)
+        return formatTypeNames(FormItemTypes.displayTypes(types).stream().map(FunctionReturnTypes::typeName)
             .filter(name -> name != null && !name.isEmpty()).toList());
     }
 
@@ -2286,6 +2358,10 @@ final class FunctionReturnTypes
     {
         if (type == null)
             return null;
+        String form = BslFormTypePresentation.text(type);
+        if (form != null)
+            return form;
+        type = FormItemTypes.displayType(type);
         // McoreUtil читает имя прокси через штатный ITypeNameResolver, не загружая сам тип.
         String russian = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeNameRu(type);
         String english = com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(type);

@@ -145,7 +145,6 @@ public final class ContentAssistSessionReloader
     private volatile boolean pendingPopupRefresh;
     private volatile boolean pendingPopupRefreshIsIr;
     private long irWordsRequestStartedAtMs;
-    private volatile int preIrMergeSelectedRow = -1;
     /** Каретка ручного Ctrl+Space (popup был закрыт). */
     private volatile int manualIrAssistCaret = -1;
     /** Ожидаем отложенное открытие popup только с ИР. */
@@ -590,7 +589,6 @@ boolean inLiteral = endCaret >= 0
                     wordsTableCaret = -1;
                     pendingPopupRefresh = false;
                     pendingPopupRefreshIsIr = false;
-                    clearIrSelectionResetState();
                     irWordsRequestStartedAtMs = 0;
                     irAssistCommandOpen = false;
                     activeIrDisplayKey = null;
@@ -1436,15 +1434,16 @@ boolean inLiteral = endCaret >= 0
     {
         if (sync == null)
             return Boolean.FALSE;
-        synchronized (ASSIST_SYNC_HOLD)
+        org.eclipse.core.runtime.jobs.ISchedulingRule rule = syncHoldRule(sync);
+        synchronized (rule)
         {
             if (sync.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
                 return null;
-            if (sync.getRule() != ASSIST_SYNC_HOLD)
+            if (sync.getRule() != rule)
             {
                 try
                 {
-                    sync.setRule(ASSIST_SYNC_HOLD);
+                    sync.setRule(rule);
                 }
                 catch (RuntimeException e)
                 {
@@ -1460,7 +1459,7 @@ boolean inLiteral = endCaret >= 0
         {
             // Проверено в ImplicitJobs.begin/ThreadJob.joinRun: свободное правило
             // берётся сразу; при конфликте отмена проверяется до начала ожидания.
-            manager.beginRule(ASSIST_SYNC_HOLD, noWait);
+            manager.beginRule(rule, noWait);
             traceHoldAcquired(System.nanoTime(), "uiGate", sync); //$NON-NLS-1$
             return Boolean.TRUE;
         }
@@ -1468,7 +1467,7 @@ boolean inLiteral = endCaret >= 0
         {
             // ImplicitJobs.begin регистрирует ThreadJob и при отмене (finally).
             // Снять незавершённый beginRule нужно и в этом случае.
-            manager.endRule(ASSIST_SYNC_HOLD);
+            manager.endRule(rule);
             return null;
         }
         catch (RuntimeException e)
@@ -2573,6 +2572,97 @@ boolean inLiteral = endCaret >= 0
         return doc == null || queryWork == null ? null : doc.readOnly(queryWork);
     }
 
+    /** Защищённый фоновый читатель уступает подсказкам, не отменяя собственный монитор вложенным assist. */
+    static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
+        IUnitOfWork<T, XtextResource> work)
+    {
+        long started = System.nanoTime();
+        long monitorAcquired = 0L;
+        boolean invoked = false;
+        boolean ruleBusy = false;
+        AutoCloseable trace = SmartContentAssistProcessor.traceBackgroundModelRead(doc);
+        try
+        {
+            org.eclipse.core.runtime.jobs.Job sync = assistSyncJob(doc);
+            Object resource = Global.getField(doc, "resource"); //$NON-NLS-1$
+            if (sync == null || resource == null || !attachHoldRule(sync, monitor::isCanceled))
+            {
+                monitor.setCanceled(true);
+                return null;
+            }
+            observeSyncHoldJob(sync);
+            Object lock = resource instanceof org.eclipse.xtext.resource.ISynchronizable synchronizable
+                ? synchronizable.getLock() : resource;
+            // Пока монитор занят, правило НЕ держим: иначе отменённый читатель блокирует
+            // синхронизацию всё время ожидания чужого чтения (лог: 7486 мс).
+            synchronized (lock)
+            {
+                monitorAcquired = System.nanoTime();
+                if (monitor.isCanceled() || AssistPriority.isPending(doc)
+                    || Global.getField(doc, "resource") != resource) //$NON-NLS-1$
+                {
+                    monitor.setCanceled(true);
+                    return null;
+                }
+                long ruleStarted = System.nanoTime();
+                try
+                {
+                    // Отменённый монитор разрешает свободное правило, но немедленно
+                    // прерывает ожидание занятого. Это проверено на JobManager Eclipse.
+                    var noWait = new org.eclipse.core.runtime.NullProgressMonitor();
+                    noWait.setCanceled(true);
+                    org.eclipse.core.runtime.jobs.Job.getJobManager().beginRule(syncHoldRule(sync), noWait);
+                }
+                catch (org.eclipse.core.runtime.OperationCanceledException busy)
+                {
+                    ruleBusy = true;
+                    monitor.setCanceled(true);
+                    return null;
+                }
+                traceHoldAcquired(ruleStarted, "low", sync); //$NON-NLS-1$
+                LOW_PRIORITY_HOLDERS.add(monitor);
+                try
+                {
+                    if (AssistPriority.isPending(doc))
+                        monitor.setCanceled(true);
+                    if (monitor.isCanceled())
+                        return null;
+                    invoked = true;
+                    Object result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+                    if (result == BSL_READ_MISSING)
+                    {
+                        Global.tempLog("assist-low-read", "missing protected read"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return null;
+                    }
+                    @SuppressWarnings("unchecked")
+                    T typed = (T) result;
+                    return typed;
+                }
+                finally
+                {
+                    endLowPriorityHold(monitor);
+                }
+            }
+        }
+        finally
+        {
+            if (invoked)
+                Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+            Global.tempLog("assist-low-read", "end monitorWaitMs=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (monitorAcquired == 0L ? -1 : (monitorAcquired - started) / 1_000_000.0)
+                + " ruleBusy=" + ruleBusy + " canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
+                + " totalMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+            try
+            {
+                trace.close();
+            }
+            catch (Exception error)
+            {
+                Global.tempLog("assist-low-read", "trace failed=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
     /** Разрешение открытого документа действует и при синхронном переходе в чужие модули. */
     private static <T> IUnitOfWork<T, XtextResource> withQueryCalculationScope(IUnitOfWork<T, XtextResource> work)
     {
@@ -2620,27 +2710,45 @@ boolean inLiteral = endCaret >= 0
      * Поэтому расчёт идёт по текущей модели, как у самой EDT, а заданию разбора дано это
      * правило: поставленное во время расчёта, оно стартует только после него.
      */
-    private static final org.eclipse.core.runtime.jobs.ISchedulingRule ASSIST_SYNC_HOLD =
-        new org.eclipse.core.runtime.jobs.ISchedulingRule()
+    private static final java.util.Map<org.eclipse.core.runtime.jobs.Job,
+        org.eclipse.core.runtime.jobs.ISchedulingRule> MODEL_SYNC_RULES = new java.util.WeakHashMap<>();
+
+    /** Чужой документ не должен ждать разбора или вычисления типов этого документа. */
+    private static org.eclipse.core.runtime.jobs.ISchedulingRule syncHoldRule(org.eclipse.core.runtime.jobs.Job job)
+    {
+        synchronized (MODEL_SYNC_RULES)
         {
-            @Override
-            public boolean contains(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
-            {
-                return rule == this;
-            }
+            return MODEL_SYNC_RULES.computeIfAbsent(job, key -> new ModelSyncRule(System.identityHashCode(key)));
+        }
+    }
 
-            @Override
-            public boolean isConflicting(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
-            {
-                return rule == this;
-            }
+    private static final class ModelSyncRule implements org.eclipse.core.runtime.jobs.ISchedulingRule
+    {
+        private final int jobId;
 
-            @Override
-            public String toString()
-            {
-                return "ComfortAssistSyncHold"; //$NON-NLS-1$
-            }
-        };
+        ModelSyncRule(int jobId)
+        {
+            this.jobId = jobId;
+        }
+
+        @Override
+        public boolean contains(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
+        {
+            return rule == this;
+        }
+
+        @Override
+        public boolean isConflicting(org.eclipse.core.runtime.jobs.ISchedulingRule rule)
+        {
+            return rule == this;
+        }
+
+        @Override
+        public String toString()
+        {
+            return "ComfortAssistSyncHold[" + jobId + "]"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
 
     /** Шаг ожидания идущего разбора: между шагами спрашиваем {@code abort}. */
     private static final long MODEL_SYNC_JOIN_STEP_MS = 100;
@@ -2787,6 +2895,100 @@ boolean inLiteral = endCaret >= 0
                 "why=" + why + " ms=" + ms + " steps=" + steps + " end=" + end); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         return ok;
     }
+
+    /**
+     * Члены после точки: готовность текста до точки проверяем под удержанием разбора,
+     * даже если синхронизация хвоста уже поставлена. Удержание сохраняем до конца body;
+     * штатный расчёт выполняет собственное защищённое чтение документа.
+     */
+    static <T> T withMemberModelReady(IXtextDocument doc, int end,
+        java.util.function.BooleanSupplier abort, java.util.function.Supplier<T> body)
+    {
+        long started = System.nanoTime();
+        long[] matchedAt = { 0L };
+        int[] state = { 0 };
+        int attempts = 0;
+        String outcome = "aborted"; //$NON-NLS-1$
+        org.eclipse.core.runtime.jobs.Job job = assistSyncJob(doc);
+        try (AssistPriority priority = AssistPriority.begin(doc))
+        {
+            while (abort == null || !abort.getAsBoolean())
+            {
+                if ((System.nanoTime() - started) / 1_000_000L >= MODEL_READY_CAP_MS)
+                {
+                    outcome = "cap"; //$NON-NLS-1$
+                    return null;
+                }
+                attempts++;
+                MemberModelResult<T> result = withModelSyncHeld(doc, abort, true, () ->
+                {
+                    if (abort != null && abort.getAsBoolean())
+                        return null;
+                    Boolean ready = readOnlyPeekAst(doc, resource ->
+                    {
+                        if (!modelTextMatchesUpTo(doc, end))
+                        {
+                            matchedAt[0] = 0L;
+                            state[0] = 0;
+                            return false;
+                        }
+                        if (matchedAt[0] == 0L)
+                            matchedAt[0] = System.nanoTime();
+                        boolean resolved = !Boolean.FALSE.equals(
+                            Global.invoke(resource, "isLocalResolveCrossReference")); //$NON-NLS-1$
+                        state[0] = resolved ? 2 : 1;
+                        return resolved || (System.nanoTime() - matchedAt[0]) / 1_000_000L
+                            >= LOCAL_RESOLVE_GRACE_MS;
+                    });
+                    Global.tempLog("assist-member-opening", "checked end=" + end //$NON-NLS-1$ //$NON-NLS-2$
+                        + " state=" + state[0] + " ready=" + ready //$NON-NLS-1$ //$NON-NLS-2$
+                        + " elapsedMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+                    if (!Boolean.TRUE.equals(ready))
+                        return null;
+                    Global.tempLog("assist-member-opening", "ready end=" + end //$NON-NLS-1$ //$NON-NLS-2$
+                        + " waitMs=" + ((System.nanoTime() - started) / 1_000_000.0) //$NON-NLS-1$
+                        + " syncState=" + (job == null ? -1 : job.getState())); //$NON-NLS-1$
+                    return new MemberModelResult<>(body.get());
+                });
+                if (result != null)
+                {
+                    outcome = "ready"; //$NON-NLS-1$
+                    return result.value();
+                }
+                if (abort != null && abort.getAsBoolean())
+                    return null;
+                if (job != null && job.getState() == org.eclipse.core.runtime.jobs.Job.NONE && state[0] == 0)
+                    job.schedule();
+                if (job != null && job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+                {
+                    if (!joinStep(job, abort))
+                        return null;
+                }
+                else
+                {
+                    try
+                    {
+                        Thread.sleep(MODEL_SYNC_JOIN_STEP_MS);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        outcome = "interrupted"; //$NON-NLS-1$
+                        return null;
+                    }
+                }
+            }
+            return null;
+        }
+        finally
+        {
+            Global.tempLog("assist-member-opening", "model end=" + end + " result=" + outcome //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " attempts=" + attempts + " state=" + state[0] //$NON-NLS-1$ //$NON-NLS-2$
+                + " totalMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+        }
+    }
+
+    private record MemberModelResult<T>(T value) {}
 
     /** Текст модели до {@code end} совпадает с текстом документа. */
     private static boolean modelTextMatchesUpTo(IDocument doc, int end)
@@ -2992,24 +3194,25 @@ boolean inLiteral = endCaret >= 0
     }
 
     /**
-     * Дать заданию разбора {@link #ASSIST_SYNC_HOLD}. {@code Job.setRule} допустим только
+     * Дать заданию разбора {@link #syncHoldRule}. {@code Job.setRule} допустим только
      * у незапланированного задания ({@code JobManager.setRule}: {@code state == NONE}),
      * поэтому при первом обращении ждём, пока оно освободится.
      */
     private static boolean attachHoldRule(org.eclipse.core.runtime.jobs.Job job,
                                           java.util.function.BooleanSupplier abort)
     {
-        while (job.getRule() != ASSIST_SYNC_HOLD)
+        org.eclipse.core.runtime.jobs.ISchedulingRule rule = syncHoldRule(job);
+        while (job.getRule() != rule)
         {
-            synchronized (ASSIST_SYNC_HOLD)
+            synchronized (rule)
             {
-                if (job.getRule() == ASSIST_SYNC_HOLD)
+                if (job.getRule() == rule)
                     return true;
                 if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
                 {
                     try
                     {
-                        job.setRule(ASSIST_SYNC_HOLD);
+                        job.setRule(rule);
                         SmartContentAssistProcessor.uiBlockLog("modelSync.ruleAttached", //$NON-NLS-1$
                             "job=" + System.identityHashCode(job)); //$NON-NLS-1$
                         return true;
@@ -3050,7 +3253,7 @@ boolean inLiteral = endCaret >= 0
 
     /**
      * Выполнить штатный расчёт по текущей модели, удерживая догоняющий разбор EDT
-     * ({@link #ASSIST_SYNC_HOLD}). Идущий разбор прервать нельзя — его ждём: шагами, пока
+     * ({@link #syncHoldRule}). Идущий разбор прервать нельзя — его ждём: шагами, пока
      * {@code abort} (может быть {@code null}) не скажет, что запрос устарел, иначе внутри
      * {@code beginRule}.
      *
@@ -3059,9 +3262,15 @@ boolean inLiteral = endCaret >= 0
     static <T> T withModelSyncHeld(IDocument doc, java.util.function.BooleanSupplier abort,
                                    java.util.function.Supplier<T> body)
     {
+        return withModelSyncHeld(doc, abort, false, body);
+    }
+
+    private static <T> T withModelSyncHeld(IDocument doc, java.util.function.BooleanSupplier abort,
+        boolean queueDuringSync, java.util.function.Supplier<T> body)
+    {
         try (AssistPriority priority = AssistPriority.begin(doc))
         {
-            Boolean held = beginModelSyncHold(assistSyncJob(doc), abort);
+            Boolean held = beginModelSyncHoldInternal(assistSyncJob(doc), abort, true, queueDuringSync);
             if (held == null)
                 return null;
             try
@@ -3080,7 +3289,7 @@ boolean inLiteral = endCaret >= 0
     private static final long MODEL_SYNC_HOLD_REPORT_MS = 5;
 
     /**
-     * Начать удержание разбора {@code job} ({@link #ASSIST_SYNC_HOLD}); парный вызов —
+     * Начать удержание разбора {@code job} ({@link #syncHoldRule}); парный вызов —
      * {@link #endModelSyncHold()}, только если вернулось {@code TRUE}. Зовётся и из
      * вплетённого в EDT {@code readOnlyForContentAssist} ({@code BslXtextDocumentHook}).
      *
@@ -3097,6 +3306,12 @@ boolean inLiteral = endCaret >= 0
                                                       java.util.function.BooleanSupplier abort,
                                                       boolean preemptLowPriority)
     {
+        return beginModelSyncHoldInternal(job, abort, preemptLowPriority, false);
+    }
+
+    private static Boolean beginModelSyncHoldInternal(org.eclipse.core.runtime.jobs.Job job,
+        java.util.function.BooleanSupplier abort, boolean preemptLowPriority, boolean queueDuringSync)
+    {
         if (job == null)
             return Boolean.FALSE;
         observeSyncHoldJob(job);
@@ -3107,7 +3322,7 @@ boolean inLiteral = endCaret >= 0
         traceModelHold("request", t0, job, "priority=" + (preemptLowPriority ? "assist" : "low")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (!attachHoldRule(job, abort))
             return abort != null ? null : Boolean.FALSE;
-        if (abort != null)
+        if (abort != null && !queueDuringSync)
         {
             while (job.getState() == org.eclipse.core.runtime.jobs.Job.RUNNING)
             {
@@ -3122,9 +3337,21 @@ boolean inLiteral = endCaret >= 0
         boolean held = false;
         try
         {
-            org.eclipse.core.runtime.jobs.Job.getJobManager().beginRule(ASSIST_SYNC_HOLD, null);
+            // Встать в очередь на ближайшее освобождение правила, не ждать всей цепочки
+            // перепарсингов фильтра. Отмена запроса по-прежнему прерывает ожидание.
+            org.eclipse.core.runtime.IProgressMonitor waitMonitor = queueDuringSync && abort != null
+                ? new org.eclipse.core.runtime.NullProgressMonitor()
+                {
+                    @Override public boolean isCanceled() { return abort.getAsBoolean(); }
+                } : null;
+            org.eclipse.core.runtime.jobs.Job.getJobManager().beginRule(syncHoldRule(job), waitMonitor);
             held = true;
             traceHoldAcquired(t0, preemptLowPriority ? "assist" : "low", job); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (org.eclipse.core.runtime.OperationCanceledException e)
+        {
+            Global.tempLog("assist-member-opening", "hold canceled job=" + System.identityHashCode(job)); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
         }
         catch (RuntimeException e)
         {
@@ -3142,17 +3369,20 @@ boolean inLiteral = endCaret >= 0
     /** Конец удержания, начатого {@link #beginModelSyncHold} с результатом {@code TRUE}. */
     static void endModelSyncHold()
     {
-        org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(ASSIST_SYNC_HOLD);
-        java.util.ArrayDeque<long[]> traces = HOLD_TRACES.get();
-        long[] trace = traces.pollLast();
-        Global.tempLog("assist-model-hold", "released id=" + (trace == null ? -1 : trace[0]) //$NON-NLS-1$ //$NON-NLS-2$
+        java.util.ArrayDeque<ModelHold> traces = HOLD_TRACES.get();
+        ModelHold trace = traces.getLast();
+        org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(trace.rule());
+        traces.removeLast();
+        Global.tempLog("assist-model-hold", "released id=" + trace.id() //$NON-NLS-1$ //$NON-NLS-2$
             + " th=" + Thread.currentThread().getName() + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " heldMs=" + (trace == null ? -1 : (System.nanoTime() - trace[1]) / 1_000_000.0)); //$NON-NLS-1$
+            + " rule=" + trace.rule() + " heldMs=" + ((System.nanoTime() - trace.started()) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
         if (traces.isEmpty())
             HOLD_TRACES.remove();
     }
 
-    private static final ThreadLocal<java.util.ArrayDeque<long[]>> HOLD_TRACES =
+    private record ModelHold(long id, long started, org.eclipse.core.runtime.jobs.ISchedulingRule rule) {}
+
+    private static final ThreadLocal<java.util.ArrayDeque<ModelHold>> HOLD_TRACES =
         ThreadLocal.withInitial(java.util.ArrayDeque::new);
     private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> HOLD_OBSERVED_JOBS =
         java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
@@ -3161,14 +3391,14 @@ boolean inLiteral = endCaret >= 0
     {
         Global.tempLog("assist-model-hold", phase + " id=" + id //$NON-NLS-1$ //$NON-NLS-2$
             + " job=" + System.identityHashCode(job) + " name=" + job.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " th=" + Thread.currentThread().getName() + " " + detail); //$NON-NLS-1$ //$NON-NLS-2$
+            + " th=" + Thread.currentThread().getName() + " rule=" + syncHoldRule(job) + " " + detail); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static void traceHoldAcquired(long id, String kind, org.eclipse.core.runtime.jobs.Job job)
     {
         long now = System.nanoTime();
-        java.util.ArrayDeque<long[]> traces = HOLD_TRACES.get();
-        traces.addLast(new long[] { id, now });
+        java.util.ArrayDeque<ModelHold> traces = HOLD_TRACES.get();
+        traces.addLast(new ModelHold(id, now, syncHoldRule(job)));
         traceModelHold("acquired", id, job, "kind=" + kind + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " waitMs=" + ((now - id) / 1_000_000.0)); //$NON-NLS-1$
     }
@@ -3181,15 +3411,41 @@ boolean inLiteral = endCaret >= 0
                 return;
             job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
             {
+                private AutoCloseable trace;
+
+                @Override
+                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    StringBuilder caller = new StringBuilder();
+                    for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+                        caller.append("\n  at ").append(frame); //$NON-NLS-1$
+                    Global.tempLog("assist-sync-schedule", "job=" + System.identityHashCode(event.getJob()) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " thread=" + Thread.currentThread().getName() + caller); //$NON-NLS-1$
+                }
+
                 @Override
                 public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
+                    trace = SmartContentAssistProcessor.traceModelSync(event.getJob());
                     traceModelHold("sync.running", 0L, event.getJob(), ""); //$NON-NLS-1$ //$NON-NLS-2$
                 }
 
                 @Override
                 public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
+                    try
+                    {
+                        if (trace != null)
+                            trace.close();
+                    }
+                    catch (Exception error)
+                    {
+                        Global.tempLog("assist-sync-schedule", "trace.close failed=" + error); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    finally
+                    {
+                        trace = null;
+                    }
                     traceModelHold("sync.done", 0L, event.getJob(), "result=" + event.getResult()); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             });
@@ -7193,32 +7449,6 @@ processor.applyIrCompletion(snapshot);
             task.run();
     }
 
-    static boolean shouldResetSelectionAfterIrMerge(String newFirstDedupKey)
-    {
-        ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
-        if (reloader == null)
-            return false;
-        clearIrSelectionResetState(reloader);
-        return reloader.preIrMergeSelectedRow <= 1;
-    }
-
-    private static void clearIrSelectionResetState(ContentAssistSessionReloader reloader)
-    {
-        if (reloader == null)
-            return;
-        reloader.preIrMergeSelectedRow = -1;
-    }
-
-    private void clearIrSelectionResetState()
-    {
-        clearIrSelectionResetState(this);
-    }
-
-    private void rememberPreIrMergeSelectionState(ContentAssistant assistant)
-    {
-        preIrMergeSelectedRow = ContentAssistPopupSync.readSelectedRowIndex(assistant);
-    }
-
     /** Повторная загрузка списка после reconcile (member-access после точки). */
     public static void refreshPopupIfOpen()
     {
@@ -7369,7 +7599,6 @@ processor.applyIrCompletion(snapshot);
             logLiteralMergeTimeline("flush"); //$NON-NLS-1$
             IrCompletionDebug.logIrPopupRefresh("flush"); //$NON-NLS-1$
             ContentAssistPopupSync.invalidateSyncSnapshot();
-            reloader.rememberPreIrMergeSelectionState(ca);
         }
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
@@ -7426,7 +7655,6 @@ return;
             logLiteralMergeTimeline("now"); //$NON-NLS-1$
             IrCompletionDebug.logIrPopupRefresh("now"); //$NON-NLS-1$
             ContentAssistPopupSync.invalidateSyncSnapshot();
-            reloader.rememberPreIrMergeSelectionState(ca);
         }
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor, caretOverride);
     }

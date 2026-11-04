@@ -532,7 +532,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     // а не к объекту.
                     if (onTail && count == 2 && segments.length == 3 && hovered == 2)
                     {
-                        BasicForm roleForm = roleForm(target, segments[2]);
+                        BasicForm roleForm = BslLiteralValues.roleForm(target, segments[2]);
                         if (roleForm != null)
                             return new TypeHyperlink(new Region(regionStart, fullLength), "Форма", roleForm, editor,
                                 page);
@@ -558,14 +558,6 @@ public final class BslEditorHyperlinkHook implements IStartup
     }
 
     private static final String METADATA_PREFIX = "Метаданные."; //$NON-NLS-1$
-
-    /** Основная форма объекта по имени роли («Форма», «ФормаСписка» …); {@code null} — роли нет или форма не задана. */
-    private static BasicForm roleForm(MdObject owner, String role)
-    {
-        String feature = BslLiteralValues.STANDARD_FORMS.get(role.toLowerCase(java.util.Locale.ROOT));
-        EStructuralFeature structural = feature == null ? null : owner.eClass().getEStructuralFeature(feature);
-        return structural != null && owner.eGet(structural) instanceof BasicForm form ? form : null;
-    }
 
     /** «Справочники.Имя.Формы.Ф» /«СправочникСсылка.Имя» → «Справочник.Имя.Форма.Ф» (первые {@code count} сегментов). */
     private static String normalizeFullName(String[] segments, int count)

@@ -15,6 +15,8 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.internal.text.html.HTMLPrinter;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHoverProvider;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -52,6 +54,7 @@ public final class BslFormDataTypes
     // Значения содержат только строки, не удерживают модель проекта через слабый ключ.
     private static final Map<TypeItem, List<Origin>> ORIGINS = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, List<Origin>> REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Object, String> FORM_REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Property, Property> PROPERTY_DOCUMENTATION = Collections.synchronizedMap(new WeakHashMap<>());
 
     private record Origin(String typeName, String label) {}
@@ -97,15 +100,43 @@ public final class BslFormDataTypes
     /** Строка списка использует типы Property напрямую, без HTML-провайдера EDT. */
     static String decorateProposal(String display, Object info)
     {
-        if (display == null || !(info instanceof com._1c.g5.v8.dt.mcore.Property property)
-            || !display.contains("ДанныеФормы")) //$NON-NLS-1$
+        if (info instanceof com._1c.g5.v8.dt.bsl.model.FeatureEntry entry)
+            return decorateProposal(display, entry.getFeature());
+        if (info instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement element)
+        {
+            String result = display;
+            for (EObject member : element.getList())
+                result = decorateProposal(result, member);
+            return result;
+        }
+        if (display == null || !(info instanceof com._1c.g5.v8.dt.mcore.Property property))
             return display;
         try
         {
             String result = display;
             for (TypeItem type : property.getTypes())
             {
-                if (type == null || type.eIsProxy() || !isFormData(type))
+                if (type == null || type.eIsProxy())
+                    continue;
+                TypeItem shown = FormItemTypes.displayType(type);
+                if (shown != type)
+                {
+                    String base = McoreUtil.getTypeNameRu(type);
+                    String extension = McoreUtil.getTypeNameRu(shown);
+                    if (base != null && extension != null)
+                        result = result.replace(base + ">", extension + ">") //$NON-NLS-1$ //$NON-NLS-2$
+                            .replace(base + ",", extension + ",") //$NON-NLS-1$ //$NON-NLS-2$
+                            .replace(base + " |", extension + " |"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                String form = BslFormTypePresentation.text(type);
+                if (form != null)
+                {
+                    String name = McoreUtil.getTypeNameRu(type);
+                    if (name != null && !name.isBlank())
+                        result = result.replace(name + ">", form + ">") //$NON-NLS-1$ //$NON-NLS-2$
+                            .replace(name + ",", form + ","); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (!isFormData(type))
                     continue;
                 List<Origin> origins = origins(type);
                 if (origins.isEmpty())
@@ -174,6 +205,7 @@ public final class BslFormDataTypes
     /** Слияние и перенос контекстов не должны терять порождающие объекты. */
     static void inheritOrigins(TypeItem target, List<? extends TypeItem> sources)
     {
+        BslFormTypePresentation.inherit(target, sources);
         if (!isFormData(target))
             return;
         rememberPropertyDocumentation(target, sources);
@@ -240,6 +272,31 @@ public final class BslFormDataTypes
             if (reference != null && type != null)
             {
                 TypeItem resolved = (TypeItem)EcoreUtil.resolve(type, resource);
+                String form = BslFormTypePresentation.html(resolved);
+                if (form != null)
+                {
+                    FORM_REFERENCES.put(reference, form);
+                    return reference;
+                }
+                TypeItem shown = FormItemTypes.displayType(resolved);
+                if (shown != resolved)
+                {
+                    // Тот же провайдер даёт и имя, и действующую ссылку на страницу расширения.
+                    var services = resource != null ? IResourceServiceProvider.Registry.INSTANCE
+                        .getResourceServiceProvider(resource.getURI()) : null;
+                    var hover = services != null ? services.get(IEObjectHoverProvider.class) : null;
+                    Object provider = Global.getField(hover, "documentationProvider"); //$NON-NLS-1$
+                    Object version = Global.invoke(provider, "getVersion", resolved); //$NON-NLS-1$
+                    Object specialized = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                        shown, resource, true, version, false);
+                    Global.tempLog("form-type-presentation", "reference type=" + McoreUtil.getTypeName(shown) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " converted=" + (specialized != null)); //$NON-NLS-1$
+                    if (specialized != null)
+                        return specialized;
+                    String name = McoreUtil.getTypeNameRu(shown);
+                    if (name != null)
+                        FORM_REFERENCES.put(reference, HTMLPrinter.convertToHTMLContent(name));
+                }
                 if (isFormData(resolved))
                 {
                     List<Origin> origins = origins(resolved);
@@ -257,6 +314,9 @@ public final class BslFormDataTypes
     /** После штатного anchor, чтобы имя метаданного получило отдельную ссылку. */
     public static String afterReferenceHtml(String html, Object reference)
     {
+        String form = FORM_REFERENCES.get(reference);
+        if (html != null && form != null)
+            return form;
         List<Origin> origins = REFERENCES.get(reference);
         if (html == null || origins == null || origins.isEmpty())
             return html;

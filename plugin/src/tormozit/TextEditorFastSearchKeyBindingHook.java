@@ -29,6 +29,7 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.keys.IBindingService;
+import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeViewerProvider;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.ThreeSideTextMergeViewerPanel;
@@ -79,6 +80,9 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
     private static StyledText pendingWholeWordFindWidget;
     private static Point pendingWholeWordFindSelection;
     private static Boolean pendingWholeWordFindForward;
+
+    /** Исходная позиция штатного поиска F3/Shift+F3 (issue 978). */
+    private static ITextEditor pendingNavigationEditor;
 
     @Override
     public void earlyStartup()
@@ -172,6 +176,14 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
             @Override
             public void preExecute(String commandId, ExecutionEvent event)
             {
+                if (findNextForward(commandId) != null)
+                {
+                    Display display = Display.getCurrent();
+                    Control focus = display != null ? display.getFocusControl() : null;
+                    pendingNavigationEditor = focus instanceof StyledText textWidget
+                        ? TextEditorFastSearchHandler.resolveNavigationEditor(textWidget) : null;
+                    Global.markNavigationLocation(pendingNavigationEditor);
+                }
                 rememberCompareFind(commandId);
                 rememberWholeWordFind(commandId);
             }
@@ -181,6 +193,7 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
             {
                 completeCompareFind(commandId);
                 completeWholeWordFind(commandId);
+                completeNavigation(commandId);
             }
 
             @Override
@@ -188,6 +201,7 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
             {
                 completeCompareFind(commandId);
                 completeWholeWordFind(commandId);
+                completeNavigation(commandId);
             }
 
             @Override
@@ -195,8 +209,19 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
             {
                 completeCompareFind(commandId);
                 completeWholeWordFind(commandId);
+                completeNavigation(commandId);
             }
         });
+    }
+
+    /** После всех коррекций поиска: история хранит окончательное найденное вхождение. */
+    private static void completeNavigation(String commandId)
+    {
+        if (findNextForward(commandId) == null)
+            return;
+        ITextEditor editor = pendingNavigationEditor;
+        pendingNavigationEditor = null;
+        Global.markNavigationLocation(editor);
     }
 
     private static void handleDisplayKeyDown(Event event)

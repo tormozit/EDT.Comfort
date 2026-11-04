@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -8,6 +10,7 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.Region;
@@ -70,11 +73,50 @@ public final class BslBracketSearchHandler extends AbstractBslBracketSearchHandl
         if (jumpToMethodPreprocessor(event, forward, withSelection))
             return null;
 
-        if (withSelection)
-            executeBracketSearchWithSelection(event, forward);
-        else
-            executeBracketSearch(event, forward);
+        jumpToNativeBracket(event, forward, withSelection);
         return null;
+    }
+
+    /**
+     * Штатный поиск EDT с показом результата без сброса документа проекции (issue 977).
+     * В com._1c.g5.v8.dt.bsl.ui 22.0.0.v202605050943 оба executeBracketSearch вызывают
+     * resetVisibleRegion(), когда exposeModelRange() вернул false. Однако false означает,
+     * что свёртки не изменились, а не ошибку: диапазон уже доступен. Сброс в таком случае
+     * освобождает документ проекции, хотя ProjectionViewer продолжает работать со свёртками.
+     * Расчёт диапазона оставляем EDT, включая направление и расширение выделения.
+     */
+    private void jumpToNativeBracket(ExecutionEvent event, boolean forward, boolean withSelection)
+        throws ExecutionException
+    {
+        IWorkbenchPart part = HandlerUtil.getActivePart(event);
+        XtextEditor editor = part == null ? null : BslHandlerUtil.extractXtextEditor(part);
+        ITextViewer viewer = editor == null ? null : BslHandlerUtil.getTextViewer(editor);
+        if (viewer == null || editor.getDocument() == null)
+            return;
+        Point selection = viewer.getSelectedRange();
+        try
+        {
+            // Сигнатура и использование подтверждены байткодом бандла EDT (см. javadoc).
+            Method search = AbstractBslBracketSearchHandler.class.getDeclaredMethod("getBracketSelected", //$NON-NLS-1$
+                int.class, XtextEditor.class, boolean.class, boolean.class, int.class);
+            search.setAccessible(true);
+            ITextSelection target = (ITextSelection)search.invoke(this, selection.x, editor, forward,
+                withSelection, withSelection ? selection.y : 0);
+            if (target == null)
+                return;
+            IRegion range = new Region(target.getOffset(), target.getLength());
+            if (viewer instanceof ITextViewerExtension5 extension)
+                extension.exposeModelRange(range);
+            else
+                viewer.resetVisibleRegion();
+            viewer.setSelectedRange(range.getOffset(), range.getLength());
+            viewer.revealRange(range.getOffset(), range.getLength());
+        }
+        catch (ReflectiveOperationException | RuntimeException e)
+        {
+            Throwable cause = e instanceof InvocationTargetException ? e.getCause() : e;
+            throw new ExecutionException("Не удалось перейти к парной скобке", cause);
+        }
     }
 
     /**

@@ -263,7 +263,7 @@ public final class BslParseTruncationMarkHook implements IStartup
             this.job = Job.create("Поиск обрыва разбора модуля", monitor -> //$NON-NLS-1$
             {
                 pending = false;
-                Mark mark = document.readOnly(this::computeByModel);
+                Mark mark = readParseMark();
                 /*
                  * Перепарсинг — только когда модель ПОДОЗРИТЕЛЬНА: директива не на своём месте
                  * есть, а дерево при этом целое. Разбирается так (см. PartialParsingHelper.reparse
@@ -281,7 +281,7 @@ public final class BslParseTruncationMarkHook implements IStartup
                     // его впустую — следующая вставка оставалась без перестроения.
                     reparseRequested = false;
                     forceFullReparse();
-                    mark = document.readOnly(this::computeByModel);
+                    mark = readParseMark();
                 }
                 else if (mark != null)
                 {
@@ -544,6 +544,22 @@ public final class BslParseTruncationMarkHook implements IStartup
          * источнике ({@link #forceFullReparse}), а не обходим сбоку: во всех остальных случаях
          * дерево редактора верно, и пометка совпадает с тем, что увидят сравнение и структура.
          */
+        private Mark readParseMark()
+        {
+            long started = System.nanoTime();
+            try
+            {
+                // Только результат синтаксического разбора. Обычный readOnly попутно
+                // устанавливает типы EDT и держит блокировку, нужную автодополнению.
+                return ContentAssistSessionReloader.readOnlyPeekAst(document, this::computeByModel);
+            }
+            finally
+            {
+                Global.tempLog("parse-truncation-read", "peekAst ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ((System.nanoTime() - started) / 1_000_000.0));
+            }
+        }
+
         private Mark computeByModel(XtextResource resource)
         {
             if (resource == null || !BslAstCompleteness.isTruncated(resource))

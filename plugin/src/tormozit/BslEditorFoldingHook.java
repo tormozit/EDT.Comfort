@@ -195,8 +195,9 @@ public final class BslEditorFoldingHook
                 while (!obsolete.getAsBoolean())
                 {
                     generation = generation();
-                    if (!ContentAssistSessionReloader.waitModelReadyUpTo(doc, Integer.MAX_VALUE, obsolete))
-                        return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                    // modelChanged уже сообщает о разобранной модели. Если текст успел
+                    // уйти вперёд, новое уведомление принесёт следующий расчёт. Свёртки
+                    // не должны сами запускать ContentAssistResourceSync на каждый символ.
                     Calculation calculated = (Calculation) peek.invoke(doc,
                         (org.eclipse.xtext.util.concurrent.IUnitOfWork<Calculation, org.eclipse.xtext.resource.XtextResource>) resource -> {
                         long stamp = ((org.eclipse.jface.text.IDocumentExtension4) doc).getModificationStamp();
@@ -219,10 +220,10 @@ public final class BslEditorFoldingHook
                             return null;
                         return new Calculation(stamp, new java.util.LinkedHashSet<>(positions));
                     });
+                    Global.tempLog("assist-folding-model", "calculated generation=" + generation //$NON-NLS-1$ //$NON-NLS-2$
+                        + " current=" + (calculated != null)); //$NON-NLS-1$
                     if (calculated == null)
-                    {
-                        continue;
-                    }
+                        return org.eclipse.core.runtime.Status.CANCEL_STATUS;
                     if (calculated.positions == null)
                     {
                         return org.eclipse.core.runtime.Status.CANCEL_STATUS;
@@ -237,6 +238,7 @@ public final class BslEditorFoldingHook
             }
             catch (Exception | LinkageError e)
             {
+                Global.tempLog("assist-folding-model", "failed error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return org.eclipse.core.runtime.Status.CANCEL_STATUS;
             }
             finally

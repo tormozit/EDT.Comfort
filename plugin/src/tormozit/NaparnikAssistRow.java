@@ -628,16 +628,15 @@ public final class NaparnikAssistRow
      *
      * @return {@code false} — запрос отменён, пока ждали
      */
-    private boolean awaitModuleLinked(int gen)
+    private boolean awaitModuleLinked(int gen, long started)
     {
         if (!(viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document))
             return true;
-        long started = System.nanoTime();
         while (gen == generation)
         {
-            // tryReadOnly не ждёт блокировку: занято (идёт перевязка) — null.
-            Boolean linked = document.tryReadOnly(resource ->
-                resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl ? bsl.isLinkedBatch() : Boolean.TRUE);
+            // Проверка готовности не должна сама запускать reconcile и расчёт типов.
+            Boolean linked = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                aiModelReady(document, resource));
             if (Boolean.TRUE.equals(linked) || (System.nanoTime() - started) / 1_000_000L >= LINK_WAIT_CAP_MS)
                 return true;
             try
@@ -653,13 +652,49 @@ public final class NaparnikAssistRow
         return false;
     }
 
+    private static boolean aiModelReady(org.eclipse.xtext.ui.editor.model.IXtextDocument document,
+        org.eclipse.xtext.resource.XtextResource resource)
+    {
+        var parse = resource != null ? resource.getParseResult() : null;
+        var root = parse != null ? parse.getRootNode() : null;
+        return root != null && root.getText().equals(document.get())
+            && (!(resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl) || bsl.isLinkedBatch());
+    }
+
+    /** Штатный getAiContext читает вложенно: готовый модуль заново не перепарсивается. */
+    private Object readAiContext(int gen, Object vm, Object source)
+    {
+        if (!(viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document))
+            return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+        long waitingStarted = System.nanoTime();
+        while (gen == generation && awaitModuleLinked(gen, waitingStarted))
+        {
+            boolean[] ready = { false };
+            long started = System.nanoTime();
+            Object context = ContentAssistSessionReloader.readOnlyForContentAssist(document, resource ->
+            {
+                if (gen != generation || !aiModelReady(document, resource))
+                    return null;
+                ready[0] = true;
+                return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+            });
+            Global.tempLog("assist-ai-context", "read generation=" + gen + " ready=" + ready[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+            if (ready[0])
+                return context;
+            // После потолка прежнее поведение не меняем: контекст всё равно запрашивается.
+            // Обычный путь выше использует только подтверждённо готовую модель.
+            if (gen == generation && (System.nanoTime() - waitingStarted) / 1_000_000L >= LINK_WAIT_CAP_MS)
+                return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+        }
+        return null;
+    }
+
     private void runRequest(int gen, Object vm, Object source, List<Word> words, Display display)
     {
         try
         {
-            if (!awaitModuleLinked(gen))
-                return;
-            Object context = Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+            Object context = readAiContext(gen, vm, source); //$NON-NLS-1$
             Object aiContext = context instanceof Optional<?> optional ? optional.orElse(null) : null;
             if (aiContext == null)
             {
@@ -1023,6 +1058,7 @@ public final class NaparnikAssistRow
     private void showInline(String rest)
     {
         Object vm = viewModel;
+        int gen = generation;
         Display display = display();
         if (vm == null || display == null)
             return;
@@ -1035,7 +1071,7 @@ public final class NaparnikAssistRow
             {
                 Object source = loadClass(vm, "com.e1c.edt.ai.CancellationTokenSource") //$NON-NLS-1$
                     .getDeclaredConstructor().newInstance();
-                Object context = Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+                Object context = readAiContext(gen, vm, source); //$NON-NLS-1$
                 Object aiContext = context instanceof Optional<?> optional ? optional.orElse(null) : null;
                 if (aiContext == null)
                     return;

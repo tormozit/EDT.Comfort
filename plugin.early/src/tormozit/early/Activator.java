@@ -66,6 +66,7 @@ public final class Activator
         DerivedCheckCancellation.install(context);
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
+        P2InstallOperationWeaving.install(context);
     }
 
     @Override
@@ -80,6 +81,162 @@ public final class Activator
         System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
         System.getProperties().put(CheckDurations.CALLBACK + ".monitor", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
+    }
+
+    /**
+     * p2.operations 2.7.200.v20231105-1139 / 2.7.700.v20250720-1530: InstallOperation
+     * отбрасывает downgrade до планировщика. Только для группы Комфорта направляем его
+     * в штатную ветку dealWithUpdates: remove установленной IU + add выбранной IU.
+     * Проверка LOCK_UPDATE и разрешение зависимостей остаются штатными (#976).
+     */
+    private static final class P2InstallOperationWeaving implements WeavingHook
+    {
+        private static final String TARGET = "org.eclipse.equinox.p2.operations.InstallOperation";
+        private static final String IU = "org/eclipse/equinox/p2/metadata/IInstallableUnit";
+        private static final String VERSION = "org/eclipse/equinox/p2/metadata/Version";
+        private static final String GROUP = "tormozit.comfort.feature.feature.group";
+        private static final String CALLBACK = "tormozit.p2.install.replacementComparison";
+        private static final java.nio.file.Path LOG = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/issue-976/runtime.log");
+        private final FrameworkLog fallback;
+
+        private P2InstallOperationWeaving(BundleContext context)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            fallback = reference == null ? null : context.getService(reference);
+        }
+
+        static void install(BundleContext context)
+        {
+            var hook = new P2InstallOperationWeaving(context);
+            System.getProperties().put(CALLBACK, (BiFunction<String, Integer, Integer>) hook::replacementComparison);
+            context.registerService(WeavingHook.class, hook, null);
+            hook.diagnostic("INSTALL pid=" + ProcessHandle.current().pid());
+        }
+
+        private int replacementComparison(String id, int comparison)
+        {
+            int result = GROUP.equals(id) && comparison < 0 ? 1 : comparison;
+            diagnostic("COMPARE id=" + id + "; original=" + comparison + "; replacement=" + result);
+            return result;
+        }
+
+        private synchronized void diagnostic(String text)
+        {
+            // Временная безусловная диагностика #976; сохранять до подтверждения исправления.
+            try
+            {
+                java.nio.file.Files.createDirectories(LOG.getParent());
+                java.nio.file.Files.writeString(LOG, java.time.OffsetDateTime.now() + " " + text + "\r\n",
+                    java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception failure)
+            {
+                System.setProperty(CALLBACK + ".logFailure", failure.toString());
+                if (fallback != null)
+                    fallback.log(new FrameworkLogEntry("tormozit.comfort.early", FrameworkLogEntry.ERROR,
+                        0, "P2 install diagnostic write failed: " + text, 0, failure, null));
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] bytes = instrument(woven.getBytes());
+                if (bytes != null)
+                    woven.setBytes(bytes);
+                diagnostic("WEAVE " + System.getProperty(CALLBACK + ".status"));
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", "FAILED: " + failure);
+                diagnostic("WEAVE FAILED " + failure);
+            }
+        }
+
+        private static byte[] instrument(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] matches = {0, 0, 0, 0}; // Метод, getVersion, compareTo, dealWithUpdates.
+            boolean[] compatible = {true};
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!name.equals("computeProfileChangeRequest") || !descriptor.equals(
+                        "(Lorg/eclipse/core/runtime/MultiStatus;Lorg/eclipse/core/runtime/IProgressMonitor;)V"))
+                        return original;
+                    matches[0]++;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        private int lastLoad = -1;
+                        private int entryLocal = -1;
+
+                        @Override
+                        public void visitVarInsn(int opcode, int local)
+                        {
+                            lastLoad = opcode == Opcodes.ALOAD ? local : -1;
+                            super.visitVarInsn(opcode, local);
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String called, String type,
+                            boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEINTERFACE && owner.equals(IU)
+                                && called.equals("getVersion") && type.equals("()L" + VERSION + ";"))
+                            {
+                                if (matches[1]++ == 0)
+                                    entryLocal = lastLoad;
+                            }
+                            super.visitMethodInsn(opcode, owner, called, type, isInterface);
+                            if (opcode == Opcodes.INVOKEVIRTUAL && owner.equals(VERSION)
+                                && called.equals("compareTo") && type.equals("(Ljava/lang/Object;)I"))
+                            {
+                                matches[2]++;
+                                if (matches[1] != 2 || entryLocal < 0)
+                                {
+                                    compatible[0] = false;
+                                    return;
+                                }
+                                // Стек: comparison -> callback, id, Integer(comparison).
+                                // Новых переходов/локальных переменных нет: исходные stack frames сохраняются.
+                                EarlyWeaving.emitGetProperty(mv, CALLBACK, "java/util/function/BiFunction");
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+                                    "(I)Ljava/lang/Integer;", false);
+                                mv.visitVarInsn(Opcodes.ALOAD, entryLocal);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, IU, "getId", "()Ljava/lang/String;", true);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Integer");
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false);
+                            }
+                            if (owner.equals(TARGET.replace('.', '/')) && called.equals("dealWithUpdates")
+                                && type.equals("(Lorg/eclipse/core/runtime/MultiStatus;Lorg/eclipse/equinox/p2/engine/IProfile;L"
+                                    + IU + ";L" + IU + ";)V"))
+                                matches[3]++;
+                            lastLoad = -1;
+                        }
+                    };
+                }
+            }, 0);
+            boolean applied = compatible[0] && matches[0] == 1 && matches[1] == 2
+                && matches[2] == 1 && matches[3] == 2;
+            System.setProperty(CALLBACK + ".status", (applied ? "woven " : "NOT WOVEN ")
+                + java.util.Arrays.toString(matches));
+            return applied ? writer.toByteArray() : null;
+        }
     }
 
     /**
@@ -2467,12 +2624,15 @@ public final class Activator
         private static final String BASE = ROOT + "contentassist.stringliteral.AbstractStringLiteralProposalProvider";
         private static final String DESCRIPTION = ROOT + "internal.contentassist.stringliteral.StringLiteralProposalProviderTypeDescription";
         private static final String CALLBACK = "tormozit.stringLiteralTypeNames.proposals";
+        private static final String CTOR_TARGET = ROOT + "contentassist.BslProposalProvider";
+        private static final String CTOR_CALLBACK = "tormozit.constructorTypeNames.descriptions";
         private static final String PREFIX = "(Lorg/eclipse/emf/ecore/EObject;Ljava/lang/String;Lorg/eclipse/xtext/scoping/IScopeProvider;"
             + "Lcom/_1c/g5/modeling/xtext/scoping/IIndexSlicePredicateService;";
 
         static void install(BundleContext context)
         {
             System.getProperties().putIfAbsent(CALLBACK, (Function<Object[], Object>)args -> null);
+            System.getProperties().putIfAbsent(CTOR_CALLBACK, (Function<Object[], Object>)args -> null);
             context.registerService(WeavingHook.class, new StringLiteralTypeNamesWeaving(), null);
         }
 
@@ -2480,6 +2640,22 @@ public final class Activator
         public void weave(WovenClass woven)
         {
             String target = woven.getClassName();
+            if (woven.getState() == WovenClass.TRANSFORMING && CTOR_TARGET.equals(target)
+                && woven.getBundleWiring().getBundle().getVersion().toString().equals("22.0.0.v202605050943"))
+            {
+                try
+                {
+                    byte[] transformed = transformConstructors(woven.getBytes());
+                    System.getProperties().put(CTOR_CALLBACK + ".woven", transformed != null);
+                    if (transformed != null)
+                        woven.setBytes(transformed);
+                }
+                catch (RuntimeException | LinkageError failure)
+                {
+                    System.getProperties().put(CTOR_CALLBACK + ".error", failure.toString());
+                }
+                return;
+            }
             if (woven.getState() != WovenClass.TRANSFORMING || !(BASE.equals(target) || DESCRIPTION.equals(target)))
                 return;
             try
@@ -2548,6 +2724,87 @@ public final class Activator
             {
                 // Ошибка необязательного вплетения не прерывает загрузку класса.
             }
+        }
+
+        static byte[] transformConstructors(byte[] bytes)
+        {
+            var reader = new ClassReader(bytes);
+            var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            String scope = "com/_1c/g5/modeling/xtext/scoping/ISlicedScope";
+            String descriptor = "(L" + scope + ";Ljava/util/Collection;Lorg/eclipse/emf/ecore/EObject;Z)Ljava/lang/Iterable;";
+            int[] changed = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String methodDescriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor original = super.visitMethod(access, name, methodDescriptor, signature, exceptions);
+                    if (!name.equals("createProposalsForCtors"))
+                        return original;
+                    return new MethodVisitor(Opcodes.ASM9, original)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String methodName,
+                            String callDescriptor, boolean isInterface)
+                        {
+                            if (owner.equals(scope) && methodName.equals("getAllElements")
+                                && callDescriptor.equals("(Ljava/util/Collection;)Ljava/lang/Iterable;"))
+                            {
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, reader.getClassName(), "isRussian", "Z");
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, reader.getClassName(),
+                                    "comfort$constructorTypes", descriptor, false);
+                                changed[0]++;
+                                return;
+                            }
+                            super.visitMethodInsn(opcode, owner, methodName, callDescriptor, isInterface);
+                        }
+                    };
+                }
+            }, 0);
+            if (changed[0] != 1)
+                return null;
+            var helper = writer.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                "comfort$constructorTypes", descriptor, null, null);
+            helper.visitCode();
+            EarlyWeaving.emitGetProperty(helper, CTOR_CALLBACK, "java/util/function/Function");
+            helper.visitInsn(Opcodes.ICONST_3);
+            helper.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+            for (int index = 0; index < 3; index++)
+            {
+                helper.visitInsn(Opcodes.DUP);
+                helper.visitLdcInsn(index);
+                if (index == 0)
+                    helper.visitVarInsn(Opcodes.ALOAD, 2);
+                else if (index == 1)
+                    helper.visitVarInsn(Opcodes.ALOAD, 0);
+                else
+                {
+                    helper.visitVarInsn(Opcodes.ILOAD, 3);
+                    helper.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+                }
+                helper.visitInsn(Opcodes.AASTORE);
+            }
+            helper.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+            helper.visitInsn(Opcodes.DUP);
+            Label fallback = new Label();
+            helper.visitJumpInsn(Opcodes.IFNULL, fallback);
+            helper.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Iterable");
+            helper.visitInsn(Opcodes.ARETURN);
+            helper.visitLabel(fallback);
+            helper.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { "java/lang/Object" });
+            helper.visitInsn(Opcodes.POP);
+            helper.visitVarInsn(Opcodes.ALOAD, 0);
+            helper.visitVarInsn(Opcodes.ALOAD, 1);
+            helper.visitMethodInsn(Opcodes.INVOKEINTERFACE, scope, "getAllElements",
+                "(Ljava/util/Collection;)Ljava/lang/Iterable;", true);
+            helper.visitInsn(Opcodes.ARETURN);
+            helper.visitMaxs(0, 4);
+            helper.visitEnd();
+            return writer.toByteArray();
         }
     }
 
@@ -4990,10 +5247,14 @@ public final class Activator
          * Вплетены монитор ресурса и блокировка чтения ({@link AssistReadLock}) — порядок как у
          * {@code internalReadOnly}, без запуска разбора.
          */
+        private static final String BSL_HIGHLIGHTING =
+            "com._1c.g5.v8.dt.bsl.ui.syntaxcoloring.BslHighlightingReconciler"; //$NON-NLS-1$
+        private static final String PROP_MODEL_HIGHLIGHTING = "tormozit.bslHighlighting.modelChanged"; //$NON-NLS-1$
         private static final String DOC_LOCKER =
             "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
         /** Совпадает с {@code BslXtextDocumentHook.PROP_SKIP_WAIT}. */
         static final String PROP_SKIP_WAIT = "tormozit.bslXtextDoc.skipWaitUpdatingDataModel"; //$NON-NLS-1$
+        static final String PROP_SKIP_LOCAL_DERIVED_WAIT = "tormozit.bslXtextDoc.skipLocalDerivedWait"; //$NON-NLS-1$
         static final String PROP_ASSIST_READ_BEGIN = "tormozit.bslXtextDoc.assistReadLockBegin"; //$NON-NLS-1$
         static final String PROP_ASSIST_READ_LOCKED = "tormozit.bslXtextDoc.assistReadLocked"; //$NON-NLS-1$
         static final String PROP_ASSIST_READ_END = "tormozit.bslXtextDoc.assistReadLockEnd"; //$NON-NLS-1$
@@ -5015,7 +5276,7 @@ public final class Activator
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
-            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER);
+            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER, BSL_HIGHLIGHTING);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -5094,6 +5355,10 @@ public final class Activator
             System.getProperties().put(PROP_ASSIST_READ_LOCKED, (Runnable) AssistReadLock::locked);
             System.getProperties().put(PROP_ASSIST_READ_END, (java.util.function.Supplier<Object>) AssistReadLock::end);
             System.getProperties().put(PROP_ASSIST_READ_DEPTH, (java.util.function.IntSupplier) AssistReadLock::depth);
+            System.getProperties().put(PROP_SKIP_LOCAL_DERIVED_WAIT,
+                (java.util.function.Predicate<Object>) AssistReadLock::skipLocalDerivedWait);
+            System.getProperties().putIfAbsent(PROP_MODEL_HIGHLIGHTING,
+                (java.util.function.BiPredicate<Object, Object>) (reconciler, resource) -> false);
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -5721,6 +5986,8 @@ public final class Activator
         {
             if (DOC_LOCKER.equals(className))
                 return transformDocLocker(bytes);
+            if (BSL_HIGHLIGHTING.equals(className))
+                return transformModelHighlighting(bytes);
             if (DCS_LOCAL_STRING_EDITOR.equals(className) || DCS_FIELD_EDITING.equals(className)
                 || DCS_PARAMETER_EDITING.equals(className))
                 return transformDcsLocalStringSource(className, bytes);
@@ -6219,6 +6486,73 @@ public final class Activator
          * {@link #transformFoldingProvider}. Функции ставит {@link #install} до хука, поэтому
          * вплетённый код зовёт их без проверок.
          */
+        /** BSL проверяет активность и stamp сам; только тяжёлый вызов родителя переносится в Job. */
+        private static byte[] transformModelHighlighting(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            String owner = reader.getClassName();
+            String parent = "org/eclipse/xtext/ui/editor/syntaxcoloring/HighlightingReconciler"; //$NON-NLS-1$
+            String desc = "(Lorg/eclipse/xtext/resource/XtextResource;Lorg/eclipse/xtext/util/CancelIndicator;)V"; //$NON-NLS-1$
+            String helper = "comfort$modelChanged"; //$NON-NLS-1$
+            int[] calls = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"modelChanged".equals(name) || !desc.equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String target, String method, String signature,
+                            boolean itf)
+                        {
+                            if (opcode == Opcodes.INVOKESPECIAL && parent.equals(target)
+                                && "modelChanged".equals(method) && desc.equals(signature)) //$NON-NLS-1$
+                            {
+                                calls[0]++;
+                                super.visitMethodInsn(Opcodes.INVOKESPECIAL, owner, helper, desc, false);
+                            }
+                            else
+                                super.visitMethodInsn(opcode, target, method, signature, itf);
+                        }
+                    };
+                }
+
+                @Override
+                public void visitEnd()
+                {
+                    MethodVisitor mv = super.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC,
+                        helper, desc, null, null);
+                    mv.visitCode();
+                    emitGetProperty(mv, PROP_MODEL_HIGHLIGHTING, "java/util/function/BiPredicate"); //$NON-NLS-1$
+                    mv.visitVarInsn(Opcodes.ALOAD, 0);
+                    mv.visitVarInsn(Opcodes.ALOAD, 1);
+                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiPredicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                    Label original = new Label();
+                    mv.visitJumpInsn(Opcodes.IFEQ, original);
+                    mv.visitInsn(Opcodes.RETURN);
+                    mv.visitLabel(original);
+                    mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                    mv.visitVarInsn(Opcodes.ALOAD, 0);
+                    mv.visitVarInsn(Opcodes.ALOAD, 1);
+                    mv.visitVarInsn(Opcodes.ALOAD, 2);
+                    mv.visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "modelChanged", desc, false); //$NON-NLS-1$
+                    mv.visitInsn(Opcodes.RETURN);
+                    mv.visitMaxs(0, 0);
+                    mv.visitEnd();
+                    super.visitEnd();
+                }
+            }, 0);
+            System.setProperty(PROP_MODEL_HIGHLIGHTING + ".patch", "calls=" + calls[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            return calls[0] == 1 ? writer.toByteArray() : null;
+        }
+
         private static byte[] transformDocLocker(byte[] bytes)
         {
             ClassReader reader = new ClassReader(bytes);
@@ -6230,7 +6564,7 @@ public final class Activator
                     return "java/lang/Object"; //$NON-NLS-1$
                 }
             };
-            int[] touched = new int[2];
+            int[] touched = new int[3];
             reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
             {
                 @Override
@@ -6260,6 +6594,27 @@ public final class Activator
                             }
                         };
                     }
+                    if ("waitLocalDerivedDataCompute".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/bsl/resource/BslResource;)V".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        touched[2]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                emitGetProperty(this, PROP_SKIP_LOCAL_DERIVED_WAIT, "java/util/function/Predicate"); //$NON-NLS-1$
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", //$NON-NLS-1$
+                                    "test", "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                Label original = new Label();
+                                super.visitJumpInsn(Opcodes.IFEQ, original);
+                                super.visitInsn(Opcodes.RETURN);
+                                super.visitLabel(original);
+                            }
+                        };
+                    }
                     if ("readOnlyForContentAssist".equals(name) && READ_FOR_ASSIST_DESC.equals(descriptor)) //$NON-NLS-1$
                     {
                         touched[1]++;
@@ -6268,9 +6623,9 @@ public final class Activator
                     return mv;
                 }
             }, ClassReader.EXPAND_FRAMES);
-            boolean woven = touched[0] == 1 && touched[1] == 1;
+            boolean woven = touched[0] == 1 && touched[1] == 1 && touched[2] == 1;
             System.setProperty(PROP_DOC_LOCKER_PATCH, (woven ? "woven" : "skipped") //$NON-NLS-1$ //$NON-NLS-2$
-                + " wait=" + touched[0] + " read=" + touched[1]); //$NON-NLS-1$ //$NON-NLS-2$
+                + " wait=" + touched[0] + " read=" + touched[1] + " localWait=" + touched[2]); //$NON-NLS-1$ //$NON-NLS-2$
             return woven ? writer.toByteArray() : null;
         }
 
@@ -6566,6 +6921,27 @@ public final class Activator
                     }
                 }
                 return entry.monitor;
+            }
+
+            /**
+             * doResolveCrossReferences берёт resource.getLock() до localResolveCrossReference.
+             * Наш читатель уже держит этот монитор: Thread.sleep его не отпускает, поэтому
+             * локальное разрешение не продвинется за штатный секундный таймаут.
+             */
+            static boolean skipLocalDerivedWait(Object resource)
+            {
+                boolean skip = false;
+                try
+                {
+                    Object monitor = invoke(resource, "getLock"); //$NON-NLS-1$
+                    skip = depth() > 0 && monitor != null && Thread.holdsLock(monitor);
+                }
+                catch (Exception error)
+                {
+                    observe("localDerivedWait.error " + error, 0); //$NON-NLS-1$
+                }
+                observe("localDerivedWait skip=" + skip, 0); //$NON-NLS-1$
+                return skip;
             }
 
             static int depth()

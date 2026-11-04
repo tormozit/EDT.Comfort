@@ -3166,11 +3166,12 @@ public final class BslStructureInsertCommentTypes
             Method owner = method;
             List<SimpleStatement> statements = PLANS.get(owner, owner.eResource(),
                 () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class));
+            StatementPlan plan = PLANS.get(new StatementPlanKey(owner), owner.eResource(),
+                () -> new StatementPlan(statements));
             int from = 0;
             SimpleStatement assignment = null;
-            for (SimpleStatement statement : statements)
-                if (statement.getLeft() instanceof StaticFeatureAccess access
-                    && sourceVariable(access) == variable && end(statement) <= offset && end(statement) > from)
+            for (SimpleStatement statement : plan.assignments.getOrDefault(variable, List.of()))
+                if (end(statement) <= offset && end(statement) > from)
                 {
                     from = end(statement);
                     assignment = statement;
@@ -3179,12 +3180,12 @@ public final class BslStructureInsertCommentTypes
                 ? callerRenames(types, param, owner, environments)
                 : calleeRenames(types, assignment, environments);
             List<SimpleStatement> renames = new ArrayList<>();
-            for (SimpleStatement statement : statements)
+            for (SimpleStatement statement : plan.renames.getOrDefault(variable, List.of()))
             {
+                if (end(statement) <= from || end(statement) > offset)
+                    continue;
                 Environmental environment = EcoreUtil2.getContainerOfType(statement, Environmental.class);
-                if (end(statement) <= from || end(statement) > offset || environment == null
-                    || !environment.environments().containsAny(environments)
-                    || renameVariable(statement.getLeft()) != variable)
+                if (environment == null || !environment.environments().containsAny(environments))
                     continue;
                 renames.add(statement);
             }
@@ -3217,6 +3218,35 @@ public final class BslStructureInsertCommentTypes
         }
 
         /** Строго одно обращение к колонке после Колонки; произвольные свойства Имя не подходят. */
+        private record StatementPlanKey(Method method) {}
+
+        /** Разрешение ссылок и поиск переименований — один раз на метод, а не для каждого значения. */
+        private static final class StatementPlan
+        {
+            final java.util.Map<Variable, List<SimpleStatement>> assignments = new java.util.IdentityHashMap<>();
+            final java.util.Map<Variable, List<SimpleStatement>> renames = new java.util.IdentityHashMap<>();
+
+            StatementPlan(List<SimpleStatement> statements)
+            {
+                long started = System.nanoTime();
+                for (SimpleStatement statement : statements)
+                {
+                    if (statement.getLeft() instanceof StaticFeatureAccess access)
+                    {
+                        Variable variable = sourceVariable(access);
+                        if (variable != null)
+                            assignments.computeIfAbsent(variable, key -> new ArrayList<>()).add(statement);
+                    }
+                    Variable renamed = renameVariable(statement.getLeft());
+                    if (renamed != null)
+                        renames.computeIfAbsent(renamed, key -> new ArrayList<>()).add(statement);
+                }
+                Global.tempLog("assist-column-plan", "built statements=" + statements.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " assignmentVariables=" + assignments.size() + " renamedVariables=" + renames.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
+            }
+        }
+
         private static Variable renameVariable(Expression expression)
         {
             if (!(expression instanceof DynamicFeatureAccess name)
@@ -3286,7 +3316,18 @@ public final class BslStructureInsertCommentTypes
             return latest == null ? null : stringValue(latest.getRight(), statements, environments);
         }
 
+        private record EndOffsetKey(EObject object) {}
+
         private static int end(EObject object)
+        {
+            var resource = object.eResource();
+            if (resource == null)
+                return uncachedEnd(object);
+            // Тот же срок жизни, что у плана операторов: сброс при изменении ресурса.
+            return PLANS.get(new EndOffsetKey(object), resource, () -> uncachedEnd(object));
+        }
+
+        private static int uncachedEnd(EObject object)
         {
             ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
             return node == null ? Integer.MAX_VALUE : node.getEndOffset();

@@ -597,6 +597,13 @@ final class PropertySheetPlatformPropertyResolver
         return false;
     }
 
+    /** Базовый тип элемента, затем его расширение; порядок задаёт штатный сервис EDT. */
+    static List<Type> formItemPlatformTypes(FormVisualEntity item)
+    {
+        FormItemInformationService service = formItemInformationService();
+        return service != null ? service.getTypesOfFormItem(item) : List.of();
+    }
+
     private static FormItemInformationService formItemInformationService()
     {
         FormItemInformationService cached = FORM_ITEM_INFO;
