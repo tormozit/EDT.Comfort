@@ -696,7 +696,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 pending.clear();
             }
             long started = System.nanoTime();
-            Boolean held = null;
             boolean retry = false;
             boolean completed = false;
             int generation = BslDocCommentComputedTypes.typesGeneration();
@@ -708,14 +707,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     retry = true;
                     return Status.CANCEL_STATUS;
                 }
-                held = ContentAssistSessionReloader.beginLowPriorityHold(document, monitor, monitor::isCanceled);
-                if (held == null || monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
+                completed = Boolean.TRUE.equals(BslNodeLookup.compute(monitor,
+                    () -> ContentAssistSessionReloader.readOnlyPeekAstLowPriority(document, monitor, resource ->
                 {
-                    retry = true;
-                    return Status.CANCEL_STATUS;
-                }
-                BslNodeLookup.compute(monitor, () -> ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                {
+                    if (monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
+                        throw new org.eclipse.core.runtime.OperationCanceledException();
                     for (Integer offset : batch.keySet())
                     {
                         if (monitor.isCanceled())
@@ -726,9 +722,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     // Один обход литералов для всех методов пакета, под тем же чтением модели.
                     BslTempTableSessions.refreshDocument(document, resource,
                         batch.keySet().stream().mapToInt(Integer::intValue).toArray(), monitor::isCanceled);
-                    return null;
-                }));
-                completed = true;
+                    return Boolean.TRUE;
+                })));
+                if (!completed || monitor.isCanceled())
+                    throw new org.eclipse.core.runtime.OperationCanceledException();
             }
             catch (org.eclipse.core.runtime.OperationCanceledException canceled)
             {
@@ -741,8 +738,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             finally
             {
-                if (Boolean.TRUE.equals(held))
-                    ContentAssistSessionReloader.endLowPriorityHold(monitor);
                 needsValidation |= batch.containsValue(Boolean.TRUE)
                     && generation != BslDocCommentComputedTypes.typesGeneration();
                 Global.tempLog("assist-query-refresh", "batch.end offsets=" + batch.keySet() //$NON-NLS-1$ //$NON-NLS-2$
@@ -1413,16 +1408,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     return tempTable(expression);
                 if (expression instanceof IndexAccess index)
                     return indexed(shape(index.getSource(), visiting), index.getIndex());
-                // Поле-вложенная таблица выборки: Выборка.Вложенная — РезультатЗапроса со своими колонками
+                // Вложенное поле выборки — результат запроса, строки выгруженной таблицы — таблица значений.
                 if (expression instanceof DynamicFeatureAccess fieldAccess && fieldAccess.getName() != null)
                 {
                     Shape owner = shape(fieldAccess.getSource(), visiting);
-                    if (owner == null || !owner.kind.equals("QueryResultSelection") || owner.results.size() != 1) //$NON-NLS-1$
+                    if (owner == null || owner.results.size() != 1
+                        || !(owner.kind.equals("QueryResultSelection") || owner.kind.equals("ValueTableRow"))) //$NON-NLS-1$ //$NON-NLS-2$
                         return null;
                     String fieldName = lower(fieldAccess.getName());
                     for (Field field : owner.results.get(0).fields)
                         if (field.nested != null && (fieldName.equals(lower(field.name)) || fieldName.equals(lower(field.nameRu))))
-                            return new Shape("QueryResult", List.of(field.nested)); //$NON-NLS-1$
+                            return new Shape(owner.kind.equals("ValueTableRow") ? "ValueTable" : "QueryResult", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                List.of(field.nested));
                     return null;
                 }
                 if (!(expression instanceof Invocation invocation)
@@ -1967,7 +1964,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 property.setEnvironments(Environments.ALL);
                 TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
                 if (field.nested != null)
-                    container.getTypes().add(baseType("QueryResult")); //$NON-NLS-1$
+                    // Выгрузка преобразует вложенные результаты на всех уровнях, сохраняя их колонки.
+                    container.getTypes().add(type.getName().equals("ValueTableRow") //$NON-NLS-1$
+                        ? valueTableType(field.nested) : baseType("QueryResult")); //$NON-NLS-1$
                 else
                     container.getTypes().addAll(field.types);
                 property.setTypeContainer(container);

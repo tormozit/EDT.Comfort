@@ -937,9 +937,7 @@ public final class BslEditorHoverHook implements IStartup
             // Подсказка читает готовые типы; пересчёт цепочки зависимостей здесь не запускается — только
             // план результатов запросов метода (поля выборки), как перед списком.
             refreshQueryTypesBeforeHover(textViewer, hoverRegion);
-            Object info = delegateExt2 != null
-                ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
-                : delegate.getHoverInfo(textViewer, hoverRegion);
+            Object info = nativeHoverInfo(textViewer, hoverRegion);
             if (info == null || hoverRegion == null || editor == null)
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
@@ -969,6 +967,44 @@ public final class BslEditorHoverHook implements IStartup
             scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
             return maybeDecorateHoverInfo(info);
+        }
+
+        /**
+         * BslDispatchingEObjectTextHover.getHoverInfo2 читает узел через обычный readOnly.
+         * Повторяем только поиск исходного узла из BslDocumentationUtil$1, сохраняя штатное
+         * построение описания и выбранный BestMatchEObjectTextHover.currentHover (бандлы в .tmp/bundles).
+         * Чтение подсказки не должно уведомлять слушателей модели и запускать валидацию.
+         */
+        private Object nativeHoverInfo(ITextViewer viewer, IRegion region)
+        {
+            Object selected = delegate;
+            if ("com._1c.g5.v8.dt.lcore.ui.hover.BestMatchEObjectTextHover".equals(delegate.getClass().getName()))
+                selected = Global.getField(delegate, "currentHover");
+            if (!(selected instanceof BslDispatchingEObjectTextHover hover)
+                || !(viewer.getDocument() instanceof IXtextDocument document))
+                return delegateExt2 != null ? delegateExt2.getHoverInfo2(viewer, region)
+                    : delegate.getHoverInfo(viewer, region);
+            if (region == null || Boolean.TRUE.equals(Global.invoke(document, "needsReconciling")))
+                return null;
+            org.eclipse.xtext.util.CancelIndicator cancellation =
+                Global.invoke(document, "getCancelIndicator") instanceof org.eclipse.xtext.util.CancelIndicator indicator
+                    ? indicator : org.eclipse.xtext.util.CancelIndicator.NullImpl;
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                if (cancellation.isCanceled())
+                    return null;
+                IParseResult parsed = resource == null ? null : resource.getParseResult();
+                if (parsed == null || !(parsed.getRootASTElement() instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                    return null;
+                INode root = NodeModelUtils.findActualNodeFor(module);
+                ILeafNode leaf = root == null ? null
+                    : com._1c.g5.v8.dt.lcore.nodemodel.util.CustomNodeModelUtils
+                        .findLeafNodeAtOffset(root, region.getOffset());
+                if (cancellation.isCanceled())
+                    return null;
+                EObject source = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
+                return hover.getHoverInfo(source, viewer, region);
+            });
         }
 
         private void prepareHoverDecorations(ITextViewer textViewer, IRegion region, Object info)
@@ -1035,7 +1071,7 @@ public final class BslEditorHoverHook implements IStartup
                 return null;
             try
             {
-                return xtextDoc.readOnly(
+                return ContentAssistSessionReloader.readOnlyPeekAst(xtextDoc,
                     (IUnitOfWork<String, XtextResource>) resource -> {
                         IParseResult parseResult = resource != null ? resource.getParseResult() : null;
                         if (parseResult == null)
@@ -1276,7 +1312,7 @@ public final class BslEditorHoverHook implements IStartup
             Set<String> names = DefinedTypeLinks.names(html);
             if (names.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                 return Map.of();
-            return document.readOnly((IUnitOfWork<Map<String, DefinedTypeLinks.Link>, XtextResource>) resource ->
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, (IUnitOfWork<Map<String, DefinedTypeLinks.Link>, XtextResource>) resource ->
                 DefinedTypeLinks.resolve(names, resource));
         }
 
@@ -1321,7 +1357,7 @@ public final class BslEditorHoverHook implements IStartup
             try
             {
                 int offset = hoverRegion.getOffset();
-                document.readOnly(resource ->
+                ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                 {
                     BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset, status -> {});
                     // Сеансы менеджера временных таблиц метода под курсором (issue 889)
@@ -1341,7 +1377,7 @@ public final class BslEditorHoverHook implements IStartup
             lastMethodDescriptionLinks = Map.of();
             if (!(editor.getDocument() instanceof IXtextDocument document))
                 return;
-            document.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
+            ContentAssistSessionReloader.readOnlyPeekAst(document, (IUnitOfWork<Void, XtextResource>) resource -> {
                 EObject object = resource == null ? null
                     : BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, region.getOffset());
                 com._1c.g5.v8.dt.bsl.model.FeatureAccess access = null;
@@ -1398,7 +1434,7 @@ public final class BslEditorHoverHook implements IStartup
             {
                 // До блокировки документа: определение темы уходит в UI-поток.
                 String color = formHandlersTextColor();
-                return document.readOnly((IUnitOfWork<String, XtextResource>) resource -> {
+                return ContentAssistSessionReloader.readOnlyPeekAst(document, (IUnitOfWork<String, XtextResource>) resource -> {
                     if (resource == null)
                         return null;
                     EObject object = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource,
@@ -1567,7 +1603,7 @@ public final class BslEditorHoverHook implements IStartup
                 return null;
             try
             {
-                return xtextDoc.readOnly(
+                return ContentAssistSessionReloader.readOnlyPeekAst(xtextDoc,
                     (org.eclipse.xtext.util.concurrent.IUnitOfWork<String, org.eclipse.xtext.resource.XtextResource>) resource -> {
                         if (resource == null)
                             return null;
@@ -1596,7 +1632,7 @@ public final class BslEditorHoverHook implements IStartup
                 return false;
             try
             {
-                Boolean found = xtextDoc.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+                Boolean found = ContentAssistSessionReloader.readOnlyPeekAst(xtextDoc, (IUnitOfWork<Boolean, XtextResource>) resource -> {
                     if (resource == null)
                         return Boolean.FALSE;
                     return Boolean.valueOf(isImplicitVariableCreationAt(resource, hoverRegion));

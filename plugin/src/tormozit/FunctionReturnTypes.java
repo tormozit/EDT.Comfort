@@ -402,7 +402,7 @@ final class FunctionReturnTypes
                     }
                 }
                 else if (request != null)
-                    compute(request);
+                    compute(request, monitor);
             }
             finally
             {
@@ -412,7 +412,7 @@ final class FunctionReturnTypes
                     more = !QUEUE.isEmpty() || !INDEX_QUEUE.isEmpty();
                 }
                 if (more)
-                    schedule();
+                    schedule(monitor.isCanceled() ? 50L : 0L);
             }
             return Status.OK_STATUS;
         }
@@ -1647,7 +1647,7 @@ final class FunctionReturnTypes
      * модуля, и в других редакторах переставали разрешаться обращения через точку (#877, 23.10).
      * Чего готового нет — остаётся предварительным.
      */
-    private static void compute(Request request)
+    private static void compute(Request request, IProgressMonitor monitor)
     {
         if (!requestStillCurrent(request) || hasCompletedResult(request))
             return;
@@ -1659,7 +1659,9 @@ final class FunctionReturnTypes
             long started = System.nanoTime();
             try
             {
-                ContentAssistSessionReloader.readOnlyForContentAssist(request.nativeDocument(), resource ->
+                // Здесь нужны только готовые состояния: assist-чтение само планирует sync,
+                // меняет поколение типов и заново запускает чтение тех же строк списка.
+                ContentAssistSessionReloader.readOnlyPeekAstLowPriority(request.nativeDocument(), monitor, resource ->
                 {
                     if (!nativeModelMatches(request.nativeDocument(), resource))
                     {
@@ -1678,9 +1680,23 @@ final class FunctionReturnTypes
                 // Запрос окончится как неизвестный (ниже).
             }
             Global.tempLog("assist-type-reader", "read key=" + request.key() + " stale=" + staleModel[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " canceled=" + monitor.isCanceled() + " generation=" + request.typesGeneration() //$NON-NLS-1$ //$NON-NLS-2$
+                + " currentGeneration=" + BslDocCommentComputedTypes.typesGeneration() //$NON-NLS-1$
                 + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
             if (!requestStillCurrent(request))
                 return;
+            if (monitor.isCanceled())
+            {
+                synchronized (QUEUE)
+                {
+                    // Не терять отменённое чтение и не заменять более свежий запрос.
+                    if (requestStillCurrent(request)
+                        && request.state().equals(REQUEST_STAMPS.get(request.key()))
+                        && QUEUE.stream().noneMatch(queued -> queued.key().equals(request.key())))
+                        QUEUE.addLast(request);
+                }
+                return;
+            }
             if (staleModel[0])
             {
                 retryAfterNativeModel(request);

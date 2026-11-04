@@ -4456,7 +4456,7 @@ public final class Activator
                     diagnostics.publish(new Object[] { "deferred-full-checks", //$NON-NLS-1$
                         "Отложен полный пересчёт проверок (" + checkIds.size() //$NON-NLS-1$
                             + ").\nПричина запуска: " + reason //$NON-NLS-1$
-                            + ".\nРезультаты неактуальны. Запустите проверки для их обновления.", //$NON-NLS-1$
+                            + ".\nРезультаты неактуальны. Можно обновить в списке «Проблемы».", //$NON-NLS-1$
                         Long.valueOf(System.currentTimeMillis()), event[1], java.util.Set.copyOf(checkIds) });
                     return true;
                 }
@@ -4498,7 +4498,7 @@ public final class Activator
                     save(next);
                     diagnostics.publish(new Object[] { "deferred-checks",
                         "Изменены проверки " + String.join(", ", contributors)
-                            + ".\nРезультаты неактуальны. Обновите их здесь или в списке «Проверки».",
+                            + ".\nРезультаты неактуальны. Можно обновить в списке «Проверки».",
                         Long.valueOf(System.currentTimeMillis()), args[1],
                         java.util.Set.copyOf((Collection<?>) args[2]) });
                 }
@@ -4539,7 +4539,7 @@ public final class Activator
                     save(next);
                     diagnostics.publish(new Object[] { "deferred-checks",
                         "Изменены настройки проверок (" + checkIds.size()
-                            + ").\nРезультаты неактуальны. Обновите их здесь или в списке «Проверки».",
+                            + ").\nРезультаты неактуальны. Можно обновить в списке «Проверки».",
                         Long.valueOf(System.currentTimeMillis()), args[2], java.util.Set.copyOf(checkIds) });
                 }
                 catch (Exception error)

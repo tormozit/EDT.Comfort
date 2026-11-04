@@ -59,15 +59,13 @@ final class BslFormTypePresentation
             return null;
         List<String> links = new ArrayList<>();
         for (FormLink form : forms)
-            links.add("<a class=\"comfort-form-type\" href=\"#\" onclick=\"" //$NON-NLS-1$
-                + "comfortOpenMethodDefinition('" + form.uri() + "');return false;\">" //$NON-NLS-1$ //$NON-NLS-2$
-                + HTMLPrinter.convertToHTMLContent(form.label()) + "</a>"); //$NON-NLS-1$
+            links.add("<span data-comfort-form=\"" + form.uri() + "\">" //$NON-NLS-1$ //$NON-NLS-2$
+                + HTMLPrinter.convertToHTMLContent(form.label()) + "</span>"); //$NON-NLS-1$
         return "Форма: " + String.join(", ", links); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static List<FormLink> forms(TypeItem item)
     {
-        Global.tempLog("form-type-presentation", "lookup item=" + describe(item)); //$NON-NLS-1$ //$NON-NLS-2$
         if (item == null || item.eIsProxy())
             return List.of();
         String name = McoreUtil.getTypeName(item);
@@ -80,25 +78,17 @@ final class BslFormTypePresentation
         Set<ContextDef> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         for (TypeItem alternative : BslDocCommentTypeMerge.alternatives(item))
             if (alternative instanceof Type type && !type.eIsProxy())
-            {
-                Global.tempLog("form-type-presentation", "alternative=" + describe(type) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " context=" + describe(type.getContextDef())); //$NON-NLS-1$
                 collect(type.getContextDef(), forms, visited);
-            }
-        Global.tempLog("form-type-presentation", "result=" + forms.values()); //$NON-NLS-1$ //$NON-NLS-2$
         return List.copyOf(forms.values());
     }
 
     private static void collect(ContextDef context, Map<String, FormLink> forms, Set<ContextDef> visited)
     {
-        Global.tempLog("form-type-presentation", "context=" + describe(context) //$NON-NLS-1$ //$NON-NLS-2$
-            + " owner=" + describe(context != null ? context.eContainer() : null)); //$NON-NLS-1$
         if (context == null || context.eIsProxy() || !visited.add(context))
             return;
         if (context.eContainer() instanceof AbstractForm form)
         {
             MdObject md = form.getMdForm();
-            Global.tempLog("form-type-presentation", "mdForm=" + describe(md)); //$NON-NLS-1$ //$NON-NLS-2$
             if (md != null && !md.eIsProxy())
             {
                 List<String> path = new ArrayList<>();
@@ -109,8 +99,6 @@ final class BslFormTypePresentation
                         String kind = object instanceof CommonForm ? "ОбщаяФорма" //$NON-NLS-1$
                             : object instanceof BasicForm ? "Форма" //$NON-NLS-1$
                             : MdTypeMapping.anyToRu(object.eClass().getName());
-                        Global.tempLog("form-type-presentation", "path object=" + describe(object) //$NON-NLS-1$ //$NON-NLS-2$
-                            + " kind=" + kind + " name=" + object.getName()); //$NON-NLS-1$ //$NON-NLS-2$
                         if (kind == null || object.getName() == null || object.getName().isBlank())
                             return;
                         path.add(0, kind + "." + object.getName()); //$NON-NLS-1$
@@ -126,14 +114,6 @@ final class BslFormTypePresentation
             collect(ref, forms, visited);
     }
 
-    private static String describe(EObject object)
-    {
-        if (object == null)
-            return "null"; //$NON-NLS-1$
-        return object.eClass().getName() + '@' + Integer.toHexString(System.identityHashCode(object))
-            + " proxy=" + object.eIsProxy() + " uri=" + EcoreUtil.getURI(object) //$NON-NLS-1$ //$NON-NLS-2$
-            + (object instanceof TypeItem type ? " name=" + McoreUtil.getTypeName(type) : ""); //$NON-NLS-1$ //$NON-NLS-2$
-    }
 }
 
 

@@ -318,7 +318,6 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
                             status.suffix = suffix;
                     }
                 }
-                Global.tempLog("debug-source", "session generation result stale=" + stale);
                 if (!current && !stale)
                     diagnoseGenerations(session, target);
                 else if (!target.isTerminated())
@@ -358,7 +357,6 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             status.stale = true;
             status.suffix = SESSION_STALE;
         }
-        Global.tempLog("debug-source", "session stale latched changed=" + changed);
         if (changed)
             DebugPlugin.getDefault().fireDebugEventSet(new DebugEvent[] {
                 new DebugEvent(frame.getDebugTarget(), DebugEvent.CHANGE, DebugEvent.CONTENT) });
@@ -607,8 +605,6 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         }
         if (java.util.Objects.equals(previous, replacement))
             return;
-        Global.tempLog("debug-source", "stack line original=" + original + " corrected=" + corrected
-            + " moduleChanged=" + moduleChanged);
         DebugPlugin.getDefault().fireDebugEventSet(new DebugEvent[] {
             new DebugEvent(frame, DebugEvent.CHANGE, DebugEvent.STATE) });
     }

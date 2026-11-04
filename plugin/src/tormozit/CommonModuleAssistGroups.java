@@ -111,7 +111,7 @@ final class CommonModuleAssistGroups
         var region = groupHoverRegion(viewer, offset);
         if (region == null || !(viewer.getDocument() instanceof IXtextDocument document))
             return null;
-        return document.readOnly(resource ->
+        return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
         {
             if (resource == null)
                 return null;

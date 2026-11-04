@@ -223,17 +223,18 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
                 SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.set(previousApply);
         }
         if (reopen)
-        {
-            Display display = Display.getCurrent();
-            if (display != null)
-                display.asyncExec(() -> ContentAssistPopupSync.showPossibleCompletions(
-                    ContentAssistSessionReloader.getActiveAssistant()));
-        }
+            BslCompletionTemplates.reopenAfterInsertion(viewer, document, word);
     }
 
     /** {@code ВставитьУказанныйШаблон(Шаблон, ПоглощаемыйПредТекст)}; выделение за кареткой заменяется. */
     private void applyTemplate(ITextViewer viewer, IDocument document, int caret) throws BadLocationException
     {
+        Point assignment = BslCompletionTemplates.applyAssignment(this, document, viewer, caret, null);
+        if (assignment != null)
+        {
+            selection = assignment;
+            return;
+        }
         int lineOffset = document.getLineInformationOfOffset(caret).getOffset();
         int from = absorbStart(document, caret, lineOffset);
         int to = wordEnd(document, caret);

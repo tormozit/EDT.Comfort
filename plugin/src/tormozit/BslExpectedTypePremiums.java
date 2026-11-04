@@ -1256,11 +1256,7 @@ final class BslExpectedTypePremiums
             for (TypeItem item : FormItemTypes.displayTypes(parentTypes))
                 if (FormItemTypes.isPresentationExtension(item))
                     specializedParents.add(FunctionReturnTypes.typeName(item));
-        Global.tempLog("form-type-presentation", "parent labels=" + parentDisplayTypes //$NON-NLS-1$ //$NON-NLS-2$
-            + " specialized=" + specializedParents + " statistics=" + statisticsContext); //$NON-NLS-1$ //$NON-NLS-2$
         String specializedParentLabel = specializedParents.size() == 1 ? specializedParents.iterator().next() : null;
-        Global.tempLog("form-type-presentation", "parent=" + context.parent() + " types=" + typeNames(parentTypes) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " display=" + parentDisplayTypes + " specialized=" + specializedParentLabel); //$NON-NLS-1$ //$NON-NLS-2$
         if (timing != null)
             timing.phase("parentLabels"); //$NON-NLS-1$
         return new Scene(expectation, statisticsContext, insideExpression, frequencies, receiverLine, expectedTypeText,
@@ -3181,7 +3177,8 @@ final class BslExpectedTypePremiums
             Context context = contextAt(document, wordEnd);
             if (context == null)
                 return null;
-            return ContentAssistSessionReloader.readOnlyForContentAssist(xtextDocument, resource ->
+            // Описание только читает типы: readOnlyForContentAssist заново запускает проверку (issue 985).
+            return ContentAssistSessionReloader.readOnlyPeekAst(xtextDocument, resource ->
             {
                 if (resource == null)
                     return null;
@@ -5058,6 +5055,74 @@ final class BslExpectedTypePremiums
         if (predefinedType != null)
             return new ArrayList<>(List.of(predefinedType));
         return displayTypes(proposal.getDisplayString());
+    }
+
+    /** Условия ветки «Левая часть присвоения» из ИР, включая доступность свойства для записи. */
+    static boolean canInsertAssignment(IDocument document, int caret, ICompletionProposal proposal)
+        throws Exception
+    {
+        Context context = contextAt(document, caret);
+        if (context == null || insideExpression(context, null)
+            || SmartContentAssistProcessor.isCommentAssistContext(document, caret)
+            || SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
+            return false;
+        if (proposal instanceof BslAddedWordProposal added)
+            return added.isGhostMember() && !added.isMethod()
+                && assignmentValueType(added.getInferredTypes());
+        if (!(document instanceof IXtextDocument xtextDocument))
+            return false;
+        Object info = statisticsFeature(proposalInfo(proposal));
+        FunctionReturnTypes.VariableTarget target = FunctionReturnTypes.variableTargetOf(info);
+        return Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyForContentAssist(xtextDocument, resource ->
+        {
+            if (resource == null)
+                return false;
+            Object feature = target != null && target.fragment() != null
+                && resource.getURI().trimFragment().equals(target.module())
+                    ? resource.getEObject(target.fragment()) : info;
+            List<TypeItem> types;
+            if (feature instanceof Property property && !property.eIsProxy())
+            {
+                if (!property.isWritable())
+                    return false;
+                types = new ArrayList<>(property.getTypes());
+            }
+            else if (feature instanceof Variable variable && !variable.eIsProxy())
+                types = variableTypeItemsAt(variable, caret, environmentsOf(resource, variable));
+            else
+                return false;
+            List<String> names = matchingTypeNames(types);
+            if (names.size() == 1 && "Неопределено".equalsIgnoreCase(names.get(0))) //$NON-NLS-1$
+            {
+                List<TypeItem> parents = context.parent().isEmpty() ? List.of()
+                    : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
+                Set<String> dynamicRows = Set.of("строкатаблицызначений", "строкадеревазначений", //$NON-NLS-1$ //$NON-NLS-2$
+                    "данныеформыэлементдерева", "данныеформыэлементколлекции", //$NON-NLS-1$ //$NON-NLS-2$
+                    "данныеформыструктура", "данныеформыструктурасколлекцией"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (matchingTypeNames(parents).stream().noneMatch(name -> dynamicRows.contains(lower(name))))
+                    return false;
+            }
+            if (assignmentValueType(names))
+                return true;
+            for (TypeItem item : types)
+            {
+                Type type = resolveType(resource, item);
+                if (type != null && type.isSysEnum())
+                    return true;
+            }
+            return false;
+        }));
+    }
+
+    private static boolean assignmentValueType(List<String> types)
+    {
+        for (String type : types)
+        {
+            String name = lower(type);
+            if (PRIMITIVE_TYPES.contains(name) || name.contains("ссылка.")) //$NON-NLS-1$
+                return true;
+        }
+        return false;
     }
 
     private static Object proposalInfo(ICompletionProposal proposal)

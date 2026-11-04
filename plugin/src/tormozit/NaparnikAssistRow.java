@@ -661,33 +661,23 @@ public final class NaparnikAssistRow
             && (!(resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl) || bsl.isLinkedBatch());
     }
 
-    /** Штатный getAiContext читает вложенно: готовый модуль заново не перепарсивается. */
+    /** getAiContext сам диспетчеризуется в UI: вызывать только вне блокировок модели. */
     private Object readAiContext(int gen, Object vm, Object source)
     {
-        if (!(viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument document))
-            return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
         long waitingStarted = System.nanoTime();
-        while (gen == generation && awaitModuleLinked(gen, waitingStarted))
+        if (!awaitModuleLinked(gen, waitingStarted) || gen != generation)
+            return null;
+        long started = System.nanoTime();
+        Global.tempLog("assist-ai-context", "native.begin generation=" + gen + " modelHold=false"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        try
         {
-            boolean[] ready = { false };
-            long started = System.nanoTime();
-            Object context = ContentAssistSessionReloader.readOnlyForContentAssist(document, resource ->
-            {
-                if (gen != generation || !aiModelReady(document, resource))
-                    return null;
-                ready[0] = true;
-                return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
-            });
-            Global.tempLog("assist-ai-context", "read generation=" + gen + " ready=" + ready[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
-            if (ready[0])
-                return context;
-            // После потолка прежнее поведение не меняем: контекст всё равно запрашивается.
-            // Обычный путь выше использует только подтверждённо готовую модель.
-            if (gen == generation && (System.nanoTime() - waitingStarted) / 1_000_000L >= LINK_WAIT_CAP_MS)
-                return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
+            return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
         }
-        return null;
+        finally
+        {
+            Global.tempLog("assist-ai-context", "native.end generation=" + gen //$NON-NLS-1$ //$NON-NLS-2$
+                + " current=" + generation + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private void runRequest(int gen, Object vm, Object source, List<Word> words, Display display)

@@ -612,6 +612,13 @@ public final class ComfortSettings
     private ComfortSettings(String pluginId)
     {
         preferenceStore = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
+        preferenceStore.addPropertyChangeListener(event ->
+        {
+            if (PREF_CONTROL_MD_REFERENCES.equals(event.getProperty()))
+                Global.tempLog("broken-links-setting", "changed old=" + event.getOldValue()
+                    + " new=" + event.getNewValue() + " callers="
+                    + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
+        });
     }
 
     public static synchronized ComfortSettings init(String pluginId)
@@ -870,9 +877,12 @@ public final class ComfortSettings
     public static boolean isControlMdReferencesEnabled()
     {
         ComfortSettings settings = instance;
-        if (settings == null)
-            return DEFAULT_CONTROL_MD_REFERENCES;
-        return settings.preferenceStore.getBoolean(PREF_CONTROL_MD_REFERENCES);
+        boolean enabled = settings == null ? DEFAULT_CONTROL_MD_REFERENCES
+            : settings.preferenceStore.getBoolean(PREF_CONTROL_MD_REFERENCES);
+        Global.tempLog("broken-links-setting", "enabled=" + enabled + " initialized=" + (settings != null)
+            + " thread=" + Thread.currentThread().getName() + " callers="
+            + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
+        return enabled;
     }
 
     public static boolean isDebugLogEnabled()

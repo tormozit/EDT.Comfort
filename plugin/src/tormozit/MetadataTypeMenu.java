@@ -40,6 +40,7 @@ final class MetadataTypeMenu
 {
     private static final String FUNCTION = "comfortMetadataTypeAction"; //$NON-NLS-1$
     private static final Pattern ANCHOR = Pattern.compile("(?is)<a\\b[^>]*>(.*?)</a>"); //$NON-NLS-1$
+    private static final Pattern FORM = Pattern.compile("<span data-comfort-form=\"([^\"]+)\">(.*?)</span>"); //$NON-NLS-1$
     private static final Pattern TYPE_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)+"); //$NON-NLS-1$
     private static final String METADATA_OBJECT_PREFIX = "ОбъектМетаданных:"; //$NON-NLS-1$
     /** Ссылка, текст которой начинается с «ОбъектМетаданных: »; группа 1 — всё до приставки. */
@@ -57,13 +58,15 @@ final class MetadataTypeMenu
         final TypeItem type;
         final MdObject object;
         final BslXtextEditor source;
+        final boolean menuOnly;
         IHyperlink[] links = new IHyperlink[0];
 
-        Request(TypeItem type, MdObject object, BslXtextEditor source)
+        Request(TypeItem type, MdObject object, BslXtextEditor source, boolean menuOnly)
         {
             this.type = type;
             this.object = object;
             this.source = source;
+            this.menuOnly = menuOnly;
         }
     }
 
@@ -219,6 +222,24 @@ final class MetadataTypeMenu
                 return abbreviated;
             // Порядок определяется по полным именам, поэтому сортировка — до сокращения «ОМ: ».
             String html = abbreviateMetadataObjectTypes(sortTypeRuns(sourceHtml, resource, scope, converter));
+            var forms = FORM.matcher(html);
+            StringBuilder formMenus = new StringBuilder();
+            while (forms.find())
+            {
+                var uri = org.eclipse.emf.common.util.URI.createURI(java.net.URLDecoder.decode(
+                    forms.group(1), java.nio.charset.StandardCharsets.UTF_8));
+                var object = resource.getResourceSet().getEObject(uri, true);
+                String replacement = forms.group();
+                if (object instanceof MdObject md)
+                {
+                    String token = register(null, md, source, true);
+                    replacement = wrap(token, "<span class=\"" + ParamHintHtmlModifier.LINK_CLASS + "\">" //$NON-NLS-1$ //$NON-NLS-2$
+                        + forms.group(2) + "</span>"); //$NON-NLS-1$
+                }
+                forms.appendReplacement(formMenus, java.util.regex.Matcher.quoteReplacement(replacement));
+            }
+            forms.appendTail(formMenus);
+            html = formMenus.toString();
             var matcher = ANCHOR.matcher(html);
             StringBuilder result = new StringBuilder();
             while (matcher.find())
@@ -448,10 +469,15 @@ final class MetadataTypeMenu
 
     private static String register(TypeItem type, MdObject object, BslXtextEditor source)
     {
+        return register(type, object, source, false);
+    }
+
+    private static String register(TypeItem type, MdObject object, BslXtextEditor source, boolean menuOnly)
+    {
         String token = UUID.randomUUID().toString();
         synchronized (REQUESTS)
         {
-            REQUESTS.put(token, new Request(type, object, source));
+            REQUESTS.put(token, new Request(type, object, source, menuOnly));
             while (REQUESTS.size() > 512)
                 REQUESTS.remove(REQUESTS.keySet().iterator().next());
         }
@@ -464,8 +490,8 @@ final class MetadataTypeMenu
         StringBuilder html = new StringBuilder();
         for (int index = 0; index < request.links.length; index++)
         {
-            // Основной переход — клик по самой ссылке.
-            if (BslEditorHyperlinkHook.isPrimary(request.links[index]))
+            // У обычного текста основной переход доступен в меню, у ссылки — по клику.
+            if (!request.menuOnly && BslEditorHyperlinkHook.isPrimary(request.links[index]))
                 continue;
             html.append("<span class=\"comfort-param-menu-item\" onclick=\"").append(FUNCTION) //$NON-NLS-1$
                 .append("('").append(token).append("','open:").append(index) //$NON-NLS-1$ //$NON-NLS-2$

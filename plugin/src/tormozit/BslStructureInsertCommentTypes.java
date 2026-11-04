@@ -4623,11 +4623,56 @@ public final class BslStructureInsertCommentTypes
 
         private void installTypeSystemPass(Module module, CancelIndicator cancelIndicator)
         {
-            stockInstall(module, cancelIndicator);
-            ModuleVariableStates.fix(module);
-            // см. ОбщаяФорма.…: экспорт модуля в тип параметра (BslTreeTypeSystem не ткётся).
-            BslFormTypeContextEnrichment.enrichModule(module);
-            enrich(this, module, null);
+            long started = System.nanoTime();
+            long nativeFinished = 0L;
+            List<Method> affected = null;
+            if (module.eResource() instanceof com._1c.g5.v8.dt.bsl.resource.BslResource resource
+                && resource.isOnlyMethodReparse() && resource.getReparseMethod() != null)
+            {
+                // Тот же набор, что у штатного initFinalStateForMethod: вызывающие и сам метод.
+                affected = new ArrayList<>();
+                for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(resource.getReparseMethod()))
+                    if (caller instanceof Method method && !affected.contains(method))
+                        affected.add(method);
+                if (!affected.contains(resource.getReparseMethod()))
+                    affected.add(resource.getReparseMethod());
+            }
+            long nativeStarted = System.nanoTime();
+            try
+            {
+                stockInstall(module, cancelIndicator);
+                nativeFinished = System.nanoTime();
+                if (isCanceled(cancelIndicator))
+                    return;
+                ModuleVariableStates.fix(module);
+                if (affected == null)
+                {
+                    BslFormTypeContextEnrichment.enrichModule(module);
+                    enrich(this, module, null);
+                }
+                else
+                {
+                    enrichExportModuleVariables(module);
+                    for (Method method : affected)
+                    {
+                        if (isCanceled(cancelIndicator))
+                            return;
+                        BslFormTypeContextEnrichment.enrichMethod(method);
+                        enrich(this, module, method);
+                    }
+                }
+            }
+            finally
+            {
+                long finished = System.nanoTime();
+                Global.tempLog("assist-type-pass", "partial=" + (affected != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " methods=" + (affected == null ? module.allMethods().size() : affected.size()) //$NON-NLS-1$
+                    + " totalMethods=" + module.allMethods().size() + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " scopeMs=" + ((nativeStarted - started) / 1_000_000.0) //$NON-NLS-1$
+                    + " nativeComplete=" + (nativeFinished != 0L) //$NON-NLS-1$
+                    + " nativeMs=" + (((nativeFinished == 0L ? finished : nativeFinished) - nativeStarted) / 1_000_000.0) //$NON-NLS-1$
+                    + " afterNativeMs=" + (nativeFinished == 0L ? 0 : (finished - nativeFinished) / 1_000_000.0)); //$NON-NLS-1$
+            }
         }
 
         /**

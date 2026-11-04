@@ -289,8 +289,6 @@ public final class BslFormDataTypes
                     Object version = Global.invoke(provider, "getVersion", resolved); //$NON-NLS-1$
                     Object specialized = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
                         shown, resource, true, version, false);
-                    Global.tempLog("form-type-presentation", "reference type=" + McoreUtil.getTypeName(shown) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " converted=" + (specialized != null)); //$NON-NLS-1$
                     if (specialized != null)
                         return specialized;
                     String name = McoreUtil.getTypeNameRu(shown);

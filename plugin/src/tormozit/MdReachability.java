@@ -368,9 +368,15 @@ public final class MdReachability
             {
                 try
                 {
-                    if (status != ComparisonProcessStatus.COMPARISON_PROCESS_INITIALIZATION_STARTED
-                        || !ComfortSettings.isControlMdReferencesEnabled())
+                    Global.tempLog("broken-links-reachability", "status handle="
+                        + System.identityHashCode(handle) + " status=" + status);
+                    if (status != ComparisonProcessStatus.COMPARISON_PROCESS_INITIALIZATION_STARTED)
                         return;
+                    if (!ComfortSettings.isControlMdReferencesEnabled())
+                    {
+                        Global.tempLog("broken-links-reachability", "skip: setting disabled");
+                        return;
+                    }
                     checkCompared(handle.getMainDescriptor());
                     checkCompared(handle.getOtherDescriptor());
                     if (handle.isThreeWay())
@@ -389,6 +395,9 @@ public final class MdReachability
     /** Сторона сравнения — проект рабочей области: только у него есть рабочий каталог. */
     private static void checkCompared(IComparisonDataSourceDescriptor descriptor)
     {
+        Global.tempLog("broken-links-reachability", "descriptor type="
+            + (descriptor == null ? "null" : descriptor.getClass().getName())
+            + " project=" + (descriptor == null ? "null" : descriptor.getProjectName()));
         if (!(descriptor instanceof V8ProjectComparisonDataSourceDescriptor) || descriptor.getProjectName() == null)
             return;
         IProject project = org.eclipse.core.resources.ResourcesPlugin.getWorkspace().getRoot()
@@ -402,10 +411,15 @@ public final class MdReachability
             {
                 try
                 {
+                    Global.tempLog("broken-links-reachability", "scan start project=" + project.getName());
                     List<Item> items = scan(project, List.of(project), monitor);
+                    Global.tempLog("broken-links-reachability", "scan end project=" + project.getName()
+                        + " items=" + items.size() + " canceled=" + monitor.isCanceled());
                     if (!items.isEmpty())
                         Display.getDefault().asyncExec(() ->
                         {
+                            Global.tempLog("broken-links-reachability", "show project=" + project.getName()
+                                + " items=" + items.size());
                             new UnreachableFilesSearchResult(project, items, null).show(false);
                             ToastNotification.show("Сравнение конфигураций", "В проекте " + project.getName()
                                 + " есть недостижимые файлы метаданных (папок: " + items.size()
@@ -417,6 +431,7 @@ public final class MdReachability
                 catch (OperationCanceledException canceled) { return Status.CANCEL_STATUS; }
                 catch (Throwable error)
                 {
+                    Global.tempLogException("broken-links-reachability", "scan failed project=" + project.getName(), error);
                     // Сбой проверки сравнению не мешает и пользователю не показывается.
                     Global.logError(TAG, "comparison check failed", error); //$NON-NLS-1$
                     return Status.OK_STATUS;

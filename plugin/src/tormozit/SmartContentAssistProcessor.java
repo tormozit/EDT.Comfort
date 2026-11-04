@@ -752,21 +752,28 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Несколько родителей именно у строк списка — для пояснения конкретного члена в боковой подсказке. */
     boolean hasSeveralParentTypes()
     {
-        java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
+        java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache, true);
         if (types.isEmpty())
-            types = collectParentTypesFromProposals(memberStockFullList);
+            types = collectParentTypesFromProposals(memberStockFullList, true);
         return types.size() > 1;
     }
 
     private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
             ICompletionProposal[] proposals)
     {
+        return collectParentTypesFromProposals(proposals, false);
+    }
+
+    private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
+            ICompletionProposal[] proposals, boolean declaredOwners)
+    {
         java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>();
         if (proposals == null || proposals.length == 0)
             return types;
         for (ICompletionProposal p : proposals)
         {
-            String display = displayString(unwrapProposal(p));
+            String display = declaredOwners ? SmartCompletionProposal.displayWithDeclaredOwner(p)
+                : displayString(unwrapProposal(p));
             if (display == null)
                 continue;
             String parentType = extractParentType(display);
@@ -3096,6 +3103,8 @@ return;
     {
         if (memberStockAwaitInProgress || doc == null || caret < 0)
             return wordListSkip("state"); //$NON-NLS-1$
+        if (!(doc instanceof IXtextDocument xtextDocument))
+            return wordListSkip("nonXtext"); //$NON-NLS-1$
         // Ctrl+Space оставляем как был: там пользователь явно попросил список и ждёт его
         // сейчас, а откладывание дало бы задержку окна на ровном месте.
         if (ManualInvocationDetect.isActive())
@@ -3281,7 +3290,9 @@ return;
                         provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
                         // Не отпускать модель между предложениями и премиями: иначе EDT
                         // запускает синхронизацию, которую премии тут же вынуждены ждать.
-                        raw = ContentAssistSessionReloader.withModelSyncHeld(doc,
+                        // Как у списка членов: достаточно готового префикса до зонда.
+                        // Хвост набираемого слова не должен заставлять ждать всю очередь sync.
+                        raw = ContentAssistSessionReloader.withMemberModelReady(xtextDocument, probeOffset,
                             () -> monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen,
                             () -> {
                                 ICompletionProposal[] proposals = BslDataEventGuard.runIsolated(
@@ -7707,6 +7718,10 @@ return stripEmptyPlaceholderProposals(result);
         if (probe == null || raw == null || raw.length == 0)
             return raw;
         ICompletionProposal[] live = probe.live;
+        Global.tempLog("assist-keywords", "merge rawCount=" + raw.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " rawNew=" + Arrays.stream(raw).anyMatch(p -> "Новый".equalsIgnoreCase(displayString(p))) //$NON-NLS-1$ //$NON-NLS-2$
+            + " live=" + (live == null ? "null" : Arrays.stream(live).map(SmartContentAssistProcessor::displayString) //$NON-NLS-1$ //$NON-NLS-2$
+                .collect(java.util.stream.Collectors.joining(",")))); //$NON-NLS-1$
         if (grammarKeywords == null || live == null)
             return raw;
         Set<String> liveNames = new HashSet<>();
@@ -7787,6 +7802,13 @@ return stripEmptyPlaceholderProposals(result);
             int wordStart = computeIdentifierWordStart(doc, caret);
             String typed = wordStart >= 0 && wordStart < caret
                 ? doc.get(wordStart, caret - wordStart) : ""; //$NON-NLS-1$
+            Global.tempLog("assist-keywords", "probe caret=" + caret + " typed=" + typed //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " contexts=" + edtContexts.length + " mode=" + Global.getField(provider, "mode") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " firstSet=" + Arrays.stream(edtContexts).flatMap(context -> context.getFirstSetGrammarElements().stream()) //$NON-NLS-1$
+                    .map(element -> element instanceof org.eclipse.xtext.Keyword keyword ? keyword.getValue()
+                        : element instanceof org.eclipse.xtext.RuleCall call && call.getRule() != null
+                            ? call.getRule().getName() : element.eClass().getName())
+                    .distinct().collect(java.util.stream.Collectors.joining(","))); //$NON-NLS-1$
             org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext[] contexts =
                 edtContexts.clone();
             if (!typed.isEmpty())

@@ -287,11 +287,20 @@ public class CompareConfigMenuHook implements IStartup
 
         private static Object beforeMerge(Object value)
         {
+            Global.tempLog("broken-links-merge", "beforeMerge value="
+                + (value == null ? "null" : value.getClass().getName()) + " callers="
+                + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
             if (!(value instanceof IEditorPart editor))
                 return Boolean.FALSE;
+            Global.tempLog("broken-links-merge", "gate editor=" + System.identityHashCode(editor)
+                + " title=" + editor.getTitle() + " pending=" + pending.contains(editor)
+                + " approved=" + approved.get(editor));
             // Флажок выключен — штатное подтверждение EDT без проверки итогового состава.
             if (!ComfortSettings.isControlMdReferencesEnabled())
+            {
+                Global.tempLog("broken-links-merge", "skip: setting disabled; standard confirmation");
                 return Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
+            }
             Boolean confirmed = approved.remove(editor);
             if (confirmed != null)
                 return confirmed || Boolean.TRUE.equals(Global.invoke(editor, "openMergeConfirmationDialog"));
@@ -305,6 +314,9 @@ public class CompareConfigMenuHook implements IStartup
                     if (Global.call(artifact, "getSession") instanceof IComparisonSession session
                         && !sessions.contains(session))
                         sessions.add(session);
+            Global.tempLog("broken-links-merge", "sessions editor=" + System.identityHashCode(editor)
+                + " count=" + sessions.size() + " artifactsType="
+                + (artifacts == null ? "null" : artifacts.getClass().getName()));
             if (sessions.isEmpty())
             {
                 pending.remove(editor);
@@ -329,6 +341,8 @@ public class CompareConfigMenuHook implements IStartup
                         SubMonitor progress = SubMonitor.convert(monitor, TITLE, sessions.size());
                         for (IComparisonSession session : sessions)
                         {
+                            Global.tempLog("broken-links-merge", "session begin id="
+                                + System.identityHashCode(session) + " type=" + session.getClass().getName());
                             SubMonitor part = progress.split(1);
                             session.runComparisonTreeReadonlyTask(new AbstractBmTask<Void>(TITLE)
                             {
@@ -388,6 +402,9 @@ public class CompareConfigMenuHook implements IStartup
                                 : "Настройки или данные сравнения изменились во время проверки. Повторите объединение.");
                             return;
                         }
+                        Global.tempLog("broken-links-merge", "UI completion editor="
+                            + System.identityHashCode(editor) + " findings=" + findings.size()
+                            + " failure=" + failure + " changed=" + changed.get());
                         if (!findings.isEmpty())
                         {
                             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
@@ -434,6 +451,8 @@ public class CompareConfigMenuHook implements IStartup
                                 String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getPropertyName,
                                     String.CASE_INSENSITIVE_ORDER).thenComparing(CompareSearchMatch::getMatchText,
                                         String.CASE_INSENSITIVE_ORDER));
+                            Global.tempLog("broken-links-merge", "show results editor="
+                                + System.identityHashCode(editor) + " rows=" + matches.size());
                             CompareConfigSearchDialogHook.showFindAllResults(editor, matches, "битые ссылки");
                             int answer = new MessageDialog(editor.getSite().getShell(),
                                 Global.withPluginWindowTitle(TITLE), null,
@@ -838,11 +857,20 @@ public class CompareConfigMenuHook implements IStartup
 
             void check(List<Finding> findings)
             {
+                Global.tempLog("broken-links-merge", "composition begin session=" + System.identityHashCode(session));
                 collectNodes(progress.split(20));
+                Global.tempLog("broken-links-merge", "nodes collected count=" + nodes.size());
                 buildNamespace(progress.split(20));
+                Global.tempLog("broken-links-merge", "namespace delta=" + delta.size()
+                    + " renamed=" + renamed.size() + " membershipChanges=" + membershipChanges);
                 if (membershipChanges.isEmpty())
+                {
+                    Global.tempLog("broken-links-merge", "composition skip: no membership changes");
                     return;
+                }
                 collectReferences(progress.split(60), findings);
+                Global.tempLog("broken-links-merge", "composition end references=" + references.size()
+                    + " affectedTargets=" + affectedTargets.size() + " findings=" + findings.size());
             }
 
             private void checkReferences(SubMonitor checking, List<Finding> findings)

@@ -744,20 +744,40 @@ public final class WinWindowActivator
         if (hwnd == null)
             return false;
 
+        activateWindowWithoutInputAttach(hwnd);
+        return true;
+    }
+
+    /**
+     * Активирует окно с UI-потока без присоединения очередей ввода EDT и другого процесса.
+     * При отказе Windows повторяет SetForegroundWindow после пустого события мыши,
+     * как при активации workbench по запросу приложения 1С.
+     */
+    public static void activateWindowWithoutInputAttach(HWND hwnd)
+    {
+        if (!WINDOWS || isNullHwnd(hwnd))
+            return;
+
+        Global.tempLog("error-dialog-964", "activate without-attach begin target=" + hwnd //$NON-NLS-1$ //$NON-NLS-2$
+            + " foreground=" + User32.INSTANCE.GetForegroundWindow()); //$NON-NLS-1$
         if (isMinimized(hwnd))
             User32.INSTANCE.ShowWindow(hwnd, WinUser.SW_RESTORE);
 
         if (User32.INSTANCE.SetForegroundWindow(hwnd)
                 && hwndEquals(User32.INSTANCE.GetForegroundWindow(), hwnd))
-            return true;
+        {
+            Global.tempLog("error-dialog-964", "activate without-attach success target=" + hwnd); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
 
         WinUser.INPUT[] inputs = (WinUser.INPUT[]) new WinUser.INPUT().toArray(1);
         inputs[0].type = new DWORD(WinUser.INPUT.INPUT_MOUSE);
         inputs[0].input.setType("mi"); //$NON-NLS-1$
         inputs[0].input.mi.dwFlags = new DWORD(MOUSEEVENTF_MOVE);
         User32.INSTANCE.SendInput(new DWORD(1), inputs, inputs[0].size());
-        User32.INSTANCE.SetForegroundWindow(hwnd);
-        return true;
+        boolean result = User32.INSTANCE.SetForegroundWindow(hwnd);
+        Global.tempLog("error-dialog-964", "activate without-attach retry target=" + hwnd //$NON-NLS-1$ //$NON-NLS-2$
+            + " result=" + result + " foreground=" + User32.INSTANCE.GetForegroundWindow()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**

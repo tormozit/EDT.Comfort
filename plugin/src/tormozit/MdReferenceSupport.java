@@ -698,6 +698,9 @@ public final class MdReferenceSupport
     private static void findInProject(IProject project, Location location, List<URI> roots, String scope,
         boolean brokenOnly)
     {
+        Global.tempLog("broken-links-project", "request project=" + project + " brokenOnly=" + brokenOnly
+            + " location=" + location + " roots=" + roots + " scope=" + scope + " callers="
+            + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
         if (project == null)
             return;
         new Job(brokenOnly ? "Поиск битых ссылок метаданных" : "Найти ссылки в объекте")

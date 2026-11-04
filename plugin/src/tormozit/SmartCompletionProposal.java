@@ -164,8 +164,10 @@ public class SmartCompletionProposal implements
             : (raw == null ? "" : raw.getDisplayString()); //$NON-NLS-1$
         String localized = localizeDisplayTypes(sourceDisplay);
         if (delegate instanceof ConfigurableCompletionProposal configurable)
-            localized = BslFormDataTypes.decorateProposal(localized,
-                Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
+        {
+            Object info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
+            localized = decorateDeclaredOwner(BslFormDataTypes.decorateProposal(localized, info), info);
+        }
         // Подпись совпадения с ИР несёт тип ИР — его досчитывает активация ИР.
         if (overlapDisplay == null)
             FunctionReturnTypes.rowShown(this);
@@ -691,10 +693,73 @@ public class SmartCompletionProposal implements
         String raw = delegate.getDisplayString();
         String display = localizeDisplayTypes(raw);
         if (delegate instanceof ConfigurableCompletionProposal configurable)
-            display = BslFormDataTypes.decorateProposal(display,
-                Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
+        {
+            Object info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
+            display = decorateDeclaredOwner(BslFormDataTypes.decorateProposal(display, info), info);
+        }
         return display;
 
+    }
+
+    /** Подпись владельца для подсчёта разных владельцев в списке, включая ещё не обёрнутые строки. */
+    static String displayWithDeclaredOwner(ICompletionProposal proposal)
+    {
+        if (proposal == null)
+            return null;
+        if (proposal instanceof SmartCompletionProposal)
+            return proposal.getDisplayString();
+        String display = proposal.getDisplayString();
+        return proposal instanceof ConfigurableCompletionProposal configurable
+            ? decorateDeclaredOwner(display, Global.getField(configurable, "additionalProposalInfo")) : display; //$NON-NLS-1$
+    }
+
+    /** Владелец объявления из того же additionalProposalInfo, что читает боковая подсказка. */
+    private static String decorateDeclaredOwner(String display, Object info)
+    {
+        int separator = display != null ? display.lastIndexOf(" ~ ") : -1; //$NON-NLS-1$
+        if (separator < 0)
+            return display;
+        java.util.Set<String> owners = new java.util.LinkedHashSet<>();
+        java.util.Set<Object> visited = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        collectDeclaredOwners(info, owners, visited);
+        return owners.size() == 1 ? display.substring(0, separator + 3) + owners.iterator().next() : display;
+    }
+
+    private static void collectDeclaredOwners(Object info, java.util.Set<String> owners,
+        java.util.Set<Object> visited)
+    {
+        if (info == null || !visited.add(info))
+            return;
+        if (info instanceof com._1c.g5.v8.dt.bsl.model.FeatureEntry entry)
+        {
+            collectDeclaredOwners(entry.getFeature(), owners, visited);
+            return;
+        }
+        if (info instanceof ProposalElement element)
+        {
+            for (EObject member : element.getList())
+                collectDeclaredOwners(member, owners, visited);
+            return;
+        }
+        if (info instanceof com._1c.g5.v8.dt.mcore.DerivedProperty property && property.getSource() != null)
+        {
+            collectDeclaredOwners(property.getSource(), owners, visited);
+            return;
+        }
+        if (!(info instanceof EObject member) || member.eIsProxy())
+            return;
+        // Контекст получателя может включать чужие refContextDefs. Контейнер самого
+        // свойства/метода указывает владельца его объявления, включая расширения.
+        for (EObject owner = member.eContainer(); owner != null && visited.add(owner); owner = owner.eContainer())
+            if (owner instanceof com._1c.g5.v8.dt.mcore.TypeItem type && !type.eIsProxy())
+            {
+                String name = type.getNameRu();
+                if (name == null || name.isEmpty())
+                    name = type.getName();
+                if (name != null && !name.isEmpty())
+                    owners.add(SmartContentAssistProcessor.localizeAssistTypeSegment(name));
+                return;
+            }
     }
 
     private String localizeDisplayTypes(String display)
@@ -1683,8 +1748,8 @@ public class SmartCompletionProposal implements
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor == null || !processor.hasSeveralParentTypes())
             return info;
-        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
-        String parent = raw != null ? SmartContentAssistProcessor.extractParentType(raw.getDisplayString()) : null;
+        String parent = SmartContentAssistProcessor.extractParentType(getDisplayString());
+        Global.tempLog("assist-hint-parent", "parent=" + parent); //$NON-NLS-1$ //$NON-NLS-2$
         if (parent == null || parent.isEmpty())
             return info;
         String line = "<div class=\"" + PARENT_LINE_CLASS + "\"><b>Родитель</b>: " //$NON-NLS-1$ //$NON-NLS-2$
@@ -1786,6 +1851,12 @@ public class SmartCompletionProposal implements
 
     private boolean tryApplyTemplate(IDocument document, ITextViewer viewer, int caret, Integer stateMask)
     {
+        templateSelection = BslCompletionTemplates.applyIdleHandler(delegate, document, viewer, caret, stateMask);
+        if (templateSelection != null)
+            return true;
+        templateSelection = BslCompletionTemplates.applyAssignment(delegate, document, viewer, caret, stateMask);
+        if (templateSelection != null)
+            return true;
         templateSelection = BslCompletionTemplates.apply(delegate, document, viewer, caret, stateMask);
         if (templateSelection == null)
             return false;

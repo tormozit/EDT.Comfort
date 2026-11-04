@@ -24,8 +24,8 @@ import com.sun.jna.ptr.IntByReference;
  * часто всплывает из фонового задания, когда главное окно EDT свёрнуто или перекрыто другими
  * окнами — пользователь его не видит. {@link Shell#forceActive()} в этом случае лишь мигает
  * иконкой в панели задач Windows (foreground lock: вызов не с потока, владеющего фокусом), поэтому
- * активация идёт через {@link WinWindowActivator#activateWindowOnUiThread} (AttachThreadInput +
- * SetForegroundWindow), что реально поднимает окно в Foreground.
+ * активация идёт через {@link WinWindowActivator#activateWindowWithoutInputAttach}.
+ * Потоки ввода EDT и приложения 1С не присоединяются (issue 964).
  */
 public final class ErrorDialogActivateHook implements IStartup
 {
@@ -82,7 +82,7 @@ public final class ErrorDialogActivateHook implements IStartup
             HWND hwnd = WinWindowActivator.hwndFromShell(shell);
             ActivationDiagnostics.snapshot(shell, "before-activation");
             if (hwnd != null)
-                WinWindowActivator.activateWindowOnUiThread(hwnd);
+                WinWindowActivator.activateWindowWithoutInputAttach(hwnd);
             else
                 shell.forceActive();
             ActivationDiagnostics.snapshot(shell, "after-activation");
@@ -97,7 +97,7 @@ public final class ErrorDialogActivateHook implements IStartup
 
         static void install(Display display)
         {
-            Global.tempLog(TOPIC, "install diagnostics=2 gui-thread-info"); //$NON-NLS-1$
+            Global.tempLog(TOPIC, "install diagnostics=3 activation-without-input-attach"); //$NON-NLS-1$
             display.addFilter(SWT.Selection, event ->
             {
                 if (!(event.widget instanceof Button button) || button.isDisposed())

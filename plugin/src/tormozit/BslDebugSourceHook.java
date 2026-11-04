@@ -94,7 +94,6 @@ public final class BslDebugSourceHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLogException("debug-source", "Подключение указателя исполнения", e);
             return;
         }
         Display.getDefault().asyncExec(() ->
@@ -344,7 +343,6 @@ public final class BslDebugSourceHook implements IStartup
                 }
                 catch (Exception e)
                 {
-                    Global.tempLogException("debug-source", "Чтение кадра", e);
                 }
             }
             for (Pointer pointer : stalePointers)
@@ -355,8 +353,6 @@ public final class BslDebugSourceHook implements IStartup
                 return;
             String snapshot = current;
             long snapshotStamp = documentStamp(document);
-            Global.tempLog("debug-source", "request file=" + file.getFullPath()
-                + " revision=" + request + " pointers=" + requests.size());
             Job job = Job.create("Комфорт: сопоставление исполняемой строки", monitor ->
             {
                 for (PointerRequest item : requests)
@@ -376,13 +372,10 @@ public final class BslDebugSourceHook implements IStartup
                             item.pointer.frame.getThread().getRuntimeDebugTarget().getConfigVersion(),
                             snapshot, snapshotStamp, matching);
                         mapping = matching.at(item.line);
-                        Global.tempLog("debug-source", "mapping built file=" + file.getFullPath()
-                            + " sourceLines=" + matching.sourceCount + " editorLines=" + matching.targetCount);
                     }
                     catch (StaleSessionMetadataException e)
                     {
                         DebugViewHook.markSessionMetadataStale(item.pointer.frame);
-                        Global.tempLog("debug-source", "stale session file=" + file.getFullPath());
                         if (!display.isDisposed())
                             display.asyncExec(() ->
                             {
@@ -393,7 +386,6 @@ public final class BslDebugSourceHook implements IStartup
                     }
                     catch (Exception e)
                     {
-                        Global.tempLogException("debug-source", "Получение исходного модуля", e);
                         mapping = new Mapping(clamp(item.line, lines(snapshot).length), false,
                             "Не удалось получить текст исполняемого модуля из базы");
                     }
@@ -429,7 +421,6 @@ public final class BslDebugSourceHook implements IStartup
             {
                 modifying = false;
             }
-            Global.tempLog("debug-source", "stale pointer, no source lookup or diff file=" + file.getFullPath());
         }
 
         void apply(long request, String current, PointerRequest item, Mapping mapping,
@@ -486,15 +477,9 @@ public final class BslDebugSourceHook implements IStartup
                     && editor.getSite().getPage().getActiveEditor() != null
                     && GetRef.getActiveBslEditor(editor.getSite().getPage().getActiveEditor()) == editor)
                     editor.selectAndReveal(region.getOffset(), 0);
-                Global.tempLog("debug-source", "applied file=" + file.getFullPath()
-                    + " sourceLine=" + (item.line + 1) + " editorLine=" + (mapping.line + 1)
-                    + " exact=" + mapping.exact + " synchronous=" + synchronous
-                    + " annotation=" + System.identityHashCode(pointer.annotation)
-                    + " reveal=" + item.reveal + " reason=" + mapping.reason);
             }
             catch (Exception e)
             {
-                Global.tempLogException("debug-source", "Установка указателя", e);
             }
         }
 
@@ -756,19 +741,14 @@ public final class BslDebugSourceHook implements IStartup
                         default -> null;
                     };
                 Object designer = invoke(connection, "getSession");
-                long started = System.nanoTime();
                 requireGeneration(designer, expected);
                 Object step = invoke(invoke(designer, "configure"), "exportXmlFromInfobase",
                     new Class<?>[] { Path.class }, directory);
                 step = invoke(step, "listFile", new Class<?>[] { Path.class }, selection);
                 if (!extension.isEmpty())
                     step = invoke(step, "extension", new Class<?>[] { String.class }, extension);
-                Global.tempLog("debug-source", "export partial start generation=" + expected
-                    + " extension=" + extension + " object=" + ownerName + " listFile=" + selection);
                 invoke(step, "exec", new Class<?>[] { Duration.class }, Duration.ofMinutes(5));
                 requireGeneration(designer, expected);
-                Global.tempLog("debug-source", "export partial complete object=" + ownerName
-                    + " elapsedMs=" + (System.nanoTime() - started) / 1_000_000 + " directory=" + directory);
                 return null;
             });
         try
@@ -787,7 +767,6 @@ public final class BslDebugSourceHook implements IStartup
     {
         Object step = invoke(invoke(designer, "configure"), "retrieveGenerationId");
         Object actual = invoke(step, "exec", new Class<?>[] { Duration.class }, Duration.ofSeconds(15));
-        Global.tempLog("debug-source", "generation expected=" + expected + " actual=" + actual);
         if (!Objects.equals(expected, actual))
             throw new StaleSessionMetadataException();
     }
@@ -844,8 +823,6 @@ public final class BslDebugSourceHook implements IStartup
             {
                 text = Files.readString(path, StandardCharsets.UTF_8);
                 texts.put(path, text);
-                Global.tempLog("debug-source", "partial module read owner=" + owner
-                    + " file=" + path + " chars=" + text.length());
             }
             return text;
         }

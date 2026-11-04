@@ -2576,6 +2576,19 @@ boolean inLiteral = endCaret >= 0
     static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
         IUnitOfWork<T, XtextResource> work)
     {
+        return readOnlyLowPriority(doc, monitor, work, false);
+    }
+
+    /** Тот же порядок блокировок для досчёта по уже готовому AST, без смены штатного способа чтения. */
+    static <T> T readOnlyPeekAstLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
+        IUnitOfWork<T, XtextResource> work)
+    {
+        return readOnlyLowPriority(doc, monitor, withQueryCalculationScope(work), true);
+    }
+
+    private static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
+        IUnitOfWork<T, XtextResource> work, boolean peekOnly)
+    {
         long started = System.nanoTime();
         long monitorAcquired = 0L;
         boolean invoked = false;
@@ -2628,7 +2641,8 @@ boolean inLiteral = endCaret >= 0
                     if (monitor.isCanceled())
                         return null;
                     invoked = true;
-                    Object result = invokeBslRead(doc, "readOnlyForContentAssist", work); //$NON-NLS-1$
+                    Object result = invokeBslRead(doc,
+                        peekOnly ? "readOnlyDataModelWithoutSync" : "readOnlyForContentAssist", work); //$NON-NLS-1$ //$NON-NLS-2$
                     if (result == BSL_READ_MISSING)
                     {
                         Global.tempLog("assist-low-read", "missing protected read"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2646,7 +2660,7 @@ boolean inLiteral = endCaret >= 0
         }
         finally
         {
-            if (invoked)
+            if (invoked && !peekOnly)
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
             Global.tempLog("assist-low-read", "end monitorWaitMs=" //$NON-NLS-1$ //$NON-NLS-2$
                 + (monitorAcquired == 0L ? -1 : (monitorAcquired - started) / 1_000_000.0)
