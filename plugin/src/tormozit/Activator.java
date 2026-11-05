@@ -63,11 +63,6 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         Global.clearTempLogs();
-        // #region agent log
-        // Отметка сборки: файл stale-markers.log обязан появиться сразу после старта плагина.
-        if (ContentAssistSessionReloader.STALE_MARKERS_LOG)
-            Global.tempLog("stale-markers", "плагин запущен, диагностика протухших маркеров v4"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         Global.cleanOrphanedFormNativeTempDirs();
 
         super.start(context);

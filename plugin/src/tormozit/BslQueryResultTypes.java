@@ -497,13 +497,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     /** Вызывающий держит readOnly документа и блокировку перевязки ресурса. */
     static void refresh(Resource resource, int offset, Consumer<String> status,
         Predicate<Method> recompute)
-    {
-        long started = System.nanoTime();
-        Consumer<String> trace = phase -> Global.tempLog("assist-query-plan", "id=" + started //$NON-NLS-1$ //$NON-NLS-2$
-            + " offset=" + offset + " phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
-            + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
-        trace.accept("begin"); //$NON-NLS-1$
-        try
         {
         if (!(resource instanceof XtextResource xtext)
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(
@@ -514,9 +507,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
         if (node == null)
             return;
-        trace.accept("session.begin"); //$NON-NLS-1$
         Session session = session(resource, true);
-        trace.accept("session.end"); //$NON-NLS-1$
         String text = node.getText();
         Plan previous = session.plans.get(method);
         if (previous != null && previous.complete && current(previous, text))
@@ -527,10 +518,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             Plan plan = current(previous, text) ? previous : new Plan(method, text);
             // Валидация могла уже подготовить план, не переустанавливая типы BSL.
-            trace.accept("prepare.begin"); //$NON-NLS-1$
             if (plan != previous)
                 plan.prepare();
-            trace.accept("prepare.end"); //$NON-NLS-1$
             if (!plan.queries.isEmpty())
                 session.hasQueries = true;
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
@@ -542,9 +531,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
-                trace.accept("recompute.begin"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
-                trace.accept("recompute.end"); //$NON-NLS-1$
                 if (!recomputed)
                 {
                     return;
@@ -559,11 +546,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             session.plans.remove(method);
         }
         }
-        finally
-        {
-            trace.accept("end"); //$NON-NLS-1$
-        }
-    }
 
     // ---- Досчёт плана после разбора правки открытого модуля ---------------------------------------
 
@@ -663,8 +645,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 TYPE_REFRESH_JOBS.put(document, job);
             }
             job.pending.merge(Integer.valueOf(offset), Boolean.valueOf(revalidate), (a, b) -> a || b);
-            Global.tempLog("assist-query-refresh", "enqueue offset=" + offset + " revalidate=" + revalidate //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " pending=" + job.pending.size() + " newJob=" + created); //$NON-NLS-1$ //$NON-NLS-2$
             if (created)
                 job.schedule();
         }
@@ -695,11 +675,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 batch = new java.util.LinkedHashMap<>(pending);
                 pending.clear();
             }
-            long started = System.nanoTime();
             boolean retry = false;
             boolean completed = false;
             int generation = BslDocCommentComputedTypes.typesGeneration();
-            Global.tempLog("assist-query-refresh", "batch.begin offsets=" + batch.keySet()); //$NON-NLS-1$ //$NON-NLS-2$
             try
             {
                 if (!ContentAssistSessionReloader.isModelCurrent(document))
@@ -734,15 +712,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             catch (RuntimeException | LinkageError failure)
             {
-                Global.tempLog("assist-query-refresh", "batch.error " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
             {
                 needsValidation |= batch.containsValue(Boolean.TRUE)
                     && generation != BslDocCommentComputedTypes.typesGeneration();
-                Global.tempLog("assist-query-refresh", "batch.end offsets=" + batch.keySet() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " retry=" + retry + " canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
                 synchronized (TYPE_REFRESH_JOBS)
                 {
                     if (retry && WATCHED_DOCUMENTS.containsKey(document))

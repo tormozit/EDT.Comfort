@@ -78,7 +78,6 @@ final class BslCompletionTemplates
         if (!name.equalsIgnoreCase("ПодключитьОбработчикОжидания") //$NON-NLS-1$
             && !name.equalsIgnoreCase("AttachIdleHandler")) //$NON-NLS-1$
             return null;
-        Global.tempLog("assist-idle-handler", "apply caret=" + caret + " replacement=" + replacement); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         Point applied = null;
         try
         {
@@ -104,20 +103,14 @@ final class BslCompletionTemplates
             SmartContentAssistProcessor.clearCtorPendingApplyState();
             document.replace(start, length, text);
             applied = new Point(start + prefix.length(), 0);
-            Global.tempLog("assist-idle-handler", "inserted start=" + start + " length=" + length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " caret=" + applied.x + " text=" + text); //$NON-NLS-1$ //$NON-NLS-2$
             reopenAfterInsertion(viewer, document, "idle-handler"); //$NON-NLS-1$
             return applied;
         }
         catch (BadLocationException | RuntimeException error)
         {
-            Global.tempLog("assist-idle-handler", "error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             return applied;
         }
-        finally
-        {
-            Global.tempLog("assist-idle-handler", "result applied=" + (applied != null)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+
     }
 
     /** ИР: «Левая часть присвоения» — каретка справа от «=», затем новый список слов. */
@@ -158,7 +151,6 @@ final class BslCompletionTemplates
         }
         catch (Exception error)
         {
-            Global.tempLog("assist-assignment", "applyAssignment: " + error); //$NON-NLS-1$ //$NON-NLS-2$
             return applied;
         }
     }
@@ -170,18 +162,44 @@ final class BslCompletionTemplates
         ContentAssistSessionReloader reloader = target instanceof SourceViewer sourceViewer
             ? ContentAssistSessionReloader.forViewer(sourceViewer) : null;
         var assistant = reloader != null ? reloader.getAssistant() : null;
-        Global.tempLog("assist-insert-reopen", "request reason=" + reason + " viewer=" + (target != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " sameDocument=" + (target != null && target.getDocument() == document) //$NON-NLS-1$
-            + " assistant=" + (assistant != null)); //$NON-NLS-1$
         if (target == null || target.getDocument() != document || assistant == null)
             return;
-        boolean queued = ContentAssistSessionReloader.requestGatedShow(target, "insert-repeat", () -> //$NON-NLS-1$
+        ContentAssistSessionReloader.requestGatedShow(target, "insert-repeat", () -> //$NON-NLS-1$
         {
-            Global.tempLog("assist-insert-reopen", "run reason=" + reason); //$NON-NLS-1$ //$NON-NLS-2$
-            boolean visible = ContentAssistPopupSync.showPossibleCompletionsAsCommand(assistant);
-            Global.tempLog("assist-insert-reopen", "result reason=" + reason + " visible=" + visible); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (target.getDocument() != document || target.getTextWidget().isDisposed())
+                return;
+            if (!ContentAssistSessionReloader.isModelCurrent(document)
+                && document instanceof org.eclipse.jface.text.IDocumentExtension4 stamped)
+            {
+                long stamp = stamped.getModificationStamp();
+                int caret = SmartContentAssistProcessor.resolveWidgetCaret(target);
+                org.eclipse.core.runtime.jobs.Job job = new org.eclipse.core.runtime.jobs.Job(
+                    "Комфорт: автодополнение после вставки") //$NON-NLS-1$
+                {
+                    @Override
+                    protected org.eclipse.core.runtime.IStatus run(org.eclipse.core.runtime.IProgressMonitor monitor)
+                    {
+                        boolean ready = ContentAssistSessionReloader.waitModelReadyUpTo(document, Integer.MAX_VALUE,
+                            () -> monitor.isCanceled() || stamped.getModificationStamp() != stamp);
+                        if (ready && stamped.getModificationStamp() == stamp)
+                            ContentAssistSessionReloader.requestGatedShow(target, "insert-repeat-ready", () -> { //$NON-NLS-1$
+                                boolean valid = !target.getTextWidget().isDisposed()
+                                    && target.getDocument() == document && stamped.getModificationStamp() == stamp
+                                    && SmartContentAssistProcessor.resolveWidgetCaret(target) == caret
+                                    && !ContentAssistPopupSync.isPopupVisible(assistant);
+                                if (valid)
+                                    reopenAfterInsertion(target, document, reason);
+                            });
+                        return org.eclipse.core.runtime.Status.OK_STATUS;
+                    }
+                };
+                job.setSystem(true);
+                job.setPriority(org.eclipse.core.runtime.jobs.Job.INTERACTIVE);
+                job.schedule();
+                return;
+            }
+            ContentAssistPopupSync.showPossibleCompletionsAsCommand(assistant);
         });
-        Global.tempLog("assist-insert-reopen", "queued reason=" + reason + " accepted=" + queued); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static String mainLanguageCode(IDocument document)

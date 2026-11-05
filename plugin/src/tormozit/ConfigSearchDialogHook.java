@@ -1243,8 +1243,8 @@ public class ConfigSearchDialogHook implements IStartup
                 "Искать в проектах и типах объектов, отмеченных в списках «среди проектов» и "
                     + "«среди типов объектов»");
             setTooltip(navigator,
-                "Искать только в объектах, видимых в навигаторе с учётом его активного отбора "
-                    + "(фильтр по подсистемам или по набору). Если отбор в навигаторе не включён — "
+                "Искать только в объектах, отфильтрованных в навигаторе. Вложенные элементы "
+                    + "расширяют область до формы или объекта. Если отбор не включён — "
                     + "область не ограничивается" + Global.pluginSignForTooltip());
             setTooltip(activeSets, activeSetsTooltip());
 
@@ -1420,7 +1420,7 @@ public class ConfigSearchDialogHook implements IStartup
             if (mode == ScopeMode.CURRENT_OBJECT)
                 return currentObjectRefs;
             if (mode == ScopeMode.NAVIGATOR)
-                return ObjectSetSubsystemsFilterBridge.visibleOwnerRefsByProject();
+                return ObjectSetSubsystemsFilterBridge.visibleOwnerRefsByProject(true);
             Map<String, List<String>> result = new HashMap<>();
             java.util.LinkedHashSet<String> union = new java.util.LinkedHashSet<>();
             for (String project : ObjectSetsAddTargetState.getInstance().projectsWithAddTarget())
@@ -1969,7 +1969,8 @@ public class ConfigSearchDialogHook implements IStartup
         if (ifaceCL == null)
             ifaceCL = cl;
         SearchSetMembership membership = scopeRefs != null ? new SearchSetMembership(scopeRefs,
-            SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.CURRENT_OBJECT) : null;
+            (SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.CURRENT_OBJECT
+                || SearchScopeGroup.mode() == SearchScopeGroup.ScopeMode.NAVIGATOR)) : null;
         return Proxy.newProxyInstance(ifaceCL, new Class[] { iface },
             (proxy, method, args) ->
             {
@@ -2376,11 +2377,11 @@ public class ConfigSearchDialogHook implements IStartup
         private final Map<Long, Boolean> byTopObject = new HashMap<>();
         private final Map<String, List<String>> refsByProject;
 
-        private final boolean currentObject;
+        private final boolean detailedScope;
 
-        SearchSetMembership(Map<String, List<String>> refsByProject, boolean currentObject)
+        SearchSetMembership(Map<String, List<String>> refsByProject, boolean detailedScope)
         {
-            this.currentObject = currentObject;
+            this.detailedScope = detailedScope;
             this.refsByProject = refsByProject != null ? refsByProject : Map.of();
         }
 
@@ -2405,7 +2406,7 @@ public class ConfigSearchDialogHook implements IStartup
                 {
                     // Для подобъекта нельзя кэшировать решение на весь корневой объект:
                     // соседние реквизиты и формы не входят в его область.
-                    topId = currentObject && match instanceof TextSearchModelMatch modelMatch
+                    topId = detailedScope && match instanceof TextSearchModelMatch modelMatch
                         ? modelMatch.getObjectId() : match.getMetadataTopObjectId();
                 }
                 catch (RuntimeException ignored)

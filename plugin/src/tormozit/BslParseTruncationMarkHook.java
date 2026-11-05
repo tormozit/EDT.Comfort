@@ -305,9 +305,8 @@ public final class BslParseTruncationMarkHook implements IStartup
         }
 
         /**
-         * Единственная точка, где решается, тратить ли работу. Обе проверки здесь бесплатны:
-         * инкрементальный разбор Xtext уже отработал, остаётся обойти список его синтаксических
-         * ошибок (их единицы).
+         * Единственная точка, где решается, тратить ли работу. getSyntaxErrors() в Xtext
+         * лениво обходит всё дерево: материализуем ошибки один раз для обеих проверок.
          *
          * <ul>
          * <li>Изменился состав синтаксических ошибок — стоит пересчитать пометку (проверка
@@ -324,8 +323,13 @@ public final class BslParseTruncationMarkHook implements IStartup
          */
         private void onModelChanged(XtextResource resource)
         {
-            int signature = syntaxErrorSignature(resource);
-            List<Integer> offsets = misplacedPreprocessorOffsets(resource);
+            IParseResult parse = resource != null ? resource.getParseResult() : null;
+            List<INode> errors = new ArrayList<>();
+            if (parse != null)
+                for (INode error : parse.getSyntaxErrors())
+                    errors.add(error);
+            int signature = syntaxErrorSignature(errors);
+            List<Integer> offsets = misplacedPreprocessorOffsets(errors);
             boolean errorsChanged = signature != knownErrorSignature;
             int previousCount = knownOffsets.size();
             boolean firstModel = !initialized;
@@ -374,12 +378,10 @@ public final class BslParseTruncationMarkHook implements IStartup
         /**
          * Признак состава синтаксических ошибок: их количество и формулировки. Смещения сюда не
          * входят намеренно — иначе любая правка выше по тексту сдвигала бы их и признак менялся
-         * бы без причины. Всё нужное уже посчитано разбором, здесь только обход единиц элементов.
+         * бы без причины. Здесь используется уже материализованный список ошибок.
          */
-        private static int syntaxErrorSignature(XtextResource resource)
+        private static int syntaxErrorSignature(Iterable<INode> errors)
         {
-            IParseResult parseResult = resource != null ? resource.getParseResult() : null;
-            Iterable<INode> errors = parseResult != null ? parseResult.getSyntaxErrors() : null;
             if (errors == null)
                 return 0;
             int count = 0;
@@ -401,10 +403,8 @@ public final class BslParseTruncationMarkHook implements IStartup
          * уже содержать такую ошибку, и тогда добавление второй по булеву признаку осталось бы
          * незамеченным (так и было — перестроение не запускалось).
          */
-        private List<Integer> misplacedPreprocessorOffsets(XtextResource resource)
+        private List<Integer> misplacedPreprocessorOffsets(Iterable<INode> errors)
         {
-            IParseResult parseResult = resource != null ? resource.getParseResult() : null;
-            Iterable<INode> errors = parseResult != null ? parseResult.getSyntaxErrors() : null;
             if (errors == null)
                 return List.of();
             List<Integer> offsets = new ArrayList<>(2);

@@ -1749,7 +1749,6 @@ public class SmartCompletionProposal implements
         if (processor == null || !processor.hasSeveralParentTypes())
             return info;
         String parent = SmartContentAssistProcessor.extractParentType(getDisplayString());
-        Global.tempLog("assist-hint-parent", "parent=" + parent); //$NON-NLS-1$ //$NON-NLS-2$
         if (parent == null || parent.isEmpty())
             return info;
         String line = "<div class=\"" + PARENT_LINE_CLASS + "\"><b>Родитель</b>: " //$NON-NLS-1$ //$NON-NLS-2$
@@ -2402,8 +2401,6 @@ public class SmartCompletionProposal implements
         {
             if (!"Object is removed".equals(error.getMessage())) //$NON-NLS-1$
                 throw error;
-            Global.tempLogException("assist-removed-object", "documentation infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
-                + object.getClass().getName(), error);
             return "removedBmObject"; //$NON-NLS-1$
         }
     }

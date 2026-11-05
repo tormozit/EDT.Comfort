@@ -1308,6 +1308,12 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
      */
     static Map<String, List<String>> visibleOwnerRefsByProject()
     {
+        return visibleOwnerRefsByProject(false);
+    }
+
+    /** Область поиска: дополнительно учитывает текстовый отбор и сохраняет формы. */
+    static Map<String, List<String>> visibleOwnerRefsByProject(boolean searchScope)
+    {
         if (!PlatformUI.isWorkbenchRunning())
             return null;
         IViewPart navigator = null;
@@ -1331,13 +1337,15 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         boolean setFilter = ObjectSetsNavigatorFilterSupport.isActive();
         boolean subsystemsFilter = Boolean.TRUE.equals(
             Global.invoke(navigator, "isSubsystemsFilterActive")); //$NON-NLS-1$
-        if (!setFilter && !subsystemsFilter)
+        boolean textFilter = searchScope && Boolean.TRUE.equals(
+            Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
+        if (!setFilter && !subsystemsFilter && !textFilter)
             return null;
 
         CommonViewer viewer = getCommonViewer(navigator);
         CombinedSubsystemsFilter wrapper = viewer != null ? findWrapperFilter(viewer) : null;
         Object input = viewer != null ? viewer.getInput() : null;
-        if (wrapper == null || input == null
+        if ((!searchScope && wrapper == null) || input == null
             || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
             return null;
 
@@ -1349,7 +1357,8 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             String projectName = resource != null && resource.getProject() != null
                 ? resource.getProject().getName()
                 : projectNode instanceof IProject p ? p.getName() : null;
-            collectVisibleRefs(viewer, wrapper, content, projectNode, projectName, acc, 0);
+            collectVisibleRefs(viewer, wrapper, content, projectNode, projectName, acc, 0,
+                searchScope, textFilter);
         }
         Map<String, List<String>> result = new HashMap<>();
         for (Map.Entry<String, LinkedHashSet<String>> entry : acc.entrySet())
@@ -1357,12 +1366,13 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         return result;
     }
 
-    private static void collectVisibleRefs(
-        Viewer viewer, CombinedSubsystemsFilter wrapper, ITreeContentProvider content,
-        Object parent, String projectName, Map<String, LinkedHashSet<String>> acc, int depth)
+    private static boolean collectVisibleRefs(
+        CommonViewer viewer, CombinedSubsystemsFilter wrapper, ITreeContentProvider content,
+        Object parent, String projectName, Map<String, LinkedHashSet<String>> acc, int depth,
+        boolean searchScope, boolean textFilter)
     {
         if (parent == null || depth > 12)
-            return;
+            return false;
         Object[] children;
         try
         {
@@ -1370,24 +1380,56 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         }
         catch (RuntimeException e)
         {
-            return;
+            return false;
         }
         if (children == null || children.length == 0)
-            return;
-        for (Object child : filterVisibleChildren(viewer, wrapper, parent, children))
+            return false;
+        Object[] visible = children;
+        if (searchScope)
         {
+            for (ViewerFilter filter : viewer.getFilters())
+                visible = filter.filter(viewer, parent, visible);
+        }
+        else
+            visible = filterVisibleChildren(viewer, wrapper, parent, children);
+        boolean collected = false;
+        for (Object child : visible)
+        {
+            // Предок виден и при совпадении только в его дочерней форме/реквизите.
+            // Не добавлять его раньше дочерних элементов: это расширило бы область.
+            if (textFilter && collectVisibleRefs(viewer, wrapper, content, child,
+                projectName, acc, depth + 1, searchScope, true))
+            {
+                collected = true;
+                continue;
+            }
             String fqn = GetRef.fullNameFromNavigatorElement(child);
             if (fqn != null && !fqn.isBlank())
             {
-                String owner = MdTypeMapping.toOwnerMdObjectRef(fqn);
+                String owner = searchScope ? searchOwnerRef(fqn) : MdTypeMapping.toOwnerMdObjectRef(fqn);
                 String ref = owner != null && !owner.isBlank() ? owner : fqn;
                 if (projectName != null && !projectName.isBlank())
                     acc.computeIfAbsent(projectName, k -> new LinkedHashSet<>()).add(ref);
                 acc.computeIfAbsent("", k -> new LinkedHashSet<>()).add(ref); //$NON-NLS-1$
+                collected = true;
                 continue;
             }
-            collectVisibleRefs(viewer, wrapper, content, child, projectName, acc, depth + 1);
+            if (!textFilter)
+                collected |= collectVisibleRefs(viewer, wrapper, content, child, projectName,
+                    acc, depth + 1, searchScope, false);
         }
+        return collected;
+    }
+
+    private static String searchOwnerRef(String fullName)
+    {
+        String[] parts = fullName.split("\\."); //$NON-NLS-1$
+        for (int i = 2; i + 1 < parts.length; i += 2)
+        {
+            if ("Form".equals(MdTypeMapping.anyToEnSing(parts[i]))) //$NON-NLS-1$
+                return String.join(".", java.util.Arrays.copyOf(parts, i + 2)); //$NON-NLS-1$
+        }
+        return MdTypeMapping.toOwnerMdObjectRef(fullName);
     }
 
     static final class CombinedSubsystemsFilter extends ViewerFilter

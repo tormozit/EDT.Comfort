@@ -593,8 +593,6 @@ final class FunctionReturnTypes
             // BM-объект предложения мог быть удалён после получения списка.
             if (!"Object is removed".equals(error.getMessage())) //$NON-NLS-1$
                 throw error;
-            Global.tempLogException("assist-removed-object", "functionTarget infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (info == null ? null : info.getClass().getName()) + " depth=" + depth, error); //$NON-NLS-1$
             return null;
         }
     }
@@ -1189,7 +1187,6 @@ final class FunctionReturnTypes
                 }
                 catch (org.eclipse.jface.text.BadLocationException error)
                 {
-                    Global.tempLog("assist-local-context", "initial point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
             document.addDocumentListener(this);
@@ -1214,10 +1211,7 @@ final class FunctionReturnTypes
             catch (org.eclipse.jface.text.BadLocationException error)
             {
                 editingLine = -1;
-                Global.tempLog("assist-local-context", "edit point error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            Global.tempLog("assist-local-context", "before module=" + module + " stamp=" + beforeStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " line=" + lineStart + " preserve=" + preserve); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
@@ -1252,8 +1246,6 @@ final class FunctionReturnTypes
                     return new Computed(afterStamp, value.type(), true, value.typesGeneration());
                 });
             }
-            Global.tempLog("assist-local-context", "after module=" + module + " stamp=" + afterStamp //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " preserve=" + preserve + " retained=" + retained[0]); //$NON-NLS-1$ //$NON-NLS-2$
             if (retained[0] > 0)
                 publish();
         }
@@ -1656,7 +1648,6 @@ final class FunctionReturnTypes
         {
             List<Pending> pending = new java.util.ArrayList<>();
             boolean[] staleModel = { false };
-            long started = System.nanoTime();
             try
             {
                 // Здесь нужны только готовые состояния: assist-чтение само планирует sync,
@@ -1676,13 +1667,8 @@ final class FunctionReturnTypes
             }
             catch (Throwable error)
             {
-                Global.tempLog("assist-type-reader", "failed key=" + request.key() + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 // Запрос окончится как неизвестный (ниже).
             }
-            Global.tempLog("assist-type-reader", "read key=" + request.key() + " stale=" + staleModel[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " canceled=" + monitor.isCanceled() + " generation=" + request.typesGeneration() //$NON-NLS-1$ //$NON-NLS-2$
-                + " currentGeneration=" + BslDocCommentComputedTypes.typesGeneration() //$NON-NLS-1$
-                + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
             if (!requestStillCurrent(request))
                 return;
             if (monitor.isCanceled())

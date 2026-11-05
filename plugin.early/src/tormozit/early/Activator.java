@@ -67,6 +67,7 @@ public final class Activator
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
         P2InstallOperationWeaving.install(context);
+        DebugValueEditorDialogWeaving.install(context);
     }
 
     @Override
@@ -81,6 +82,119 @@ public final class Activator
         System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
         System.getProperties().put(CheckDurations.CALLBACK + ".monitor", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
+    }
+
+    /**
+     * debug.ui 9.3.400.v202605050943: у объектного значения тип ещё не выбран.
+     * lambda$0 вызывает getSelectedDelegate().createContent без проверки на null (#986).
+     */
+    private static final class DebugValueEditorDialogWeaving implements WeavingHook
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.debug.ui.values.modify.BslValueEditorDialog";
+        private static final String OWNER = TARGET.replace('.', '/');
+        private static final String DELEGATE =
+            "com/_1c/g5/v8/dt/internal/debug/ui/values/modify/IBslValueTypeEditor";
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent("tormozit.debugValueEditor.dialog",
+                (Consumer<Object[]>) event -> {});
+            context.registerService(WeavingHook.class, new DebugValueEditorDialogWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                boolean[] patched = { false };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        String phase = "<init>".equals(name) ? "types"
+                            : "initializeBounds".equals(name) && "()V".equals(descriptor) ? "default"
+                            : "okPressed".equals(name) && "()V".equals(descriptor) ? "ok" : null;
+                        if (phase != null)
+                        {
+                            return new MethodVisitor(Opcodes.ASM9, mv)
+                            {
+                                private void callback()
+                                {
+                                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                        "()Ljava/util/Properties;", false);
+                                    mv.visitLdcInsn("tormozit.debugValueEditor.dialog");
+                                    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                    mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                    mv.visitInsn(Opcodes.ICONST_2);
+                                    mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitInsn(Opcodes.ICONST_0);
+                                    mv.visitLdcInsn(phase);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitInsn(Opcodes.ICONST_1);
+                                    mv.visitVarInsn(Opcodes.ALOAD, 0);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer",
+                                        "accept", "(Ljava/lang/Object;)V", true);
+                                }
+
+                                @Override
+                                public void visitCode()
+                                {
+                                    super.visitCode();
+                                    if ("ok".equals(phase))
+                                        callback();
+                                }
+
+                                @Override
+                                public void visitInsn(int opcode)
+                                {
+                                    if (opcode == Opcodes.RETURN && !"ok".equals(phase))
+                                        callback();
+                                    super.visitInsn(opcode);
+                                }
+                            };
+                        }
+                        if (!"lambda$0".equals(name)
+                            || !"(Lorg/eclipse/jface/viewers/SelectionChangedEvent;)V".equals(descriptor))
+                            return mv;
+                        patched[0] = true;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, OWNER, "getSelectedDelegate",
+                                    "()L" + DELEGATE + ";", false);
+                                Label selected = new Label();
+                                mv.visitJumpInsn(Opcodes.IFNONNULL, selected);
+                                mv.visitInsn(Opcodes.RETURN);
+                                mv.visitLabel(selected);
+                                mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0])
+                    woven.setBytes(writer.toByteArray());
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty("tormozit.debugValueEditor.weaveFailure", failure.toString());
+            }
+        }
     }
 
     /**

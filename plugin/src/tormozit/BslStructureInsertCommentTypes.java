@@ -634,11 +634,6 @@ public final class BslStructureInsertCommentTypes
 
     private static void refreshExternalFunctionTypes(Resource resource, int offset, CancelIndicator cancellation)
     {
-        long started = System.nanoTime();
-        Global.tempLog("assist-query-refresh", "external.begin offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-            + " cancellable=" + (cancellation != CancelIndicator.NullImpl)); //$NON-NLS-1$
-        try
-        {
         if (cancellation.isCanceled())
             throw new org.eclipse.core.runtime.OperationCanceledException();
         long revision = FunctionReturnTypes.semanticRevision();
@@ -709,12 +704,6 @@ public final class BslStructureInsertCommentTypes
         if (changed[0])
             BslDocCommentComputedTypes.bumpTypesGeneration();
         }
-        finally
-        {
-            Global.tempLog("assist-query-refresh", "external.end offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " canceled=" + cancellation.isCanceled() + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
 
     /**
      * Перед автодополнением: если метод под кареткой ссылается «см.» на функцию, сменившую
@@ -3228,7 +3217,6 @@ public final class BslStructureInsertCommentTypes
 
             StatementPlan(List<SimpleStatement> statements)
             {
-                long started = System.nanoTime();
                 for (SimpleStatement statement : statements)
                 {
                     if (statement.getLeft() instanceof StaticFeatureAccess access)
@@ -3241,9 +3229,6 @@ public final class BslStructureInsertCommentTypes
                     if (renamed != null)
                         renames.computeIfAbsent(renamed, key -> new ArrayList<>()).add(statement);
                 }
-                Global.tempLog("assist-column-plan", "built statements=" + statements.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " assignmentVariables=" + assignments.size() + " renamedVariables=" + renames.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
             }
         }
 
@@ -4623,7 +4608,6 @@ public final class BslStructureInsertCommentTypes
 
         private void installTypeSystemPass(Module module, CancelIndicator cancelIndicator)
         {
-            long started = System.nanoTime();
             long nativeFinished = 0L;
             List<Method> affected = null;
             if (module.eResource() instanceof com._1c.g5.v8.dt.bsl.resource.BslResource resource
@@ -4637,7 +4621,6 @@ public final class BslStructureInsertCommentTypes
                 if (!affected.contains(resource.getReparseMethod()))
                     affected.add(resource.getReparseMethod());
             }
-            long nativeStarted = System.nanoTime();
             try
             {
                 stockInstall(module, cancelIndicator);
@@ -4664,14 +4647,6 @@ public final class BslStructureInsertCommentTypes
             }
             finally
             {
-                long finished = System.nanoTime();
-                Global.tempLog("assist-type-pass", "partial=" + (affected != null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " methods=" + (affected == null ? module.allMethods().size() : affected.size()) //$NON-NLS-1$
-                    + " totalMethods=" + module.allMethods().size() + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " scopeMs=" + ((nativeStarted - started) / 1_000_000.0) //$NON-NLS-1$
-                    + " nativeComplete=" + (nativeFinished != 0L) //$NON-NLS-1$
-                    + " nativeMs=" + (((nativeFinished == 0L ? finished : nativeFinished) - nativeStarted) / 1_000_000.0) //$NON-NLS-1$
-                    + " afterNativeMs=" + (nativeFinished == 0L ? 0 : (finished - nativeFinished) / 1_000_000.0)); //$NON-NLS-1$
             }
         }
 

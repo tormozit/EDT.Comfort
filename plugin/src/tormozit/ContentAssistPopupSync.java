@@ -696,9 +696,6 @@ final int fullProposalCount = proposals.length;
         final boolean resetToFirst = restoreAfterFilterToggle
             ? SmartAssistFilterState.isSmartFilterEnabled()
             : shouldResetSelectionOnRefresh(saved);
-        Global.tempLog("completion-selection", "refresh selectedBefore=" + saved.index //$NON-NLS-1$ //$NON-NLS-2$
-            + " selectedKey=" + saved.displayKey + " resetToFirst=" + resetToFirst //$NON-NLS-1$ //$NON-NLS-2$
-            + " count=" + proposals.length + " filter=" + filter); //$NON-NLS-1$ //$NON-NLS-2$
         filter = SmartFilterTracker.getCurrentFilter();
         boolean smartEnabled = SmartAssistFilterState.isSmartFilterEnabled();
         if (!filter.equals(lastSyncedFilter))
@@ -4762,11 +4759,6 @@ ensureFilterPending(popup);
             selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
         else
             restoreSelection(popup, saved, list);
-        Table table = getProposalTable(popup);
-        Global.tempLog("completion-selection", "apply selectedBefore=" + (saved != null ? saved.index : -1) //$NON-NLS-1$ //$NON-NLS-2$
-            + " resetToFirst=" + resetToFirst + " selectedAfter=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (table != null && !table.isDisposed() ? table.getSelectionIndex() : -1));
-
     }
 
     private static void restoreSelection(Object popup, SavedSelection saved,

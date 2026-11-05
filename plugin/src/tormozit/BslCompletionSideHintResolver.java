@@ -343,8 +343,6 @@ trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
     {
         IInformationControlCreator existing = resolveHoverCreatorFromRsp(viewer);
         IInformationControlCreator creator = existing != null ? existing : resolveHoverCreatorFromHoverProvider(viewer);
-        Global.tempLog("assist-hint-creator", "prime offset=" + offset + " cached=" + (existing != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " found=" + (creator != null)); //$NON-NLS-1$
         if (creator != null && editor != null)
             rememberEditorBrowserCreator(editor, creator);
         return creator;

@@ -516,7 +516,6 @@ public final class ContentAssistPopupUi
                 }
                 catch (RuntimeException | LinkageError error)
                 {
-                    Global.tempLogException("assist-type-menu", "show.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
                     for (MenuItem item : support.menu.getItems())
                         item.dispose();
                 }
@@ -534,7 +533,6 @@ public final class ContentAssistPopupUi
             fullText = (String)label.getData(TEXT_KEY);
             if (fullText == null || fullText.isBlank() || fullText.equals(PARENT_PLACEHOLDER))
                 return;
-            Global.tempLog("assist-type-menu", "show text=" + fullText); //$NON-NLS-1$ //$NON-NLS-2$
             addAction("Копировать", () -> copyTypeLabel(viewer, fullText)); //$NON-NLS-1$
             java.util.List<String> names = typeNames(fullText);
             com._1c.g5.v8.dt.mcore.TypeItem single = names.size() == 1
@@ -562,14 +560,12 @@ public final class ContentAssistPopupUi
             MenuItem item = new MenuItem(menu, SWT.PUSH);
             item.setText(text);
             item.addListener(SWT.Selection, event -> {
-                Global.tempLog("assist-type-menu", "action text=" + text + " types=" + fullText); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 try
                 {
                     action.run();
                 }
                 catch (RuntimeException | LinkageError error)
                 {
-                    Global.tempLogException("assist-type-menu", "action.failed text=" + text, error); //$NON-NLS-1$ //$NON-NLS-2$
                     ToastNotification.show(text, "Не удалось выполнить команду: " + error.getMessage(), 5000); //$NON-NLS-1$
                 }
             });
@@ -577,14 +573,12 @@ public final class ContentAssistPopupUi
 
         private void openTypes(java.util.List<String> names)
         {
-            Global.tempLog("assist-type-menu", "openTypes names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
             java.util.List<com._1c.g5.v8.dt.mcore.TypeItem> types = new java.util.ArrayList<>();
             for (String name : names)
             {
                 var type = MetadataTypeMenu.resolveType(viewer, name);
                 if (type == null)
                 {
-                    Global.tempLog("assist-type-menu", "unresolved=" + name); //$NON-NLS-1$ //$NON-NLS-2$
                     ToastNotification.show("Открыть типы", "Не удалось найти тип: " + name, 5000); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }

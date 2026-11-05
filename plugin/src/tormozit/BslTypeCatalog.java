@@ -89,7 +89,6 @@ final class BslTypeCatalog
                 @Override
                 protected org.eclipse.core.runtime.IStatus run(org.eclipse.core.runtime.IProgressMonitor monitor)
                 {
-                    long started = System.nanoTime();
                     WARM_MONITOR.set(monitor);
                     try
                     {
@@ -163,7 +162,6 @@ final class BslTypeCatalog
                     }
                     catch (RuntimeException | LinkageError failure)
                     {
-                        Global.tempLog("type-catalog", "warm.error=" + failure);
                         return org.eclipse.core.runtime.Status.CANCEL_STATUS;
                     }
                     finally
@@ -173,7 +171,6 @@ final class BslTypeCatalog
                         {
                             WARMUPS.remove(document, this);
                         }
-                        Global.tempLog("type-catalog", "warm.end ms=" + ((System.nanoTime() - started) / 1_000_000.0));
                     }
                 }
             };
@@ -186,7 +183,6 @@ final class BslTypeCatalog
     static void install()
     {
         running = ENABLED;
-        Global.tempLog("type-catalog", "enabled=" + ENABLED);
         System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)BslTypeCatalog::proposals);
         System.getProperties().put(CONSTRUCTOR_CALLBACK,
             (java.util.function.Function<Object[], Object>)BslTypeCatalog::constructorDescriptions);
@@ -276,7 +272,6 @@ final class BslTypeCatalog
         boolean russian, boolean constructor, java.util.function.Supplier<IScope> scope,
         IIndexSlicePredicateService slices)
     {
-        long started = System.nanoTime();
         IV8Project v8 = v8Project(resource);
         IProject project = v8 != null ? v8.getProject() : null;
         IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
@@ -320,9 +315,6 @@ final class BslTypeCatalog
             catalog.languages.compareAndSet(language, null, index);
             index = catalog.languages.get(language);
         }
-        Global.tempLog("type-catalog", "lookup env=" + environments + " constructor=" + constructor
-            + " russian=" + russian + " hit=" + hit + " count=" + index.types().size()
-            + " ms=" + ((System.nanoTime() - started) / 1_000_000.0));
         return index;
     }
 
@@ -405,7 +397,6 @@ final class BslTypeCatalog
         }
         catch (RuntimeException | LinkageError failure)
         {
-            Global.tempLog("type-catalog", "constructors.error=" + failure);
             return null;
         }
     }

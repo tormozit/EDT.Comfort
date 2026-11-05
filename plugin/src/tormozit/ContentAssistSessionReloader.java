@@ -371,10 +371,6 @@ this.completionListener = new CompletionListenerAdapter() {
                     viewer.getTextWidget().getDisplay().asyncExec(() ->
                         BslEditorHighlightingHook.logAssistPaintState(viewer,
                             "sessionStarted.afterDispatch popup=" + ContentAssistPopupSync.isPopupVisible(assistant))); //$NON-NLS-1$
-                // #region agent log
-                if (STALE_MARKERS_LOG)
-                    Global.tempLog("stale-markers", "assist.sessionStarted " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 assistSessionStartedImpl(event);
             }
 
@@ -503,10 +499,6 @@ lastCaretDocumentStamp = -1;
             public void assistSessionEnded(ContentAssistEvent event)
             {
                 BslEditorHighlightingHook.logAssistPaintState(viewer, "sessionEnded"); //$NON-NLS-1$
-                // #region agent log
-                if (STALE_MARKERS_LOG)
-                    Global.tempLog("stale-markers", "assist.sessionEnded " + describeReconciler(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 assistSessionEndedImpl(event);
             }
 
@@ -663,7 +655,6 @@ boolean inLiteral = endCaret >= 0
             || !ContentAssistPopupSync.isPopupVisible(assistant)
             || !SmartContentAssistProcessor.isEmptyPlaceholderProposal(lastAssistSelection))
             return;
-        Global.tempLog("completion-empty-enter", "close caret=" + viewer.getSelectedRange()); //$NON-NLS-1$ //$NON-NLS-2$
         event.doit = false;
         ContentAssistPopupSync.hideProposalPopup(assistant);
     }
@@ -939,11 +930,6 @@ boolean inLiteral = endCaret >= 0
             {
                 long t0 = System.nanoTime();
                 noteDocumentChangedForValidation(event);
-                // #region agent log
-                // Первой строкой обработчика: ниже есть ранние выходы и вызовы, способные
-                // бросить исключение, а эта запись должна появляться на каждую правку.
-                logValidationAfterDocumentChange(event, viewer);
-                // #endregion
                 String text = event == null ? null : event.getText();
                 if (inputJumpProbe != null)
                     inputJumpProbe.documentChanged(event);
@@ -982,13 +968,6 @@ boolean inLiteral = endCaret >= 0
         doc.addDocumentListener(completionAutoOpenDocumentListener);
         installAssistSyncValidationRestart();
         OrphanUnderlineRepair.install(viewer);
-        // #region agent log
-        if (STALE_MARKERS_LOG)
-            Global.tempLog("stale-markers", "слушатель правок подключён: документ " //$NON-NLS-1$ //$NON-NLS-2$
-                + doc.getClass().getName() + "@" + System.identityHashCode(doc)); //$NON-NLS-1$
-        logValidationState(doc, "listener.install"); //$NON-NLS-1$
-        watchReconcilerAndRewriteSessions(doc, viewer);
-        // #endregion
     }
 
     /**
@@ -2558,13 +2537,7 @@ boolean inLiteral = endCaret >= 0
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
             // HandlyXtextDocument; сам публичный метод подтверждён в EDT-бандле.
-            // #region agent log
-            logValidationState(doc, "read.done"); //$NON-NLS-1$
-            // #endregion
             Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
-            // #region agent log
-            logValidationState(doc, "afterCheckAndUpdate"); //$NON-NLS-1$
-            // #endregion
             @SuppressWarnings("unchecked")
             T typed = (T) result;
             return typed;
@@ -2589,11 +2562,7 @@ boolean inLiteral = endCaret >= 0
     private static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
         IUnitOfWork<T, XtextResource> work, boolean peekOnly)
     {
-        long started = System.nanoTime();
-        long monitorAcquired = 0L;
         boolean invoked = false;
-        boolean ruleBusy = false;
-        AutoCloseable trace = SmartContentAssistProcessor.traceBackgroundModelRead(doc);
         try
         {
             org.eclipse.core.runtime.jobs.Job sync = assistSyncJob(doc);
@@ -2603,14 +2572,12 @@ boolean inLiteral = endCaret >= 0
                 monitor.setCanceled(true);
                 return null;
             }
-            observeSyncHoldJob(sync);
             Object lock = resource instanceof org.eclipse.xtext.resource.ISynchronizable synchronizable
                 ? synchronizable.getLock() : resource;
             // Пока монитор занят, правило НЕ держим: иначе отменённый читатель блокирует
             // синхронизацию всё время ожидания чужого чтения (лог: 7486 мс).
             synchronized (lock)
             {
-                monitorAcquired = System.nanoTime();
                 if (monitor.isCanceled() || AssistPriority.isPending(doc)
                     || Global.getField(doc, "resource") != resource) //$NON-NLS-1$
                 {
@@ -2628,7 +2595,6 @@ boolean inLiteral = endCaret >= 0
                 }
                 catch (org.eclipse.core.runtime.OperationCanceledException busy)
                 {
-                    ruleBusy = true;
                     monitor.setCanceled(true);
                     return null;
                 }
@@ -2645,7 +2611,6 @@ boolean inLiteral = endCaret >= 0
                         peekOnly ? "readOnlyDataModelWithoutSync" : "readOnlyForContentAssist", work); //$NON-NLS-1$ //$NON-NLS-2$
                     if (result == BSL_READ_MISSING)
                     {
-                        Global.tempLog("assist-low-read", "missing protected read"); //$NON-NLS-1$ //$NON-NLS-2$
                         return null;
                     }
                     @SuppressWarnings("unchecked")
@@ -2662,18 +2627,6 @@ boolean inLiteral = endCaret >= 0
         {
             if (invoked && !peekOnly)
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
-            Global.tempLog("assist-low-read", "end monitorWaitMs=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (monitorAcquired == 0L ? -1 : (monitorAcquired - started) / 1_000_000.0)
-                + " ruleBusy=" + ruleBusy + " canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
-                + " totalMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
-            try
-            {
-                trace.close();
-            }
-            catch (Exception error)
-            {
-                Global.tempLog("assist-low-read", "trace failed=" + error); //$NON-NLS-1$ //$NON-NLS-2$
-            }
         }
     }
 
@@ -2954,14 +2907,8 @@ boolean inLiteral = endCaret >= 0
                         return resolved || (System.nanoTime() - matchedAt[0]) / 1_000_000L
                             >= LOCAL_RESOLVE_GRACE_MS;
                     });
-                    Global.tempLog("assist-member-opening", "checked end=" + end //$NON-NLS-1$ //$NON-NLS-2$
-                        + " state=" + state[0] + " ready=" + ready //$NON-NLS-1$ //$NON-NLS-2$
-                        + " elapsedMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
                     if (!Boolean.TRUE.equals(ready))
                         return null;
-                    Global.tempLog("assist-member-opening", "ready end=" + end //$NON-NLS-1$ //$NON-NLS-2$
-                        + " waitMs=" + ((System.nanoTime() - started) / 1_000_000.0) //$NON-NLS-1$
-                        + " syncState=" + (job == null ? -1 : job.getState())); //$NON-NLS-1$
                     return new MemberModelResult<>(body.get());
                 });
                 if (result != null)
@@ -2994,12 +2941,7 @@ boolean inLiteral = endCaret >= 0
             }
             return null;
         }
-        finally
-        {
-            Global.tempLog("assist-member-opening", "model end=" + end + " result=" + outcome //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " attempts=" + attempts + " state=" + state[0] //$NON-NLS-1$ //$NON-NLS-2$
-                + " totalMs=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
-        }
+
     }
 
     private record MemberModelResult<T>(T value) {}
@@ -3328,12 +3270,10 @@ boolean inLiteral = endCaret >= 0
     {
         if (job == null)
             return Boolean.FALSE;
-        observeSyncHoldJob(job);
         if (preemptLowPriority)
             for (org.eclipse.core.runtime.IProgressMonitor holder : LOW_PRIORITY_HOLDERS)
                 holder.setCanceled(true);
         long t0 = System.nanoTime();
-        traceModelHold("request", t0, job, "priority=" + (preemptLowPriority ? "assist" : "low")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (!attachHoldRule(job, abort))
             return abort != null ? null : Boolean.FALSE;
         if (abort != null && !queueDuringSync)
@@ -3364,7 +3304,6 @@ boolean inLiteral = endCaret >= 0
         }
         catch (org.eclipse.core.runtime.OperationCanceledException e)
         {
-            Global.tempLog("assist-member-opening", "hold canceled job=" + System.identityHashCode(job)); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         catch (RuntimeException e)
@@ -3387,9 +3326,6 @@ boolean inLiteral = endCaret >= 0
         ModelHold trace = traces.getLast();
         org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(trace.rule());
         traces.removeLast();
-        Global.tempLog("assist-model-hold", "released id=" + trace.id() //$NON-NLS-1$ //$NON-NLS-2$
-            + " th=" + Thread.currentThread().getName() + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " rule=" + trace.rule() + " heldMs=" + ((System.nanoTime() - trace.started()) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
         if (traces.isEmpty())
             HOLD_TRACES.remove();
     }
@@ -3398,72 +3334,12 @@ boolean inLiteral = endCaret >= 0
 
     private static final ThreadLocal<java.util.ArrayDeque<ModelHold>> HOLD_TRACES =
         ThreadLocal.withInitial(java.util.ArrayDeque::new);
-    private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> HOLD_OBSERVED_JOBS =
-        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
-
-    private static void traceModelHold(String phase, long id, org.eclipse.core.runtime.jobs.Job job, String detail)
-    {
-        Global.tempLog("assist-model-hold", phase + " id=" + id //$NON-NLS-1$ //$NON-NLS-2$
-            + " job=" + System.identityHashCode(job) + " name=" + job.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " th=" + Thread.currentThread().getName() + " rule=" + syncHoldRule(job) + " " + detail); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
 
     private static void traceHoldAcquired(long id, String kind, org.eclipse.core.runtime.jobs.Job job)
     {
         long now = System.nanoTime();
         java.util.ArrayDeque<ModelHold> traces = HOLD_TRACES.get();
         traces.addLast(new ModelHold(id, now, syncHoldRule(job)));
-        traceModelHold("acquired", id, job, "kind=" + kind + " depth=" + traces.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " waitMs=" + ((now - id) / 1_000_000.0)); //$NON-NLS-1$
-    }
-
-    private static void observeSyncHoldJob(org.eclipse.core.runtime.jobs.Job job)
-    {
-        synchronized (HOLD_OBSERVED_JOBS)
-        {
-            if (!HOLD_OBSERVED_JOBS.add(job))
-                return;
-            job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
-            {
-                private AutoCloseable trace;
-
-                @Override
-                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    StringBuilder caller = new StringBuilder();
-                    for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-                        caller.append("\n  at ").append(frame); //$NON-NLS-1$
-                    Global.tempLog("assist-sync-schedule", "job=" + System.identityHashCode(event.getJob()) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " thread=" + Thread.currentThread().getName() + caller); //$NON-NLS-1$
-                }
-
-                @Override
-                public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    trace = SmartContentAssistProcessor.traceModelSync(event.getJob());
-                    traceModelHold("sync.running", 0L, event.getJob(), ""); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-
-                @Override
-                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    try
-                    {
-                        if (trace != null)
-                            trace.close();
-                    }
-                    catch (Exception error)
-                    {
-                        Global.tempLog("assist-sync-schedule", "trace.close failed=" + error); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
-                    finally
-                    {
-                        trace = null;
-                    }
-                    traceModelHold("sync.done", 0L, event.getJob(), "result=" + event.getResult()); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-            });
-        }
     }
 
     private static final java.util.Map<IDocument, ValidationWatch> VALIDATION_WATCHES =
@@ -3771,14 +3647,6 @@ boolean inLiteral = endCaret >= 0
             && cancel.isCanceled();
         boolean restart = !skip && !outdated
             && watch.guardRestarts.get() < VALIDATION_GUARD_MAX_RESTARTS;
-        // #region agent log
-        if (STALE_MARKERS_LOG)
-            Global.tempLog("stale-markers", "сторож: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
-                + " перезапуск=" + restart + " skip=" + skip + " outdated=" + outdated //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " проверок=" + watch.guardChecks.get() //$NON-NLS-1$
-                + " перезапусков=" + watch.guardRestarts.get() //$NON-NLS-1$
-                + " " + describeValidationJob(job)); //$NON-NLS-1$
-        // #endregion
         if (restart)
         {
             watch.guardRestarts.incrementAndGet();
@@ -3874,599 +3742,12 @@ boolean inLiteral = endCaret >= 0
                 continue;
             boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
-            // #region agent log
-            if (STALE_MARKERS_LOG)
-                Global.tempLog("stale-markers", "assistSync.done: проверка после правки не отработала," //$NON-NLS-1$ //$NON-NLS-2$
-                    + " перезапуск=" + (idle && !skip) + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " " + describeOutdated(doc)); //$NON-NLS-1$
-            // #endregion
             // Задание уже запланировано или идёт — оно отработает само
             if (idle && !skip)
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
         }
     }
 
-    // #region agent log
-    /**
-     * Выключатель временной диагностики протухших маркеров (тема {@code stale-markers}).
-     * Выключена 06.10.2026 по просьбе автора; сама диагностика не снята — второй сценарий
-     * (проверка не планируется после блочной замены) не разобран. Включить: {@code true}.
-     */
-    static final boolean STALE_MARKERS_LOG = true;
-
-    private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> VALIDATION_JOBS_WATCHED =
-        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
-
-    /**
-     * Временная диагностика протухших маркеров ошибок. Штатный
-     * {@code readOnlyForContentAssist} ставит заданию проверки признак пропуска
-     * ({@code skip}) и отменяет его; если модель ещё не догнала текст, признак остаётся
-     * взведённым, и {@code checkAndUpdateAnnotations} задание не перезапускает. Пишем
-     * состояние задания в точках чтения и каждое его планирование/завершение: чтение с
-     * {@code skip=true}, после которого нет запуска проверки, и есть протухший маркер.
-     */
-    private static void logValidationAfterDocumentChange(DocumentEvent event,
-        org.eclipse.jface.text.ITextViewer viewer)
-    {
-        if (!STALE_MARKERS_LOG)
-            return;
-        if (event == null)
-        {
-            Global.tempLog("stale-markers", "docChanged: событие null"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        IDocument doc = event.getDocument();
-        if (!(doc instanceof IXtextDocument))
-        {
-            Global.tempLog("stale-markers", "docChanged: документ не Xtext — " //$NON-NLS-1$ //$NON-NLS-2$
-                + (doc == null ? "null" : doc.getClass().getName())); //$NON-NLS-1$
-            return;
-        }
-        String text = event.getText() == null ? "" : event.getText(); //$NON-NLS-1$
-        logValidationState(doc, "docChanged offset=" + event.getOffset() //$NON-NLS-1$
-            + " removed=" + event.getLength() + " inserted=" + text.length() //$NON-NLS-1$ //$NON-NLS-2$
-            + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
-        watchReconcilerAndRewriteSessions(doc, viewer);
-        // Блочная замена — после неё проверка не планируется вовсе (лог 06.10.2026).
-        // Стек показывает, какая команда правит текст. Порог — данные, а не условие записи
-        // самой правки: строка docChanged выше пишется всегда.
-        if (event.getLength() >= 200 || text.length() >= 200)
-            Global.tempLogException("stale-markers", "стек блочной замены offset=" //$NON-NLS-1$ //$NON-NLS-2$
-                + event.getOffset(), new Throwable("кто правит документ")); //$NON-NLS-1$
-        long stampAtChange = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
-            ? ext.getModificationStamp() : -1;
-        // Через 3 и 20 с после правки: если текст с тех пор не менялся, а проверка так и
-        // не отработала — это и есть протухший маркер. Задание, а не timerExec: слушатель
-        // документа может прийти не из UI-потока.
-        for (int delaySeconds : new int[] { 3, 20 })
-        {
-            org.eclipse.core.runtime.jobs.Job probe = org.eclipse.core.runtime.jobs.Job.create(
-                "Комфорт: проба задания проверки модуля", //$NON-NLS-1$
-                (org.eclipse.core.runtime.ICoreRunnable)monitor -> {
-                    long stampNow = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
-                        ? ext.getModificationStamp() : -1;
-                    // Сокращение объёма лога (07.10.2026, по просьбе автора): пробу пишем
-                    // только для последней правки — когда текст с тех пор не менялся.
-                    if (stampNow != stampAtChange)
-                        return;
-                    logValidationState(doc, "probe+" + delaySeconds + "s" //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + describeReconciler(viewer) + " " + describeOutdated(doc)); //$NON-NLS-1$ //$NON-NLS-2$
-                    Global.tempLog("stale-markers", "painter+" + delaySeconds + "s " //$NON-NLS-1$ //$NON-NLS-2$
-                        + describePainterVsModel(viewer));
-                    // Цикл, который так и не закончился успехом, виден только отсюда
-                    if (Global.invoke(doc, "getValidationJob") //$NON-NLS-1$
-                        instanceof org.eclipse.core.runtime.jobs.Job loopJob)
-                        validationRunsSinceOk(loopJob).logLoopStacks(
-                            "проба +" + delaySeconds + " с, успеха не было", loopJob); //$NON-NLS-1$ //$NON-NLS-2$
-                });
-            probe.setSystem(true);
-            probe.schedule(delaySeconds * 1000L);
-        }
-    }
-
-    private static final java.util.Set<Object> RECONCILER_WATCHED =
-        java.util.Collections.synchronizedSet(
-            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
-
-    /**
-     * Каждое планирование, запуск и завершение штатного согласователя и каждый сеанс
-     * перезаписи документа: видно, дошла ли правка до согласователя и чем он закончил.
-     */
-    private static void watchReconcilerAndRewriteSessions(IDocument doc,
-        org.eclipse.jface.text.ITextViewer viewer)
-    {
-        if (!STALE_MARKERS_LOG)
-            return;
-        try
-        {
-            installReconcilerJobDiagnostics();
-            if (doc instanceof org.eclipse.jface.text.IDocumentExtension4 sessions
-                && RECONCILER_WATCHED.add(doc))
-                sessions.addDocumentRewriteSessionListener(event ->
-                    Global.tempLog("stale-markers", "rewriteSession " //$NON-NLS-1$ //$NON-NLS-2$
-                        + (event.getChangeType() == org.eclipse.jface.text.DocumentRewriteSessionEvent.SESSION_START
-                            ? "start" : "stop") //$NON-NLS-1$ //$NON-NLS-2$
-                        + " type=" + (event.getSession() == null ? null //$NON-NLS-1$
-                            : event.getSession().getSessionType())
-                        + " th=" + Thread.currentThread().getName())); //$NON-NLS-1$
-        }
-        catch (RuntimeException ex)
-        {
-            Global.tempLog("stale-markers", "сбой подключения к согласователю: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    /**
-     * Состояние штатного {@code XtextReconciler}: пока идёт сеанс автодополнения, он стоит
-     * на паузе ({@code paused}) и модель до текста не догоняет, а возобновляется только по
-     * {@code assistSessionEnded}. Незакрытый сеанс значит «проверки нет до конца сеанса».
-     */
-    private static String describeReconciler(org.eclipse.jface.text.ITextViewer viewer)
-    {
-        // Лог 06.10.2026: viewer.fReconciler в редакторе модуля — неработающий экземпляр
-        // (ни разу не запланирован, сеансов автодополнения не видит). Настоящий согласователь
-        // узнаём по событиям менеджера заданий, см. installReconcilerJobDiagnostics.
-        java.lang.ref.WeakReference<Object> known = viewer == null ? null : RECONCILER_BY_VIEWER.get(viewer);
-        Object real = known == null ? null : known.get();
-        return describeReconcilerObject(
-            real != null ? real : Global.getField(viewer, "fReconciler"), //$NON-NLS-1$
-            real != null ? "job" : "fReconciler"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    // Слабая ссылка на значение: задание само держит свой viewer, иначе ключ не освободится
-    private static final java.util.Map<Object, java.lang.ref.WeakReference<Object>> RECONCILER_BY_VIEWER =
-        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
-
-    private static boolean reconcilerJobDiagnosticsInstalled;
-
-    /**
-     * Семейство заданий штатного согласователя — то же, по которому его ищет и отменяет
-     * сама EDT в {@code readOnlyForContentAssist}.
-     */
-    private static final String RECONCILER_JOB_FAMILY =
-        "org.eclipse.xtext.ui.editor.reconciler.XtextReconciler"; //$NON-NLS-1$
-
-    private static synchronized void installReconcilerJobDiagnostics()
-    {
-        if (reconcilerJobDiagnosticsInstalled)
-            return;
-        reconcilerJobDiagnosticsInstalled = true;
-        Global.tempLog("stale-markers", "слушатель заданий согласователя подключён"); //$NON-NLS-1$ //$NON-NLS-2$
-        org.eclipse.core.runtime.jobs.Job.getJobManager().addJobChangeListener(
-            new org.eclipse.core.runtime.jobs.JobChangeAdapter()
-            {
-                @Override
-                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    log(null, event);
-                }
-
-                @Override
-                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    log("done result=" + (event.getResult() != null && event.getResult().isOK() //$NON-NLS-1$
-                        ? "OK" : "CANCEL"), event); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-
-                // Сокращение объёма лога: планирование только запоминает согласователь
-                // редактора (what == null), в лог идёт одно завершение.
-                private void log(String what, org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    org.eclipse.core.runtime.jobs.Job job = event.getJob();
-                    if (!job.belongsTo(RECONCILER_JOB_FAMILY))
-                        return;
-                    Object jobViewer = Global.getField(job, "textViewer"); //$NON-NLS-1$
-                    if (jobViewer != null)
-                        RECONCILER_BY_VIEWER.put(jobViewer, new java.lang.ref.WeakReference<>(job));
-                    if (what == null)
-                        return;
-                    IDocument doc = jobViewer instanceof org.eclipse.jface.text.ITextViewer textViewer
-                        ? textViewer.getDocument() : null;
-                    Global.tempLog("stale-markers", "reconciler." + what //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + describeReconcilerObject(job, "job") //$NON-NLS-1$ //$NON-NLS-2$
-                        + " viewer=" + System.identityHashCode(jobViewer) //$NON-NLS-1$
-                        + (doc == null ? "" : " " + describeOutdated(doc)) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                }
-            });
-    }
-
-    private static String describeReconcilerObject(Object reconciler, String source)
-    {
-        try
-        {
-            if (reconciler == null)
-                return "reconciler=null"; //$NON-NLS-1$
-            Object pending = Global.getField(reconciler, "pendingChanges"); //$NON-NLS-1$
-            Object listener = Global.getField(reconciler, "documentListener"); //$NON-NLS-1$
-            return "reconciler{" + source + "@" + System.identityHashCode(reconciler) //$NON-NLS-1$ //$NON-NLS-2$
-                + " paused=" + Global.getField(reconciler, "paused") //$NON-NLS-1$ //$NON-NLS-2$
-                + " pending=" + (pending instanceof java.util.Collection<?> queue ? queue.size() : -1) //$NON-NLS-1$
-                + " sessionStarted=" + Global.getField(listener, "sessionStarted") //$NON-NLS-1$ //$NON-NLS-2$
-                + " state=" + (reconciler instanceof org.eclipse.core.runtime.jobs.Job job //$NON-NLS-1$
-                    ? job.getState() : -1) + "}"; //$NON-NLS-1$
-        }
-        catch (RuntimeException ex)
-        {
-            return "reconciler=сбой:" + ex; //$NON-NLS-1$
-        }
-    }
-
-    /**
-     * Считает ли EDT модель устаревшей относительно текста. При {@code true} штатный
-     * {@code checkAndUpdateAnnotations} проверку не планирует.
-     */
-    private static String describeOutdated(IDocument doc)
-    {
-        try
-        {
-            Object indicator = Global.invoke(doc, "getCancelIndicator"); //$NON-NLS-1$
-            return "outdated=" + (indicator instanceof org.eclipse.xtext.util.CancelIndicator cancel //$NON-NLS-1$
-                ? String.valueOf(cancel.isCanceled()) : "?"); //$NON-NLS-1$
-        }
-        catch (RuntimeException ex)
-        {
-            return "outdated=сбой:" + ex; //$NON-NLS-1$
-        }
-    }
-
-    private static void logValidationState(IDocument doc, String point)
-    {
-        if (!STALE_MARKERS_LOG)
-            return;
-        try
-        {
-            Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
-            org.eclipse.core.runtime.jobs.Job job =
-                jobObject instanceof org.eclipse.core.runtime.jobs.Job found ? found : null;
-            long stamp = doc instanceof org.eclipse.jface.text.IDocumentExtension4 ext
-                ? ext.getModificationStamp() : -1;
-            Global.tempLog("stale-markers", point + " " + describeValidationJob(job) //$NON-NLS-1$ //$NON-NLS-2$
-                + " docStamp=" + stamp + " docLen=" + doc.getLength() //$NON-NLS-1$ //$NON-NLS-2$
-                + " th=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            if (job == null)
-                return;
-            boolean added;
-            synchronized (VALIDATION_JOBS_WATCHED)
-            {
-                added = VALIDATION_JOBS_WATCHED.add(job);
-            }
-            if (!added)
-                return;
-            job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
-            {
-                @Override
-                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    // Слушатель зовётся в потоке, вызвавшем schedule(): стек показывает, кто
-                    // планирует проверку в тысячном цикле.
-                    validationRunsSinceOk(event.getJob()).scheduled(Thread.currentThread().getName(),
-                        callerStack());
-                }
-
-                @Override
-                public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-                {
-                    // Сокращение объёма лога: планирования и отмены не пишем построчно
-                    // (их тысячи на десятки успешных), а считаем до следующего успеха;
-                    // счётчики видны в строке успеха и в пробах (describeValidationJob).
-                    ValidationRuns runs = validationRunsSinceOk(event.getJob());
-                    if (event.getResult() == null || !event.getResult().isOK())
-                    {
-                        // Ожидавшее задание отменяется в потоке отменившего — его стек и нужен;
-                        // у выполнявшегося здесь будет только рабочий поток задания.
-                        runs.canceled(callerStack());
-                        return;
-                    }
-                    Global.tempLog("stale-markers", "validation.done OK " //$NON-NLS-1$ //$NON-NLS-2$
-                        + describeValidationJob(event.getJob()));
-                    runs.logLoopStacks("цикл закончился успехом", event.getJob()); //$NON-NLS-1$
-                    runs.reset();
-                    // Аннотации попадают в модель чуть позже завершения задания
-                    org.eclipse.core.runtime.jobs.Job report = org.eclipse.core.runtime.jobs.Job.create(
-                        "Комфорт: аннотации после проверки модуля", //$NON-NLS-1$
-                        (org.eclipse.core.runtime.ICoreRunnable)monitor ->
-                            Global.tempLog("stale-markers", "annotations+1s " //$NON-NLS-1$ //$NON-NLS-2$
-                                + describeIssueAnnotations(event.getJob())));
-                    report.setSystem(true);
-                    report.schedule(1000);
-                }
-            });
-        }
-        catch (RuntimeException ex)
-        {
-            Global.tempLog("stale-markers", point + " сбой диагностики: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    /**
-     * Что осталось в редакторе после проверки: число аннотаций проверки и первые из них
-     * (позиция и текст). Маркер, который пережил успешную проверку уже исправленного места,
-     * виден здесь без снимка экрана.
-     */
-    private static String describeIssueAnnotations(org.eclipse.core.runtime.jobs.Job job)
-    {
-        try
-        {
-            Object model = Global.getField(job, "annotationModel"); //$NON-NLS-1$
-            if (!(model instanceof org.eclipse.jface.text.source.IAnnotationModel annotations))
-                return "job=" + System.identityHashCode(job) + " модель аннотаций недоступна"; //$NON-NLS-1$ //$NON-NLS-2$
-            int total = 0;
-            int errors = 0;
-            StringBuilder first = new StringBuilder();
-            for (java.util.Iterator<org.eclipse.jface.text.source.Annotation> it =
-                annotations.getAnnotationIterator(); it.hasNext();)
-            {
-                org.eclipse.jface.text.source.Annotation annotation = it.next();
-                if (annotation.isMarkedDeleted()
-                    || !annotation.getClass().getName().endsWith("XtextAnnotation")) //$NON-NLS-1$
-                    continue;
-                total++;
-                // Сокращение объёма лога: пишем только ошибки — протухают именно они
-                if (!String.valueOf(annotation.getType()).endsWith("error")) //$NON-NLS-1$
-                    continue;
-                errors++;
-                if (errors > 40)
-                    continue;
-                org.eclipse.jface.text.Position position = annotations.getPosition(annotation);
-                String text = String.valueOf(annotation.getText());
-                first.append(" | ").append(position == null ? "?" : position.getOffset() + "+" + position.getLength()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    .append(' ').append(annotation.getType()).append(' ')
-                    .append(text.length() > 90 ? text.substring(0, 90) : text);
-            }
-            return "job=" + System.identityHashCode(job) + " всего=" + total //$NON-NLS-1$ //$NON-NLS-2$
-                + " ошибок=" + errors + " " + describeParseErrors(job) + first; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (RuntimeException ex)
-        {
-            return "job=" + System.identityHashCode(job) + " сбой чтения аннотаций: " + ex; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    /**
-     * Что лежит в разборе модуля в тот же момент: синтаксические ошибки есть, а аннотаций
-     * проверки нет — значит, их потеряла проверка, а не разбор.
-     */
-    private static String describeParseErrors(org.eclipse.core.runtime.jobs.Job job)
-    {
-        try
-        {
-            Object access = Global.getField(job, "xtextDocument"); //$NON-NLS-1$
-            if (!(access instanceof org.eclipse.xtext.util.concurrent.IReadAccess<?> read))
-                return "разбор=недоступен"; //$NON-NLS-1$
-            @SuppressWarnings("unchecked")
-            org.eclipse.xtext.util.concurrent.IReadAccess<org.eclipse.xtext.resource.XtextResource> resourceAccess =
-                (org.eclipse.xtext.util.concurrent.IReadAccess<org.eclipse.xtext.resource.XtextResource>)read;
-            return resourceAccess.tryReadOnly(resource ->
-            {
-                if (resource == null || resource.getParseResult() == null)
-                    return "разбор=нет"; //$NON-NLS-1$
-                StringBuilder syntax = new StringBuilder();
-                int count = 0;
-                for (org.eclipse.xtext.nodemodel.INode node : resource.getParseResult().getSyntaxErrors())
-                {
-                    if (++count <= 3)
-                        syntax.append(' ').append(node.getOffset()).append(':')
-                            .append(node.getSyntaxErrorMessage() == null ? "?" //$NON-NLS-1$
-                                : node.getSyntaxErrorMessage().getMessage());
-                }
-                return "разбор{синтаксических=" + count + " ресурсОшибок=" + resource.getErrors().size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + syntax + "}"; //$NON-NLS-1$
-            });
-        }
-        catch (RuntimeException ex)
-        {
-            return "разбор=сбой:" + ex; //$NON-NLS-1$
-        }
-    }
-
-    /**
-     * Сверка штатного отрисовщика подчёркиваний с моделью аннотаций. Лог 07.10.2026: после
-     * успешной проверки ошибок в модели уже нет (и на вертикальной полосе их нет), а в
-     * тексте подчёркивания остались — то есть {@code AnnotationPainter} держит в
-     * {@code fDecorationsMap} аннотации, которых в модели нет. Пишем именно такие.
-     */
-    private static String describePainterVsModel(org.eclipse.jface.text.ITextViewer viewer)
-    {
-        try
-        {
-            Object painter = null;
-            Object painters = Global.getField(Global.getField(viewer, "fPaintManager"), "fPainters"); //$NON-NLS-1$ //$NON-NLS-2$
-            if (painters instanceof java.util.Collection<?> list)
-                for (Object candidate : new java.util.ArrayList<>(list))
-                    if (candidate instanceof org.eclipse.jface.text.source.AnnotationPainter)
-                        painter = candidate;
-            if (painter == null)
-                return "painter=не найден"; //$NON-NLS-1$
-            Object modelObject = Global.getField(painter, "fModel"); //$NON-NLS-1$
-            Object lock = Global.getField(painter, "fDecorationMapLock"); //$NON-NLS-1$
-            Object mapObject = Global.getField(painter, "fDecorationsMap"); //$NON-NLS-1$
-            if (!(modelObject instanceof org.eclipse.jface.text.source.IAnnotationModel model)
-                || !(mapObject instanceof java.util.Map<?, ?> map) || lock == null)
-                return "painter@" + System.identityHashCode(painter) + " поля недоступны"; //$NON-NLS-1$ //$NON-NLS-2$
-            java.util.List<java.util.Map.Entry<?, ?>> decorations;
-            synchronized (lock)
-            {
-                decorations = new java.util.ArrayList<>(map.entrySet());
-            }
-            int stale = 0;
-            StringBuilder text = new StringBuilder();
-            for (java.util.Map.Entry<?, ?> entry : decorations)
-            {
-                if (!(entry.getKey() instanceof org.eclipse.jface.text.source.Annotation annotation))
-                    continue;
-                boolean inModel = model.getPosition(annotation) != null;
-                if (inModel && !annotation.isMarkedDeleted())
-                    continue;
-                stale++;
-                if (stale > 30)
-                    continue;
-                Object position = Global.getField(entry.getValue(), "fPosition"); //$NON-NLS-1$
-                String message = String.valueOf(annotation.getText());
-                text.append(" | ").append(position instanceof org.eclipse.jface.text.Position drawn //$NON-NLS-1$
-                    ? drawn.getOffset() + "+" + drawn.getLength() + (drawn.isDeleted() ? "(удалена)" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    : "?") //$NON-NLS-1$
-                    .append(" inModel=").append(inModel) //$NON-NLS-1$
-                    .append(" markedDeleted=").append(annotation.isMarkedDeleted()) //$NON-NLS-1$
-                    .append(' ').append(annotation.getClass().getSimpleName())
-                    .append(' ').append(annotation.getType()).append(' ')
-                    .append(message.length() > 90 ? message.substring(0, 90) : message);
-            }
-            return "painter@" + System.identityHashCode(painter) //$NON-NLS-1$
-                + " model@" + System.identityHashCode(model) //$NON-NLS-1$
-                + " нарисовано=" + decorations.size() + " лишних=" + stale + text; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (RuntimeException ex)
-        {
-            return "painter=сбой:" + ex; //$NON-NLS-1$
-        }
-    }
-
-    private static String describeValidationJob(org.eclipse.core.runtime.jobs.Job job)
-    {
-        if (job == null)
-            return "job=null"; //$NON-NLS-1$
-        return "job=" + System.identityHashCode(job) //$NON-NLS-1$
-            + " state=" + job.getState() //$NON-NLS-1$
-            + " skip=" + Global.invoke(job, "isSkip") //$NON-NLS-1$ //$NON-NLS-2$
-            + " " + validationRunsSinceOk(job); //$NON-NLS-1$
-    }
-
-    private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, ValidationRuns> VALIDATION_RUNS =
-        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
-
-    /**
-     * Стек вызвавшего без кадров менеджера заданий и самой диагностики: до 40 кадров,
-     * каждый с новой строки. Служит и ключом для подсчёта одинаковых стеков.
-     */
-    private static String callerStack()
-    {
-        StringBuilder text = new StringBuilder();
-        int frames = 0;
-        for (StackTraceElement frame : new Throwable().getStackTrace())
-        {
-            String owner = frame.getClassName();
-            if (owner.startsWith("tormozit.ContentAssistSessionReloader") //$NON-NLS-1$
-                && (frame.getMethodName().equals("callerStack") //$NON-NLS-1$
-                    || frame.getMethodName().equals("scheduled") //$NON-NLS-1$
-                    || frame.getMethodName().equals("done")) //$NON-NLS-1$
-                || owner.startsWith("org.eclipse.core.internal.jobs.JobListeners")) //$NON-NLS-1$
-                continue;
-            text.append(System.lineSeparator()).append("      ").append(owner).append('.') //$NON-NLS-1$
-                .append(frame.getMethodName()).append(':').append(frame.getLineNumber());
-            if (++frames >= 40)
-                break;
-        }
-        return text.toString();
-    }
-
-    private static ValidationRuns validationRunsSinceOk(org.eclipse.core.runtime.jobs.Job job)
-    {
-        return VALIDATION_RUNS.computeIfAbsent(job, key -> new ValidationRuns());
-    }
-
-    /**
-     * Планирования и отмены задания проверки с последнего успешного запуска — вместо
-     * строки лога на каждое из них. «Отмены есть, а успеха нет» видно по пробе.
-     */
-    private static final class ValidationRuns
-    {
-        private int scheduled;
-        private int canceled;
-        private String firstScheduler;
-        private String lastScheduler;
-        private long firstAt;
-        private long lastAt;
-        private int loggedAtScheduled;
-        /** Разные стеки планирования и отмены со счётчиками и порядком первого появления. */
-        private final java.util.Map<String, int[]> scheduleStacks = new java.util.LinkedHashMap<>();
-        private final java.util.Map<String, int[]> cancelStacks = new java.util.LinkedHashMap<>();
-        private String lastScheduleStack;
-        private String lastCancelStack;
-
-        synchronized void scheduled(String thread, String stack)
-        {
-            scheduled++;
-            if (firstScheduler == null)
-            {
-                firstScheduler = thread;
-                firstAt = System.nanoTime();
-            }
-            lastScheduler = thread;
-            lastAt = System.nanoTime();
-            lastScheduleStack = stack;
-            count(scheduleStacks, stack);
-        }
-
-        synchronized void canceled(String stack)
-        {
-            canceled++;
-            lastAt = System.nanoTime();
-            lastCancelStack = stack;
-            count(cancelStacks, stack);
-        }
-
-        private static void count(java.util.Map<String, int[]> stacks, String stack)
-        {
-            int[] counter = stacks.get(stack);
-            if (counter != null)
-                counter[0]++;
-            else if (stacks.size() < 12)
-                stacks.put(stack, new int[] { 1 });
-        }
-
-        /**
-         * Стеки цикла «запланировано → отменено» одной записью: каждый разный стек один раз
-         * со счётчиком. Пишется, только если с прошлого успеха набралось от 10 планирований
-         * и с прошлой записи прибавилось столько же — обычная правка сюда не попадает.
-         */
-        synchronized void logLoopStacks(String when, org.eclipse.core.runtime.jobs.Job job)
-        {
-            if (scheduled < 10 || scheduled - loggedAtScheduled < 10)
-                return;
-            loggedAtScheduled = scheduled;
-            StringBuilder text = new StringBuilder("цикл проверки (" + when + ") job=" //$NON-NLS-1$ //$NON-NLS-2$
-                + System.identityHashCode(job) + " scheduled=" + scheduled + " canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
-                + " длительность_мс=" + (lastAt - firstAt) / 1_000_000L); //$NON-NLS-1$
-            append(text, "ПЛАНИРОВАНИЕ", scheduleStacks); //$NON-NLS-1$
-            append(text, "ОТМЕНА", cancelStacks); //$NON-NLS-1$
-            text.append(System.lineSeparator()).append("  ПОСЛЕДНЕЕ ПЛАНИРОВАНИЕ:") //$NON-NLS-1$
-                .append(lastScheduleStack)
-                .append(System.lineSeparator()).append("  ПОСЛЕДНЯЯ ОТМЕНА:") //$NON-NLS-1$
-                .append(lastCancelStack);
-            Global.tempLog("stale-markers", text.toString()); //$NON-NLS-1$
-        }
-
-        private static void append(StringBuilder text, String title, java.util.Map<String, int[]> stacks)
-        {
-            for (java.util.Map.Entry<String, int[]> entry : stacks.entrySet())
-                text.append(System.lineSeparator()).append("  ").append(title).append(" ×") //$NON-NLS-1$ //$NON-NLS-2$
-                    .append(entry.getValue()[0]).append(':').append(entry.getKey());
-        }
-
-        synchronized void reset()
-        {
-            scheduled = 0;
-            canceled = 0;
-            firstScheduler = null;
-            lastScheduler = null;
-            firstAt = 0;
-            lastAt = 0;
-            loggedAtScheduled = 0;
-            scheduleStacks.clear();
-            cancelStacks.clear();
-            lastScheduleStack = null;
-            lastCancelStack = null;
-        }
-
-        @Override
-        public synchronized String toString()
-        {
-            return "sinceOk{scheduled=" + scheduled + " canceled=" + canceled //$NON-NLS-1$ //$NON-NLS-2$
-                + " first=" + firstScheduler + " last=" + lastScheduler + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-    }
-    // #endregion
 
     /**
      * Только заглянуть в модель: без notify и без отмены {@code XtextReconciler}.
@@ -5241,9 +4522,6 @@ boolean inLiteral = endCaret >= 0
         contextPremiumAutoOpenCaret = -1;
         String skipText = event == null ? null : event.getText();
         boolean proposalApply = SmartCompletionProposal.isAnyApplyInProgress();
-        if (skipText != null && skipText.indexOf('"') >= 0)
-            Global.tempLog("assist-literal-quote", "document.quote apply=" + proposalApply //$NON-NLS-1$ //$NON-NLS-2$
-                + " offset=" + event.getOffset() + " length=" + skipText.length()); //$NON-NLS-1$ //$NON-NLS-2$
         if (skipText != null && proposalApply && (skipText.endsWith(".") //$NON-NLS-1$
             || skipText.indexOf('"') >= 0
             || (skipText.length() >= 4
@@ -5408,14 +4686,10 @@ boolean inLiteral = endCaret >= 0
         IDocument doc = event.getDocument();
         int eventCaret = event.getOffset() + event.getText().length();
         boolean irApply = Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
-        Global.tempLog("assist-literal-quote", "proposal.schedule from=" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-            + " to=" + eventCaret + " ir=" + irApply); //$NON-NLS-1$ //$NON-NLS-2$
         // JFace устанавливает выделение через getSelection уже после apply. До этого
         // момента не открывать новый список и не менять состояние завершаемой сессии.
         text.getDisplay().asyncExec(() ->
         {
-            Global.tempLog("assist-literal-quote", "proposal.afterSelection disposed=" + text.isDisposed() //$NON-NLS-1$ //$NON-NLS-2$
-                + " sameDocument=" + (viewer.getDocument() == doc)); //$NON-NLS-1$
             if (text.isDisposed() || viewer.getDocument() != doc)
             {
                 return;
@@ -5435,8 +4709,6 @@ boolean inLiteral = endCaret >= 0
                     ContentAssistPopupSync.isPopupVisible(assistant), 0);
                 boolean literalQuote = "quote".equals(branch) //$NON-NLS-1$
                     && caret > event.getOffset() && caret <= eventCaret;
-                Global.tempLog("assist-literal-quote", "proposal.check caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                    + " branch=" + branch + " literalQuote=" + literalQuote); //$NON-NLS-1$ //$NON-NLS-2$
                 if (irApply && caret != eventCaret && !literalQuote)
                     return;
                 if (!"dot".equals(branch) && !"commentLink".equals(branch) && !literalQuote) //$NON-NLS-1$ //$NON-NLS-2$
@@ -5451,7 +4723,6 @@ boolean inLiteral = endCaret >= 0
             }
             catch (org.eclipse.jface.text.BadLocationException e)
             {
-                Global.tempLog("assist-literal-quote", "proposal.error " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }

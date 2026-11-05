@@ -769,27 +769,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 value = value.substring(1);
             valueInfos.putIfAbsent(lower(value.trim()), entry.getValue());
         }
-        int infoQuote = literalQuote(doc, offset);
-        Global.tempLog("assist-literal-types", "finish proposals=" + result.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " infos=" + request.infos.size() + " quote=" + infoQuote); //$NON-NLS-1$ //$NON-NLS-2$
 
+        int quote = literalQuote(doc, offset);
         for (ICompletionProposal proposal : result)
         {
             if (!(SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable))
                 continue;
             Object info = request.infos.get(configurable.getReplacementString());
-            if (info == null && infoQuote >= 0)
-                info = valueInfos.get(dedupeKey(configurable, doc, infoQuote));
+            if (info == null && quote >= 0)
+                info = valueInfos.get(dedupeKey(configurable, doc, quote));
             if (info == null && request.added.contains(configurable))
                 info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
             if (info == null)
                 continue;
             describeProposal(configurable, info, viewer, resource, hover);
-            Global.tempLog("assist-literal-types", "replacement=" + configurable.getReplacementString() //$NON-NLS-1$ //$NON-NLS-2$
-                + " type=" + (info instanceof Property property //$NON-NLS-1$
-                    ? FunctionReturnTypes.typeSetText(property.getTypes()) : info.getClass().getName()));
         }
-        int quote = literalQuote(doc, offset);
         if (quote >= 0 && !request.fullValues.isEmpty())
             result.removeIf(proposal -> !request.fullValues.contains(dedupeKey(proposal, doc, quote)));
         if (quote < 0)
@@ -2826,7 +2820,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     continue;
                 Set<String> platform = platformPropertyNames(type);
                 for (Property property : type.getContextDef().allProperties())
-                    if (!platform.contains(lower(property.getName())))
+                    if (!property.isDependsOnMetadata() && !platform.contains(lower(property.getName())))
                     {
                         addUnique(names, dualName(property));
                         rememberProperty(property);
@@ -3061,10 +3055,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (def != null)
                     for (Property property : def.allProperties())
                     {
+                        // Шаблон платформы описывает произвольное имя, а не реальное свойство.
+                        if (property.isDependsOnMetadata())
+                        {
+                            Global.tempLog("literal-property-names", "skip template type=" + type.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                                + " property=" + property.getName()); //$NON-NLS-1$
+                            continue;
+                        }
                         addUnique(names, dualName(property));
                         rememberProperty(property);
                     }
             }
+            Global.tempLog("literal-property-names", "properties types=" + types.size() + " names=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return names;
         }
 

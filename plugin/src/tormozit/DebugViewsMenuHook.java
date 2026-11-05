@@ -1,25 +1,35 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.debug.core.DebugEvent;
+import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.debug.ui.IDebugUIConstants;
+import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IStartup;
@@ -27,13 +37,14 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.actions.SelectionProviderAction;
 
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
+import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 
 /**
- * «Отладить объект ИР» в контекстном меню панелей «Переменные», «Выражения» и
- * «Выражения встроенного языка».
+ * Команды значений в контекстном меню панелей «Переменные», «Выражения» и инспектора.
  * Только {@link SWT#MenuDetect} при правом клике — без partListener и без getViewer() на активации view.
  */
 public final class DebugViewsMenuHook implements IStartup
@@ -65,6 +76,8 @@ public final class DebugViewsMenuHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         display.addFilter(SWT.MenuDetect, DebugViewsMenuHook::handleMenuDetect);
+        WatchExpressionVariables.install(display);
+        UndefinedValueEditor.install();
         DebugViewsDebug.log("install MenuDetect filter"); //$NON-NLS-1$
     }
 
@@ -106,6 +119,7 @@ public final class DebugViewsMenuHook implements IStartup
                 boolean supported = selection instanceof IStructuredSelection structured
                     && structured.size() == 1 && isSupportedSelection(kind, structured.getFirstElement());
                 Menu menu = (Menu) e.widget;
+                addChangeValueItem(menu, selection, tree, suspended, addedItems);
                 MenuItem item = new MenuItem(menu, SWT.PUSH);
                 item.setText(ITEM_TEXT);
                 item.setEnabled(supported && suspended);
@@ -136,6 +150,332 @@ public final class DebugViewsMenuHook implements IStartup
                 });
             }
         };
+    }
+
+    /** Корневое выражение не реализует IVariable, необходимый штатной команде EDT. */
+    private static void addChangeValueItem(Menu menu, ISelection selection, Tree tree,
+        boolean suspended, List<MenuItem> addedItems)
+    {
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled()
+            || !(selection instanceof IStructuredSelection structured) || structured.size() != 1)
+            return;
+        for (MenuItem existing : menu.getItems())
+        {
+            if (existing.getData() instanceof ActionContributionItem contribution
+                && contribution.getAction() instanceof SelectionProviderAction stockAction
+                && stockAction.getClass().getSimpleName().equals("ChangeVariableValueAction")) //$NON-NLS-1$
+            {
+                adaptChangeValueAction(stockAction);
+                existing.setEnabled(suspended && stockAction.isEnabled());
+                return;
+            }
+            String label = existing.getText().replace("&", ""); //$NON-NLS-1$ //$NON-NLS-2$
+            if (existing.getData() instanceof SelectionProviderAction action
+                    && action.getClass().getSimpleName().equals("ChangeVariableValueAction") //$NON-NLS-1$
+                || label.startsWith("Изменить значение") //$NON-NLS-1$
+                || label.startsWith("Change Value") || label.startsWith("Change value")) //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+        }
+        ISelection adapted = adaptVariableSelection(selection);
+        if (!(adapted instanceof IStructuredSelection variables)
+            || !(variables.getFirstElement() instanceof IBslVariable variable))
+            return;
+
+        IStructuredSelection variableSelection = new StructuredSelection(variable);
+        SelectionProviderAction action = createChangeValueAction(
+            new FixedVariableSelection(variableSelection), tree.getShell());
+        if (action == null)
+            return;
+        action.selectionChanged(variableSelection);
+        MenuItem item = new MenuItem(menu, SWT.PUSH);
+        item.setText(action.getText());
+        item.setData(action);
+        if (action.getImageDescriptor() != null)
+        {
+            Image image = action.getImageDescriptor().createImage();
+            item.setImage(image);
+            item.addListener(SWT.Dispose, event -> image.dispose());
+        }
+        item.setEnabled(suspended && action.isEnabled());
+        ComfortSubmenuHelper.setMenuItemTooltip(item, action.getDescription());
+        item.addListener(SWT.Selection, event ->
+        {
+            if (variable.getDebugTarget().isSuspended() && variable.supportsValueModification())
+                action.run();
+        });
+        addedItems.add(item);
+    }
+
+    /** Класс и конструктор штатной команды подтверждены в debug-ui/ChangeVariableValueAction.javap.txt. */
+    private static SelectionProviderAction createChangeValueAction(ISelectionProvider provider, Shell shell)
+    {
+        try
+        {
+            Class<?> type = Platform.getBundle("com._1c.g5.v8.dt.debug.ui").loadClass( //$NON-NLS-1$
+                "com._1c.g5.v8.dt.internal.debug.ui.actions.ChangeVariableValueAction"); //$NON-NLS-1$
+            return (SelectionProviderAction) type.getConstructor(ISelectionProvider.class, Shell.class)
+                .newInstance(provider, shell);
+        }
+        catch (ReflectiveOperationException e)
+        {
+            DebugViewsDebug.logError("create stock change-value action", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** Поле provider подтверждено исходниками Eclipse SelectionProviderAction. */
+    private static void adaptChangeValueAction(SelectionProviderAction action)
+    {
+        ISelectionProvider original = action.getSelectionProvider();
+        if (!(original instanceof VariableSelectionProvider))
+        {
+            VariableSelectionProvider adapted = new VariableSelectionProvider(original);
+            if (!Global.setFieldForce(action, "provider", adapted)) //$NON-NLS-1$
+            {
+                return;
+            }
+            original.removeSelectionChangedListener(action);
+            adapted.addSelectionChangedListener(action);
+        }
+        ISelection selection = action.getSelectionProvider().getSelection();
+        action.selectionChanged(new SelectionChangedEvent(action.getSelectionProvider(), selection));
+    }
+
+    private static ISelection adaptVariableSelection(ISelection selection)
+    {
+        if (selection instanceof IStructuredSelection structured && structured.size() == 1
+            && structured.getFirstElement() instanceof IWatchExpression watch
+            && watch.isEnabled() && !watch.isPending() && !watch.hasErrors()
+            && watch.getValue() instanceof IBslValue value && value.getStackFrame() != null
+            && value.getParentUuid() != null && value.isEvaluated()
+            && !value.isPending() && !value.isUnreadable())
+            return new StructuredSelection(WatchExpressionVariables.create(watch, value));
+        return selection;
+    }
+
+    /** Адаптация выделения только для команды, без подмены модели дерева. */
+    private static final class VariableSelectionProvider implements ISelectionProvider
+    {
+        private final ISelectionProvider original;
+        private final Map<ISelectionChangedListener, ISelectionChangedListener> listeners = new HashMap<>();
+
+        VariableSelectionProvider(ISelectionProvider original)
+        {
+            this.original = original;
+        }
+
+        @Override
+        public ISelection getSelection()
+        {
+            return adaptVariableSelection(original.getSelection());
+        }
+
+        @Override
+        public void setSelection(ISelection selection)
+        {
+            // Штатная команда повторно выбирает IVariable; корневое выражение оставляем в дереве.
+            ISelection current = original.getSelection();
+            if (!(current instanceof IStructuredSelection structured)
+                || !(structured.getFirstElement() instanceof IWatchExpression))
+                original.setSelection(selection);
+        }
+
+        @Override
+        public void addSelectionChangedListener(ISelectionChangedListener listener)
+        {
+            if (listeners.containsKey(listener))
+                return;
+            ISelectionChangedListener forwarding = event -> listener.selectionChanged(
+                new SelectionChangedEvent(this, getSelection()));
+            listeners.put(listener, forwarding);
+            original.addSelectionChangedListener(forwarding);
+        }
+
+        @Override
+        public void removeSelectionChangedListener(ISelectionChangedListener listener)
+        {
+            ISelectionChangedListener forwarding = listeners.remove(listener);
+            if (forwarding != null)
+                original.removeSelectionChangedListener(forwarding);
+        }
+    }
+
+    /** Сохраняет выделенное выражение в дереве при работе штатной команды с его переменной. */
+    private static final class FixedVariableSelection implements ISelectionProvider
+    {
+        private final ISelection selection;
+
+        FixedVariableSelection(ISelection selection)
+        {
+            this.selection = selection;
+        }
+
+        @Override
+        public ISelection getSelection()
+        {
+            return selection;
+        }
+
+        @Override
+        public void setSelection(ISelection selection) { }
+
+        @Override
+        public void addSelectionChangedListener(ISelectionChangedListener listener) { }
+
+        @Override
+        public void removeSelectionChangedListener(ISelectionChangedListener listener) { }
+    }
+
+    /**
+     * Штатная фабрика сохраняет UUID и путь значения. BslVariable.fireVariableModifiedEvent
+     * посылает MODEL_SPECIFIC/10001 после успешного setValue/setTypedValue
+     * (debug-core/BslVariable.javap.txt); только тогда пересчитываем выражение.
+     */
+    private static final class UndefinedValueEditor
+    {
+        private static final String KEY = "tormozit.debugValueEditor.dialog"; //$NON-NLS-1$
+
+        static void install()
+        {
+            System.getProperties().put(KEY, (java.util.function.Consumer<Object[]>) event ->
+            {
+                String phase = (String) event[0];
+                Object dialog = event[1];
+
+                try
+                {
+                    if ("types".equals(phase)) //$NON-NLS-1$
+                    {
+                        Class<?> api = dialog.getClass().getClassLoader().loadClass(
+                            "com._1c.g5.v8.dt.internal.debug.ui.values.modify.IBslValueTypeEditor"); //$NON-NLS-1$
+                        Object editor = java.lang.reflect.Proxy.newProxyInstance(api.getClassLoader(),
+                            new Class<?>[] { api }, (proxy, method, args) -> switch (method.getName())
+                            {
+                                case "getLabel", "toString" -> "Неопределено"; //$NON-NLS-1$ //$NON-NLS-2$
+                                case "getModificationType" -> Void.class; //$NON-NLS-1$
+                                case "hashCode" -> System.identityHashCode(proxy); //$NON-NLS-1$
+                                case "equals" -> proxy == args[0]; //$NON-NLS-1$
+                                default -> null; // У Неопределено нет поля ввода и типизированного результата.
+                            });
+                        Object original = Global.getField(dialog, "delegates"); //$NON-NLS-1$
+                        if (original instanceof java.util.Collection<?> delegates)
+                        {
+                            List<Object> types = new ArrayList<>(delegates);
+                            types.add(0, editor);
+                            Global.setField(dialog, "delegates", types); //$NON-NLS-1$
+                        }
+                    }
+                    else if ("default".equals(phase)) //$NON-NLS-1$
+                    {
+                        Object types = Global.getField(dialog, "delegates"); //$NON-NLS-1$
+                        Object viewer = Global.getField(dialog, "typeViewer"); //$NON-NLS-1$
+                        if (types instanceof List<?> list && !list.isEmpty()
+                            && viewer instanceof org.eclipse.jface.viewers.ComboViewer combo)
+                            combo.setSelection(new StructuredSelection(list.get(0)));
+                    }
+                    else if ("ok".equals(phase)) //$NON-NLS-1$
+                    {
+                        Object viewer = Global.getField(dialog, "typeViewer"); //$NON-NLS-1$
+                        Object mode = Global.getField(dialog, "resultType"); //$NON-NLS-1$
+                        Object types = Global.getField(dialog, "delegates"); //$NON-NLS-1$
+                        if (viewer instanceof org.eclipse.jface.viewers.ComboViewer combo
+                            && types instanceof List<?> list && !list.isEmpty()
+                            && combo.getStructuredSelection().getFirstElement() == list.get(0)
+                            && mode instanceof Enum<?> current && "TYPED_MODIFICATION".equals(current.name())) //$NON-NLS-1$
+                        {
+                            for (Object constant : current.getDeclaringClass().getEnumConstants())
+                                if (constant instanceof Enum<?> value && "EXPRESSION".equals(value.name())) //$NON-NLS-1$
+                                    Global.setField(dialog, "resultType", constant); //$NON-NLS-1$
+                            Global.setField(dialog, "resultExpression", "Неопределено"); //$NON-NLS-1$
+                        }
+                    }
+                }
+                catch (Exception failure)
+                {
+                    DebugViewsDebug.logError("value editor dialog " + phase, failure); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+            });
+        }
+    }
+
+    private static final class WatchExpressionVariables
+    {
+        // BslVariable.equals сравнивает UUID/путь: WeakHashMap сохраняла первый из равных
+        // ключей, который мог исчезнуть ещё до события от реально редактируемого экземпляра.
+        private static final List<PendingWatchVariable> expressions = new ArrayList<>();
+        private static boolean installed;
+
+        private static final class PendingWatchVariable
+        {
+            final java.lang.ref.WeakReference<IBslVariable> variable;
+            final IWatchExpression watch;
+
+            PendingWatchVariable(IBslVariable variable, IWatchExpression watch)
+            {
+                this.variable = new java.lang.ref.WeakReference<>(variable);
+                this.watch = watch;
+            }
+        }
+
+        static IBslVariable create(IWatchExpression watch, IBslValue value)
+        {
+            IBslStackFrame frame = value.getStackFrame();
+            IBslVariable variable = frame.getDebugTarget().getVariablesFactory()
+                .createVariable(frame, watch.getExpressionText(), value);
+            synchronized (expressions)
+            {
+                expressions.removeIf(entry -> entry.variable.get() == null);
+                expressions.add(new PendingWatchVariable(variable, watch));
+            }
+
+            return variable;
+        }
+
+        private static IWatchExpression takeWatch(IBslVariable variable)
+        {
+            IWatchExpression result = null;
+            synchronized (expressions)
+            {
+                var iterator = expressions.iterator();
+                while (iterator.hasNext())
+                {
+                    PendingWatchVariable entry = iterator.next();
+                    IBslVariable candidate = entry.variable.get();
+                    if (candidate == variable)
+                        result = entry.watch;
+                    if (candidate == null || candidate == variable)
+                        iterator.remove();
+                }
+            }
+            return result;
+        }
+
+        static void install(Display display)
+        {
+            if (installed)
+                return;
+            installed = true;
+            DebugPlugin.getDefault().addDebugEventListener(events ->
+            {
+                for (DebugEvent event : events)
+                {
+                    if (event.getKind() != DebugEvent.MODEL_SPECIFIC || event.getDetail() != 10001
+                        || !(event.getSource() instanceof IBslVariable variable))
+                        continue;
+                    IWatchExpression watch = takeWatch(variable);
+
+                    if (watch == null)
+                        continue;
+
+                    if (!display.isDisposed())
+                        display.asyncExec(() ->
+                        {
+                            if (watch.isEnabled() && variable.getDebugTarget().isSuspended())
+                                watch.evaluate();
+                        });
+                }
+            });
+        }
     }
 
     private static void runCommand(AbstractDebugView view, ViewKind kind, Tree tree)

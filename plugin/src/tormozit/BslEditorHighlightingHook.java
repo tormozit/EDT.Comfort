@@ -96,7 +96,6 @@ public final class BslEditorHighlightingHook implements IStartup
                 XtextSourceViewer source = resolveSourceViewer(hr);
                 if (source == null || source.getXtextDocument() == null)
                     return false;
-                Global.tempLog("assist-highlighting", "deferred thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
                 applyHighlightingNow(reconciler);
                 return true;
             });
@@ -195,7 +194,6 @@ public final class BslEditorHighlightingHook implements IStartup
                         }
                         catch (Exception e)
                         {
-                            Global.tempLog("assist-highlighting", "job failed=" + e); //$NON-NLS-1$ //$NON-NLS-2$
                             Global.log(TAG, "applyHighlightingNow job failed: " //$NON-NLS-1$
                                 + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$
                         }
@@ -273,7 +271,6 @@ public final class BslEditorHighlightingHook implements IStartup
             || addedField == null || removedField == null || startMethod == null
             || reconcileMethod == null || updateMethod == null || stopMethod == null)
         {
-            Global.tempLog("assist-highlighting", "reflection members missing"); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "runFullHighlightingApply: reflection members missing"); //$NON-NLS-1$
             return;
         }
@@ -323,7 +320,6 @@ public final class BslEditorHighlightingHook implements IStartup
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
                     return;
 
-                long started = System.nanoTime();
                 HighlightingRead prepared = ContentAssistSessionReloader.readOnlyLowPriority(document, monitor,
                     resource -> {
                         if (monitor.isCanceled() || resource == null || resource.getParseResult() == null
@@ -340,8 +336,6 @@ public final class BslEditorHighlightingHook implements IStartup
                             new ArrayList<>((List<AttributedPosition>) addedField.get(hr)),
                             new ArrayList<>((List<AttributedPosition>) removedField.get(hr)));
                     });
-                Global.tempLog("assist-highlighting", "read ms=" + ((System.nanoTime() - started) / 1_000_000.0) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
                 if (prepared == null || presenter.isCanceled() || monitor.isCanceled())
                     return;
                 // Текстовая presentation использует готовые позиции, а не AST. Модель уже свободна.
@@ -380,7 +374,6 @@ public final class BslEditorHighlightingHook implements IStartup
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
-            Global.tempLog("assist-highlighting", "apply failed=" + cause); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "runFullHighlightingApply failed: " //$NON-NLS-1$
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
         }

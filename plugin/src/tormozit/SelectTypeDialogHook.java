@@ -167,8 +167,6 @@ public class SelectTypeDialogHook implements IStartup
             {
                 String name = McoreUtil.getTypeName(type);
                 String russian = McoreUtil.getTypeNameRu(type);
-                Global.tempLog("assist-type-menu", "prepareType name=" + name + " russian=" + russian //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " uri=" + EcoreUtil.getURI(type) + " proxy=" + type.eIsProxy()); //$NON-NLS-1$ //$NON-NLS-2$
                 Object classifier = TypeDescriptionPresentationHook.typeClassifier(type);
                 if (name == null || classifier == null)
                     throw new IllegalStateException("Не получено описание типа " + (russian != null ? russian : name)); //$NON-NLS-1$
@@ -189,7 +187,6 @@ public class SelectTypeDialogHook implements IStartup
         }
         catch (ReflectiveOperationException | RuntimeException | LinkageError error)
         {
-            Global.tempLogException("assist-type-menu", "openTypes.failed", error); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + error.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -276,8 +273,6 @@ public class SelectTypeDialogHook implements IStartup
         {
             if (engine != null)
                 Global.invoke(engine, "dispose"); //$NON-NLS-1$
-            if (suppliedInfo != null)
-                Global.tempLogException("assist-type-menu", "dialog.failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + e.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }

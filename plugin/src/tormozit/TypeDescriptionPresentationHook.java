@@ -373,9 +373,6 @@ final class TypeDescriptionPresentationHook
                 String category = dot < 0 ? name : name.substring(0, dot);
                 Object classifier = classifiers.getClassifier.invoke(classifiers.service, category,
                     current instanceof TypeSet);
-                Global.tempLog("assist-type-menu", "classifier type=" + McoreUtil.getTypeName(item) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " category=" + category + " typeSet=" + (current instanceof TypeSet) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " service=" + classifiers.service.getClass().getName() + " result=" + classifier); //$NON-NLS-1$ //$NON-NLS-2$
                 if (classifier != null)
                     return classifier;
             }

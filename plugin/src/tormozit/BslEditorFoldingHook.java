@@ -220,8 +220,6 @@ public final class BslEditorFoldingHook
                             return null;
                         return new Calculation(stamp, new java.util.LinkedHashSet<>(positions));
                     });
-                    Global.tempLog("assist-folding-model", "calculated generation=" + generation //$NON-NLS-1$ //$NON-NLS-2$
-                        + " current=" + (calculated != null)); //$NON-NLS-1$
                     if (calculated == null)
                         return org.eclipse.core.runtime.Status.CANCEL_STATUS;
                     if (calculated.positions == null)
@@ -238,7 +236,6 @@ public final class BslEditorFoldingHook
             }
             catch (Exception | LinkageError e)
             {
-                Global.tempLog("assist-folding-model", "failed error=" + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return org.eclipse.core.runtime.Status.CANCEL_STATUS;
             }
             finally

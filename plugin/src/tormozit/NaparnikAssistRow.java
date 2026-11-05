@@ -667,17 +667,7 @@ public final class NaparnikAssistRow
         long waitingStarted = System.nanoTime();
         if (!awaitModuleLinked(gen, waitingStarted) || gen != generation)
             return null;
-        long started = System.nanoTime();
-        Global.tempLog("assist-ai-context", "native.begin generation=" + gen + " modelHold=false"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        try
-        {
-            return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
-        }
-        finally
-        {
-            Global.tempLog("assist-ai-context", "native.end generation=" + gen //$NON-NLS-1$ //$NON-NLS-2$
-                + " current=" + generation + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        return Global.invoke(vm, "getAiContext", source); //$NON-NLS-1$
     }
 
     private void runRequest(int gen, Object vm, Object source, List<Word> words, Display display)

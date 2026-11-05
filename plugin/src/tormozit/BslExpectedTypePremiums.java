@@ -681,7 +681,6 @@ final class BslExpectedTypePremiums
     /** Родитель, независимые особые члены и статистика до первого показа фонового списка членов. */
     static ICompletionProposal[] prepareMemberList(IDocument document, int caret, ICompletionProposal[] list)
     {
-        BasePreparationTiming timing = new BasePreparationTiming();
         try
         {
             // Вызывается фоновым расчётом членов до публикации списка в UI.
@@ -697,64 +696,16 @@ final class BslExpectedTypePremiums
             {
                 Snapshot extended = extend(snapshot, list);
                 publish(extended);
-                timing.result = snapshot.complete() ? "cachedFull" : "cachedBase"; //$NON-NLS-1$ //$NON-NLS-2$
                 return withAddedWords(list, extended);
             }
             active = null;
-            Snapshot computed = compute(context, activeProject(), list, false, timing);
+            Snapshot computed = compute(context, activeProject(), list, false);
             publish(computed);
-            timing.result = computed != null ? "computed" : "noSnapshot"; //$NON-NLS-1$ //$NON-NLS-2$
             return computed != null ? withAddedWords(list, computed) : list;
         }
         catch (Exception error)
         {
-            timing.result = "error:" + error.getClass().getName(); //$NON-NLS-1$
-            Global.tempLog("completion-base", "prepareMemberList: " + error); //$NON-NLS-1$ //$NON-NLS-2$
             return list;
-        }
-        finally
-        {
-            timing.log(caret, list == null ? -1 : list.length);
-        }
-    }
-
-    /** Временный безусловный замер добавленного участка до публикации списка; все интервалы — мс. */
-    private static final class BasePreparationTiming
-    {
-        final long started = System.nanoTime();
-        long readRequested;
-        long modelEntered;
-        long modelExited;
-        long readReturned;
-        long rankingStarted;
-        long rankingFinished;
-        String result = "skipped"; //$NON-NLS-1$
-        long phaseStarted;
-        final StringBuilder phases = new StringBuilder();
-
-        void phase(String name)
-        {
-            long now = System.nanoTime();
-            if (phaseStarted != 0)
-                phases.append(' ').append(name).append("Ms=").append(millis(phaseStarted, now)); //$NON-NLS-1$
-            phaseStarted = now;
-        }
-
-        void log(int caret, int count)
-        {
-            long finished = System.nanoTime();
-            Global.tempLog("completion-base", "prepare id=" + started //$NON-NLS-1$ //$NON-NLS-2$
-                + " caret=" + caret + " count=" + count + " result=" + result //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " totalMs=" + millis(started, finished) //$NON-NLS-1$
-                + " beforeModelMs=" + millis(readRequested, modelEntered) //$NON-NLS-1$
-                + " modelMs=" + millis(modelEntered, modelExited) //$NON-NLS-1$
-                + " readReturnMs=" + millis(modelExited, readReturned) //$NON-NLS-1$
-                + " rankingMs=" + millis(rankingStarted, rankingFinished) + phases); //$NON-NLS-1$
-        }
-
-        private static double millis(long from, long to)
-        {
-            return from == 0 || to == 0 ? -1 : (to - from) / 1_000_000.0;
         }
     }
 
@@ -789,7 +740,6 @@ final class BslExpectedTypePremiums
         {
             if (Display.getCurrent() != null)
             {
-                long started = System.nanoTime();
                 boolean covered = snapshot.covers(list);
                 active = snapshot;
                 // Восстановленный полный список может содержать тысячи новых строк.
@@ -798,8 +748,6 @@ final class BslExpectedTypePremiums
                     schedule(context, snapshot.project(), list.clone());
                 else if (!covered)
                     schedule(context, snapshot.project(), list.clone(), snapshot);
-                Global.tempLog("completion-ui-snapshot", "count=" + list.length + " covered=" + covered //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " complete=" + snapshot.complete() + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             publish(extend(snapshot, list));
@@ -1011,9 +959,6 @@ final class BslExpectedTypePremiums
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                long started = System.nanoTime();
-                String route = extensionBase == null ? "full" : "extend"; //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog("completion-premium-job", "begin route=" + route + " count=" + list.length); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 try
                 {
                     if (!context.sameAs(requested) || revision != foreignParameterRevision)
@@ -1042,8 +987,6 @@ final class BslExpectedTypePremiums
                 }
                 finally
                 {
-                    Global.tempLog("completion-premium-job", "end route=" + route + " count=" + list.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " ms=" + ((System.nanoTime() - started) / 1_000_000.0)); //$NON-NLS-1$
                     if (pending == context)
                         pending = null;
                 }
@@ -1096,11 +1039,10 @@ final class BslExpectedTypePremiums
 
     private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list)
     {
-        return compute(context, project, list, true, null);
+        return compute(context, project, list, true);
     }
 
-    private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list, boolean complete,
-        BasePreparationTiming timing)
+    private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list, boolean complete)
     {
         long parameterRevision = foreignParameterRevision;
         Scene[] scene = new Scene[1];
@@ -1108,61 +1050,33 @@ final class BslExpectedTypePremiums
         Boolean read;
         try
         {
-            if (timing != null)
-                timing.readRequested = System.nanoTime();
             read = ContentAssistSessionReloader.readOnlyForContentAssist((IXtextDocument)context.document(),
                 resource -> BslNodeLookup.read(state ->
                 {
-                    if (timing != null)
-                        timing.modelEntered = System.nanoTime();
+                    if (resource == null)
+                        return Boolean.FALSE;
+                    READ_RESOURCE.set(resource);
                     try
                     {
-                        if (resource == null)
-                            return Boolean.FALSE;
-                        READ_RESOURCE.set(resource);
-                        try
-                        {
-                            scene[0] = scene(resource, context, list, complete, timing);
-                            if (scene[0].expectation() != null)
-                                collectVariableTypes(resource, context, list, variableTypes);
-                        }
-                        finally
-                        {
-                            READ_RESOURCE.remove();
-                        }
-                        return Boolean.TRUE;
+                        scene[0] = scene(resource, context, list, complete);
+                        if (scene[0].expectation() != null)
+                            collectVariableTypes(resource, context, list, variableTypes);
                     }
                     finally
                     {
-                        if (timing != null)
-                            timing.modelExited = System.nanoTime();
+                        READ_RESOURCE.remove();
                     }
+                    return Boolean.TRUE;
                 }, resource));
         }
         catch (RuntimeException e)
         {
             return null;
         }
-        finally
-        {
-            if (timing != null)
-                timing.readReturned = System.nanoTime();
-        }
         if (!Boolean.TRUE.equals(read) || scene[0] == null)
             return null;
         Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
-        Premiums premiums;
-        if (timing != null)
-            timing.rankingStarted = System.nanoTime();
-        try
-        {
-            premiums = premiums(context, scene[0], project, list, variableTypes, added);
-        }
-        finally
-        {
-            if (timing != null)
-                timing.rankingFinished = System.nanoTime();
-        }
+        Premiums premiums = premiums(context, scene[0], project, list, variableTypes, added);
         Set<String> evaluated = new HashSet<>();
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
@@ -1175,14 +1089,11 @@ final class BslExpectedTypePremiums
 
     private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list)
     {
-        return scene(resource, context, list, true, null);
+        return scene(resource, context, list, true);
     }
 
-    private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list, boolean complete,
-        BasePreparationTiming timing)
+    private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list, boolean complete)
     {
-        if (timing != null)
-            timing.phase("start"); //$NON-NLS-1$
         Matcher literal = TYPE_LITERAL.matcher(context.preceding());
         if (literal.find())
         {
@@ -1203,34 +1114,22 @@ final class BslExpectedTypePremiums
             return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
                 Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of(), null, null);
         }
-        if (timing != null)
-            timing.phase("literalProbe"); //$NON-NLS-1$
         ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
         if (site != null && !site.contains(context.start()))
             site = null;
-        if (timing != null)
-            timing.phase("callSite"); //$NON-NLS-1$
         Expectation expectation = complete ? expectation(resource, context, site, list) : null;
-        if (timing != null)
-            timing.phase("expectation"); //$NON-NLS-1$
         List<TypeItem> parentTypes = context.parent().isEmpty() ? List.of()
             : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
-        if (timing != null)
-            timing.phase("parentTypes"); //$NON-NLS-1$
         String statisticsContext = statisticsContext(resource, context, parentTypes);
         String legacyStatisticsContext = statisticsContext != null && !statisticsContext.startsWith("Форма.") //$NON-NLS-1$
             && !context.parent().isEmpty() ? formStatisticsContext(resource,
                 findExpression(resource, context.start(), context.anchor() - 1), context.anchor() - 1) : null;
         boolean insideExpression = insideExpression(context, site);
-        if (timing != null)
-            timing.phase("statisticsContext"); //$NON-NLS-1$
         Map<String, String> memberNames = new LinkedHashMap<>();
         Map<String, Integer> frequencies = context.parent().isEmpty() ? Collections.emptyMap()
             : memberFrequencies(resource, context, memberNames);
         Map<String, List<String>> memberTypes = complete && !memberNames.isEmpty()
             ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
-        if (timing != null)
-            timing.phase("frequencies"); //$NON-NLS-1$
         // В комментарии слово — не выражение, приёмника у него нет.
         boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret());
         String receiverLine = comment ? null : receiverTypeLine(expectation, resource);
@@ -1239,11 +1138,7 @@ final class BslExpectedTypePremiums
                     : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 : FunctionReturnTypes.typeSetText(expectation.typeItems());
         Map<String, String> predefined = predefinedTypes(resource, expectation, list);
-        if (timing != null)
-            timing.phase("typeLabels"); //$NON-NLS-1$
         Facts facts = facts(resource, context, expectation, site, parentTypes);
-        if (timing != null)
-            timing.phase("facts"); //$NON-NLS-1$
         List<String> parentDisplayTypes = displayTypeNames(parentTypes, resource);
         Set<String> specializedParents = new LinkedHashSet<>();
         for (TypeItem item : parentTypes)
@@ -1257,8 +1152,6 @@ final class BslExpectedTypePremiums
                 if (FormItemTypes.isPresentationExtension(item))
                     specializedParents.add(FunctionReturnTypes.typeName(item));
         String specializedParentLabel = specializedParents.size() == 1 ? specializedParents.iterator().next() : null;
-        if (timing != null)
-            timing.phase("parentLabels"); //$NON-NLS-1$
         return new Scene(expectation, statisticsContext, insideExpression, frequencies, receiverLine, expectedTypeText,
             predefined, facts, List.of(), parentDisplayTypes, memberNames, memberTypes, legacyStatisticsContext,
             specializedParentLabel);
@@ -2782,7 +2675,6 @@ final class BslExpectedTypePremiums
                 PLATFORM_CHOICE_MEMBERS.put(lower(name), new PlatformChoiceMembers(Set.copyOf(properties),
                     Set.copyOf(methods), true, false));
             }
-            Global.tempLog("assist-choice-statistics", "formItemType=" + name + " types=" + typeNames(new ArrayList<>(types))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return name;
         }
         return null;
@@ -4027,20 +3919,25 @@ final class BslExpectedTypePremiums
             {
                 String name = group.getKey();
                 String key = lower(name);
+                String prefix = name.substring(0, name.length() - 1);
+                ICompletionProposal rankingMember = null;
+                for (ICompletionProposal proposal : list)
+                {
+                    if (startsWithIgnoreCase(SmartContentAssistProcessor.filterMatchName(proposal), prefix))
+                    {
+                        rankingMember = proposal;
+                        break;
+                    }
+                }
                 if (!proposals.containsKey(key))
                     added.putIfAbsent(key, new BslAddedWordProposal(name, BslAddedWordProposal.Kind.PROPERTY, name,
                         BslAddedWordProposal.Absorb.WORD, -1, "", null, false, false, true) //$NON-NLS-1$
-                            .withAdditionalInfo(group.getValue()));
+                            .withAdditionalInfo(group.getValue()).withRankingMember(rankingMember));
             }
         }
 
         void surroundingConstructions()
         {
-            Global.tempLog("completion-constructions", "offer line=" + line + " caret=" + context.caret() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " anchor=" + context.anchor() + " parent=" + parent + " word=" + currentWord() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " prefixBlank=" + lineBeforeWord.isBlank() + " suffixBlank=" + lineAfterWord.isBlank() //$NON-NLS-1$ //$NON-NLS-2$
-                + " insideExpression=" + scene.insideExpression() + " betweenMethods=" + facts.betweenMethods() //$NON-NLS-1$ //$NON-NLS-2$
-                + " selectedLength=" + context.selected().length()); //$NON-NLS-1$
             if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
                 return;
             String selected = context.selected();
@@ -4079,8 +3976,6 @@ final class BslExpectedTypePremiums
                 construction("Функция КонецФункции", between ? 2 : 0, false); //$NON-NLS-1$
                 construction("Процедура КонецПроцедуры", between ? 2 : 0, false); //$NON-NLS-1$
             }
-            Global.tempLog("completion-constructions", "offered emptyLine=" + emptyLine + " wholeLines=" + wholeLines //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " added=" + added.keySet()); //$NON-NLS-1$
         }
 
         /** {@code мКонтекст} без родителя: слово у каретки целиком. */
@@ -5337,8 +5232,6 @@ final class BslExpectedTypePremiums
         @Override
         public void applied(ICompletionProposal proposal)
         {
-            Global.tempLog("assist-choice-statistics", "applied " //$NON-NLS-1$ //$NON-NLS-2$
-                + (proposal != null ? proposal.getDisplayString() : null));
             try
             {
                 BslQueryLiteralSupport.QueryChoice query = proposal != null ? BslQueryLiteralSupport.choiceOf(proposal) : null;
@@ -5381,10 +5274,6 @@ final class BslExpectedTypePremiums
                 boolean projectWord = isProjectChoice(context, word, method, members,
                     isKnownPlatformChoice(context, word, method)
                         || isPlatformWord(proposal, statisticsFeature(info), snapshot.scene().predefinedTypes()));
-                Global.tempLog("assist-choice-statistics", "context=" + context + " word=" + word //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " method=" + method + " dynamic=" + dynamic + " project=" + projectWord //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " parentTypes=" + parentTypes + " members=" + members //$NON-NLS-1$ //$NON-NLS-2$
-                    + " info=" + (info != null ? info.getClass().getName() : null)); //$NON-NLS-1$
                 if (dynamic)
                     return;
                 // Без проекта слову проекта места нет: в таблицу рабочей области оно не пишется
@@ -5395,7 +5284,6 @@ final class BslExpectedTypePremiums
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException("assist-choice-statistics", "applied failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -5630,8 +5518,6 @@ final class BslExpectedTypePremiums
                 iterator.remove();
                 moved++;
             }
-            Global.tempLog("assist-choice-statistics", "formMigration source=" + previousContext //$NON-NLS-1$ //$NON-NLS-2$
-                + " target=" + context + " moved=" + moved); //$NON-NLS-1$ //$NON-NLS-2$
             if (moved > 0)
             {
                 DIRTY.add(source);
@@ -5794,8 +5680,6 @@ final class BslExpectedTypePremiums
                         }
                     }
                 }
-                Global.tempLog("assist-choice-statistics", "migration file=" + file + " removed=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + removed + " movedToWorkspace=" + moved + " remaining=" + rows.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 DIRTY.add(file);
                 scheduleSave();
             }

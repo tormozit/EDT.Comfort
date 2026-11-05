@@ -84,6 +84,19 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
     private boolean suppliedByLiteralProvider;
     /** Слово ранжируется наравне со строками EDT: при равной премии не поднимается выше них. */
     private boolean rankedWithStock;
+    /** Штатный член группы: источник её позиции и приоритета в списке EDT. */
+    private ICompletionProposal rankingMember;
+
+    BslAddedWordProposal withRankingMember(ICompletionProposal member)
+    {
+        rankingMember = member;
+        return rankedWithStock();
+    }
+
+    ICompletionProposal getRankingMember()
+    {
+        return rankingMember;
+    }
     /** Член найден в тексте метода, его наличие у приёмника EDT не подтверждает. */
     private boolean ghostMember;
     private List<String> inferredTypes = List.of();
@@ -203,7 +216,6 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         int caret = offset >= 0 ? Math.min(offset, document.getLength()) : document.getLength();
         Boolean previousApply = SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get();
         SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
-        Global.tempLog("assist-literal-quote", "added.apply caret=" + caret + " word=" + word); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         try
         {
             if (closing != null)
@@ -486,8 +498,6 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         boolean generator = isCodeGenerator(word);
         boolean codeTemplate = isCodeTemplate(word) || kind == Kind.CONSTRUCTION
             && (closing != null || template.contains(CARET) || template.contains(CENTER) || template.indexOf('\n') >= 0);
-        Global.tempLog("completion-generator-icon", "word=" + word + " generator=" + generator //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " template=" + codeTemplate + " kind=" + kind + " surrounding=" + (closing != null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (generator)
             return codeGeneratorImage();
         if (codeTemplate)
