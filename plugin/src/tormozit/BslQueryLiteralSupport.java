@@ -432,7 +432,7 @@ final class BslQueryLiteralSupport
         }
     }
 
-    /** Хаб EDT не должен проверять отдельные фрагменты составного текста запроса (issue 373). */
+    /** Хаб EDT пропускает фрагменты составного запроса (issue 373) и пустую заготовку «ВЫБРАТЬ». */
     static void installCheckWeavingHook()
     {
         QueryLiteralWeaving.install();
@@ -505,6 +505,13 @@ final class BslQueryLiteralSupport
             && binary.getOperation() == BinaryOperation.PLUS;
     }
 
+    /** Текст читается через lines(false), как в BslQlDelegatingCheck.getQueryText. */
+    private static boolean shouldSkipHubCheck(Object object)
+    {
+        return isConcatenatedLiteral(object) || object instanceof StringLiteral literal
+            && "ВЫБРАТЬ".equalsIgnoreCase(String.join("\n", literal.lines(false)).strip()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     /** Мост через JDK Predicate: бандлу EDT не нужна зависимость от Комфорт. */
     private static final class QueryLiteralWeaving implements WeavingHook
     {
@@ -524,7 +531,7 @@ final class BslQueryLiteralSupport
         {
             if (!INSTALLED.compareAndSet(false, true))
                 return;
-            System.getProperties().put(CALLBACK, (Predicate<Object>) BslQueryLiteralSupport::isConcatenatedLiteral);
+            System.getProperties().put(CALLBACK, (Predicate<Object>) BslQueryLiteralSupport::shouldSkipHubCheck);
             System.getProperties().put(COMPLETION_CALLBACK,
                 (Predicate<Object>) BslQueryLiteralSupport::applyNativeEmptyPrefixRestriction);
             System.getProperties().put(LITERALS_CALLBACK,
@@ -1090,6 +1097,14 @@ final class BslQueryLiteralSupport
             if (i == n || i == start)
                 return false;
             String word = text.substring(start, i);
+            if ("ВЫБРАТЬ".equalsIgnoreCase(word)) //$NON-NLS-1$
+            {
+                int contentStart = i;
+                while (contentStart < n && Character.isWhitespace(text.charAt(contentStart)))
+                    contentStart++;
+                if (contentStart == n)
+                    return false;
+            }
             for (String w : QUERY_START_WORDS)
             {
                 if (w.equalsIgnoreCase(word))

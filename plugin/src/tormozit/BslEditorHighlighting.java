@@ -466,7 +466,15 @@ public final class BslEditorHighlighting
                 else
                     break;
             }
-            return startsWithWord(content, i, "ВЫБРАТЬ") || startsWithWord(content, i, "SELECT") //$NON-NLS-1$ //$NON-NLS-2$
+            if (startsWithWord(content, i, "ВЫБРАТЬ")) //$NON-NLS-1$
+            {
+                int contentStart = i + "ВЫБРАТЬ".length(); //$NON-NLS-1$
+                while (contentStart < length
+                    && (Character.isWhitespace(content.charAt(contentStart)) || content.charAt(contentStart) == '|'))
+                    contentStart++;
+                return contentStart < length;
+            }
+            return startsWithWord(content, i, "SELECT") //$NON-NLS-1$
                 || startsWithWord(content, i, "УНИЧТОЖИТЬ") || startsWithWord(content, i, "DROP"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 

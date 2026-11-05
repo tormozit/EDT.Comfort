@@ -44,17 +44,28 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.Return
 import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Block;
+import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.BinaryPreprocessorExpression;
+import com._1c.g5.v8.dt.bsl.model.BracketPreprocessorExpression;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Conditional;
 import com._1c.g5.v8.dt.bsl.model.IfStatement;
+import com._1c.g5.v8.dt.bsl.model.IfPreprocessor;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorConditional;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorExpression;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorIfConditional;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorLiteralExpression;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorLiteralExpressionType;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
+import com._1c.g5.v8.dt.bsl.model.UnaryOperation;
+import com._1c.g5.v8.dt.bsl.model.UnaryPreprocessorExpression;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.impl.InvocationImpl;
 import com._1c.g5.v8.dt.bsl.model.impl.StaticFeatureAccessImpl;
@@ -69,6 +80,7 @@ import com._1c.g5.v8.dt.bsl.typesystem.InvocationTypesComputerExtensionRegistry;
 import com._1c.g5.v8.dt.bsl.typesystem.util.CreatorTreeState;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.mcore.ContextDef;
+import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environment;
 import com._1c.g5.v8.dt.mcore.util.Environments;
@@ -543,6 +555,9 @@ public final class BslDocCommentComputedTypes
     {
         if (!installed.compareAndSet(false, true))
             return;
+        System.getProperties().put("tormozit.preprocessor.typeHintEnvironments", //$NON-NLS-1$
+            (java.util.function.BiFunction<Object, Object, Object>) (expression, environments) ->
+                typeHintEnvironments((EObject)expression, (Environments)environments));
         Bundle bundle = FrameworkUtil.getBundle(BslDocCommentComputedTypes.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
@@ -2746,13 +2761,151 @@ public final class BslDocCommentComputedTypes
         return -1;
     }
 
+    /** Окружение только для привязки имён и вывода типа присвоений в ветке-подсказке. */
+    public static Environments typeHintEnvironments(EObject expression, Environments original)
+    {
+        if (original == null || !original.isEmpty())
+            return original;
+
+        boolean assignment = false;
+        for (EObject owner = expression; owner != null && !(owner instanceof Block); owner = owner.eContainer())
+        {
+            if (owner instanceof SimpleStatement simple && simple.getLeft() instanceof StaticFeatureAccess
+                && simple.getRight() != null)
+                assignment = true;
+            if (!(owner instanceof PreprocessorConditional))
+                continue;
+            if (!assignment || !(owner instanceof PreprocessorIfConditional branch)
+                || !(branch.eContainer() instanceof IfPreprocessor directive) || directive.getIfPart() != branch
+                || !directive.getElsIfParts().isEmpty() || directive.getElseElement() != null
+                || !isServerTypeHint(branch.getPredicate()))
+                return original;
+
+            for (EObject outer = directive.eContainer(); outer != null; outer = outer.eContainer())
+                    return environmental.environments();
+            return original;
+        }
+        return original;
+    }
+
+    private static boolean isServerTypeHint(PreprocessorExpression predicate)
+    {
+        return unbracket(predicate) instanceof BinaryPreprocessorExpression binary
+            && binary.getOperation() == BinaryOperation.AND
+            && (isServerLiteral(binary.getLeft()) && isNotServerLiteral(binary.getRight())
+                || isServerLiteral(binary.getRight()) && isNotServerLiteral(binary.getLeft()));
+    }
+
+    private static boolean isNotServerLiteral(PreprocessorExpression expression)
+    {
+        return unbracket(expression) instanceof UnaryPreprocessorExpression unary
+            && unary.getOperation() == UnaryOperation.NOT && isServerLiteral(unary.getOperand());
+    }
+
+    private static boolean isServerLiteral(PreprocessorExpression expression)
+    {
+        return unbracket(expression) instanceof PreprocessorLiteralExpression literal
+            && literal.getTypeLiteral() == PreprocessorLiteralExpressionType.SERVER;
+    }
+
+    private static PreprocessorExpression unbracket(PreprocessorExpression expression)
+    {
+        while (expression instanceof BracketPreprocessorExpression bracket)
+            expression = bracket.getOperand();
+        return expression;
+    }
+
     private static final class ParseWeavingHook implements WeavingHook
     {
+        private static final String INSTALLER =
+            "com._1c.g5.v8.dt.bsl.resource.BslDerivedStateComputer$StaticFeatureAccessInstaller"; //$NON-NLS-1$
+        private static final String RESOLVER =
+            "com._1c.g5.v8.dt.bsl.resource.BslResource$StaticFeatureAccessResolver"; //$NON-NLS-1$
+        private static final String ENV = "Lcom/_1c/g5/v8/dt/mcore/util/Environments;"; //$NON-NLS-1$
+        private static final String OBJECT = "Lorg/eclipse/emf/ecore/EObject;"; //$NON-NLS-1$
+        private static final String TYPE_UTIL = "com/_1c/g5/v8/dt/bsl/typesystem/util/TypeSystemUtil"; //$NON-NLS-1$
+
+        /** Привязка имён и состояния присвоения используют то же окружение, что TypesComputer. */
+        private static byte[] transformTypeHintEnvironments(String className, byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] sites = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor delegate = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean selected = switch (className)
+                    {
+                        case INSTALLER -> "installFeatureEntries".equals(name) || "installImplicitVariable".equals(name); //$NON-NLS-1$ //$NON-NLS-2$
+                        case RESOLVER -> "computeNotCoverageEnvs".equals(name); //$NON-NLS-1$
+                        case TARGET_CREATOR -> "doInternalProcessAssignedOperator".equals(name); //$NON-NLS-1$
+                        default -> false;
+                    };
+                    if (delegate == null || !selected)
+                        return delegate;
+                    return new MethodVisitor(Opcodes.ASM9, delegate)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String desc,
+                            boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKESTATIC && TYPE_UTIL.equals(owner)
+                                && "getActualEnvironments".equals(method) //$NON-NLS-1$
+                                && ("(" + OBJECT + "Lcom/_1c/g5/v8/dt/bsl/model/resource/owner/IBslOwnerComputerService;)" //$NON-NLS-1$ //$NON-NLS-2$
+                                    + ENV).equals(desc))
+                            {
+                                // Сохраняем объект вызова рядом со штатным результатом.
+                                super.visitInsn(Opcodes.DUP2);
+                                super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitInsn(Opcodes.POP);
+                                adjustEnvironment();
+                                return;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                        }
+
+                        private void adjustEnvironment()
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "typeHintEnvironments", //$NON-NLS-1$
+                                "(" + OBJECT + ENV + ")" + ENV, false); //$NON-NLS-1$ //$NON-NLS-2$
+                            sites[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            int expected = INSTALLER.equals(className) || TARGET_CREATOR.equals(className) ? 2 : 1;
+            return sites[0] == expected ? writer.toByteArray() : bytes;
+        }
+
         @Override
         public void weave(WovenClass wovenClass)
         {
             if (wovenClass.getState() != WovenClass.TRANSFORMING)
                 return;
+            String className = wovenClass.getClassName();
+            if (INSTALLER.equals(className) || RESOLVER.equals(className))
+            {
+                try
+                {
+                    byte[] original = wovenClass.getBytes();
+                    byte[] transformed = transformTypeHintEnvironments(className, original);
+                    if (transformed != original)
+                    {
+                        wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$
+                        wovenClass.setBytes(transformed);
+                    }
+                }
+                catch (RuntimeException | LinkageError ignored)
+                {
+                    // Несовместимая версия EDT сохраняет штатный код класса.
+                }
+                return;
+            }
             if (TARGET_CREATOR.equals(wovenClass.getClassName()))
             {
                 weaveCreator(wovenClass);
@@ -2782,7 +2935,11 @@ public final class BslDocCommentComputedTypes
         {
             try
             {
-                byte[] transformed = transformCreatorClass(wovenClass.getBytes());
+                byte[] original = wovenClass.getBytes();
+                byte[] withTypeHints = transformTypeHintEnvironments(TARGET_CREATOR, original);
+                byte[] transformed = transformCreatorClass(withTypeHints);
+                if (transformed == null && withTypeHints != original)
+                    transformed = withTypeHints;
                 if (transformed != null)
                 {
                     wovenClass.getDynamicImports().add("tormozit"); //$NON-NLS-1$

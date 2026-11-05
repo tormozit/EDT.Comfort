@@ -314,7 +314,7 @@ public final class Activator
         private static final String GROUP = "tormozit.comfort.feature.feature.group";
         private static final String CALLBACK = "tormozit.p2.install.replacementComparison";
         private static final java.nio.file.Path LOG = java.nio.file.Path.of(
-            "C:/VC/EDT.Comfort/.tmp/issue-976/runtime.log");
+            "C:/VC/EDT.Comfort/.tmp/plugin-version-install/runtime.log");
         private final FrameworkLog fallback;
 
         private P2InstallOperationWeaving(BundleContext context)
@@ -2652,13 +2652,32 @@ public final class Activator
     private static final class ArrayElementTypesWeaving implements WeavingHook
     {
         private static final String CALLBACK = "tormozit.arrayElementTypes.variableTypes"; //$NON-NLS-1$
+        private static final String TYPE_HINT_ENVIRONMENTS = "tormozit.preprocessor.typeHintEnvironments"; //$NON-NLS-1$
         private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
         private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
         private static final String STATUS = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
+
+        private static void adjustTypeHintEnvironments(MethodVisitor visitor)
+        {
+            visitor.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            visitor.visitLdcInsn(TYPE_HINT_ENVIRONMENTS);
+            visitor.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            visitor.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+            visitor.visitVarInsn(Opcodes.ALOAD, 1);
+            visitor.visitVarInsn(Opcodes.ALOAD, 2);
+            visitor.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            visitor.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/mcore/util/Environments"); //$NON-NLS-1$
+            visitor.visitVarInsn(Opcodes.ASTORE, 2);
+        }
         static void install(BundleContext context)
         {
             System.getProperties().putIfAbsent(CALLBACK,
                 (Function<Object, Object>) payload -> ((Object[])payload)[0]);
+            System.getProperties().putIfAbsent(TYPE_HINT_ENVIRONMENTS,
+                (java.util.function.BiFunction<Object, Object, Object>) (expression, environments) -> environments);
             context.registerService(WeavingHook.class, new ArrayElementTypesWeaving(), null);
             System.getProperties().put(STATUS, Boolean.TRUE);
         }
@@ -2708,6 +2727,14 @@ public final class Activator
                         return visitor;
                     return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9, visitor)
                     {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            if (!variableUtility)
+                                adjustTypeHintEnvironments(this);
+                        }
+
                         @Override
                         public void visitInsn(int opcode)
                         {
@@ -3644,6 +3671,19 @@ public final class Activator
                     String signature, String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    // BslUtil.getRealObject заново берёт окружение узла при разрешении вызываемого метода.
+                    if (mv != null && "getLastObject".equals(name) && descriptor.equals( //$NON-NLS-1$
+                        "(Lcom/_1c/g5/v8/dt/bsl/model/DynamicFeatureAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;Z)Ljava/util/List;")) //$NON-NLS-1$
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                ArrayElementTypesWeaving.adjustTypeHintEnvironments(this);
+                                touched.set(true);
+                            }
+                        };
                     if (mv != null && "getAllMethodAndProperties".equals(name) && ALL_MEMBERS_DESC.equals(descriptor)) //$NON-NLS-1$
                         return new MethodVisitor(Opcodes.ASM9, mv)
                         {
