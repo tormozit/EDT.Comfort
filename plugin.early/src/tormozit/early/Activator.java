@@ -66,6 +66,7 @@ public final class Activator
         DerivedCheckCancellation.install(context);
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
+        EmptyExceptStatementWeaving.install(context);
         P2InstallOperationWeaving.install(context);
         DebugValueEditorDialogWeaving.install(context);
     }
@@ -82,6 +83,108 @@ public final class Activator
         System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
         System.getProperties().put(CheckDurations.CALLBACK + ".monitor", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
+    }
+
+    /** Уточнение штатной empty-except-statement без добавления второй проверки (#988). */
+    private static final class EmptyExceptStatementWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com.e1c.v8codestyle.bsl.check.EmptyExceptStatementCheck";
+        private static final String CALLBACK = "tormozit.emptyExcept.issue";
+        private static final String TITLE =
+            "Конструкция \"Попытка…Исключение…КонецПопытки\" имеет пустое исключение";
+        private static final String EMIT_DESCRIPTOR =
+            "(Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;"
+            + "Lcom/_1c/g5/v8/dt/bsl/model/TryExceptStatement;Lorg/eclipse/emf/common/util/EList;)V";
+
+        static void install(BundleContext context)
+        {
+            context.registerService(WeavingHook.class, new EmptyExceptStatementWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0, 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if ("configureCheck".equals(name))
+                            return new MethodVisitor(Opcodes.ASM9, mv)
+                            {
+                                @Override
+                                public void visitFieldInsn(int opcode, String owner, String field, String desc)
+                                {
+                                    if (opcode == Opcodes.GETSTATIC
+                                        && "com/e1c/v8codestyle/bsl/check/Messages".equals(owner)
+                                        && ("EmptyExceptStatementCheck_title".equals(field)
+                                            || "EmptyExceptStatementCheck_description".equals(field))
+                                        && "Ljava/lang/String;".equals(desc))
+                                    {
+                                        mv.visitLdcInsn(TITLE);
+                                        patched[0]++;
+                                    }
+                                    else
+                                        super.visitFieldInsn(opcode, owner, field, desc);
+                                }
+                            };
+                        if (!"lambda$2".equals(name) || !EMIT_DESCRIPTOR.equals(descriptor)
+                            || (access & Opcodes.ACC_STATIC) == 0)
+                            return mv;
+                        patched[1]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                mv.visitLdcInsn(CALLBACK);
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                mv.visitInsn(Opcodes.DUP);
+                                Label original = new Label();
+                                mv.visitJumpInsn(Opcodes.IFNULL, original);
+                                mv.visitInsn(Opcodes.ICONST_2);
+                                mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                for (int i = 0; i < 2; i++)
+                                {
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitInsn(Opcodes.ICONST_0 + i);
+                                    mv.visitVarInsn(Opcodes.ALOAD, i);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                }
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer",
+                                    "accept", "(Ljava/lang/Object;)V", true);
+                                mv.visitInsn(Opcodes.RETURN);
+                                mv.visitLabel(original);
+                                mv.visitFrame(Opcodes.F_SAME1, 0, null, 1,
+                                    new Object[] { "java/util/function/Consumer" });
+                                mv.visitInsn(Opcodes.POP);
+                            }
+                        };
+                    }
+                }, 0);
+                // Публикуем только полную правку известной формы класса.
+                if (patched[0] == 2 && patched[1] == 1)
+                    woven.setBytes(writer.toByteArray());
+
+            }
+            catch (Throwable ignored)
+            {
+            }
+        }
     }
 
     /**
@@ -5363,9 +5466,15 @@ public final class Activator
          */
         private static final String BSL_HIGHLIGHTING =
             "com._1c.g5.v8.dt.bsl.ui.syntaxcoloring.BslHighlightingReconciler"; //$NON-NLS-1$
+        private static final String XTEXT_DOCUMENT = "org.eclipse.xtext.ui.editor.model.XtextDocument"; //$NON-NLS-1$
+        private static final String BSL_XTEXT_DOCUMENT = "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument"; //$NON-NLS-1$
+        private static final String PROP_VALIDATION_TRACE = "tormozit.bslXtextDoc.validationTrace"; //$NON-NLS-1$
         private static final String PROP_MODEL_HIGHLIGHTING = "tormozit.bslHighlighting.modelChanged"; //$NON-NLS-1$
         private static final String DOC_LOCKER =
             "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
+        private static final String PROP_VALIDATION_REENTRY = "tormozit.bslXtextDoc.validationReentry"; //$NON-NLS-1$
+        private static final String HANDLY_RECONCILING_WORK =
+            "org.eclipse.handly.xtext.ui.editor.HandlyXtextDocument$T2MReconcilingUnitOfWork"; //$NON-NLS-1$
         /** Совпадает с {@code BslXtextDocumentHook.PROP_SKIP_WAIT}. */
         static final String PROP_SKIP_WAIT = "tormozit.bslXtextDoc.skipWaitUpdatingDataModel"; //$NON-NLS-1$
         static final String PROP_SKIP_LOCAL_DERIVED_WAIT = "tormozit.bslXtextDoc.skipLocalDerivedWait"; //$NON-NLS-1$
@@ -5390,7 +5499,8 @@ public final class Activator
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
-            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER, BSL_HIGHLIGHTING);
+            DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER, BSL_HIGHLIGHTING,
+            XTEXT_DOCUMENT, BSL_XTEXT_DOCUMENT);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -5473,6 +5583,11 @@ public final class Activator
                 (java.util.function.Predicate<Object>) AssistReadLock::skipLocalDerivedWait);
             System.getProperties().putIfAbsent(PROP_MODEL_HIGHLIGHTING,
                 (java.util.function.BiPredicate<Object, Object>) (reconciler, resource) -> false);
+            System.getProperties().putIfAbsent(PROP_VALIDATION_TRACE,
+                (java.util.function.BiConsumer<Object, String>) (document, phase) -> {});
+            System.getProperties().put(PROP_VALIDATION_REENTRY,
+                (java.util.function.BiPredicate<Object, Object>) (work, currentJob) ->
+                    currentJob != null && work != null && HANDLY_RECONCILING_WORK.equals(work.getClass().getName()));
             context.registerService(WeavingHook.class, new EarlyWeaving(), null);
         }
 
@@ -5504,7 +5619,13 @@ public final class Activator
                 if (FORM_PRESENTATION.equals(name) || FORM_PAGE.equals(name))
                     System.setProperty(PROP_FORM_PATCH + name, "error " + t); //$NON-NLS-1$
                 if (DOC_LOCKER.equals(name))
+                {
                     System.setProperty(PROP_DOC_LOCKER_PATCH, "error " + t); //$NON-NLS-1$
+                    System.setProperty(PROP_VALIDATION_REENTRY + ".patch", "error " + t); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (XTEXT_DOCUMENT.equals(name) || BSL_XTEXT_DOCUMENT.equals(name))
+                    System.setProperty(PROP_VALIDATION_TRACE
+                        + (BSL_XTEXT_DOCUMENT.equals(name) ? ".bsl.patch" : ".patch"), "error " + t); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
 
@@ -6098,8 +6219,20 @@ public final class Activator
         /** Кадры стека остаются исходными: вставки без ветвлений и не меняют высоту стека в точках кадров. */
         static byte[] transform(String className, byte[] bytes)
         {
+            if (XTEXT_DOCUMENT.equals(className))
+                return transformValidationTrace(bytes, false);
+            if (BSL_XTEXT_DOCUMENT.equals(className))
+                return transformValidationTrace(bytes, true);
             if (DOC_LOCKER.equals(className))
-                return transformDocLocker(bytes);
+            {
+                byte[] locked = transformDocLocker(bytes);
+                if (locked == null)
+                {
+                    System.setProperty(PROP_VALIDATION_REENTRY + ".patch", "skipped: locker patch missing"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                return transformValidationReentry(locked);
+            }
             if (BSL_HIGHLIGHTING.equals(className))
                 return transformModelHighlighting(bytes);
             if (DCS_LOCAL_STRING_EDITOR.equals(className) || DCS_FIELD_EDITING.equals(className)
@@ -6594,6 +6727,63 @@ public final class Activator
             emitFilter(mv, prop, IPARSE_RESULT);
         }
 
+        /** Временная диагностика: только наблюдение, без чтения модели через readOnly. */
+        private static byte[] transformValidationTrace(byte[] bytes, boolean bsl)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean trace = "checkAndUpdateAnnotations".equals(name) && "()V".equals(descriptor) //$NON-NLS-1$ //$NON-NLS-2$
+                        || "notifyModelListeners".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lorg/eclipse/xtext/resource/XtextResource;)V") //$NON-NLS-1$
+                        || "fireDocumentChanged".equals(name) && descriptor.equals( //$NON-NLS-1$
+                            "(Lorg/eclipse/jface/text/DocumentEvent;)V"); //$NON-NLS-1$
+                    if (mv == null || !trace)
+                        return mv;
+                    touched[0]++;
+                    String phaseName = (bsl ? "bsl." : "") + name; //$NON-NLS-1$ //$NON-NLS-2$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            emitTrace(phaseName + ".enter"); //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN || opcode == Opcodes.ATHROW)
+                                emitTrace(phaseName + (opcode == Opcodes.RETURN ? ".exit" : ".throw")); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitInsn(opcode);
+                        }
+
+                        private void emitTrace(String phase)
+                        {
+                            emitGetProperty(this, PROP_VALIDATION_TRACE, "java/util/function/BiConsumer"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitLdcInsn(phase);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                        }
+                    };
+                }
+            }, 0);
+            int expected = bsl ? 1 : 3;
+            boolean complete = touched[0] == expected;
+            System.setProperty(PROP_VALIDATION_TRACE + (bsl ? ".bsl.patch" : ".patch"), //$NON-NLS-1$ //$NON-NLS-2$
+                (complete ? "woven" : "missing") + " methods=" + touched[0] + " expected=" + expected); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return complete ? writer.toByteArray() : null;
+        }
+
         /**
          * {@link #DOC_LOCKER}: ветвление и обработчик исключений — кадры пересчитываются
          * ({@code COMPUTE_FRAMES}, общий предок — {@code Object}, классы EDT не загружаются), как в
@@ -6665,6 +6855,109 @@ public final class Activator
             }, 0);
             System.setProperty(PROP_MODEL_HIGHLIGHTING + ".patch", "calls=" + calls[0]); //$NON-NLS-1$ //$NON-NLS-2$
             return calls[0] == 1 ? writer.toByteArray() : null;
+        }
+
+        /**
+         * BSL UI: modify вызывает checkAndUpdateAnnotations и на штатном выходе, и в finally.
+         * Для Handly T2M внутри собственной проверки это отменяет саму проверку и ставит её снова.
+         * Дополняем обе штатные защиты instanceof только для текущего validationJob документа.
+         * Внешние задания и синхронизация при редактировании по-прежнему запрашивают проверку.
+         */
+        private static byte[] transformValidationReentry(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            // Та же проверка типа управляет уведомлениями модели. На первом проходе
+            // выбираем только защиты непосредственно перед checkAndUpdateAnnotations.
+            java.util.Set<Integer> validationGuards = new java.util.HashSet<>();
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    if (!"modify".equals(name) || !READ_FOR_ASSIST_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return null;
+                    return new MethodVisitor(Opcodes.ASM9)
+                    {
+                        private int guardOrdinal;
+
+                        @Override
+                        public void visitTypeInsn(int opcode, String type)
+                        {
+                            if (opcode == Opcodes.INSTANCEOF
+                                && "org/eclipse/xtext/ui/editor/model/edit/ReconcilingUnitOfWork".equals(type)) //$NON-NLS-1$
+                                guardOrdinal++;
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
+                            boolean isInterface)
+                        {
+                            if (opcode == Opcodes.INVOKEVIRTUAL && BSL_XTEXT_DOCUMENT.replace('.', '/').equals(owner)
+                                && "checkAndUpdateAnnotations".equals(name) && "()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                                validationGuards.add(guardOrdinal);
+                        }
+                    };
+                }
+            }, 0);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] guards = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"modify".equals(name) || !READ_FOR_ASSIST_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        private int guardOrdinal;
+
+                        @Override
+                        public void visitTypeInsn(int opcode, String type)
+                        {
+                            super.visitTypeInsn(opcode, type);
+                            if (opcode != Opcodes.INSTANCEOF
+                                || !"org/eclipse/xtext/ui/editor/model/edit/ReconcilingUnitOfWork".equals(type)) //$NON-NLS-1$
+                                return;
+                            if (!validationGuards.contains(++guardOrdinal))
+                                return;
+                            guards[0]++;
+                            // original || (Handly T2M && currentJob != null && currentJob == validationJob).
+                            // Вставка без ветвлений сохраняет исходные кадры и высоту стека на выходе.
+                            emitGetProperty(mv, PROP_VALIDATION_REENTRY, "java/util/function/BiPredicate"); //$NON-NLS-1$
+                            mv.visitVarInsn(Opcodes.ALOAD, 1);
+                            emitCurrentJob();
+                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiPredicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            emitCurrentJob();
+                            mv.visitVarInsn(Opcodes.ALOAD, 0);
+                            mv.visitFieldInsn(Opcodes.GETFIELD, DOC_LOCKER.replace('.', '/'), "this$0", //$NON-NLS-1$
+                                "Lcom/_1c/g5/v8/dt/bsl/ui/editor/BslXtextDocument;"); //$NON-NLS-1$
+                            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, BSL_XTEXT_DOCUMENT.replace('.', '/'),
+                                "getValidationJob", "()Lorg/eclipse/core/runtime/jobs/Job;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Objects", "equals", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Z", false); //$NON-NLS-1$
+                            mv.visitInsn(Opcodes.IAND);
+                            mv.visitInsn(Opcodes.IOR);
+                        }
+
+                        private void emitCurrentJob()
+                        {
+                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "org/eclipse/core/runtime/jobs/Job", "getJobManager", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Lorg/eclipse/core/runtime/jobs/IJobManager;", false); //$NON-NLS-1$
+                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "org/eclipse/core/runtime/jobs/IJobManager", //$NON-NLS-1$
+                                "currentJob", "()Lorg/eclipse/core/runtime/jobs/Job;", true); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                    };
+                }
+            }, 0);
+            boolean complete = guards[0] == 2 && !validationGuards.contains(0);
+            System.setProperty(PROP_VALIDATION_REENTRY + ".patch", //$NON-NLS-1$
+                (complete ? "woven" : "missing") + " guards=" + guards[0] + " expected=2"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return complete ? writer.toByteArray() : bytes;
         }
 
         private static byte[] transformDocLocker(byte[] bytes)

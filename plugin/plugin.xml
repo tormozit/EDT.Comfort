@@ -2062,8 +2062,8 @@
       <description>Общие (workspace) настройки плагина Комфорт.</description>
     </transfer>
     <!-- scope="project" здесь номинальный: узел ProjectScope реально лежит по пути
-         /project/<ИмяПроекта>/tormozit (с именем проекта посередине), а <entry node="tormozit">
-         матчит только буквальный "/project/tormozit" — никогда не совпадёт с реальным путём.
+         /project/<ИмяПроекта>/comfort (с именем проекта посередине), а <entry node="comfort">
+         матчит только буквальный "/project/comfort" — никогда не совпадёт с реальным путём.
          Рабочий фильтр для этой категории ComfortPreferenceTransferFilter подменяет в рантайме
          (см. withProjectFilter/COMFORT_PROJECT_TRANSFER_ID) на конкретное имя проекта:
          на экспорте — из поля "Проект", на импорте — из "Проект из файла". Мэппинг ниже нужен
@@ -2073,7 +2073,7 @@
         icon="icons/etool16/comfort.png"
         name="Комфорт">
       <mapping scope="project">
-        <entry node="tormozit"/>
+        <entry node="comfort"/>
       </mapping>
       <description>Настройки плагина Комфорт для конкретного проекта.</description>
     </transfer>

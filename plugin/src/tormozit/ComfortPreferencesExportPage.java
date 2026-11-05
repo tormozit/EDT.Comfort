@@ -30,6 +30,7 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.internal.preferences.PreferenceTransferElement;
 import org.eclipse.ui.internal.wizards.preferences.WizardPreferencesExportPage1;
+import org.osgi.service.prefs.BackingStoreException;
 
 /**
  * Единственная страница {@link ComfortPreferencesExportWizard}. Расширение файла
@@ -104,7 +105,7 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         java.util.function.Supplier<List<String>> project = () -> projectCombo == null || projectCombo.isDisposed()
                 || projectCombo.getText().isBlank() ? List.of() : List.of(projectCombo.getText());
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
-                ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, Activator.PLUGIN_ID, project);
+                ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, ComfortSettings.PROJECT_PREFERENCE_QUALIFIER, project);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID,
                 ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, project);
@@ -226,6 +227,19 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
         ComfortSettings.setAndSave(ComfortSettings.PREF_PREFERENCES_EXPORT_TRANSFER_ALL,
                 transferAllButtonRef != null && transferAllButtonRef.getSelection());
 
+        String selectedProject = projectCombo == null ? null : projectCombo.getText();
+        if (selectedProject != null && !selectedProject.isBlank())
+        {
+            try
+            {
+                ComfortSettings.projectPreferences(ResourcesPlugin.getWorkspace().getRoot().getProject(selectedProject));
+            }
+            catch (BackingStoreException e)
+            {
+                Global.logError("preferences-export", "Перенос настроек проекта не удался", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
         boolean ok = super.transfer(filters);
         if (ok)
         {
@@ -387,7 +401,7 @@ public class ComfortPreferencesExportPage extends WizardPreferencesExportPage1
                 if (!"project".equals(scope)) //$NON-NLS-1$
                     return Map.of();
                 Map<String, PreferenceFilterEntry[]> mapping = new HashMap<>();
-                mapping.put(projectName + '/' + Activator.PLUGIN_ID, null);
+                mapping.put(projectName + '/' + ComfortSettings.PROJECT_PREFERENCE_QUALIFIER, null);
                 mapping.put(projectName + '/' + ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, null);
                 mapping.put(projectName + '/' + ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, null);
                 return mapping;

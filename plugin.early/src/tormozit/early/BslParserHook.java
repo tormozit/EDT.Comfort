@@ -353,7 +353,12 @@ public final class BslParserHook
             boolean anyHidden = false;
             for (List<int[]> block : blocks)
             {
-                if (!straddles(block) || badSegments.get(segment[block.get(0)[0]]))
+                int firstSegment = segment[block.get(0)[0]];
+                int lastSegment = segment[block.get(block.size() - 1)[1]];
+                int firstBadSegment = badSegments.nextSetBit(firstSegment);
+                // Блок может охватывать несколько методов. Ошибка внутри любого из них —
+                // не разрыв директивой: нельзя скрывать весь блок по корректности его начала.
+                if (firstBadSegment >= 0 && firstBadSegment <= lastSegment || !straddles(block))
                     continue;
                 for (int[] instr : block)
                     for (int j = instr[0]; j <= instr[1]; j++)

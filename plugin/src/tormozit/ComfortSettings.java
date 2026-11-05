@@ -3,16 +3,54 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ProjectScope;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
+import org.osgi.service.prefs.BackingStoreException;
+import org.osgi.service.prefs.Preferences;
 
 /**
  * Общие настройки плагина Comfort (не только content assist).
  */
 public final class ComfortSettings
 {
+    /** Имя проектного файла .settings/comfort.prefs; не связано с id бандла. */
+    public static final String PROJECT_PREFERENCE_QUALIFIER = "comfort"; //$NON-NLS-1$
+
+    /**
+     * Переносит прежний .settings/tormozit.prefs без перезаписи уже новых значений.
+     * Старый файл очищается только после успешного сохранения нового.
+     */
+    public static synchronized IEclipsePreferences projectPreferences(IProject project) throws BackingStoreException
+    {
+        ProjectScope scope = new ProjectScope(project);
+        IEclipsePreferences current = scope.getNode(PROJECT_PREFERENCE_QUALIFIER);
+        IEclipsePreferences legacy = scope.getNode(Activator.PLUGIN_ID);
+        if (legacy.keys().length == 0 && legacy.childrenNames().length == 0)
+            return current;
+        copyMissingProjectPreferences(legacy, current);
+        current.flush();
+        legacy.clear();
+        for (String child : legacy.childrenNames())
+            legacy.node(child).removeNode();
+        legacy.flush();
+        return current;
+    }
+
+    private static void copyMissingProjectPreferences(Preferences source, Preferences target)
+            throws BackingStoreException
+    {
+        for (String key : source.keys())
+            if (target.get(key, null) == null)
+                target.put(key, source.get(key, "")); //$NON-NLS-1$
+        for (String child : source.childrenNames())
+            copyMissingProjectPreferences(source.node(child), target.node(child));
+    }
+
     /**
      * Ключ булевой настройки «Улучшать списки» (имя ключа исторически осталось прежним).
      * Управляет заменой фильтров по подстроке в списках (навигатор, список баз, панель

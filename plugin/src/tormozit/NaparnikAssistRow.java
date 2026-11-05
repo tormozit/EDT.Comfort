@@ -109,6 +109,8 @@ public final class NaparnikAssistRow
     private boolean rowNavigated;
     private boolean selectRowOnOpen;
     private boolean applying;
+    /** Полный список слов запроса: нужен и после закрытия окна перед вставкой. */
+    private List<Word> completionWords = List.of();
 
     /** Позиция модели, для которой запрошено предложение; {@code -1} — предложения нет. */
     private int baseOffset = -1;
@@ -385,7 +387,7 @@ public final class NaparnikAssistRow
         DocumentEvent change = event.getDocumentEvent();
         if (change == null)
             return;
-        if (baseOffset >= 0 && change.getOffset() < baseOffset)
+        if (!applying && baseOffset >= 0 && change.getOffset() < baseOffset)
             dropSuggestion();
         if (!sessionOpen)
             return;
@@ -563,6 +565,8 @@ public final class NaparnikAssistRow
             display.timerExec(WORDS_WAIT_STEP_MS, () -> launchRequest(gen, attempt + 1));
             return;
         }
+        completionWords = words;
+        List<Word> requestWords = words.subList(0, Math.min(words.size(), MAX_WORDS));
         Object vm = viewModel;
         Object source;
         try
@@ -576,7 +580,7 @@ public final class NaparnikAssistRow
             return;
         }
         cancelSource = source;
-        Thread thread = new Thread(() -> runRequest(gen, vm, source, words, display),
+        Thread thread = new Thread(() -> runRequest(gen, vm, source, requestWords, display),
             "Комфорт: предложение Напарника"); //$NON-NLS-1$
         thread.setDaemon(true);
         thread.start();
@@ -591,8 +595,6 @@ public final class NaparnikAssistRow
             return words;
         for (ICompletionProposal p : list)
         {
-            if (words.size() >= MAX_WORDS)
-                break;
             if (isRow(p) || SmartContentAssistProcessor.isEmptyPlaceholderProposal(p))
                 continue;
             ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(p);
@@ -1181,19 +1183,47 @@ public final class NaparnikAssistRow
         applying = true;
         try
         {
-            document.replace(caret, 0, text);
+            String prefix = correctedPrefix(document, caret);
+            Global.tempLog("naparnik-prefix", "insert caret=" + caret + " prefix=" + prefix //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " words=" + completionWords.size() + " insertedLength=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            document.replace(caret - prefix.length(), prefix.length(), prefix + text);
             viewer.setSelectedRange(caret + text.length(), 0);
             viewer.revealRange(caret + text.length(), 0);
             return true;
         }
-        catch (Exception ignored)
+        catch (Exception failure)
         {
+            Global.tempLog("naparnik-prefix", "insert failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
         finally
         {
             applying = false;
         }
+    }
+
+    /** Регистр набранной части первого слова — из совпавшего полного имени списка. */
+    private String correctedPrefix(IDocument document, int caret) throws org.eclipse.jface.text.BadLocationException
+    {
+        int start = caret;
+        while (start > 0 && isWordChar(document.getChar(start - 1)))
+            start--;
+        if (start == caret)
+            return ""; //$NON-NLS-1$
+        String prefix = document.get(start, caret - start);
+        int end = 0;
+        while (end < remaining.length() && isWordChar(remaining.charAt(end)))
+            end++;
+        String firstWord = prefix + remaining.substring(0, end);
+        for (Word word : completionWords)
+        {
+            int wordEnd = 0;
+            while (wordEnd < word.text.length() && isWordChar(word.text.charAt(wordEnd)))
+                wordEnd++;
+            if (wordEnd == firstWord.length() && word.text.regionMatches(true, 0, firstWord, 0, wordEnd))
+                return word.text.substring(0, prefix.length());
+        }
+        return ""; //$NON-NLS-1$
     }
 
     private Display display()

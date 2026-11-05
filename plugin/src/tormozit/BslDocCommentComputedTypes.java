@@ -18,6 +18,7 @@ import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.dialogs.MessageDialog;
@@ -44,10 +45,19 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.TypeSection;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Block;
 import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.Conditional;
+import com._1c.g5.v8.dt.bsl.model.IfStatement;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
+import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
+import com._1c.g5.v8.dt.bsl.model.Variable;
+import com._1c.g5.v8.dt.bsl.model.impl.InvocationImpl;
+import com._1c.g5.v8.dt.bsl.model.impl.StaticFeatureAccessImpl;
 import com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService;
 import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeState;
@@ -567,7 +577,7 @@ public final class BslDocCommentComputedTypes
     {
         try
         {
-            return new ProjectScope(project).getNode(Activator.PLUGIN_ID)
+            return ComfortSettings.projectPreferences(project)
                 .getBoolean(PREF_EXTENDED_TYPE_COMPUTATION, false);
         }
         catch (Throwable t)
@@ -588,7 +598,7 @@ public final class BslDocCommentComputedTypes
             return false;
         try
         {
-            IEclipsePreferences own = new ProjectScope(project).getNode(Activator.PLUGIN_ID);
+            IEclipsePreferences own = ComfortSettings.projectPreferences(project);
             own.putBoolean(PREF_EXTENDED_TYPE_COMPUTATION, enabled);
             own.flush();
             extendedTypesCache.put(project.getName(), Boolean.valueOf(enabled));
@@ -2413,6 +2423,155 @@ public final class BslDocCommentComputedTypes
         }
     }
 
+    /** Дополнение штатного распознавания ТипЗнч: результат сначала сохранён в переменной (#958). */
+    public static Object afterTypeOfFeature(Object original, Object expression)
+    {
+        if (original != null || !(expression instanceof StaticFeatureAccess access)
+            || !isExtendedTypesEnabled(access))
+            return original;
+        try
+        {
+            StaticFeatureAccess source = SavedTypeOf.source(access);
+            return source == null ? original : new SavedTypeOf.PredicateAccess(access, source);
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return original;
+        }
+    }
+
+    /**
+     * CreatorTreeState из bsl 28.0.1.v202605050943 принимает StaticFeatureAccess аргумента ТипЗнч.
+     * Ссылку берём из присваивания, позицию — из условия; диапазоны веток и типы создаёт сама EDT.
+     * AST не меняется, расчёт/ожидание валидации не запускаются.
+     */
+    private static final class SavedTypeOf
+    {
+        /**
+         * CreatorTreeState читает только getFeatureEntries и цепочку eContainer:
+         * два родителя до сравнения и поиск содержащего IfStatement (проверено в JAR).
+         * Представление не включается в AST и не переносит FeatureEntry из исходного дерева.
+         */
+        private static final class PredicateAccess extends StaticFeatureAccessImpl
+        {
+            private final StaticFeatureAccess source;
+            private final EObject invocation;
+
+            PredicateAccess(StaticFeatureAccess alias, StaticFeatureAccess source)
+            {
+                this.source = source;
+                invocation = new InvocationImpl()
+                {
+                    @Override
+                    public EObject eContainer()
+                    {
+                        return alias.eContainer();
+                    }
+                };
+            }
+
+            @Override
+            public EList<FeatureEntry> getFeatureEntries()
+            {
+                return source.getFeatureEntries();
+            }
+
+            @Override
+            public EObject eContainer()
+            {
+                return invocation;
+            }
+        }
+
+        static StaticFeatureAccess source(StaticFeatureAccess access)
+        {
+            Variable alias = variable(access);
+            Conditional branch = org.eclipse.xtext.EcoreUtil2.getContainerOfType(access, Conditional.class);
+            if (alias == null || branch == null || !(branch.eContainer() instanceof IfStatement condition))
+                return null;
+            // Предикаты выполняются до входа в ветку и тоже могут изменить проверяемое значение.
+            if (!pureTypeCalls(condition.getIfPart().getPredicate()))
+                return null;
+            for (Conditional part : condition.getElsIfParts())
+            {
+                if (branch == condition.getIfPart())
+                    break;
+                if (!pureTypeCalls(part.getPredicate()))
+                    return null;
+                if (part == branch)
+                    break;
+            }
+            EObject parent = condition.eContainer();
+            List<Statement> statements = parent instanceof Block block ? block.getStatements()
+                : parent instanceof Conditional part ? part.getStatements() : List.of();
+            java.util.Set<Variable> written = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            for (int index = statements.indexOf(condition) - 1; index >= 0; index--)
+            {
+                // Не переносим сведения через развилки, циклы, препроцессор и вызовы с побочными эффектами.
+                if (!(statements.get(index) instanceof SimpleStatement assignment)
+                    || !(assignment.getLeft() instanceof StaticFeatureAccess left)
+                    || variable(left) == null || !pureTypeCalls(assignment.getRight()))
+                    return null;
+                Variable target = variable(left);
+                if (target == alias)
+                {
+                    Expression argument = typeOfArgument(assignment.getRight());
+                    if (!(argument instanceof StaticFeatureAccess source))
+                        return null;
+                    Variable value = variable(source);
+                    return value == null || value == alias || written.contains(value) ? null : source;
+                }
+                written.add(target);
+            }
+            return null;
+        }
+
+        private static Variable variable(StaticFeatureAccess access)
+        {
+            // Смешанные ссылки разных контекстов не дают однозначной связи с переменной.
+            Variable result = null;
+            for (var entry : access.getFeatureEntries())
+            {
+                if (!(entry.getFeature() instanceof Variable value) || result != null && result != value)
+                    return null;
+                result = value;
+            }
+            return result;
+        }
+
+        private static boolean pureTypeCalls(EObject object)
+        {
+            if (object == null)
+                return false;
+            if (object instanceof Invocation invocation && !pureTypeCall(invocation))
+                return false;
+            var contents = object.eAllContents();
+            while (contents.hasNext())
+                if (contents.next() instanceof Invocation invocation && !pureTypeCall(invocation))
+                    return false;
+            return true;
+        }
+
+        private static boolean pureTypeCall(Invocation invocation)
+        {
+            return typeOfArgument(invocation) instanceof StaticFeatureAccess
+                || namedCall(invocation, "Тип", "Type") && invocation.getParams().get(0) instanceof StringLiteral; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static Expression typeOfArgument(Expression expression)
+        {
+            return expression instanceof Invocation invocation && namedCall(invocation, "ТипЗнч", "TypeOf") //$NON-NLS-1$ //$NON-NLS-2$
+                ? invocation.getParams().get(0) : null;
+        }
+
+        private static boolean namedCall(Invocation invocation, String russian, String english)
+        {
+            return invocation.getParams().size() == 1
+                && invocation.getMethodAccess() instanceof StaticFeatureAccess method
+                && (russian.equalsIgnoreCase(method.getName()) || english.equalsIgnoreCase(method.getName()));
+        }
+    }
+
     /**
      * Инструментализация {@code CreatorTreeState}: начальные состояния неявных переменных; в хвост
      * {@code isReplaceTypesByDocumentationComment} добавляется наш ответ, который умеет
@@ -2433,6 +2592,24 @@ public final class BslDocCommentComputedTypes
                 String signature, String[] exceptions)
             {
                 MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                if (mv != null && "getFeatureAccessFromTypeOfMethod".equals(name) //$NON-NLS-1$
+                    && "(Lcom/_1c/g5/v8/dt/bsl/model/Expression;)Lcom/_1c/g5/v8/dt/bsl/model/StaticFeatureAccess;".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "afterTypeOfFeature", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/bsl/model/StaticFeatureAccess"); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
                 if (mv != null && "doProcess".equals(name) //$NON-NLS-1$
                     && "(Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)V".equals(descriptor)) //$NON-NLS-1$
                     return new MethodVisitor(Opcodes.ASM9, mv)

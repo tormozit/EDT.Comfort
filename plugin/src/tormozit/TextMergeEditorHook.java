@@ -685,6 +685,21 @@ public final class TextMergeEditorHook
                 return;
             }
             int line1Based = CompareLineRangeMatcher.lineAtCaret(activeWidget) + 1;
+            String methodName = null;
+            int methodLineOffset = 0;
+            if (Global.getField(provider, "currentSelectedNode") instanceof IPartialModelNode selectedNode //$NON-NLS-1$
+                && selectedNode.retrieveComparisonNode() instanceof BslModuleSectionComparisonNode section)
+            {
+                String sectionName = MethodLineRestore.sectionName(section, side);
+                int declarationLine0 = GetRef.findMethodDeclarationLine(new Document(activeWidget.getText()),
+                    sectionName);
+                if (declarationLine0 >= 0)
+                {
+                    methodName = sectionName;
+                    // Секция может начинаться с комментариев/директив перед объявлением метода.
+                    methodLineOffset = line1Based - 1 - declarationLine0;
+                }
+            }
 
             if (!(provider instanceof Window dialogWindow) || dialogWindow.getShell() == null)
                 return;
@@ -714,7 +729,10 @@ public final class TextMergeEditorHook
             IWorkbenchPage page = window != null ? window.getActivePage() : null;
             if (page == null)
                 return;
-            ShowInModuleHandler.openBslModule(file, line1Based, page, window.getShell());
+            if (methodName != null)
+                ShowInModuleHandler.openBslModuleAtMethod(file, methodName, methodLineOffset, window.getShell());
+            else
+                ShowInModuleHandler.openBslModule(file, line1Based, page, window.getShell());
         }
         catch (Exception e)
         {

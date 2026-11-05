@@ -17,6 +17,7 @@ import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreePathViewerSorter;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerComparator;
+import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.ui.model.IWorkbenchAdapter;
 import org.osgi.framework.Bundle;
@@ -195,6 +196,18 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
             if (current instanceof CommonNodeAlphabeticSorter)
                 return;
             structured.setComparator(new CommonNodeAlphabeticSorter(current));
+            var store = ComfortSettings.getInstance().getPreferenceStore();
+            IPropertyChangeListener listener = event -> {
+                if (!ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED.equals(event.getProperty())
+                        && !ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(event.getProperty()))
+                    return;
+                control.getDisplay().asyncExec(() -> {
+                    if (!control.isDisposed())
+                        structured.refresh();
+                });
+            };
+            store.addPropertyChangeListener(listener);
+            control.addDisposeListener(event -> store.removePropertyChangeListener(listener));
         });
     }
 
@@ -236,10 +249,20 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         return 0;
     }
 
-    /** Подчинена флажку «Улучшать списки» — сортировщик ставится только вместе с ним. */
+    /** Сортировка и сокращение подписей подчинены флажку «Улучшать списки». */
     private static boolean isEnabled()
     {
-        return ComfortSettings.isAlphabeticCommonNodeEnabled();
+        return ComfortSettings.isAlphabeticCommonNodeEnabled() && ComfortSettings.isReplaceListFiltersEnabled();
+    }
+
+    /** Только папки внутри «Общие»: имена объектов и подписи остальных веток не меняются. */
+    static String comparisonFolderLabel(Object element, String label)
+    {
+        // EDT создаёт здесь и VirtualFolderPartialModelNode (пустые папки), и
+        // MdCollectionPartialNode (коллекции объектов); оба — непосредственные дети «Общие».
+        if (!(element instanceof IPartialModelNode folder) || !isCommonNode(folder.getParent()))
+            return label;
+        return isEnabled() ? withoutCommonPrefix(label) : label;
     }
 
     private static boolean isCommonNode(Object element)
@@ -271,7 +294,7 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         }
         if (element instanceof IPartialModelNode node)
         {
-            String label = node.getLabel();
+            String label = comparisonFolderLabel(node, node.getLabel());
             return label != null ? label : ""; //$NON-NLS-1$
         }
         Object adapterObj = Platform.getAdapterManager().getAdapter(element, IWorkbenchAdapter.class);

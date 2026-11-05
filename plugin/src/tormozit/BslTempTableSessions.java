@@ -647,7 +647,8 @@ public final class BslTempTableSessions
                         || select.getPlacementTable().getTableName() == null || select.getDbViewByThis() == null)
                         continue;
                     List<Column> columns = new ArrayList<>();
-                    for (DbViewFieldDef field : select.getDbViewByThis().getActualFields())
+                    for (DbViewFieldDef selected : select.getDbViewByThis().getActualFields())
+                    for (DbViewFieldDef field : BslQueryResultTypes.resultFields(selected, resource))
                     {
                         String name = field.getNameRu() != null && !field.getNameRu().isBlank() ? field.getNameRu()
                             : field.getName();
@@ -655,7 +656,7 @@ public final class BslTempTableSessions
                             continue;
                         TypeDescription type = computer.getFieldType(field).getFirst();
                         columns.add(new Column(name, type == null ? null : EcoreUtil.copy(type),
-                            BslQueryResultTypes.queryFieldTarget(batch.literal(), field, select, resource)));
+                            BslQueryResultTypes.queryFieldTarget(batch.literal(), selected, select, resource)));
                     }
                     INode placement = NodeModelUtils.findActualNodeFor(select.getPlacementTable());
                     String name = select.getPlacementTable().getTableName();

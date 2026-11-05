@@ -52,6 +52,7 @@ import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
@@ -6406,6 +6407,15 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             @Override
+            protected StyledString getStyledText(Object element)
+            {
+                var styled = super.getStyledText(element);
+                String label = CommonNodeAlphabeticSorter.comparisonFolderLabel(element, styled.getString());
+                // У штатных виртуальных папок getStyledText возвращает строку без стилей.
+                return styled.getString().equals(label) ? styled : new StyledString(label);
+            }
+
+            @Override
             public Color getBackground(Object element)
             {
                 // null наследует фон TreeItem; равной ячейке нужен явный фон дерева.
@@ -6429,6 +6439,8 @@ public class CompareConfigMenuHook implements IStartup
             public void update(ViewerCell cell)
             {
                 original.update(cell);
+                if (cell.getColumnIndex() == 0)
+                    cell.setText(CommonNodeAlphabeticSorter.comparisonFolderLabel(cell.getElement(), cell.getText()));
                 if (support.isEqualMethod(cell.getElement()))
                     cell.setBackground(support.tree.getBackground());
             }

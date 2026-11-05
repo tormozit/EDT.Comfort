@@ -93,6 +93,8 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewDef;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewVirtualFieldDef;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -101,6 +103,7 @@ import com._1c.g5.v8.dt.ql.dcs.resource.IDependentQuerySchemaProvider;
 import com._1c.g5.v8.dt.ql.model.ABinaryOperatorsExpression;
 import com._1c.g5.v8.dt.ql.model.DbViewNestedTableFromQuery;
 import com._1c.g5.v8.dt.ql.model.InExpression;
+import com._1c.g5.v8.dt.ql.model.NestedTableAllFieldsExpression;
 import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
@@ -109,6 +112,7 @@ import com._1c.g5.v8.dt.ql.model.QuerySchemaTotalControlPoint;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
 import com._1c.g5.v8.dt.ql.resource.QlParametersFinder;
+import com._1c.g5.v8.dt.ql.typesystem.IDynamicDbViewFieldComputer;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
@@ -135,6 +139,13 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
+        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess access
+            && RESULT_METHODS.contains(lower(access.getName())))
+            Global.tempLog("query-result-columns", "getTypes uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + (method == null ? null : method.getName()) + " offset=" + start(invocation) //$NON-NLS-1$ //$NON-NLS-2$
+                + " call=" + access.getName() + " plan=" + (plan != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " complete=" + (plan != null && plan.complete) + " planned=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (planned == null ? null : planned.stream().map(TypeItem::getName).toList()));
         if (planned != null)
             return planned;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
@@ -510,6 +521,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
+        Global.tempLog("query-result-columns", "refresh uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
+            + " method=" + method.getName() + " offset=" + offset + " previous=" + (previous != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " current=" + current(previous, text) + " complete=" + (previous != null && previous.complete)); //$NON-NLS-1$ //$NON-NLS-2$
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -543,6 +557,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         catch (RuntimeException | LinkageError failure)
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
+            java.io.StringWriter trace = new java.io.StringWriter();
+            failure.printStackTrace(new java.io.PrintWriter(trace));
+            Global.tempLog("query-result-columns", "refresh.failure uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + method.getName() + "\n" + trace); //$NON-NLS-1$ //$NON-NLS-2$
             session.plans.remove(method);
         }
         }
@@ -1292,6 +1310,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     || !RESULT_METHODS.contains(lower(access.getName())))
                     continue;
                 Shape shape = shape(invocation, Collections.newSetFromMap(new IdentityHashMap<>()));
+                Global.tempLog("query-result-columns", "prepare uri=" + method.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " method=" + method.getName() + " offset=" + start(invocation) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " call=" + access.getName() + " shape=" + (shape == null ? null : shape.kind) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " fields=" + (shape == null ? null : shape.results.stream() //$NON-NLS-1$
+                        .map(result -> result.fields.stream().map(Field::name).toList()).toList()));
                 // Строки выводит штатная система типов из общего типа таблицы.
                 if (shape == null || shape.kind.equals("ValueTableRow")) //$NON-NLS-1$
                     continue;
@@ -1694,12 +1717,13 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     var view = select.getDbViewByThis();
                     if (view == null || view.eIsProxy())
                         throw new IllegalStateException("Query result fields unavailable"); //$NON-NLS-1$
-                    for (DbViewFieldDef field : view.getActualFields())
+                    for (DbViewFieldDef selected : view.getActualFields())
+                    for (DbViewFieldDef field : resultFields(selected, (XtextResource)schema.eResource()))
                     {
                         TypeDescription type = computer.getFieldType(field).getFirst();
                         int offset;
                         int length;
-                        INode source = fieldNode(field, select, mapper);
+                        INode source = fieldNode(selected, select, mapper);
                         var location = source == null ? null : textProvider.getLocation(source.getOffset());
                         var endLocation = source == null ? null : textProvider.getLocation(source.getEndOffset());
                         offset = location == null ? -1 : firstLine + location.getSecond();
@@ -1903,6 +1927,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     column.setTypeContainer(types);
                     columns.getContextDef().getProperties().add(column);
                 }
+            Global.tempLog("query-result-columns", "valueTable uri=" + method.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + method.getName() + " row=" //$NON-NLS-1$ //$NON-NLS-2$
+                + row.getContextDef().getProperties().stream().map(property -> property.getName()).toList()
+                + " columns=" + columns.getContextDef().getProperties().stream() //$NON-NLS-1$
+                    .map(property -> property.getName()).toList());
             return table;
         }
 
@@ -1986,6 +2015,31 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         if (schema != null && stamp == null)
             schema.eAdapters().add(new SchemaGeneration(generation));
         return schema;
+    }
+
+    /**
+     * EDT представляет Источник.* как DbViewNestedTableFromQuery (issue 989).
+     * Раскрываем его в колонки результата, только если слева источник, а не поле-табличная часть.
+     * Исходную схему и её связи не меняем; место перехода остаётся у выражения со звёздочкой.
+     */
+    static List<DbViewFieldDef> resultFields(DbViewFieldDef selected, XtextResource resource)
+    {
+        if (!(selected instanceof DbViewNestedTableFromQuery nested))
+            return List.of(selected);
+        QlMapper mapper = resource.getResourceServiceProvider().get(QlMapper.class);
+        IDynamicDbViewFieldComputer computer = resource.getResourceServiceProvider()
+            .get(IDynamicDbViewFieldComputer.class);
+        for (EObject source : mapper.getSourceObjects(selected))
+        {
+            if (!(source instanceof QuerySchemaExpression expression)
+                || !(expression.getExpression() instanceof NestedTableAllFieldsExpression star))
+                continue;
+            EObject table = computer.computeDbView(star.getTable());
+            if (table instanceof DbViewDef && !(table instanceof DbViewFieldDef))
+                return nested.getActualFields().stream()
+                    .filter(field -> !(field instanceof DbViewVirtualFieldDef)).toList();
+        }
+        return List.of(selected);
     }
 
     /** Версия структуры данных: типы полей запросов действительны в пределах одной версии. */

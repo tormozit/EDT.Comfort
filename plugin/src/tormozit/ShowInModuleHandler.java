@@ -5,8 +5,10 @@ import java.net.URL;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.osgi.framework.Bundle;
 
 /**
@@ -76,6 +78,40 @@ public final class ShowInModuleHandler
         }
         if (!GoToDefinition.openBslModuleAtLine(file, line1Based, page, shell))
             log("openBslModule: не удалось открыть " + file.getFullPath()); //$NON-NLS-1$
+    }
+
+    /**
+     * Переход из секции метода: ищем объявление в живом документе после закрытия диалога,
+     * затем отсчитываем строки от него. Отрицательное смещение — комментарии/директивы
+     * перед объявлением. Номер строки фрагмента в полный модуль не переносим.
+     */
+    public static void openBslModuleAtMethod(IFile file, String methodName, int lineOffset, Shell shell)
+    {
+        XtextEditor editor = GoToDefinition.openBslModuleGranularEditor(file);
+        if (editor == null)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            try
+            {
+                var document = editor.getDocument();
+                int declarationLine0 = GetRef.findMethodDeclarationLine(document, methodName);
+                if (declarationLine0 < 0)
+                {
+                    ToastNotification.show(MENU_LABEL, "Метод «" + methodName + "» не найден в модуле", 6000); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                int line0 = Math.max(0, Math.min(declarationLine0 + lineOffset, document.getNumberOfLines() - 1));
+                editor.selectAndReveal(document.getLineOffset(line0), 0);
+            }
+            catch (Exception e)
+            {
+                ToastNotification.show(MENU_LABEL, "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
+            }
+        });
     }
 
     private static void log(String msg)

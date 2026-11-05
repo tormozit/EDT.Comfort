@@ -125,7 +125,7 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         PreferenceTransferElement[] filtered = ComfortPreferenceTransferFilter.filterAndLabel(super.getTransfers());
         Supplier<List<String>> targets = this::checkedTargetProjects;
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
-                ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, Activator.PLUGIN_ID, targets);
+                ComfortPreferenceTransferFilter.COMFORT_PROJECT_TRANSFER_ID, ComfortSettings.PROJECT_PREFERENCE_QUALIFIER, targets);
         filtered = ComfortPreferenceTransferFilter.appendProjectCategory(filtered,
                 ComfortPreferenceTransferFilter.BSL_PROJECT_TRANSFER_ID,
                 ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, targets);
@@ -186,14 +186,24 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         String sourceProject = sourceProjectValue == null || sourceProjectValue.isDisposed()
                 ? null : sourceProjectValue.getText();
         boolean sourceKnown = sourceProject != null && !sourceProject.isBlank() && !"-".equals(sourceProject); //$NON-NLS-1$
-        boolean needsRewrite = sourceKnown && !targets.isEmpty()
-                && !(targets.size() == 1 && targets.get(0).equals(sourceProject));
+        // Переписываем также импорт в тот же проект: старые .par содержат узел tormozit.
+        boolean needsRewrite = sourceKnown && !targets.isEmpty();
 
         if (needsRewrite)
+        {
             tempRewrittenFilePath = buildRewrittenFile(super.getDestinationValue(), sourceProject, targets);
+            if (tempRewrittenFilePath == null)
+            {
+                Global.tempLog("preferences-import", "Не удалось подготовить файл импорта: " //$NON-NLS-1$ //$NON-NLS-2$
+                        + super.getDestinationValue());
+                return false;
+            }
+        }
 
         try
         {
+            for (String target : targets)
+                ComfortSettings.projectPreferences(ResourcesPlugin.getWorkspace().getRoot().getProject(target));
             boolean ok = super.transfer(filters);
             if (ok)
             {
@@ -227,6 +237,11 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                     return false;
             }
             return ok;
+        }
+        catch (BackingStoreException e)
+        {
+            Global.logError("preferences-import", "Перенос настроек проекта не удался", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
         }
         finally
         {
@@ -321,7 +336,7 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
                 Map<String, PreferenceFilterEntry[]> mapping = new HashMap<>();
                 for (String target : targets)
                 {
-                    mapping.put(target + '/' + Activator.PLUGIN_ID, null);
+                    mapping.put(target + '/' + ComfortSettings.PROJECT_PREFERENCE_QUALIFIER, null);
                     mapping.put(target + '/' + ComfortPreferenceTransferFilter.BSL_PREFERENCE_QUALIFIER, null);
                     mapping.put(target + '/' + ComfortPreferenceTransferFilter.CHECKS_PREFERENCE_QUALIFIER, null);
                 }
@@ -353,18 +368,24 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
             return null;
         Properties rewritten = new Properties();
         String sourcePrefix = "/project/" + sourceProject + '/'; //$NON-NLS-1$
-        for (String key : original.stringPropertyNames())
+        for (String originalKey : original.stringPropertyNames())
         {
-            String value = original.getProperty(key);
-            rewritten.setProperty(key, value);
-            if (!key.startsWith(sourcePrefix))
+            String key = normalizeProjectPreferenceKey(originalKey);
+            // Если в файле оба узла, новый имеет приоритет независимо от порядка Properties.
+            if (!key.equals(originalKey) && original.containsKey(key))
                 continue;
-            String suffix = key.substring(sourcePrefix.length());
+            String value = original.getProperty(originalKey);
+            rewritten.setProperty(key, value);
+            String prefix = key.startsWith("!") ? "!" + sourcePrefix : sourcePrefix; //$NON-NLS-1$ //$NON-NLS-2$
+            if (!key.startsWith(prefix))
+                continue;
+            String suffix = key.substring(prefix.length());
             for (String target : targets)
             {
                 if (target.equals(sourceProject))
                     continue;
-                rewritten.setProperty("/project/" + target + '/' + suffix, value); //$NON-NLS-1$
+                rewritten.setProperty((key.startsWith("!") ? "!/project/" : "/project/") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + target + '/' + suffix, value);
             }
         }
         try
@@ -381,6 +402,22 @@ public class ComfortPreferencesImportPage extends WizardPreferencesImportPage1
         {
             return null;
         }
+    }
+
+    /** Сохраняет общие настройки tormozit; меняет только проектный узел и маркер экспорта. */
+    private static String normalizeProjectPreferenceKey(String key)
+    {
+        String prefix = key.startsWith("!") ? "!/project/" : "/project/"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!key.startsWith(prefix))
+            return key;
+        int qualifierStart = key.indexOf('/', prefix.length()) + 1;
+        if (qualifierStart == 0)
+            return key;
+        String legacy = key.substring(qualifierStart);
+        if (legacy.equals(Activator.PLUGIN_ID) || legacy.startsWith(Activator.PLUGIN_ID + '/'))
+            return key.substring(0, qualifierStart) + ComfortSettings.PROJECT_PREFERENCE_QUALIFIER
+                    + legacy.substring(Activator.PLUGIN_ID.length());
+        return key;
     }
 
     private static Properties loadProperties(String path)

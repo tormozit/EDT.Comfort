@@ -94,7 +94,226 @@ public final class BslXtextDocumentHook implements IStartup
         // #region agent log
         System.getProperties().put(PROP_ASSIST_READ_OBSERVER,
             (BiConsumer<String, Long>) BslXtextDocumentHook::observeAssistRead);
+        ValidationTrace.install();
         // #endregion
+    }
+
+    /** Временная диагностика Xtext; по просьбе пользователя повторы агрегируются, AST не обновляется. */
+    private static final class ValidationTrace extends org.eclipse.core.runtime.jobs.JobChangeAdapter
+    {
+        private static final String TOPIC = "xtext-validation-cycle"; //$NON-NLS-1$
+        private static final String PROPERTY = "tormozit.bslXtextDoc.validationTrace"; //$NON-NLS-1$
+        private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+        private static final java.util.concurrent.atomic.AtomicLong SEQUENCE =
+            new java.util.concurrent.atomic.AtomicLong();
+        // Пользователь явно разрешил сокращение вывода: каждый вызов считаем, подробности — редко.
+        private static final long DETAIL_EVERY = 10_000L;
+        private static final java.util.concurrent.ConcurrentMap<String, java.util.concurrent.atomic.AtomicLong> COUNTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private static final java.util.Map<String, Long> REPORTED = new java.util.HashMap<>();
+        private final java.util.Map<Job, Long> started = new java.util.WeakHashMap<>();
+
+        static void install()
+        {
+            System.getProperties().put(PROPERTY, (BiConsumer<Object, String>) ValidationTrace::documentEvent);
+            if (!INSTALLED.compareAndSet(false, true))
+                return;
+            java.util.Timer summaries = new java.util.Timer("ComfortXtextValidationSummary", true); //$NON-NLS-1$
+            summaries.scheduleAtFixedRate(new java.util.TimerTask()
+            {
+                @Override
+                public void run()
+                {
+                    reportCounts();
+                }
+            }, 5_000L, 5_000L);
+            Job.getJobManager().addJobChangeListener(new ValidationTrace());
+            Global.tempLog(TOPIC, "installed" + patches() //$NON-NLS-1$
+                + "; expected base=3 bsl=1; detailEvery=" + DETAIL_EVERY + "; summaryMs=5000; pending jobs follow"); //$NON-NLS-1$ //$NON-NLS-2$
+            for (Job job : Job.getJobManager().find(null))
+                jobEvent("existing", job, "", false); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String identity(Object value)
+        {
+            return value == null ? "null" : value.getClass().getName() + "@" //$NON-NLS-1$ //$NON-NLS-2$
+                + Integer.toHexString(System.identityHashCode(value));
+        }
+
+        private static String patches()
+        {
+            return " patch=" + System.getProperty(PROPERTY + ".patch", "not-loaded") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " bslPatch=" + System.getProperty(PROPERTY + ".bsl.patch", "not-loaded") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " reentryPatch=" + System.getProperty("tormozit.bslXtextDoc.validationReentry.patch", "not-loaded"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static long count(String phase, Object source)
+        {
+            return COUNTS.computeIfAbsent(phase + " " + identity(source), //$NON-NLS-1$
+                key -> new java.util.concurrent.atomic.AtomicLong()).incrementAndGet();
+        }
+
+        private static boolean detailed(long count)
+        {
+            return count == 1L || count % DETAIL_EVERY == 0L;
+        }
+
+        /** Только один поток таймера; полные стеки и состояние документа здесь не читаются. */
+        private static void reportCounts()
+        {
+            try
+            {
+                for (var entry : COUNTS.entrySet())
+                {
+                    long total = entry.getValue().get();
+                    Long previous = REPORTED.put(entry.getKey(), total);
+                    long delta = total - (previous == null ? 0L : previous.longValue());
+                    if (delta != 0L)
+                        Global.tempLog(TOPIC, "summary " + entry.getKey() + " total=" + total + " delta=" + delta); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+            }
+            catch (Throwable error)
+            {
+                Global.tempLogException(TOPIC, "summary", error); //$NON-NLS-1$
+            }
+        }
+
+        private static String documentState(Object document)
+        {
+            String text = " doc=" + identity(document); //$NON-NLS-1$
+            if (document instanceof org.eclipse.jface.text.IDocument doc)
+            {
+                text += " length=" + doc.getLength(); //$NON-NLS-1$
+                if (doc instanceof org.eclipse.jface.text.IDocumentExtension4 versioned)
+                    text += " stamp=" + versioned.getModificationStamp(); //$NON-NLS-1$
+                // Поле resource подтверждено в XtextDocument и BslXtextDocument; только готовый AST.
+                Object resource = Global.getField(document, "resource"); //$NON-NLS-1$
+                text += " resource=" + identity(resource); //$NON-NLS-1$
+                if (resource instanceof org.eclipse.xtext.resource.XtextResource xresource)
+                    text += " uri=" + xresource.getURI() + " parse=" + identity(xresource.getParseResult()); //$NON-NLS-1$ //$NON-NLS-2$
+                Object validation = Global.getField(document, "validationJob"); //$NON-NLS-1$
+                text += " validation=" + identity(validation); //$NON-NLS-1$
+            }
+            return text;
+        }
+
+        private static String caller()
+        {
+            StringBuilder text = new StringBuilder(" caller="); //$NON-NLS-1$
+            for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+            {
+                String name = frame.getClassName();
+                if (name.equals(Thread.class.getName()) || name.startsWith(ValidationTrace.class.getName()))
+                    continue;
+                text.append(frame).append(" <- "); //$NON-NLS-1$
+            }
+            return text.toString();
+        }
+
+        private static void documentEvent(Object document, String phase)
+        {
+            try
+            {
+                long count = count(phase, document);
+                if (!detailed(count))
+                    return;
+                Global.tempLog(TOPIC, "seq=" + SEQUENCE.incrementAndGet() + " " + phase //$NON-NLS-1$ //$NON-NLS-2$
+                    + " count=" + count //$NON-NLS-1$
+                    + " thread=" + Thread.currentThread().getName() + documentState(document) //$NON-NLS-1$
+                    + patches()
+                    + (phase.endsWith(".enter") ? caller() : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable error)
+            {
+                Global.tempLogException(TOPIC, phase, error);
+            }
+        }
+
+        private static void jobEvent(String phase, Job job, String detail, boolean stack)
+        {
+            try
+            {
+                String name = job.getClass().getName();
+                if (!observed(job))
+                    return;
+                long count = count("job." + phase, job); //$NON-NLS-1$
+                if (!detailed(count))
+                    return;
+                Object document = Global.getField(job, "xtextDocument"); //$NON-NLS-1$
+                if (name.contains("ContentAssistResourceSync")) //$NON-NLS-1$
+                    document = Global.getField(job, "this$0"); //$NON-NLS-1$
+                Global.tempLog(TOPIC, "seq=" + SEQUENCE.incrementAndGet() + " job." + phase //$NON-NLS-1$ //$NON-NLS-2$
+                    + " count=" + count //$NON-NLS-1$
+                    + " job=" + identity(job) + " name=" + job.getName() + " state=" + job.getState() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " thread=" + Thread.currentThread().getName() + " skip=" + Global.getField(job, "skip") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " rule=" + identity(job.getRule()) + detail + documentState(document) //$NON-NLS-1$
+                    + patches()
+                    + (stack ? caller() : "")); //$NON-NLS-1$
+            }
+            catch (Throwable error)
+            {
+                Global.tempLogException(TOPIC, "job." + phase, error); //$NON-NLS-1$
+            }
+        }
+
+        private static boolean observed(Job job)
+        {
+            String name = job.getClass().getName();
+            return job instanceof org.eclipse.xtext.ui.editor.validation.ValidationJob
+                || name.contains("XtextReconciler") || name.contains("ContentAssistResourceSync") //$NON-NLS-1$ //$NON-NLS-2$
+                || job.getName().contains("Xtext"); //$NON-NLS-1$
+        }
+
+        @Override
+        public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            jobEvent("scheduled", event.getJob(), " delayMs=" + event.getDelay(), true); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            jobEvent("aboutToRun", event.getJob(), "", false); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            if (!observed(event.getJob()))
+                return;
+            synchronized (started)
+            {
+                started.put(event.getJob(), System.nanoTime());
+            }
+            jobEvent("running", event.getJob(), "", false); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            if (!observed(event.getJob()))
+                return;
+            Long since;
+            synchronized (started)
+            {
+                since = started.remove(event.getJob());
+            }
+            jobEvent("done", event.getJob(), " elapsedMs=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (since == null ? -1L : (System.nanoTime() - since) / 1_000_000L)
+                + " result=" + event.getResult(), false); //$NON-NLS-1$
+        }
+
+        @Override
+        public void sleeping(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            jobEvent("sleeping", event.getJob(), "", true); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void awake(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            jobEvent("awake", event.getJob(), "", true); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     @Override

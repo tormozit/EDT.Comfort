@@ -13,7 +13,6 @@ import java.util.Properties;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
-import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.runtime.IAdaptable;
 import org.eclipse.core.runtime.IProduct;
 import org.eclipse.core.runtime.NullProgressMonitor;
@@ -786,11 +785,17 @@ public class ComfortPreferencePage
     {
         // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
         // отдельный host, иначе ломается сетка страницы.
-        Composite checkboxHost = new Composite(getFieldEditorParent(), SWT.NONE);
+        Composite logRow = new Composite(getFieldEditorParent(), SWT.NONE);
         GridData hostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
         hostData.horizontalSpan = 2;
         hostData.verticalIndent = 8;
-        checkboxHost.setLayoutData(hostData);
+        logRow.setLayoutData(hostData);
+        GridLayout logRowLayout = new GridLayout(2, false);
+        logRowLayout.marginWidth = 0;
+        logRowLayout.marginHeight = 0;
+        logRow.setLayout(logRowLayout);
+        Composite checkboxHost = new Composite(logRow, SWT.NONE);
+        checkboxHost.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
 
         BooleanFieldEditor debugLogField = new BooleanFieldEditor(
             ComfortSettings.PREF_DEBUG_LOG,
@@ -801,6 +806,13 @@ public class ComfortPreferencePage
             "Журнал отладки: content assist, установщик «Сменить»/«Обновить» и др.\n"
             + "Окно: Показать представление → Прочее → Журнал Комфорт", //$NON-NLS-1$
             checkboxHost);
+
+        Link logLink = new Link(logRow, SWT.NONE);
+        logLink.setText("<a>Открыть журнал</a>"); //$NON-NLS-1$
+        logLink.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        logLink.setToolTipText(TooltipText.wrap(logLink,
+            "Открыть представление «Журнал Комфорт».")); //$NON-NLS-1$
+        logLink.addListener(SWT.Selection, e -> GlobalLog.showView());
 
         Composite stallRow = new Composite(getFieldEditorParent(), SWT.NONE);
         GridData rowData = new GridData(SWT.FILL, SWT.CENTER, true, false);
@@ -1801,7 +1813,7 @@ public class ComfortPreferencePage
             try
             {
                 IEclipsePreferences node =
-                    new ProjectScope(project).getNode(Activator.PLUGIN_ID);
+                    ComfortSettings.projectPreferences(project);
                 String[] keys = node.keys();
                 Arrays.sort(keys, String.CASE_INSENSITIVE_ORDER);
                 for (String key : keys)

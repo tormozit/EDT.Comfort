@@ -5,12 +5,17 @@ import java.security.ProtectionDomain;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.xtext.Keyword;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
@@ -24,6 +29,7 @@ import org.objectweb.asm.Opcodes;
 
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexManager;
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexProvider;
+import com._1c.g5.v8.dt.bsl.model.TryExceptStatement;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProjectManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
@@ -40,6 +46,9 @@ import com._1c.g5.wiring.AbstractServiceAwareModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.e1c.g5.v8.dt.check.settings.ICheckSettings;
+import com.e1c.g5.v8.dt.check.BslDirectLocationIssue;
+import com.e1c.g5.v8.dt.check.DirectLocation;
+import com.e1c.g5.v8.dt.check.components.BasicCheck;
 
 /**
  * Activator (точка входа) плагина EDT Compare - Open Object.
@@ -69,6 +78,7 @@ public class Activator extends AbstractUIPlugin
         instance = this;
         RightsEditDialogHook.start(context);
         BuiltinCheckReplacements.start(context);
+        EmptyExceptStatementFix.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
@@ -242,6 +252,7 @@ public class Activator extends AbstractUIPlugin
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
+        EmptyExceptStatementFix.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
@@ -397,7 +408,7 @@ public class Activator extends AbstractUIPlugin
                 ToastNotification.close(previous);
             // Включён «Отключить массовые проверки»: откладывание ожидаемо, предложение скрывается само
             Shell shell = autoHide
-                ? ToastNotification.show(title, message, 15_000, run, "Запустить проверки")
+                ? ToastNotification.show(title, message, 5_000, run, "Запустить проверки")
                 : ToastNotification.showStickyUntilToastHover(title, message, run, "Запустить проверки");
             if (shell != null)
                 gateOffers.put(project.getName(), shell);
@@ -650,6 +661,62 @@ public class Activator extends AbstractUIPlugin
     }
     private Injector createInjector() {
         return Guice.createInjector(new ExternalDependenciesModule(this));
+    }
+
+    /**
+     * empty-except-statement из com.e1c.v8codestyle.bsl 0.7.0.v20260515-0037 и
+     * 0.8.0.v20260915-2022: штатное условие пустого списка операторов сохранено ранним
+     * вплетением; здесь комментарий считается содержимым, маркер ограничен словом Исключение.
+     */
+    private static final class EmptyExceptStatementFix
+    {
+        private static final String CALLBACK = "tormozit.emptyExcept.issue"; //$NON-NLS-1$
+        private static final String TITLE =
+            "Конструкция \"Попытка…Исключение…КонецПопытки\" имеет пустое исключение";
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) EmptyExceptStatementFix::addIssue);
+        }
+
+        static void stop()
+        {
+            System.getProperties().remove(CALLBACK);
+        }
+
+        private static void addIssue(Object[] args)
+        {
+            if (!(args[0] instanceof BasicCheck.ResultAcceptor acceptor)
+                || !(args[1] instanceof TryExceptStatement statement))
+                return;
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(statement);
+            if (node == null)
+                return;
+            ILeafNode except = null;
+            for (ILeafNode leaf : node.getLeafNodes())
+            {
+                boolean ownKeyword = !leaf.isHidden() && leaf.getGrammarElement() instanceof Keyword
+                    && NodeModelUtils.findActualSemanticObjectFor(leaf) == statement;
+                if (except == null)
+                {
+                    if (ownKeyword && ("Исключение".equalsIgnoreCase(leaf.getText())
+                        || "Except".equalsIgnoreCase(leaf.getText()))) //$NON-NLS-1$
+                        except = leaf;
+                    continue;
+                }
+                if (ownKeyword && ("КонецПопытки".equalsIgnoreCase(leaf.getText())
+                    || "EndTry".equalsIgnoreCase(leaf.getText()))) //$NON-NLS-1$
+                {
+                    DirectLocation location = new DirectLocation(Integer.valueOf(except.getOffset()),
+                        Integer.valueOf(except.getLength()), Integer.valueOf(except.getStartLine()), statement);
+                    acceptor.addIssue(new BslDirectLocationIssue(TITLE, location));
+                    return;
+                }
+                // Включая скрытые узлы комментариев; пробелы и переводы строк содержимым не считаются.
+                if (!leaf.getText().isBlank())
+                    return;
+            }
+        }
     }
 
     /**
