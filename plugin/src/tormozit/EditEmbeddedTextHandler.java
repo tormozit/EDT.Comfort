@@ -883,7 +883,18 @@ public final class EditEmbeddedTextHandler
         /** Новая настройка просмотрщика сбрасывает подсказки при наведении — ставим подсказку орфографии заново. */
         private void onFormatApplied()
         {
-            SpellCheckHook.installSpellingQuickFixHover(viewer, textConfiguration);
+            boolean jdtAvailable = ComfortJdtAvailability.isJdtUiAvailable();
+            try
+            {
+                boolean installed = jdtAvailable
+                    && SpellCheckHook.installSpellingQuickFixHover(viewer, textConfiguration);
+                Global.tempLog("embedded-text", "Spelling hover: jdtAvailable=" + jdtAvailable //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", installed=" + installed); //$NON-NLS-1$
+            }
+            catch (LinkageError e)
+            {
+                Global.tempLogException("embedded-text", "Spelling hover: jdtAvailable=" + jdtAvailable, e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             syncPreviewTab();
         }
 
