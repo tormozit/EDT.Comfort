@@ -241,7 +241,7 @@ final class BslExpectedTypePremiums
      */
     private record Expectation(List<String> types, String receiver, String token, String callMethod,
         int parameterIndex, boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems,
-        List<String> matchingTypes, Boolean booleanDefault)
+        List<String> matchingTypes, Boolean booleanDefault, String formalParameterName)
     {
         /** Только «Неопределено» — ожидаемый тип неизвестен; смешанный набор сохраняется целиком. */
         Expectation
@@ -259,7 +259,7 @@ final class BslExpectedTypePremiums
             boolean systemEnum, String systemProperty, boolean formalParameter, List<TypeItem> typeItems)
         {
             this(types, receiver, token, callMethod, parameterIndex, systemEnum, systemProperty, formalParameter,
-                typeItems, typeItems.isEmpty() ? List.copyOf(types) : matchingTypeNames(typeItems), null);
+                typeItems, typeItems.isEmpty() ? List.copyOf(types) : matchingTypeNames(typeItems), null, ""); //$NON-NLS-1$
         }
 
         Expectation(List<String> types, String receiver, String token, String callMethod, int parameterIndex,
@@ -499,7 +499,7 @@ final class BslExpectedTypePremiums
         return premium != null ? premium.intValue() : 0;
     }
 
-    /** Есть ли у текущего места строка «Приемник.Тип» для боковой подсказки (без слов ИР). */
+    /** Есть ли у текущего места строка ожидаемого типа для боковой подсказки (без слов ИР). */
     static boolean hasReceiverLine()
     {
         Snapshot snapshot = active;
@@ -762,17 +762,41 @@ final class BslExpectedTypePremiums
             schedule(context, project, list.clone());
             return;
         }
-        publish(compute(context, project, list));
+        Snapshot computed = compute(context, project, list);
+        publish(computed);
+        if (computed != null && active == computed)
+            refreshPublishedContext(computed);
     }
 
     /** Новый снимок становится текущим, а действующим — если место с тех пор не сменилось. */
     private static void publish(Snapshot computed)
     {
-        if (computed == null)
+        if (computed == null || !computed.context().sameAs(requested))
+            return;
+        Snapshot previous = current;
+        if (!computed.complete() && previous != null && previous.complete()
+            && previous.context().sameAs(computed.context()))
             return;
         current = computed;
-        if (computed.context().sameAs(requested))
-            active = computed;
+        active = computed;
+    }
+
+    private static void refreshPublishedContext(Snapshot computed)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            Snapshot snapshot = active;
+            boolean applicable = snapshot != null && snapshot.scene() == computed.scene()
+                && snapshot.context().sameAs(requested);
+            Global.tempLog("expected-type-assist", "refresh applicable=" + applicable //$NON-NLS-1$ //$NON-NLS-2$
+                + " start=" + computed.context().start()); //$NON-NLS-1$
+            if (!applicable)
+                return;
+            ContentAssistSessionReloader.refreshContextPremiums(computed.context().document());
+            ContentAssistSessionReloader.onContextPremiumsReady(computed.context().document());
+        });
     }
 
     /** Общий расчёт чужого модуля готов: перечитать ожидание и обновить уже открытый список. UI-поток. */
@@ -959,6 +983,8 @@ final class BslExpectedTypePremiums
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
+                Global.tempLog("expected-type-assist", "job start=" + context.start() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " caret=" + context.caret() + " proposals=" + list.length); //$NON-NLS-1$ //$NON-NLS-2$
                 try
                 {
                     if (!context.sameAs(requested) || revision != foreignParameterRevision)
@@ -973,17 +999,12 @@ final class BslExpectedTypePremiums
                         return Status.CANCEL_STATUS;
                     publish(computed);
                     if (active == computed && (basis == null || computed.premiums() != basis.premiums()))
-                    {
-                        Display display = Display.getDefault();
-                        if (display != null && !display.isDisposed())
-                            display.asyncExec(() -> {
-                                Global.tempLog("boolean-default-ranking", "publishUI active=" + (active == computed)); //$NON-NLS-1$ //$NON-NLS-2$
-                                if (active != computed)
-                                    return;
-                                ContentAssistSessionReloader.refreshContextPremiums(context.document());
-                                ContentAssistSessionReloader.onContextPremiumsReady(context.document());
-                            });
-                    }
+                        refreshPublishedContext(computed);
+                }
+                catch (RuntimeException | LinkageError error)
+                {
+                    Global.tempLogException("expected-type-assist", "job start=" + context.start(), error); //$NON-NLS-1$ //$NON-NLS-2$
+                    throw error;
                 }
                 finally
                 {
@@ -1071,8 +1092,11 @@ final class BslExpectedTypePremiums
         }
         catch (RuntimeException e)
         {
+            Global.tempLogException("expected-type-assist", "read start=" + context.start(), e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
+        Global.tempLog("expected-type-assist", "read start=" + context.start() + " complete=" + complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " result=" + read + " type=" + (scene[0] != null ? scene[0].expectedTypeText() : null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (!Boolean.TRUE.equals(read) || scene[0] == null)
             return null;
         Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
@@ -1132,7 +1156,7 @@ final class BslExpectedTypePremiums
             ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
         // В комментарии слово — не выражение, приёмника у него нет.
         boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret());
-        String receiverLine = comment ? null : receiverTypeLine(expectation, resource);
+        String receiverLine = comment ? null : receiverTypeLine(expectation, resource, context);
         String expectedTypeText = expectation == null || expectation.typeItems().isEmpty()
                 ? receiverTypes(expectation).isEmpty() ? "" //$NON-NLS-1$
                     : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -1262,6 +1286,7 @@ final class BslExpectedTypePremiums
         int parameterIndex = -1;
         String systemProperty = null;
         Boolean booleanDefault = null;
+        String formalParameterName = ""; //$NON-NLS-1$
         // «Возврат» ИР читает как присваивание переменной результата метода.
         if (endsWithWord(preceding, "Возврат") || endsWithWord(preceding, "Return")) //$NON-NLS-1$ //$NON-NLS-2$
         {
@@ -1282,6 +1307,7 @@ final class BslExpectedTypePremiums
                 receiver = call.receiver();
                 callMethod = call.method();
                 booleanDefault = call.booleanDefault();
+                formalParameterName = call.formalParameterName();
             }
         }
         // Ожидание от параметра вызова, пока его не перебил приёмник слева от оператора
@@ -1374,7 +1400,8 @@ final class BslExpectedTypePremiums
             return null;
         return new Expectation(names, receiver, token, callMethod, parameterIndex, hasSystemEnum(types),
             systemProperty, formalParameter, List.copyOf(types),
-            types.isEmpty() ? List.copyOf(names) : matchingTypeNames(types), formalParameter ? booleanDefault : null);
+            types.isEmpty() ? List.copyOf(names) : matchingTypeNames(types), formalParameter ? booleanDefault : null,
+            formalParameter ? formalParameterName : ""); //$NON-NLS-1$
     }
 
     /** Тип ключа {@code коллекция[}: ключ соответствия, Число по ЕстьЧисловойИндекс, Строка для доступа по имени. */
@@ -1407,11 +1434,17 @@ final class BslExpectedTypePremiums
     }
 
     /** Ожидание в аргументе вызова: типы параметра, приёмник (имя параметра или ключа) и имя метода. */
-    private record CallExpectation(List<TypeItem> types, String receiver, String method, Boolean booleanDefault)
+    private record CallExpectation(List<TypeItem> types, String receiver, String method, Boolean booleanDefault,
+        String formalParameterName)
     {
         CallExpectation(List<TypeItem> types, String receiver, String method)
         {
-            this(types, receiver, method, null);
+            this(types, receiver, method, null, ""); //$NON-NLS-1$
+        }
+
+        CallExpectation(List<TypeItem> types, String formalParameterName, String method, Boolean booleanDefault)
+        {
+            this(types, formalParameterName, method, booleanDefault, formalParameterName);
         }
     }
 
@@ -1492,7 +1525,7 @@ final class BslExpectedTypePremiums
         {
             List<TypeItem> elements = elementTypes(resource, sourceTypes);
             if (!elements.isEmpty())
-                return new CallExpectation(elements, receiver, methodName);
+                return new CallExpectation(elements, receiver, methodName, null);
         }
         // БСП: ВыполнитьФункцию/ВыполнитьПроцедуру("Модуль.Метод", П1, …)
         if (("ВыполнитьФункцию".equalsIgnoreCase(methodName) || "ВыполнитьПроцедуру".equalsIgnoreCase(methodName)) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1540,7 +1573,7 @@ final class BslExpectedTypePremiums
         Parameter parameter = chooseParameter(resource, variants, args, index, offset);
         if (parameter == null)
             return new CallExpectation(new ArrayList<>(), "", typeName); //$NON-NLS-1$
-        return new CallExpectation(new ArrayList<>(parameter.getType()), parameterName(parameter), typeName);
+        return new CallExpectation(new ArrayList<>(parameter.getType()), parameterName(parameter), typeName, null);
     }
 
     /**
@@ -3023,8 +3056,8 @@ final class BslExpectedTypePremiums
     }
 
     /**
-     * Боковая подсказка списка: первой строкой — {@code Приемник.Тип: <ИмяТипа>}, если у места есть ожидаемый
-     * тип. Как раздел описания слова ИР; при словах ИР подсказку строит ИР.
+     * Боковая подсказка списка: первой строкой — ожидаемый тип и, если известно, имя формального параметра.
+     * При словах ИР подсказку строит ИР.
      */
     static Object withReceiverType(Object info)
     {
@@ -3081,7 +3114,8 @@ final class BslExpectedTypePremiums
                 READ_RESOURCE.set(resource);
                 try
                 {
-                    return receiverTypeLine(expectation(resource, context, site, new ICompletionProposal[0]), resource);
+                    return receiverTypeLine(expectation(resource, context, site, new ICompletionProposal[0]),
+                        resource, context);
                 }
                 finally
                 {
@@ -3096,17 +3130,21 @@ final class BslExpectedTypePremiums
     }
 
     /**
-     * Строка {@code Приемник.Тип: <ИмяТипа>} (как раздел описания слова ИР); {@code null} — типа нет. Типы —
-     * ссылками EDT, как в её подсказках ({@link #edtTypesHtml}). Только под чтением модели {@code resource}.
+     * Строка {@code Приемник: ИмяПараметра <ИмяТипа>} или {@code Приемник: <ИмяТипа>}.
+     * Если типа нет, возвращает {@code null}. Типы — ссылками EDT ({@link #edtTypesHtml}).
+     * Только под чтением модели {@code resource}.
      */
-    private static String receiverTypeLine(Expectation expectation, XtextResource resource)
+    private static String receiverTypeLine(Expectation expectation, XtextResource resource, Context context)
     {
         List<String> types = receiverTypes(expectation);
         if (types.isEmpty())
             return null;
         String typesHtml = expectation != null && !expectation.typeItems().isEmpty()
             ? typeItemsHtml(resource, expectation.typeItems()) : edtTypesHtml(resource, types);
-        return "<div class=\"" + RECEIVER_TYPE_CLASS + "\"><b>Приемник.Тип</b>: " //$NON-NLS-1$ //$NON-NLS-2$
+        String name = expectation.formalParameterName();
+        String parameter = name.isBlank() ? "" : ParamHintHtmlModifier.linkToParameterHint(escapeHtml(name), //$NON-NLS-1$
+            context.document(), context.start()) + " "; //$NON-NLS-1$
+        return "<div class=\"" + RECEIVER_TYPE_CLASS + "\"><b>Приемник</b>: " + parameter //$NON-NLS-1$ //$NON-NLS-2$
             + (typesHtml != null ? typesHtml : escapeHtml("<" + String.join(" | ", types) + ">")) + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 

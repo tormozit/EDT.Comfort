@@ -187,7 +187,7 @@ public final class ContentAssistPopupUi
         if (viewer == null || viewer.getDocument() == null)
             return ""; //$NON-NLS-1$
         String types = BslExpectedTypePremiums.expectedTypeTextAt(viewer.getDocument(), resolveViewerCaret(viewer));
-        return types == null || types.isEmpty() ? "" : "Ожидаем: " + types; //$NON-NLS-1$ //$NON-NLS-2$
+        return types == null || types.isEmpty() ? "" : "Приемник: " + types; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean applyExpectedTypeLabel(Composite bar, SourceViewer viewer)

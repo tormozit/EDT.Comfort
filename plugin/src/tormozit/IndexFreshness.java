@@ -226,7 +226,7 @@ final class IndexFreshness
             }
             catch (CoreException ex)
             {
-                Global.tempLog("search-index-coverage", "Не удалось прочитать изменения ресурсов: " + ex);
+                return;
             }
             if (!saved.isEmpty())
                 display.asyncExec(() ->
@@ -256,9 +256,6 @@ final class IndexFreshness
             var bsl = GetRef.getActiveBslEditor(editor);
             IFile file = bsl != null && bsl.getEditorInput() != null
                 ? bsl.getEditorInput().getAdapter(IFile.class) : null;
-            Global.tempLog("search-index-coverage", "Нажата кнопка удаления: редактор="
-                + (editor == null ? "нет" : editor.getClass().getName()) + ", файл="
-                + (file == null ? "нет" : file.getFullPath()));
             if (file == null || !file.isAccessible())
             {
                 ToastNotification.show(REMOVE_LABEL, "Откройте модуль BSL и повторите команду");
@@ -294,8 +291,6 @@ final class IndexFreshness
                 boolean presentBefore = containsIndexedFile(index, file, monitor);
                 index.removeFile(List.of(file));
                 boolean presentAfter = containsIndexedFile(index, file, monitor);
-                Global.tempLog("search-index-coverage", "Проверка удаления " + file.getFullPath()
-                    + ": до=" + presentBefore + ", после=" + presentAfter);
                 if (presentAfter)
                     result = "Записи модуля по-прежнему находятся в индексе.";
                 else if (!presentBefore)
@@ -306,7 +301,6 @@ final class IndexFreshness
             catch (IOException | RuntimeException ex)
             {
                 result = "Не удалось подтвердить удаление записей модуля из индекса.";
-                Global.tempLog("search-index-coverage", result + " " + file.getFullPath() + ": " + ex);
             }
             String message = moduleName + "\n" + result;
             display.asyncExec(() ->
@@ -338,7 +332,6 @@ final class IndexFreshness
                 complete = missing.isEmpty();
                 status = complete ? "Индекс поиска актуален."
                     : "Индекс содержит пропуски или устаревшие записи. Модулей: " + missing.size() + ".";
-                Global.tempLog("search-index-coverage", status + " " + missing);
             }
             catch (OperationCanceledException ex)
             {
@@ -347,7 +340,6 @@ final class IndexFreshness
             catch (CoreException | IOException | ReflectiveOperationException | RuntimeException ex)
             {
                 status = "Не удалось проверить полноту индекса.";
-                Global.tempLog("search-index-coverage", status + " " + ex);
             }
             String result = status;
             boolean confirmed = complete;
@@ -407,7 +399,6 @@ final class IndexFreshness
             if (!FtsAccess.isLocalIndex(textIndex))
             {
                 unsupportedProject = true;
-                Global.tempLog("search-index-coverage", "Пропущен индекс с библиотеками: " + project.getName());
                 continue;
             }
             checkedSource = true;
@@ -447,8 +438,6 @@ final class IndexFreshness
             }
             found += repair.size();
             updateAnalysis(projectIndex, projects.size(), 100, found);
-            Global.tempLog("search-index-coverage", "Сверка " + project.getName() + ": файлов в индексе="
-                + indexed.size() + ", сверено сохранений=" + changed.size() + ", кандидатов=" + repair.size());
             if (repair.isEmpty())
                 continue;
             analysisProgress = null;
@@ -460,7 +449,6 @@ final class IndexFreshness
                     : access.enqueue(manager, List.copyOf(repair));
                 if (!contexts.isEmpty())
                 {
-                    Global.tempLog("search-index-coverage", "Поставлены в очередь FTS: " + repair);
                     if (waitForRepair(manager, contexts, monitor))
                     {
                         int submitted = repair.size();
@@ -468,8 +456,6 @@ final class IndexFreshness
                         int confirmed = submitted - repair.size() - removed;
                         repairedCount.addAndGet(confirmed);
                         REPAIR_REVISION.addAndGet(confirmed);
-                        Global.tempLog("search-index-coverage", "Подтверждено обновление: " + confirmed
-                            + ", не восстановлены: " + repair);
                     }
                 }
             }
@@ -529,7 +515,6 @@ final class IndexFreshness
         }
         if (monitor.isCanceled())
             throw new OperationCanceledException();
-        Global.tempLog("search-index-coverage", "Истекло ожидание контекстов FTS: " + contexts.keySet());
         return false;
     }
 

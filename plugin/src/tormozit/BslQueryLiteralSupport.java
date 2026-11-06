@@ -2103,14 +2103,14 @@ final class BslQueryLiteralSupport
                         expectedNames = names;
                         if (links.isEmpty())
                             return null;
-                        return "<div class=\"comfort-receiver-type\"><b>Приемник.Тип</b>: &lt;" //$NON-NLS-1$
+                        return "<div class=\"comfort-receiver-type\"><b>Приемник</b>: &lt;" //$NON-NLS-1$
                             + String.join(", ", links) + "&gt;</div>"; //$NON-NLS-1$ //$NON-NLS-2$
                     });
                     line = expected;
                 }
                 catch (Exception | LinkageError error)
                 {
-                    // без строки «Приемник.Тип»
+                    // без строки «Приемник»
                 }
             }
             if (expected == null)

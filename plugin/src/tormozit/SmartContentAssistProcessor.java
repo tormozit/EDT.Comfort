@@ -11338,7 +11338,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
     /**
-     * Боковую подсказку плагина (описание, «Приемник.Тип», замечание о типе) даёт только
+     * Боковую подсказку плагина (описание, «Приемник», замечание о типе) даёт только
      * {@link SmartCompletionProposal}. При снятом флажке «Фильтр» строки штатного списка доходят до окна
      * без обёртки — оборачиваем; фильтр обёртки при снятом флажке штатный ({@link #proposalMatchesFilter}).
      */

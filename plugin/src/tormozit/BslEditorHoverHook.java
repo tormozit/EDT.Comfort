@@ -622,7 +622,7 @@ public final class BslEditorHoverHook implements IStartup
                 return info;
             var links = BslStructureInsertCommentTypes.seeLinksFor(member, viewer);
             String block = ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
-                MethodDefinitionLink::registerFormHandler);
+                MethodDefinitionLink::registerAction);
             String html = MetadataTypeMenu.decorate(IrBslHoverHtml.readHtml(info), viewer,
                 SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer));
             String injected = ParamHintHtmlModifier.injectMemberSeeLinks(html, block);
@@ -631,10 +631,10 @@ public final class BslEditorHoverHook implements IStartup
             result = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
             {
                 var descriptionLinks = ParamHintHtmlModifier.methodDescriptionLinksForInput(info,
-                    document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
+                    document.getResourceURI(), MethodDefinitionLink::registerAction);
                 if (descriptionLinks.isEmpty())
                     descriptionLinks = ParamHintHtmlModifier.methodDescriptionLinks(member,
-                        document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
+                        document.getResourceURI(), MethodDefinitionLink::registerAction);
                 return ParamHintHtmlModifier.injectMethodDescriptionLinks(descriptionHtml, descriptionLinks);
             });
             if (result == null)
@@ -651,16 +651,15 @@ public final class BslEditorHoverHook implements IStartup
     private static final class MethodDefinitionLink
     {
         private static final String FUNCTION = "comfortOpenMethodDefinition";
-        private static final Map<String, Runnable> formHandlerActions =
+        private static final Map<String, Runnable> actions =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-        /** Действие ссылки на элемент формы, подписанный на событие методом (issue 671). */
-        static String registerFormHandler(Runnable action)
+        static String registerAction(Runnable action)
         {
-            if (formHandlerActions.size() > 200)
-                formHandlerActions.clear();
-            String token = "formhandler:" + java.util.UUID.randomUUID();
-            formHandlerActions.put(token, action);
+            if (actions.size() > 200)
+                actions.clear();
+            String token = "action:" + java.util.UUID.randomUUID(); //$NON-NLS-1$
+            actions.put(token, action);
             return token;
         }
 
@@ -688,9 +687,9 @@ public final class BslEditorHoverHook implements IStartup
                             || !(arguments[0] instanceof String encoded))
                             return Boolean.FALSE;
                         boolean closeWindow = arguments.length == 1 || !Boolean.FALSE.equals(arguments[1]);
-                        if (encoded.startsWith("formhandler:"))
+                        if (encoded.startsWith("action:")) //$NON-NLS-1$
                         {
-                            Runnable action = formHandlerActions.get(encoded);
+                            Runnable action = actions.get(encoded);
                             if (action == null)
                                 return Boolean.FALSE;
                             display.asyncExec(() -> {
@@ -726,6 +725,13 @@ public final class BslEditorHoverHook implements IStartup
     static void installMethodDefinitionFunction(Browser browser)
     {
         MethodDefinitionLink.installBrowser(browser);
+    }
+
+    static String parameterHintLink(String nameHtml, Runnable action)
+    {
+        String token = MethodDefinitionLink.registerAction(action);
+        return "<a href=\"#\" onclick=\"comfortOpenMethodDefinition('" + token //$NON-NLS-1$
+            + "');return false;\">" + nameHtml + "</a>"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Ctrl+F2 (INFORMATION_PROPOSAL) — {@code XtextInformationProvider.hover}, не из {@code fTextHovers}. */
@@ -841,7 +847,7 @@ public final class BslEditorHoverHook implements IStartup
         private volatile String lastMemberSeeLinksHtml;
         private volatile Map<String, String> lastMethodDescriptionLinks = Map.of();
         private volatile String lastPlatformAvailabilityHtml;
-        /** «Приемник.Тип: …» места слова под указателем — как в боковой подсказке списка. */
+        /** «Приемник: …» места слова под указателем — как в боковой подсказке списка. */
         private volatile String lastReceiverTypeLine;
         private volatile boolean lastCreationSite;
         private volatile HtmlIntegrityWatcher activeWatcher;
@@ -1017,7 +1023,7 @@ public final class BslEditorHoverHook implements IStartup
             {
                 var descriptionLinks = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                     ParamHintHtmlModifier.methodDescriptionLinksForInput(info, document.getResourceURI(),
-                        MethodDefinitionLink::registerFormHandler));
+                        MethodDefinitionLink::registerAction));
                 if (descriptionLinks != null && !descriptionLinks.isEmpty())
                     lastMethodDescriptionLinks = descriptionLinks;
             }
@@ -1299,7 +1305,7 @@ public final class BslEditorHoverHook implements IStartup
                 if (links.isEmpty() || !(editor.getDocument() instanceof IXtextDocument document))
                     return null;
                 return ParamHintHtmlModifier.memberSeeLinksBlock(links, document.getResourceURI(),
-                    MethodDefinitionLink::registerFormHandler);
+                    MethodDefinitionLink::registerAction);
             }
             catch (Throwable ex)
             {
@@ -1411,7 +1417,7 @@ public final class BslEditorHoverHook implements IStartup
                     EObject feature = entry.getFeature();
                     if (lastMethodDescriptionLinks.isEmpty())
                         lastMethodDescriptionLinks = ParamHintHtmlModifier.methodDescriptionLinks(feature,
-                            document.getResourceURI(), MethodDefinitionLink::registerFormHandler);
+                            document.getResourceURI(), MethodDefinitionLink::registerAction);
                     if (lastFunctionTarget == null)
                         lastFunctionTarget = FunctionReturnTypes.targetOf(feature, 0);
                 }
@@ -1467,7 +1473,7 @@ public final class BslEditorHoverHook implements IStartup
                             || !method.getName().equalsIgnoreCase(action.getHandler().getName()))
                             continue;
                         // Как строка «Найти ссылки»: команда формы и её поле «Действие» в «Свойствах».
-                        String token = MethodDefinitionLink.registerFormHandler(() -> {
+                        String token = MethodDefinitionLink.registerAction(() -> {
                             org.eclipse.ui.IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
                             org.eclipse.ui.IWorkbenchPage page = window == null ? null : window.getActivePage();
                             ConfigSearchResultsHook.PropertyFieldFocus.scheduleExact(page, command,
@@ -1578,7 +1584,7 @@ public final class BslEditorHoverHook implements IStartup
                 String eventName = event == null ? ""
                     : event.getNameRu() != null && !event.getNameRu().isEmpty() ? event.getNameRu()
                     : event.getName() != null ? event.getName() : "";
-                String token = MethodDefinitionLink.registerFormHandler(() -> {
+                String token = MethodDefinitionLink.registerAction(() -> {
                     org.eclipse.ui.IWorkbenchPage page = PlatformUI.getWorkbench().getActiveWorkbenchWindow() == null
                         ? null : PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
                     FormEditorHook.openFormEventHandler(page, resolveBasicForm(moduleUri), target, handler);

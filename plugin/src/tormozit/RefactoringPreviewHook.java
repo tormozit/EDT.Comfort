@@ -10,7 +10,6 @@ import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.CompareViewerSwitchingPane;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
-import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
@@ -327,8 +326,6 @@ public final class RefactoringPreviewHook
             return;
         try
         {
-            Global.tempLog("search-index-coverage", "Повтор предпросмотра: " + wizard.getRefactoring().getName());
-            logPreviewViewer(shell, "до повтора");
             Change previous = wizard.getChange();
             boolean nativeNavigation = repeatThroughInputPage(container, page);
             if (!nativeNavigation)
@@ -362,11 +359,9 @@ public final class RefactoringPreviewHook
                         + "\nПроверьте пометки изменений.");
             }
             container.updateButtons();
-            logPreviewViewer(shell, "после повтора, штатная навигация=" + nativeNavigation);
         }
         catch (ReflectiveOperationException | RuntimeException e)
         {
-            Global.tempLogException("search-index-coverage", "Повтор предпросмотра", e);
             ToastNotification.show("Рефакторинг", "Не удалось повторить поиск. Откройте предпросмотр заново.");
         }
     }
@@ -387,16 +382,6 @@ public final class RefactoringPreviewHook
         if (container.getCurrentPage() == input)
             next.invoke(container);
         return true;
-    }
-
-    private static void logPreviewViewer(Shell shell, String phase)
-    {
-        CompareViewerSwitchingPane compare = CurrentLines.findComparePane(shell);
-        Viewer viewer = compare == null ? null : compare.getViewer();
-        Object input = viewer == null ? null : viewer.getInput();
-        String type = input instanceof ICompareInput diff && diff.getLeft() != null ? diff.getLeft().getType() : "";
-        Global.tempLog("refactoring-preview-syntax", phase + ": viewer="
-            + (viewer == null ? "нет" : viewer.getClass().getName()) + ", type=" + type);
     }
 
     private static Object pageFlag(IWizardPage page)

@@ -178,6 +178,8 @@ public final class ParamHintHtmlModifier
     private static final String TYPE_CLASS = "contentassist-type"; //$NON-NLS-1$
     private static final String DESC_CLASS = "contentassist-description"; //$NON-NLS-1$
     private static final String COMFORT_META_MARKER = "comfort-param-meta"; //$NON-NLS-1$
+    private static final java.util.regex.Pattern CONTENT_PARAM_INDEX =
+        java.util.regex.Pattern.compile(" data-comfort-param-index=[\"'](-?\\d+)[\"']"); //$NON-NLS-1$
     private static final String INVOCATION_PARAMETERS_HOVER_COMMAND =
         "com._1c.g5.v8.dt.bsl.ui.hover.InvocationParametersHover"; //$NON-NLS-1$
     private static final String PARAMETERS_HOVER_CLASS =
@@ -814,6 +816,42 @@ public final class ParamHintHtmlModifier
             sigPickOnOpenPending.set(true);
             return showParamInfoViaHandler(handler, viewer, info, site, true, false);
         }
+    }
+
+    static String linkToParameterHint(String nameHtml, IDocument document, int offset)
+    {
+        if (!(document instanceof org.eclipse.jface.text.IDocumentExtension4 versioned))
+            return nameHtml;
+        long stamp = versioned.getModificationStamp();
+        return BslEditorHoverHook.parameterHintLink(nameHtml, () ->
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window != null ? window.getActivePage() : null;
+            BslXtextEditor editor = page != null ? GetRef.getActiveBslEditor(page.getActiveEditor()) : null;
+            ITextViewer viewer = editor != null ? editor.getInternalSourceViewer() : null;
+            StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+            if (widget == null || widget.isDisposed() || viewer.getDocument() != document
+                || versioned.getModificationStamp() != stamp || offset < 0 || offset > document.getLength())
+                return;
+
+            try
+            {
+                var handlers = editor.getSite().getService(org.eclipse.ui.handlers.IHandlerService.class);
+                if (handlers == null)
+                    return;
+                ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+                if (reloader != null && reloader.getBslEditor() == editor)
+                    ContentAssistPopupSync.hideProposalPopup(reloader.getAssistant());
+                widget.setFocus();
+                viewer.setSelectedRange(offset, 0);
+                viewer.revealRange(offset, 0);
+                handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("parameter-hint-link", "offset=" + offset + " " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+        });
     }
 
     static boolean openParamHintWithoutHighlight(ITextViewer viewer, int caret)
@@ -5684,6 +5722,8 @@ public final class ParamHintHtmlModifier
             return null;
 
         String oldTypeInner = html.substring(typeInnerStart, typeInnerEnd);
+        String typeOpen = html.substring(typeDivStart, typeInnerStart);
+        var previousIndex = CONTENT_PARAM_INDEX.matcher(typeOpen);
         // База — только типы (без «Тип:» / «Типы:»), со ссылками если есть
         String typeBase = stripTypeLabel(stripComfortMeta(oldTypeInner));
 
@@ -5694,6 +5734,7 @@ public final class ParamHintHtmlModifier
         Object paramContent = null;
         boolean currentParam = false;
         boolean virtualParam = false;
+        boolean staleContent = false;
 
         if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
             && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size())
@@ -5701,6 +5742,17 @@ public final class ParamHintHtmlModifier
             Object page = ctx.pages.get(ctx.pageIndex);
             virtualParam = extraUnknownParamCount(ctx, countPageParams(page)) > 0;
             int highlight = currentParamHighlightIndex(ctx, countPageParams(page));
+            // showPage и перерисовка заголовка могут опередить загрузку HTML браузером.
+            String selectedIndex = Integer.toString(highlight);
+            staleContent = previousIndex.find() ? !selectedIndex.equals(previousIndex.group(1))
+                : highlight != ctx.paramIndex;
+            if (staleContent)
+                typeBase = ""; //$NON-NLS-1$
+            typeOpen = previousIndex.replaceFirst(""); //$NON-NLS-1$
+            typeOpen = typeOpen.substring(0, typeOpen.length() - 1)
+                + " data-comfort-param-index=\"" + selectedIndex + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("parameter-hint-content", "page=" + ctx.pageIndex + " stock=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " selected=" + highlight + " staleContent=" + staleContent); //$NON-NLS-1$ //$NON-NLS-2$
             currentParam = highlight >= 0;
             paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
                 Integer.valueOf(highlight)) : null;
@@ -5748,7 +5800,7 @@ public final class ParamHintHtmlModifier
             isOut = resolveIsOut(ctx, paramName, paramContent);
         }
 
-        if (currentParam && (description == null || description.isEmpty()))
+        if (currentParam && !staleContent && (description == null || description.isEmpty()))
             description = normalizeDescription(extractExpandedDescription(html));
 
         if (virtualParam)
@@ -5791,9 +5843,9 @@ public final class ParamHintHtmlModifier
         String newTypeInner = directionPrefix
             + (stripHtml(typeBase).isEmpty() && seeLinks.isEmpty() ? "" //$NON-NLS-1$
                 : "&lt;" + typeBase + seeLinks + "&gt;") + suffix; //$NON-NLS-1$ //$NON-NLS-2$
-        if (!virtualParam && (newTypeInner == null || newTypeInner.isEmpty()))
+        if (!virtualParam && !staleContent && newTypeInner.isEmpty())
             return null;
-        boolean hasEnrichment = virtualParam
+        boolean hasEnrichment = virtualParam || staleContent
             || !stripHtml(typeBase).isEmpty()
             || !seeLinks.isEmpty()
             || isOut != null
@@ -5802,7 +5854,6 @@ public final class ParamHintHtmlModifier
         if (!hasEnrichment)
             return null;
 
-        String typeOpen = html.substring(typeDivStart, typeInnerStart);
         if (!typeOpen.contains(COMFORT_META_MARKER))
         {
             String replaced = replaceClassAttribute(typeOpen, TYPE_CLASS,
@@ -5831,7 +5882,7 @@ public final class ParamHintHtmlModifier
         // убираем вместе с типом.
         boolean inlinedDescription = description != null && !description.isBlank();
         boolean emptyDescription = isEmptyParamDescription(paramContent);
-        int descClassPos = inlinedDescription || virtualParam || emptyDescription
+        int descClassPos = inlinedDescription || virtualParam || emptyDescription || staleContent
             ? indexOfClassAttribute(html, DESC_CLASS, afterTypeDiv)
             : -1;
         if (descClassPos >= 0)

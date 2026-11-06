@@ -814,15 +814,12 @@ public final class BslReferenceSearchTableHook implements IStartup
         private void removeDuplicateOccurrences()
         {
             var positions = new java.util.HashSet<OccurrencePosition>();
-            int before = rows.size();
             rows.removeIf(row ->
             {
                 int[] range = row.region != null ? row.region : row.knownRegion;
                 return row.file != null && range != null && range[0] >= 0 && range[1] > 0
                     && !positions.add(new OccurrencePosition(row.file, range[0], range[1]));
             });
-            Global.tempLog("search-index-coverage", "Сверка строк ссылок: всего=" + before
-                + ", дублей=" + (before - rows.size()));
         }
 
         private void repeatQuery(ISearchQuery query, int updated, boolean cancelCurrentRun)
@@ -835,13 +832,11 @@ public final class BslReferenceSearchTableHook implements IStartup
             {
                 if (cancelCurrentRun)
                 {
-                    Global.tempLog("search-index-coverage", "Отмена поиска ссылок перед повтором: " + query.getLabel());
                     NewSearchUI.cancelQuery(query);
                 }
                 table.getDisplay().timerExec(50, () -> repeatQuery(query, updated, false));
                 return;
             }
-            Global.tempLog("search-index-coverage", "Повтор поиска ссылок: " + query.getLabel());
             NewSearchUI.runQueryInBackground(query, searchView);
             ToastNotification.show("Поиск ссылок",
                 "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);

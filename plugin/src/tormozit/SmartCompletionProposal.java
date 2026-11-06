@@ -1568,7 +1568,7 @@ public class SmartCompletionProposal implements
         if (isEdtIrOverlapRow())
             return IrBslHoverHtml.wrapCreator(BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate));
-        // Строка без описания EDT получает от нас HTML («Приемник.Тип», замечание о шаблонном типе) — панель
+        // Строка без описания EDT получает от нас HTML («Приемник», замечание о шаблонном типе) — панель
         // браузерная, как у слов ИР; штатная текстовая показала бы разметку текстом.
         if (delegate instanceof ConfigurableCompletionProposal configurable
             && Global.getField(configurable, "additionalProposalInfo") == null //$NON-NLS-1$
@@ -1689,7 +1689,7 @@ public class SmartCompletionProposal implements
         // Строка типа штатного списка без обработчика подсказки: сам тип — в additionalProposalInfo.
         Object element = SmartContentAssistProcessor.unwrapProposal(delegate) instanceof ConfigurableCompletionProposal configurable
             ? Global.getField(configurable, "additionalProposalInfo") : null; //$NON-NLS-1$
-        // Замечание о типе — до «Приемник.Тип»: та строка всегда первая.
+        // Замечание о типе — до «Приемник»: та строка всегда первая.
         Object described = PlatformTemplateTypes.withNote(withParentLine(resolveEdtAssistSideHint(baseInfo)), element,
             SmartContentAssistProcessor.filterMatchName(delegate));
         return withComputedFunctionType(BslExpectedTypePremiums.withReceiverType(described));
@@ -1741,7 +1741,7 @@ public class SmartCompletionProposal implements
     /**
      * Боковая подсказка строки, когда у строк списка больше одного родителя (например, после {@code База_.} группы
      * общих модулей): сверху {@code Родитель: <родитель строки>} — часть подписи после {@code ~}. Строку
-     * {@code Приемник.Тип} {@link BslExpectedTypePremiums#withReceiverType} ставит выше неё.
+     * {@code Приемник} {@link BslExpectedTypePremiums#withReceiverType} ставит выше неё.
      */
     private Object withParentLine(Object info)
     {

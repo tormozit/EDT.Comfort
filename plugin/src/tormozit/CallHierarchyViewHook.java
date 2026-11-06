@@ -973,20 +973,17 @@ public final class CallHierarchyViewHook implements IStartup
                 {
                     if (cancelCurrentRun)
                     {
-                        Global.tempLog("search-index-coverage", "Отмена запроса иерархии вызовов перед повтором");
                         ui.getMethod("cancelQuery", queryType).invoke(null, query);
                     }
                     table.getDisplay().timerExec(50, () -> repeatHierarchy(result, query, updated, false));
                     return;
                 }
                 ui.getMethod("runQueryInBackground", queryType, viewType).invoke(null, query, view);
-                Global.tempLog("search-index-coverage", "Повтор запроса иерархии вызовов, обновлено=" + updated);
                 ToastNotification.show("Иерархия вызовов",
                     "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);
             }
             catch (ReflectiveOperationException | RuntimeException | LinkageError ex)
             {
-                Global.tempLogException("search-index-coverage", "Повтор запроса иерархии вызовов", ex);
                 ToastNotification.show("Иерархия вызовов", "Индекс обновлён. Не удалось перезапустить поиск.");
             }
         }

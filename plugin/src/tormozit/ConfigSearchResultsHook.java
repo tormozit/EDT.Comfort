@@ -352,7 +352,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             }
             NewSearchUI.runQueryInBackground(query, view);
-            Global.tempLog("search-index-coverage", "Повтор поиска по конфигурации: " + query.getLabel());
             ToastNotification.show("Поиск по конфигурации",
                 "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);
         }

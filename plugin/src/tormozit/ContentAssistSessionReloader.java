@@ -5521,6 +5521,7 @@ if (!inLiteral)
         ContentAssistPopupSync.invalidateSyncSnapshot();
         boolean refreshed = ContentAssistPopupSync.recomputePopupList(reloader.assistant, reloader.viewer,
             reloader.processor);
+        ContentAssistPopupSync.refreshAdditionalInfo(reloader.assistant);
         Global.tempLog("boolean-default-ranking", "refreshDocument recomputed=" + refreshed); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
