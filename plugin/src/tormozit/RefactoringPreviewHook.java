@@ -10,6 +10,7 @@ import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.CompareViewerSwitchingPane;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
+import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
@@ -42,6 +43,7 @@ import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
+import org.eclipse.jface.operation.IRunnableContext;
 import org.eclipse.jface.wizard.WizardDialog;
 import org.eclipse.ltk.core.refactoring.Change;
 import org.eclipse.ltk.core.refactoring.CompositeChange;
@@ -49,6 +51,8 @@ import org.eclipse.ltk.core.refactoring.RefactoringStatusEntry;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChange;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChangeGroup;
 import org.eclipse.ltk.core.refactoring.TextFileChange;
+import org.eclipse.ltk.ui.refactoring.RefactoringWizard;
+import org.eclipse.ltk.ui.refactoring.UserInputWizardPage;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.ViewForm;
@@ -208,7 +212,6 @@ public final class RefactoringPreviewHook
         if (!isPageOrShellShow(control, shell))
             return;
         sortStatusMessages(shell);
-        IndexFreshness.watch(shell);
         RefactoringWizardTitleHook.prepareRenameContext(shell);
         Marks.scheduleApply(shell, 0);
         scheduleAttach(shell, 0);
@@ -289,31 +292,111 @@ public final class RefactoringPreviewHook
         if (tree == null || tree.isDisposed())
             return false;
         markPageHandled(page);
+        Composite sash = tree.getParent();
+        while (sash != null && !(sash instanceof org.eclipse.swt.custom.SashForm))
+            sash = sash.getParent();
+        Composite indicatorHost = sash == null ? null : sash.getParent();
+        PreviewTablePane previewPane = null;
         try
         {
-            // Корень страницы предпросмотра LTK: GridLayout с SashForm; подпись — под ним.
-            Composite sash = tree.getParent();
-            while (sash != null && !(sash instanceof org.eclipse.swt.custom.SashForm))
-                sash = sash.getParent();
-            if (sash != null)
-                IndexFreshness.installInRefactoring(sash.getParent(), shell);
-        }
-        catch (RuntimeException e)
-        {
-            // Вёрстка страницы могла измениться в новой версии EDT — подписи просто не будет.
-        }
-        try
-        {
-            // Страницу мог подключить переход по кнопке мастера раньше показа окна, а колонке
-            // «Подходит» полное имя нужно уже при установке.
             RefactoringWizardTitleHook.prepareRenameContext(shell);
-            PreviewTablePane.install(treeViewer);
+            previewPane = PreviewTablePane.install(treeViewer);
         }
         catch (RuntimeException e)
         {
             // Вёрстка страницы могла измениться в новой версии EDT — она остаётся штатной.
         }
+        try
+        {
+            PreviewTablePane pane = previewPane;
+            IndexFreshness.installInRefactoring(indicatorHost,
+                count -> repeatPreviewSearch(shell, container, page, pane, count));
+        }
+        catch (RuntimeException e)
+        {
+            // Вёрстка страницы могла измениться в новой версии EDT — подписи просто не будет.
+        }
         return true;
+    }
+
+    private static void repeatPreviewSearch(Shell shell, IWizardContainer container, IWizardPage page,
+        PreviewTablePane pane, int updated)
+    {
+        if (shell.isDisposed() || container.getCurrentPage() != page
+            || !(page.getWizard() instanceof RefactoringWizard wizard))
+            return;
+        try
+        {
+            Global.tempLog("search-index-coverage", "Повтор предпросмотра: " + wizard.getRefactoring().getName());
+            logPreviewViewer(shell, "до повтора");
+            Change previous = wizard.getChange();
+            boolean nativeNavigation = repeatThroughInputPage(container, page);
+            if (!nativeNavigation)
+            {
+                var compute = RefactoringWizard.class.getDeclaredMethod("computeUserInputSuccessorPage",
+                    IWizardPage.class, IRunnableContext.class);
+                compute.setAccessible(true);
+                // У мастера без страницы ввода воспроизводим штатное снятие старого предпросмотра.
+                page.setVisible(false);
+                try
+                {
+                    Object next = compute.invoke(wizard, page, container);
+                    if (!shell.isDisposed() && next instanceof IWizardPage nextPage && nextPage != page)
+                        container.showPage(nextPage);
+                }
+                finally
+                {
+                    if (!shell.isDisposed() && container.getCurrentPage() == page)
+                        page.setVisible(true);
+                }
+            }
+            if (shell.isDisposed())
+                return;
+            if (container.getCurrentPage() == page && wizard.getChange() != null && wizard.getChange() != previous)
+            {
+                Marks.applyMarks(shell);
+                if (pane != null)
+                    pane.reload();
+                ToastNotification.show("Рефакторинг",
+                    "Поиск перезапущен после обновления устаревших элементов индекса: " + updated
+                        + "\nПроверьте пометки изменений.");
+            }
+            container.updateButtons();
+            logPreviewViewer(shell, "после повтора, штатная навигация=" + nativeNavigation);
+        }
+        catch (ReflectiveOperationException | RuntimeException e)
+        {
+            Global.tempLogException("search-index-coverage", "Повтор предпросмотра", e);
+            ToastNotification.show("Рефакторинг", "Не удалось повторить поиск. Откройте предпросмотр заново.");
+        }
+    }
+
+    private static boolean repeatThroughInputPage(IWizardContainer container, IWizardPage preview)
+        throws ReflectiveOperationException
+    {
+        Class<?> dialog = container.getClass();
+        if (!dialog.getName().equals("org.eclipse.ltk.internal.ui.refactoring.RefactoringWizardDialog2")
+            || !(preview.getPreviousPage() instanceof UserInputWizardPage input))
+            return false;
+
+        var back = dialog.getDeclaredMethod("backPressed");
+        var next = dialog.getDeclaredMethod("nextOrPreviewPressed");
+        back.setAccessible(true);
+        next.setAccessible(true);
+        back.invoke(container);
+        if (container.getCurrentPage() == input)
+            next.invoke(container);
+        return true;
+    }
+
+    private static void logPreviewViewer(Shell shell, String phase)
+    {
+        CompareViewerSwitchingPane compare = CurrentLines.findComparePane(shell);
+        Viewer viewer = compare == null ? null : compare.getViewer();
+        Object input = viewer == null ? null : viewer.getInput();
+        String type = input instanceof ICompareInput diff && diff.getLeft() != null ? diff.getLeft().getType() : "";
+        Global.tempLog("refactoring-preview-syntax", phase + ": viewer="
+            + (viewer == null ? "нет" : viewer.getClass().getName()) + ", type=" + type);
     }
 
     private static Object pageFlag(IWizardPage page)

@@ -2782,6 +2782,7 @@ public final class BslDocCommentComputedTypes
                 return original;
 
             for (EObject outer = directive.eContainer(); outer != null; outer = outer.eContainer())
+                if (outer instanceof Environmental environmental)
                     return environmental.environments();
             return original;
         }

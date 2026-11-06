@@ -23,6 +23,9 @@ import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Table;
@@ -43,6 +46,7 @@ import org.eclipse.ui.part.Page;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResultViewPart;
+import org.eclipse.search.ui.ISearchResult;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.xtext.resource.IReferenceDescription;
@@ -311,7 +315,7 @@ public final class BslReferenceSearchTableHook implements IStartup
         }
         try
         {
-            ReferenceTablePane pane = ReferenceTablePane.install(activePage, treeViewer);
+            ReferenceTablePane pane = ReferenceTablePane.install(searchView, activePage, treeViewer);
             if (pane != null)
                 host.setData(HANDLED_KEY, pane);
         }
@@ -466,6 +470,11 @@ public final class BslReferenceSearchTableHook implements IStartup
         private org.eclipse.ui.IActionBars actionBars;
         private org.eclipse.jface.action.Action computeTypesAction;
         private boolean reloadScheduled;
+        private IndexFreshness indexFreshness;
+        private ISearchQuery recoveryQuery;
+        private ISearchResultViewPart searchView;
+
+        private record OccurrencePosition(IFile file, int offset, int length) {}
 
         private ReferenceTablePane(Object page, TreeViewer treeViewer, Composite host,
             TopControlStack stackLayout, Composite tableHost, Table table, TableViewer viewer)
@@ -479,7 +488,7 @@ public final class BslReferenceSearchTableHook implements IStartup
             this.viewer = viewer;
         }
 
-        static ReferenceTablePane install(Object page, TreeViewer treeViewer)
+        static ReferenceTablePane install(ISearchResultViewPart searchView, Object page, TreeViewer treeViewer)
         {
             Tree tree = treeViewer.getTree();
             Composite host = tree.getParent();
@@ -489,8 +498,13 @@ public final class BslReferenceSearchTableHook implements IStartup
             TopControlStack stackLayout = new TopControlStack();
             host.setLayout(stackLayout);
 
-            Composite tableHost = new Composite(host, SWT.NONE);
-            tableHost.setLayout(null);
+            Composite resultsHost = new Composite(host, SWT.NONE);
+            GridLayout tableLayout = new GridLayout();
+            tableLayout.marginHeight = 0;
+            tableLayout.marginWidth = 0;
+            resultsHost.setLayout(tableLayout);
+            Composite tableHost = new Composite(resultsHost, SWT.NONE);
+            tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
             Composite columnHost = new Composite(tableHost, SWT.NONE);
             TableColumnLayout columnLayout = new TableColumnLayout();
             columnHost.setLayout(columnLayout);
@@ -500,21 +514,14 @@ public final class BslReferenceSearchTableHook implements IStartup
             Table table = viewer.getTable();
             table.setHeaderVisible(true);
             ThemeAwareColors.applyGridLines(table);
-            tableHost.addControlListener(new org.eclipse.swt.events.ControlAdapter()
-            {
-                @Override
-                public void controlResized(org.eclipse.swt.events.ControlEvent e)
-                {
-                    if (!columnHost.isDisposed())
-                        columnHost.setBounds(tableHost.getClientArea());
-                }
-            });
-
+            tableHost.addListener(SWT.Resize, event -> columnHost.setBounds(tableHost.getClientArea()));
             ReferenceTablePane pane =
                 new ReferenceTablePane(page, treeViewer, host, stackLayout, tableHost, table, viewer);
+            pane.searchView = searchView;
+            pane.indexFreshness = IndexFreshness.installInSearchResults(resultsHost, tableLayout);
             pane.createColumns(columnLayout);
 
-            stackLayout.topControl = tableHost;
+            stackLayout.topControl = resultsHost;
             host.layout(true, true);
             tree.setRedraw(false);
             pane.detachStockTree();
@@ -575,7 +582,9 @@ public final class BslReferenceSearchTableHook implements IStartup
                 PARENT_TYPE_TITLE, TYPE_AUTO_THRESHOLD, this::refreshComputeTypesAction);
             contextResolver.setFastCompletedCallback(() ->
             {
+                removeDuplicateOccurrences();
                 viewer.refresh();
+                updateResultHeaderCount();
             });
             contextResolver.trackViewportScrolling();
             installComputeTypesAction();
@@ -745,13 +754,22 @@ public final class BslReferenceSearchTableHook implements IStartup
             if (table.isDisposed())
                 return;
             Object result = searchResult();
+            ISearchQuery query = result instanceof ISearchResult search ? search.getQuery() : null;
+            if (query != null && recoveryQuery != query)
+            {
+                recoveryQuery = query;
+                indexFreshness.watchSearch(count -> repeatQuery(query, count, true));
+            }
             List<IReferenceDescription> references = matchingReferences(result);
             boolean unchanged = result == loadedResult && loadedReferences != null
                 && references.size() == loadedReferences.size();
             for (int i = 0; unchanged && i < references.size(); i++)
                 unchanged = references.get(i) == loadedReferences.get(i);
             if (unchanged)
+            {
+                updateResultHeaderCount();
                 return;
+            }
             String targetName = searchTargetName();
             rows.clear();
             for (IReferenceDescription reference : references)
@@ -766,7 +784,23 @@ public final class BslReferenceSearchTableHook implements IStartup
             loadedResult = result;
             loadedReferences = references;
             viewer.refresh();
+            updateResultHeaderCount();
             contextResolver.reschedule(rows);
+        }
+
+        private void updateResultHeaderCount()
+        {
+            if (loadedReferences == null || rows.size() == loadedReferences.size()
+                || searchView.getActivePage() != page || searchResult() != loadedResult
+                || !(Global.getField(searchView, "fDescription") instanceof Link link) || link.isDisposed())
+                return;
+            // Формат заголовка ReferenceSearchResult: "%s - (%s %s)".
+            String text = link.getText();
+            String prefix = " - (";
+            String rawCount = Integer.toString(loadedReferences.size());
+            int start = text.lastIndexOf(prefix) + prefix.length();
+            if (start >= prefix.length() && text.startsWith(rawCount + " ", start) && text.endsWith(")"))
+                link.setText(text.substring(0, start) + rows.size() + text.substring(start + rawCount.length()));
         }
 
         private Object searchResult()
@@ -775,6 +809,42 @@ public final class BslReferenceSearchTableHook implements IStartup
             if (result == null)
                 result = Global.getField(page, "searchResult"); //$NON-NLS-1$
             return result;
+        }
+
+        private void removeDuplicateOccurrences()
+        {
+            var positions = new java.util.HashSet<OccurrencePosition>();
+            int before = rows.size();
+            rows.removeIf(row ->
+            {
+                int[] range = row.region != null ? row.region : row.knownRegion;
+                return row.file != null && range != null && range[0] >= 0 && range[1] > 0
+                    && !positions.add(new OccurrencePosition(row.file, range[0], range[1]));
+            });
+            Global.tempLog("search-index-coverage", "Сверка строк ссылок: всего=" + before
+                + ", дублей=" + (before - rows.size()));
+        }
+
+        private void repeatQuery(ISearchQuery query, int updated, boolean cancelCurrentRun)
+        {
+            if (table.isDisposed() || !host.isVisible() || searchView.getActivePage() != page
+                || !query.canRerun() || !query.canRunInBackground()
+                || !(searchResult() instanceof ISearchResult current) || current.getQuery() != query)
+                return;
+            if (NewSearchUI.isQueryRunning(query))
+            {
+                if (cancelCurrentRun)
+                {
+                    Global.tempLog("search-index-coverage", "Отмена поиска ссылок перед повтором: " + query.getLabel());
+                    NewSearchUI.cancelQuery(query);
+                }
+                table.getDisplay().timerExec(50, () -> repeatQuery(query, updated, false));
+                return;
+            }
+            Global.tempLog("search-index-coverage", "Повтор поиска ссылок: " + query.getLabel());
+            NewSearchUI.runQueryInBackground(query, searchView);
+            ToastNotification.show("Поиск ссылок",
+                "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);
         }
 
         /** Плоский список вхождений напрямую из результата поиска (минуя дерево). */

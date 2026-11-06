@@ -137,6 +137,7 @@ import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -277,6 +278,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 @Override public void queryStarting(ISearchQuery query)
                 {
                     onSearchStarting();
+                    ConfigIndexAnalysis.queryStarting(query);
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
@@ -285,6 +287,75 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
             });
         });
+    }
+
+    private static final class ConfigIndexAnalysis
+    {
+        private static final String KEY = "tormozit.configSearch.indexAnalysis";
+        private final IndexFreshness freshness;
+        private ISearchQuery query;
+
+        private ConfigIndexAnalysis(Composite host, GridLayout layout)
+        {
+            freshness = IndexFreshness.installInSearchResults(host, layout);
+        }
+
+        private static void queryStarting(ISearchQuery query)
+        {
+            if (!ConfigSearchReplace.isTextSearchResult(query.getSearchResult()))
+                return;
+            int revision = IndexFreshness.repairRevision();
+            Display display = Display.getDefault();
+            display.asyncExec(() -> attachWhenVisible(display, query, revision, 0));
+        }
+
+        private static void attachWhenVisible(Display display, ISearchQuery query, int revision, int attempt)
+        {
+            if (display.isDisposed())
+                return;
+            IViewPart view = findSearchViewPart();
+            SearchViewViewers viewers = resolveViewers(view);
+            if (viewers == null || viewers.tree.getInput() != query.getSearchResult())
+            {
+                if (attempt < 40)
+                    display.timerExec(50, () -> attachWhenVisible(display, query, revision, attempt + 1));
+                return;
+            }
+            if (!(view instanceof ISearchResultViewPart results)
+                || !(Global.getField(view, "fPageContent") instanceof Composite host)
+                || host.isDisposed() || !(host.getLayout() instanceof GridLayout layout))
+                return;
+            ConfigIndexAnalysis analysis = host.getData(KEY) instanceof ConfigIndexAnalysis existing
+                ? existing : new ConfigIndexAnalysis(host, layout);
+            host.setData(KEY, analysis);
+            if (analysis.query == query)
+                return;
+            analysis.query = query;
+            ISearchResultPage page = results.getActivePage();
+            java.util.function.BooleanSupplier isCurrent = () -> !host.isDisposed()
+                && !viewers.tree.getTree().isDisposed() && results.getActivePage() == page
+                && viewers.tree.getInput() == query.getSearchResult();
+            analysis.freshness.watchSearch(revision, isCurrent,
+                count -> repeatQuery(display, results, query, isCurrent, count, true));
+        }
+
+        private static void repeatQuery(Display display, ISearchResultViewPart view, ISearchQuery query,
+            java.util.function.BooleanSupplier isCurrent, int updated, boolean cancelCurrentRun)
+        {
+            if (!isCurrent.getAsBoolean() || !query.canRerun() || !query.canRunInBackground())
+                return;
+            if (NewSearchUI.isQueryRunning(query))
+            {
+                if (cancelCurrentRun)
+                    NewSearchUI.cancelQuery(query);
+                display.timerExec(50, () -> repeatQuery(display, view, query, isCurrent, updated, false));
+                return;
+            }
+            NewSearchUI.runQueryInBackground(query, view);
+            Global.tempLog("search-index-coverage", "Повтор поиска по конфигурации: " + query.getLabel());
+            ToastNotification.show("Поиск по конфигурации",
+                "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);
+        }
     }
 
     private static String describeQuery(ISearchQuery query)

@@ -50,6 +50,8 @@ import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.PaintListener;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
@@ -381,6 +383,7 @@ public final class CallHierarchyViewHook implements IStartup
             session.installTreeSort();
             session.installTreeServerPrefix();
             session.installOpenActualArg();
+            session.indexFreshness = installIndexAnalysis(view);
 
             // Штатный слушатель EDT на каждый клик в дереве пересобирает правую таблицу
             // (сужает до мест выбранного метода). Мы показываем весь уровень и только
@@ -431,6 +434,29 @@ public final class CallHierarchyViewHook implements IStartup
     {
         Object raw = Global.getField(view, "locationViewer"); //$NON-NLS-1$
         return raw instanceof TableViewer viewer ? viewer : null;
+    }
+
+    private static IndexFreshness installIndexAnalysis(IViewPart view)
+    {
+        if (!(Global.getField(view, "pagebook") instanceof Composite pages) || pages.isDisposed())
+            return null;
+        Composite parent = pages.getParent();
+        Composite wrapper = new Composite(parent, SWT.NONE);
+        wrapper.moveAbove(pages);
+        wrapper.setLayoutData(pages.getLayoutData());
+        if (!pages.setParent(wrapper))
+        {
+            wrapper.dispose();
+            return null;
+        }
+        GridLayout layout = new GridLayout();
+        layout.marginHeight = 0;
+        layout.marginWidth = 0;
+        wrapper.setLayout(layout);
+        pages.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        IndexFreshness freshness = IndexFreshness.installInSearchResults(wrapper, layout);
+        parent.layout(true, true);
+        return freshness;
     }
 
     private static FormTableInteraction installTableInteraction(TableViewer locationViewer)
@@ -704,6 +730,8 @@ public final class CallHierarchyViewHook implements IStartup
         private final TableViewer locationViewer;
         private final Map<URI, String[]> argsBySource = new LinkedHashMap<>();
         private FormTableInteraction interaction;
+        private IndexFreshness indexFreshness;
+        private Object indexQuery;
         private Object hookedResult;
         private Object listenerProxy;
         private boolean applying;
@@ -896,7 +924,10 @@ public final class CallHierarchyViewHook implements IStartup
             serverBySource.clear();
             cancelParamHeaderTips();
             if (hookedResult == null)
+            {
+                syncIndexAnalysis(null);
                 return;
+            }
             listenerProxy = resultListenerProxy(hookedResult);
             if (listenerProxy != null)
                 Global.invoke(hookedResult, "addListener", listenerProxy); //$NON-NLS-1$
@@ -904,6 +935,59 @@ public final class CallHierarchyViewHook implements IStartup
             {
                 searchFinished = false;
                 clearTableNow();
+            }
+            syncIndexAnalysis(result);
+        }
+
+        private void syncIndexAnalysis(Object result)
+        {
+            if (indexFreshness == null)
+                return;
+            Object query = result != null && isCallersMode(view) ? Global.invoke(result, "getQuery") : null;
+            if (query == indexQuery)
+                return;
+            indexQuery = query;
+            if (query == null)
+                indexFreshness.stopWatchingSearch();
+            else
+                indexFreshness.watchSearch(count -> repeatHierarchy(result, query, count, true));
+        }
+
+        private void repeatHierarchy(Object result, Object query, int updated, boolean cancelCurrentRun)
+        {
+            Table table = locationViewer.getTable();
+            if (table.isDisposed() || !view.getSite().getPage().isPartVisible(view) || !isCallersMode(view)
+                || indexQuery != query || Global.invoke(view, "getCurrentCallHierarchyResult") != result)
+                return;
+            try
+            {
+                String prefix = "com._1c.g5.v8.dt.bsl.ui.editor.callhierarchy.";
+                ClassLoader loader = view.getClass().getClassLoader();
+                Class<?> ui = loader.loadClass(prefix + "CallHierarchyUI");
+                Class<?> queryType = loader.loadClass(prefix + "ICallHierarchyQuery");
+                Class<?> viewType = loader.loadClass(prefix + "CallHierarchyViewPart");
+                var running = ui.getDeclaredMethod("isQueryRunning", queryType);
+                running.setAccessible(true);
+                Object instance = ui.getMethod("getDefault").invoke(null);
+                if (Boolean.TRUE.equals(running.invoke(instance, query)))
+                {
+                    if (cancelCurrentRun)
+                    {
+                        Global.tempLog("search-index-coverage", "Отмена запроса иерархии вызовов перед повтором");
+                        ui.getMethod("cancelQuery", queryType).invoke(null, query);
+                    }
+                    table.getDisplay().timerExec(50, () -> repeatHierarchy(result, query, updated, false));
+                    return;
+                }
+                ui.getMethod("runQueryInBackground", queryType, viewType).invoke(null, query, view);
+                Global.tempLog("search-index-coverage", "Повтор запроса иерархии вызовов, обновлено=" + updated);
+                ToastNotification.show("Иерархия вызовов",
+                    "Поиск перезапущен после обновления устаревших элементов индекса: " + updated);
+            }
+            catch (ReflectiveOperationException | RuntimeException | LinkageError ex)
+            {
+                Global.tempLogException("search-index-coverage", "Повтор запроса иерархии вызовов", ex);
+                ToastNotification.show("Иерархия вызовов", "Индекс обновлён. Не удалось перезапустить поиск.");
             }
         }
 
@@ -1786,6 +1870,8 @@ public final class CallHierarchyViewHook implements IStartup
                     Object result = Global.invoke(view, "getCurrentCallHierarchyResult"); //$NON-NLS-1$
                     if (result != hookedResult)
                         attachResult(result);
+                    else
+                        syncIndexAnalysis(result);
                     boolean empty = table.getItemCount() == 0;
                     if (empty && keptInput != null && !keptInput.isEmpty() && !forceEmpty)
                         locationViewer.setInput(keptInput);
