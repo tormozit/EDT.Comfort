@@ -180,7 +180,6 @@ public final class ProblemViewHook implements IStartup
 
     private static final String SCOPE_LABEL_KEY = "tormozit.problemViewScopeLabel"; //$NON-NLS-1$
     private static final String STATS_TOOLTIP_KEY = "tormozit.problemViewStatsTooltip"; //$NON-NLS-1$
-    private static final String TYPE_RENAME_KEY = "tormozit.problemViewTypeRename"; //$NON-NLS-1$
     private static final String OPEN_OVERRIDE_KEY = "tormozit.problemViewOpenOverride"; //$NON-NLS-1$
     /** Отделяет дописанный отбор от штатных итогов — он же признак «уже дописано». */
     private static final String SCOPE_SEPARATOR = "   │   "; //$NON-NLS-1$
@@ -1933,10 +1932,13 @@ public final class ProblemViewHook implements IStartup
         if (!(view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer))
             return;
         Tree tree = viewer.getTree();
-        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(TYPE_RENAME_KEY)))
+        if (tree == null || tree.isDisposed())
             return;
+        // Колонки штатная панель пересоздаёт при смене их набора (LazyProblemView.initColumns),
+        // поэтому обёртку проверяем у каждой колонки при каждом вызове, а не один раз на дерево.
         ClassLoader loader = view.getClass().getClassLoader();
         int wrapped = 0;
+        boolean creationDateWrapped = false;
         for (int i = 0; i < tree.getColumnCount(); i++)
         {
             TreeViewerColumn column = resolveViewerColumn(viewer, tree, i);
@@ -1945,19 +1947,24 @@ public final class ProblemViewHook implements IStartup
             Object lpObj = Global.invoke(column, "getLabelProvider"); //$NON-NLS-1$
             if (lpObj instanceof TypeRenameLabelProvider || !(lpObj instanceof CellLabelProvider lp))
                 continue;
-            TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader);
+            // LazyProblemView.initColumns кладёт в данные колонки её MarkerField.
+            Object field = column.getColumn().getData();
+            boolean creationDate = field != null && CreationDateSorting.FIELD_CLASS.equals(field.getClass().getName());
+            TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader, viewer, creationDate);
             if (!Global.invokeVoid(column, "setLabelProvider", wrapper, Boolean.FALSE)) //$NON-NLS-1$
             {
                 Debug.log("installTypeRename: 2-arg setLabelProvider not found"); //$NON-NLS-1$
                 continue;
             }
             wrapped++;
+            creationDateWrapped |= wrapper.creationDate;
         }
         if (wrapped > 0)
         {
-            tree.setData(TYPE_RENAME_KEY, Boolean.TRUE);
             Debug.log("installTypeRename: wrapped " + wrapped + " columns"); //$NON-NLS-1$
         }
+        if (creationDateWrapped)
+            GroupCreationDate.relabel(viewer);
     }
 
     private static TreeViewerColumn resolveViewerColumn(TreeViewer viewer, Tree tree, int index)
@@ -2019,7 +2026,8 @@ public final class ProblemViewHook implements IStartup
     }
 
     /**
-     * Подмена штатного имени {@link IssueType#ERROR} в тексте ячейки и подсказке.
+     * Подмена штатного имени {@link IssueType#ERROR} в тексте ячейки и подсказке;
+     * в колонке «Создано» у строки группы — {@link GroupCreationDate}.
      * Штатный провайдер не диспозится ({@code setLabelProvider(..., false)}).
      */
     private static final class TypeRenameLabelProvider extends ColumnLabelProvider
@@ -2028,16 +2036,31 @@ public final class ProblemViewHook implements IStartup
 
         private final ClassLoader loader;
 
-        private TypeRenameLabelProvider(CellLabelProvider delegate, ClassLoader loader)
+        private final TreeViewer viewer;
+
+        /** Колонка «Создано» ({@code CreationDateField}). */
+        final boolean creationDate;
+
+        private TypeRenameLabelProvider(CellLabelProvider delegate, ClassLoader loader, TreeViewer viewer,
+            boolean creationDate)
         {
             this.delegate = delegate;
             this.loader = loader;
+            this.viewer = viewer;
+            this.creationDate = creationDate;
         }
 
         @Override
         public void update(ViewerCell cell)
         {
             delegate.update(cell);
+            if (creationDate)
+            {
+                String max = GroupCreationDate.text(viewer, loader, cell.getElement());
+                if (max != null)
+                    cell.setText(max);
+                return;
+            }
             String rewritten = rewrite(cell.getElement(), cell.getText());
             if (rewritten != null && !rewritten.equals(cell.getText()))
                 cell.setText(rewritten);
@@ -2061,6 +2084,209 @@ public final class ProblemViewHook implements IStartup
         public void dispose()
         {
             // Штатный провайдер живёт у колонки; не диспозить его вместе с обёрткой.
+        }
+    }
+
+    /**
+     * Колонка «Создано» в строке группы — самая поздняя дата создания среди проблем группы.
+     * Штатный {@code MarkerTreeElementLabelProvider} пишет дату только в строке проблемы.
+     *
+     * <p>Проблемы группы берутся тем же запросом, которым {@code LazyTreeNode.loadedChildren}
+     * грузит листья: {@code createReader(getSubtreeProject()).markers(getTreeFilter(),
+     * buildGroupFilter())}. Читатель — из {@code V8UiValidationPlugin.getMarkerManager()}, как у
+     * самого узла, поэтому учитывается и отбор по проверке. Расчёт в фоне, по одной группе;
+     * до готовности в ячейке прежнее значение или пусто. После каждого обновления списка
+     * видимые группы пересчитываются.
+     */
+    private static final class GroupCreationDate
+    {
+        private static final String KEY = "tormozit.problemViewGroupCreationDate"; //$NON-NLS-1$
+        private static final String NODE_CLASS =
+            "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyTreeNode"; //$NON-NLS-1$
+        private static final long NONE = Long.MIN_VALUE;
+
+        /** Формат штатного {@code CreationDateField}; только UI-поток. */
+        private static final java.text.DateFormat FORMAT =
+            java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT);
+
+        private static final java.util.concurrent.ConcurrentLinkedQueue<Request> queue =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+        private static final Job job = createJob();
+
+        /** Состояние дерева панели; только UI-поток. */
+        private static final class State
+        {
+            Object root;
+            int generation;
+            /** Узлы — по идентичности: {@code LazyTreeNode.equals} сравнивает путь, не экземпляр. */
+            final Map<Object, Entry> entries = new java.util.IdentityHashMap<>();
+        }
+
+        private static final class Entry
+        {
+            long max = NONE;
+            int generation = -1;
+            boolean pending;
+        }
+
+        private record Request(TreeViewer viewer, State state, Object node, Entry entry, int generation,
+            ClassLoader loader)
+        {
+        }
+
+        private GroupCreationDate() {}
+
+        /** Текст ячейки для строки группы или {@code null} — оставить штатный. */
+        static String text(TreeViewer viewer, ClassLoader loader, Object element)
+        {
+            if (!isGroupNode(loader, element))
+                return null;
+            State state = stateOf(viewer);
+            if (state == null)
+                return null;
+            Entry entry = state.entries.computeIfAbsent(element, key -> new Entry());
+            if (entry.generation != state.generation && !entry.pending)
+            {
+                entry.pending = true;
+                queue.add(new Request(viewer, state, element, entry, state.generation, loader));
+                job.schedule();
+            }
+            return entry.max == NONE ? null : FORMAT.format(new java.util.Date(entry.max));
+        }
+
+        /** Список обновился — состав групп мог измениться; пересчитать видимые. */
+        static void invalidate(IViewPart view)
+        {
+            if (!(view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer)
+                || viewer.getTree().isDisposed() || !(viewer.getTree().getData(KEY) instanceof State state))
+                return;
+            state.generation++;
+            relabel(viewer);
+        }
+
+        /** Перерисовать ячейки видимых строк групп (раскрытые ветви). */
+        static void relabel(TreeViewer viewer)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            List<Object> groups = new java.util.ArrayList<>();
+            collectGroups(tree.getItems(), groups);
+            for (Object node : groups)
+                viewer.update(node, null);
+        }
+
+        private static void collectGroups(TreeItem[] items, List<Object> out)
+        {
+            for (TreeItem item : items)
+            {
+                Object data = item.getData();
+                if (data == null || markerOf(data) != null)
+                    continue;
+                out.add(data);
+                if (item.getExpanded())
+                    collectGroups(item.getItems(), out);
+            }
+        }
+
+        private static State stateOf(TreeViewer viewer)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return null;
+            State state = tree.getData(KEY) instanceof State existing ? existing : null;
+            if (state == null)
+            {
+                state = new State();
+                tree.setData(KEY, state);
+            }
+            Object root = viewer.getInput();
+            if (state.root != root)
+            {
+                // Новый корень — все узлы новые; старые не держим.
+                state.root = root;
+                state.entries.clear();
+            }
+            return state;
+        }
+
+        private static boolean isGroupNode(ClassLoader loader, Object element)
+        {
+            if (element == null || loader == null)
+                return false;
+            try
+            {
+                if (!loader.loadClass(NODE_CLASS).isInstance(element))
+                    return false;
+            }
+            catch (ClassNotFoundException | LinkageError e)
+            {
+                return false;
+            }
+            if (Global.invoke(element, "getMarker") != null) //$NON-NLS-1$
+                return false;
+            Object group = Global.invoke(element, "getGroup"); //$NON-NLS-1$
+            if (group == null && Global.invoke(element, "getProject") == null) //$NON-NLS-1$
+                return false;
+            // «Ещё N…» при ограничении числа строк — не группа проблем.
+            if (group != null && group.getClass().getName().endsWith("$LimitPlaceholderGroup")) //$NON-NLS-1$
+                return false;
+            return Global.invoke(element, "getSubtreeMarkers") instanceof Integer count && count > 0; //$NON-NLS-1$
+        }
+
+        private static Job createJob()
+        {
+            ICoreRunnable drain = monitor ->
+            {
+                for (Request request; (request = queue.poll()) != null && !monitor.isCanceled();)
+                    compute(request);
+            };
+            Job created = Job.create("Комфорт: даты создания групп проблем", drain); //$NON-NLS-1$
+            created.setSystem(true);
+            return created;
+        }
+
+        private static void compute(Request request)
+        {
+            long max = NONE;
+            Object node = request.node();
+            try
+            {
+                Object manager = request.loader().loadClass(PLUGIN_CLASS)
+                    .getMethod("getMarkerManager").invoke(null); //$NON-NLS-1$
+                if (!(manager instanceof IMarkerManagerV2 markers))
+                    throw new IllegalStateException("markerManager=" + manager); //$NON-NLS-1$
+                Object project = Global.invoke(node, "getSubtreeProject"); //$NON-NLS-1$
+                if (!(Global.invoke(node, "getTreeFilter") instanceof MarkerFilter treeFilter) //$NON-NLS-1$
+                    || !(Global.invoke(node, "buildGroupFilter") instanceof MarkerFilter groupFilter)) //$NON-NLS-1$
+                    throw new IllegalStateException("filters not found"); //$NON-NLS-1$
+                IMarkerReader reader = markers.createReader(project instanceof IProject p ? p : null);
+                try (java.util.stream.Stream<Marker> stream = reader.markers(treeFilter, groupFilter))
+                {
+                    max = stream.mapToLong(Marker::getCreatedAt).max().orElse(NONE);
+                }
+            }
+            catch (Exception | LinkageError e)
+            {
+                Debug.log("GroupCreationDate.compute: " + e); //$NON-NLS-1$
+            }
+            long result = max;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                Entry entry = request.entry();
+                entry.pending = false;
+                entry.generation = request.generation();
+                entry.max = result;
+                TreeViewer viewer = request.viewer();
+                if (viewer.getTree().isDisposed() || viewer.getInput() != request.state().root)
+                    return;
+                // Если пока считали список обновился, перерисовка запустит новый расчёт.
+                viewer.update(node, null);
+            });
         }
     }
 
@@ -3692,7 +3918,11 @@ public final class ProblemViewHook implements IStartup
                     if (updateFinished && state != null)
                         applyRootCheckCode(view, state, true);
                     if (updateFinished)
+                    {
                         SelectionKeeper.afterUpdate(view);
+                        installTypeRename(view);
+                        GroupCreationDate.invalidate(view);
+                    }
                     apply(view, statusLabel(view));
                 }
             });

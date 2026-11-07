@@ -2603,6 +2603,29 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (validation && object instanceof Invocation invocation
                     && isStructurePropertyProbe(invocation.getMethodAccess().getName(), ownerTypes))
                     continue;
+                // Полнота выборки подтверждается моделью запроса, а не числом вычисленных свойств;
+                // шаблонное «ИмяПоля» колонкой не является.
+                if (hasType(ownerTypes, "QueryResultSelection")) //$NON-NLS-1$
+                {
+                    Map<String, List<TypeItem>> columns = BslQueryResultTypes.selectionColumnsOf(owner);
+                    // #region agent log
+                    org.eclipse.xtext.nodemodel.INode ownerNode = NodeModelUtils.findActualNodeFor(owner);
+                    Global.tempLog("literal-selection-fullness", "owner=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (ownerNode == null ? "?" : NodeModelUtils.getTokenText(ownerNode)) + " validation=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + validation + " columns=" //$NON-NLS-1$
+                        + (columns == null ? "null" : columns.keySet()) + " template=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + structureKeyNames(ownerTypes) + " all=" + objectProperties(ownerTypes)); //$NON-NLS-1$
+                    // #endregion
+                    branch("objectSelection"); //$NON-NLS-1$
+                    if (columns != null)
+                        columns.forEach(this::add);
+                    else
+                        addAll(structureKeyNames(ownerTypes));
+                    full = columns != null && isFullParameterRole(scope, object);
+                    if (full)
+                        return;
+                    continue;
+                }
                 List<String> names = objectProperties(ownerTypes);
                 if (!names.isEmpty())
                 {
