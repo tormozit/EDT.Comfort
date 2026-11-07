@@ -15,6 +15,7 @@ import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
 import org.osgi.framework.Bundle;
@@ -29,7 +30,13 @@ import org.objectweb.asm.Opcodes;
 
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexManager;
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexProvider;
+import com._1c.g5.v8.dt.bsl.model.IfPreprocessorStatement;
+import com._1c.g5.v8.dt.bsl.model.IfStatement;
+import com._1c.g5.v8.dt.bsl.model.LoopStatement;
+import com._1c.g5.v8.dt.bsl.model.RegionPreprocessorStatement;
+import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.TryExceptStatement;
+import com._1c.g5.v8.dt.bsl.validation.BslSuppressionProvider;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProjectManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
@@ -78,6 +85,8 @@ public class Activator extends AbstractUIPlugin
         instance = this;
         RightsEditDialogHook.start(context);
         BuiltinCheckReplacements.start(context);
+        QlHubOpenModules.start();
+        SuppressionRanges.start();
         EmptyExceptStatementFix.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
@@ -252,6 +261,8 @@ public class Activator extends AbstractUIPlugin
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
         BuiltinCheckReplacements.stop();
+        QlHubOpenModules.stop();
+        SuppressionRanges.stop();
         EmptyExceptStatementFix.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
@@ -742,6 +753,194 @@ public class Activator extends AbstractUIPlugin
         {
             // Уже преобразованный класс продолжает обращаться к callback после остановки бандла.
             System.getProperties().put(CALLBACK, (Predicate<ICheckSettings>)ICheckSettings::isEnabled);
+        }
+    }
+
+    /**
+     * Флажок «Только открытые модули» штатной {@code bsl-ql-hub} (#870): параметр и вызов этой функции
+     * в начале её {@code check} вплетает ранний бандл ({@code QlHubOpenModulesWeaving}). Правило — как у
+     * {@code OpenModulesOnly} проверок Комфорта.
+     */
+    private static final class QlHubOpenModules
+    {
+        private static final String CALLBACK = "tormozit.qlHub.skip"; //$NON-NLS-1$
+        private static final String PARAMETER = "onlyOpenModules"; //$NON-NLS-1$
+        /** Временный лог #870: одна строка на модуль и вариант решения. */
+        private static final java.util.Set<String> LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+        static void start()
+        {
+            Global.tempLog("ql-hub-open-modules", "weave status=" //$NON-NLS-1$ //$NON-NLS-2$
+                + System.getProperty(CALLBACK + ".status")); //$NON-NLS-1$
+            System.getProperties().put(CALLBACK, (java.util.function.BiPredicate<Object, Object>)QlHubOpenModules::skip);
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный класс продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK, (java.util.function.BiPredicate<Object, Object>)(object, parameters) -> false);
+        }
+
+        private static boolean skip(Object object, Object parameters)
+        {
+            if (!(object instanceof org.eclipse.emf.ecore.EObject literal) || literal.eResource() == null)
+                return false;
+            boolean only;
+            String parameter;
+            try
+            {
+                only = !(parameters instanceof com.e1c.g5.v8.dt.check.ICheckParameters checkParameters)
+                    || checkParameters.getBoolean(PARAMETER);
+                parameter = String.valueOf(only);
+            }
+            catch (Exception e)
+            {
+                // Нет параметра в описании проверки — как OpenModulesOnly: флажок считается включённым.
+                only = true;
+                parameter = "missing: " + e; //$NON-NLS-1$
+            }
+            org.eclipse.emf.common.util.URI uri = literal.eResource().getURI();
+            boolean skip = only && !MassiveChecksExemptionHook.isOpenOrManual(uri);
+            if (LOGGED.add(uri + "|" + parameter + "|" + skip)) //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("ql-hub-open-modules", "module=" + org.eclipse.emf.common.util.URI.decode(uri.toString()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " onlyOpenModules=" + parameter + " skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$
+            return skip;
+        }
+    }
+
+    /**
+     * Обход бага EDT: {@code //@skip-check} перед оператором, который начинается ключевым словом
+     * ({@code Возврат}, {@code ВызватьИсключение} и т.п.), штатный {@code BslSuppressionProvider} не растягивает
+     * на весь оператор — диапазон остаётся строкой комментария и первой строкой оператора, и многострочный
+     * литерал не подавляется ни одной проверкой. Диапазон, который кончается на строке начала оператора,
+     * растягивается до конца оператора. Блоки ({@code Если}, циклы, {@code Попытка}, препроцессор) штатный
+     * расчёт обрабатывает сам. Функцию вызывает ранний бандл ({@code SuppressionRangesWeaving}) на выходе
+     * {@code computeSuppressionRanges}, поэтому правка действует для всех проверок.
+     */
+    private static final class SuppressionRanges
+    {
+        private static final String CALLBACK = "tormozit.bslSuppression.ranges"; //$NON-NLS-1$
+        private static final String LOG = "suppression-ranges"; //$NON-NLS-1$
+
+        static void start()
+        {
+            Global.tempLog(LOG, "weave status=" + System.getProperty(CALLBACK + ".status")); //$NON-NLS-1$ //$NON-NLS-2$
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)SuppressionRanges::apply);
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный класс продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)(module, ranges) -> ranges);
+        }
+
+        private static Object apply(Object module, Object ranges)
+        {
+            try
+            {
+                return extend(module, ranges);
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLog(LOG, "failed: " + e); //$NON-NLS-1$
+                return ranges;
+            }
+        }
+
+        private static Object extend(Object moduleObject, Object rangesObject)
+        {
+            if (!(moduleObject instanceof com._1c.g5.v8.dt.bsl.model.Module module)
+                || !(rangesObject instanceof java.util.Map<?, ?> ranges) || ranges.isEmpty())
+                return rangesObject;
+            // Кандидаты: диапазон «комментарий + следующая строка» — кончается на строке после своего начала.
+            java.util.Set<Integer> lines = new java.util.TreeSet<>();
+            for (Object value : ranges.values())
+            {
+                if (!(value instanceof Collection<?> collection))
+                    continue;
+                for (Object item : collection)
+                {
+                    if (item instanceof BslSuppressionProvider.BslSuppressionRange range
+                        && range.getStartLine() < range.getEndLine())
+                        lines.add(range.getEndLine());
+                }
+            }
+            if (lines.isEmpty())
+                return rangesObject;
+            ICompositeNode root = NodeModelUtils.findActualNodeFor(module);
+            if (root == null)
+                return rangesObject;
+            int lastLine = ((java.util.TreeSet<Integer>)lines).last();
+            java.util.Map<Integer, Integer> extendTo = new java.util.HashMap<>();
+            java.util.Set<Integer> seen = new java.util.HashSet<>();
+            for (ILeafNode leaf : root.getLeafNodes())
+            {
+                if (leaf.isHidden())
+                    continue;
+                int line = leaf.getStartLine();
+                if (line > lastLine)
+                    break;
+                // Только первая значимая лексема строки.
+                if (!lines.contains(line) || !seen.add(line))
+                    continue;
+                int end = statementEndLine(leaf);
+                if (end > line)
+                    extendTo.put(line, end);
+            }
+            // Временный лог: каждый вызов, с итогом.
+            org.eclipse.emf.ecore.resource.Resource resource = module.eResource();
+            Global.tempLog(LOG, "module=" //$NON-NLS-1$
+                + (resource == null ? null : org.eclipse.emf.common.util.URI.decode(resource.getURI().toString()))
+                + " candidates=" + lines + " extended=" + extendTo); //$NON-NLS-1$ //$NON-NLS-2$
+            if (extendTo.isEmpty())
+                return rangesObject;
+            // Один штатный диапазон может лежать в нескольких наборах — заменяем одним новым.
+            java.util.Map<Object, BslSuppressionProvider.BslSuppressionRange> replaced = new java.util.IdentityHashMap<>();
+            java.util.Map<Object, Object> result = new java.util.LinkedHashMap<>();
+            for (java.util.Map.Entry<?, ?> entry : ranges.entrySet())
+            {
+                if (!(entry.getValue() instanceof Collection<?> collection))
+                {
+                    result.put(entry.getKey(), entry.getValue());
+                    continue;
+                }
+                java.util.List<Object> items = new java.util.ArrayList<>(collection.size());
+                for (Object item : collection)
+                {
+                    if (item instanceof BslSuppressionProvider.BslSuppressionRange range
+                        && range.getStartLine() < range.getEndLine() && extendTo.containsKey(range.getEndLine()))
+                        items.add(replaced.computeIfAbsent(range, key -> new BslSuppressionProvider.BslSuppressionRange(
+                            range.getStartLine(), extendTo.get(range.getEndLine()), range.getCheckIds())));
+                    else
+                        items.add(item);
+                }
+                result.put(entry.getKey(), items);
+            }
+            return result;
+        }
+
+        /**
+         * Последняя строка оператора, который начинается лексемой {@code leaf}; {@code -1} — лексема не
+         * начинает оператор или это блок, который штатный расчёт растягивает сам.
+         */
+        private static int statementEndLine(ILeafNode leaf)
+        {
+            for (INode node = leaf.getParent(); node != null; node = node.getParent())
+            {
+                if (node.getOffset() != leaf.getOffset())
+                    return -1;
+                if (!(node.getSemanticElement() instanceof Statement statement))
+                    continue;
+                if (statement instanceof IfStatement || statement instanceof LoopStatement
+                    || statement instanceof TryExceptStatement || statement instanceof IfPreprocessorStatement
+                    || statement instanceof RegionPreprocessorStatement)
+                    return -1;
+                INode statementNode = NodeModelUtils.findActualNodeFor(statement);
+                if (statementNode == null || statementNode.getOffset() != leaf.getOffset())
+                    return -1;
+                return statementNode.getEndLine();
+            }
+            return -1;
         }
     }
 

@@ -318,7 +318,7 @@ public final class BslOccurrenceMarkerHook implements IStartup
      * ({@code MarkOccurrenceActionContributor} в нём — синглтон, у всех редакторов один).
      * У {@code BslActivator.getInjector} в этой версии EDT есть параметр языка.
      */
-    private static Injector bslUiInjector() throws Exception
+    static Injector bslUiInjector() throws Exception
     {
         Class<?> activatorClass =
             BslSyntaxAssist.bslUiClass("com._1c.g5.v8.dt.bsl.ui.internal.BslActivator"); //$NON-NLS-1$

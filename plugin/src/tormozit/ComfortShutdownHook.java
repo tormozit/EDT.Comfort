@@ -53,6 +53,7 @@ public final class ComfortShutdownHook implements IStartup
                 runStep("designerPool", () -> DesignerSessionPoolAccessor.getInstance().stopPolling()); //$NON-NLS-1$
                 runStep("listTheme", ListSelectionThemeHook::uninstall); //$NON-NLS-1$
                 runStep("irDisconnect", IRApplication::disconnectAll); //$NON-NLS-1$
+                runStep("debugSource", BslDebugSourceHook::deleteExportDirectories); //$NON-NLS-1$
             }
             catch (Exception e)
             {

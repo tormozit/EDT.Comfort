@@ -519,7 +519,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         ITextViewer viewer, XtextResource resource, IEObjectHover hover)
     {
         // Описание значения с известным типом точнее служебного описания строки EDT.
-        if (info instanceof Property property && !property.getTypes().isEmpty()
+        if (info instanceof Property property && !property.getTypes().isEmpty() || info instanceof Method
             || Global.getField(proposal, "additionalProposalInfo") == null) //$NON-NLS-1$
             proposal.setAdditionalProposalInfo(info);
         if (Global.getField(proposal, "hover") == null && hover != null) //$NON-NLS-1$
@@ -570,7 +570,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (literal == null)
                     return null;
                 String name = literalText(literal);
-                Property property;
+                EObject property;
                 EObject target = literal.eContainer();
                 List<Expression> args = argumentsOf(target);
                 int index = args.indexOf(literal);
@@ -600,7 +600,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     else
                         analysis.outside(literal);
                     analysis.finish();
-                    property = analysis.info(prefix.substring(segment.start));
+                    property = analysis.describe(prefix.substring(segment.start));
                 }
                 if (property == null)
                     return null;
@@ -665,7 +665,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             String replacement = before + name;
             request.produced.add(replacement);
-            Property info = analysis.info(name);
+            EObject info = analysis.describe(name);
             if (info != null)
                 request.infos.put(replacement, info);
             proposals.add(Tuples.create(replacement, name, IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
@@ -706,7 +706,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     // ------------------------------------------------------------------------------------------
 
     /** @param infos описания строк (свойство с типом или {@code null}) в порядке {@code names} */
-    private record Added(List<String> names, List<Property> infos, int segmentOffset) {}
+    private record Added(List<String> names, List<EObject> infos, int segmentOffset) {}
 
     /**
      * Ответ штатного расчёта в строковом литерале: значения литерала вне вызова ({@code Вид = "…"}) и без
@@ -726,7 +726,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             Added added = xdoc.readOnly(resource -> outsideCall(resource, doc, offset, request));
             if (added != null && !added.names.isEmpty())
             {
+                List<Integer> order = new ArrayList<>();
                 for (int i = 0; i < added.names.size(); i++)
+                    order.add(i);
+                order.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(added.names.get(a), added.names.get(b)));
+                for (int i : order)
                 {
                     String name = added.names.get(i);
                     ConfigurableCompletionProposal proposal = new ConfigurableCompletionProposal(name,
@@ -898,9 +902,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         analysis.finish();
         request.rememberFull(analysis, prefix.substring(0, Segment.of(prefix).start));
         List<String> names = new ArrayList<>(analysis.values.values());
-        List<Property> infos = new ArrayList<>();
+        List<EObject> infos = new ArrayList<>();
         for (String name : names)
-            infos.add(analysis.info(name));
+            infos.add(analysis.describe(name));
         return new Added(names, infos, start + 1 + Segment.of(prefix).start);
     }
 
@@ -1145,6 +1149,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Типы значений по имени в нижнем регистре; запоминаются и для имён, ещё не попавших в список. */
         final Map<String, List<TypeItem>> valueTypes = new HashMap<>();
         final Map<String, Property> valueProperties = new HashMap<>();
+        /** Значение — имя метода модуля: боковая подсказка показывает обычное описание метода. */
+        final Map<String, Method> valueMethods = new HashMap<>();
+
+        void addMethod(Method method)
+        {
+            add(method.getName());
+            if (method.getName() != null && !method.getName().isBlank())
+                valueMethods.putIfAbsent(lower(method.getName().trim()), method);
+        }
+
+        /** Объект описания строки списка: метод модуля или свойство с типом значения. */
+        EObject describe(String name)
+        {
+            Method method = valueMethods.get(lower(name));
+            return method != null ? method : info(name);
+        }
         final List<String> branches = new ArrayList<>();
         /** {@code ЛиНаборЗначенийПолный}. */
         boolean full;
@@ -2175,7 +2195,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         continue;
                     if (idle && (!method.getFormalParams().isEmpty() || isServerOnly(method)))
                         continue;
-                    add(method.getName());
+                    addMethod(method);
                 }
             }
             if (!found)
@@ -2273,6 +2293,16 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         addFormAttributes(form);
                     full = true;
                 }
+            }
+            if (startsWithIgnoreCase(last, "Действие") && left instanceof DynamicFeatureAccess actionAccess //$NON-NLS-1$
+                && hasType(typesOf(actionAccess.getSource()), "FormCommand") && moduleForm() != null) //$NON-NLS-1$
+            {
+                // #950: Команда.Действие = "Процедура" — клиентские методы модуля формы.
+                branch("formCommandAction"); //$NON-NLS-1$
+                for (Method method : module.allMethods())
+                    if (method.getName() != null && method.getFormalParams().size() == 1 && !isServerOnly(method))
+                        addMethod(method);
+                full = true;
             }
             if (!full && parent.isEmpty())
             {

@@ -65,6 +65,8 @@ public final class Activator
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
         EmptyExceptStatementWeaving.install(context);
+        QlHubOpenModulesWeaving.install(context);
+        SuppressionRangesWeaving.install(context);
         P2InstallOperationWeaving.install(context);
         DebugValueEditorDialogWeaving.install(context);
     }
@@ -81,6 +83,206 @@ public final class Activator
         System.getProperties().put(CheckDurations.CALLBACK + ".end", (Consumer<Object>) check -> {}); //$NON-NLS-1$
         System.getProperties().put(CheckDurations.CALLBACK + ".monitor", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (check, monitor) -> monitor);
+        System.getProperties().put(QlHubOpenModulesWeaving.CALLBACK,
+            (java.util.function.BiPredicate<Object, Object>) (object, parameters) -> false);
+        System.getProperties().put(SuppressionRangesWeaving.CALLBACK,
+            (BiFunction<Object, Object, Object>) (module, ranges) -> ranges);
+    }
+
+    /**
+     * bsl 28.0.1.v202605050943 (и 28.1.0.v202610211527) {@code BslSuppressionProvider.computeSuppressionRanges}:
+     * результат проходит через функцию {@link #CALLBACK} основного бандла. Штатный расчёт растягивает
+     * {@code //@skip-check} на оператор, только если комментарий попал в его узел; перед оператором с
+     * ключевым словом ({@code Возврат}) не попадает, и многострочный литерал не подавляется ни одной проверкой.
+     */
+    private static final class SuppressionRangesWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.bslSuppression.ranges"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.validation.BslSuppressionProvider"; //$NON-NLS-1$
+        private static final String DESCRIPTOR = "(Lcom/_1c/g5/v8/dt/bsl/model/Module;)Ljava/util/Map;"; //$NON-NLS-1$
+        private static final String FUNCTION = "java/util/function/BiFunction"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>) (module, ranges) -> ranges);
+            context.registerService(WeavingHook.class, new SuppressionRangesWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0, 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"computeSuppressionRanges".equals(name) || !DESCRIPTOR.equals(descriptor) //$NON-NLS-1$
+                            || (access & Opcodes.ACC_STATIC) != 0)
+                            return mv;
+                        patched[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /** {@code return (Map) callback.apply(module, ranges);} — без ветвлений и кадров. */
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.ARETURN)
+                                {
+                                    EarlyWeaving.emitGetProperty(mv, CALLBACK, FUNCTION);
+                                    mv.visitInsn(Opcodes.SWAP);
+                                    mv.visitVarInsn(Opcodes.ALOAD, 1);
+                                    mv.visitInsn(Opcodes.SWAP);
+                                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION, "apply", //$NON-NLS-1$
+                                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                    mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Map"); //$NON-NLS-1$
+                                    patched[1]++;
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                }, 0);
+                // Публикуем только правку известной формы класса.
+                boolean ok = patched[0] == 1 && patched[1] >= 1;
+                if (ok)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", ok //$NON-NLS-1$
+                    ? "woven returns=" + patched[1] : "skipped: method=" + patched[0] + " returns=" + patched[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /**
+     * bsl.check 4.0.300.v202605050943 (и 4.0.302.v202610211527) {@code BslQlDelegatingCheck}
+     * ({@code bsl-ql-hub}): параметр «Только открытые модули», как у тяжёлых проверок Комфорта (#870).
+     * {@code configureCheck} получает параметр {@code onlyOpenModules} (по умолчанию включён), {@code check}
+     * пропускает литерал, если функция {@link #CALLBACK} основного бандла вернула {@code true}.
+     */
+    private static final class QlHubOpenModulesWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.qlHub.skip"; //$NON-NLS-1$
+        private static final String TARGET = "com.e1c.g5.v8.dt.internal.bsl.check.BslQlDelegatingCheck"; //$NON-NLS-1$
+        private static final String PARAMETER = "onlyOpenModules"; //$NON-NLS-1$
+        private static final String TITLE = "Только открытые модули";
+        private static final String BUILDER = "com/e1c/g5/v8/dt/check/components/BasicCheck$CheckParameterBuilder"; //$NON-NLS-1$
+        private static final String PARAMETER_DESCRIPTOR =
+            "(Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)L" + BUILDER + ";"; //$NON-NLS-1$ //$NON-NLS-2$
+        private static final String CHECK_DESCRIPTOR = "(Ljava/lang/Object;" //$NON-NLS-1$
+            + "Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;" //$NON-NLS-1$
+            + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String PREDICATE = "java/util/function/BiPredicate"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK,
+                (java.util.function.BiPredicate<Object, Object>) (object, parameters) -> false);
+            context.registerService(WeavingHook.class, new QlHubOpenModulesWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0, 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if ("configureCheck".equals(name)) //$NON-NLS-1$
+                            return new MethodVisitor(Opcodes.ASM9, mv)
+                            {
+                                private boolean afterParameter;
+
+                                @Override
+                                public void visitMethodInsn(int opcode, String owner, String called, String desc,
+                                    boolean isInterface)
+                                {
+                                    super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                                    afterParameter = opcode == Opcodes.INVOKEVIRTUAL && "parameter".equals(called) //$NON-NLS-1$
+                                        && desc.endsWith(")L" + BUILDER + ";"); //$NON-NLS-1$ //$NON-NLS-2$
+                                }
+
+                                /** Последний {@code .parameter(...)} цепочки: его результат отбрасывается. */
+                                @Override
+                                public void visitInsn(int opcode)
+                                {
+                                    if (opcode == Opcodes.POP && afterParameter)
+                                    {
+                                        mv.visitLdcInsn(PARAMETER);
+                                        mv.visitLdcInsn(org.objectweb.asm.Type.getType("Ljava/lang/Boolean;")); //$NON-NLS-1$
+                                        mv.visitLdcInsn("true"); //$NON-NLS-1$
+                                        mv.visitLdcInsn(TITLE);
+                                        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, BUILDER, "parameter", //$NON-NLS-1$
+                                            PARAMETER_DESCRIPTOR, false);
+                                        patched[0]++;
+                                    }
+                                    afterParameter = false;
+                                    super.visitInsn(opcode);
+                                }
+                            };
+                        if (!"check".equals(name) || !CHECK_DESCRIPTOR.equals(descriptor) //$NON-NLS-1$
+                            || (access & Opcodes.ACC_STATIC) != 0)
+                            return mv;
+                        patched[1]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /** {@code if (skip != null && skip.test(object, parameters)) return;} */
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                EarlyWeaving.emitGetProperty(mv, CALLBACK, PREDICATE);
+                                mv.visitInsn(Opcodes.DUP);
+                                Label missing = new Label();
+                                Label original = new Label();
+                                mv.visitJumpInsn(Opcodes.IFNULL, missing);
+                                mv.visitVarInsn(Opcodes.ALOAD, 1);
+                                mv.visitVarInsn(Opcodes.ALOAD, 3);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, PREDICATE, "test", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                                mv.visitJumpInsn(Opcodes.IFEQ, original);
+                                mv.visitInsn(Opcodes.RETURN);
+                                mv.visitLabel(missing);
+                                mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { PREDICATE });
+                                mv.visitInsn(Opcodes.POP);
+                                mv.visitLabel(original);
+                                mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                            }
+                        };
+                    }
+                }, 0);
+                // Публикуем только полную правку известной формы класса.
+                if (patched[0] == 1 && patched[1] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", patched[0] == 1 && patched[1] == 1 //$NON-NLS-1$
+                    ? "woven" : "skipped: parameter=" + patched[0] + " check=" + patched[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
     }
 
     /** Уточнение штатной empty-except-statement без добавления второй проверки (#988). */

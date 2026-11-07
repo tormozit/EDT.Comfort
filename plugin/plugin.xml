@@ -26,8 +26,14 @@
     </factory>
     <factory
         adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.RuntimeDebugTargetThread"
-        class="tormozit.DebugTargetTerminateAdapterFactory">
+        class="tormozit.DebugTargetCommandsAdapterFactory">
       <adapter type="org.eclipse.debug.core.commands.ITerminateHandler"/>
+    </factory>
+    <factory
+        adaptableType="com._1c.g5.v8.dt.internal.debug.core.model.RuntimeDebugClientTarget"
+        class="tormozit.DebugTargetCommandsAdapterFactory">
+      <adapter type="org.eclipse.debug.core.commands.ITerminateHandler"/>
+      <adapter type="org.eclipse.debug.core.commands.ISuspendHandler"/>
     </factory>
   </extension>
   <extension point="com._1c.g5.v8.dt.bsl.stringLiteralProposals">

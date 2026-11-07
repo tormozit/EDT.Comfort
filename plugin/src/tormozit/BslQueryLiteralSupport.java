@@ -121,8 +121,11 @@ import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.bsl.ui.quickfix.BslCheckSuppressor;
+import com._1c.g5.v8.dt.bsl.validation.BslSuppressionProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
@@ -147,6 +150,7 @@ import com._1c.g5.v8.dt.qw.ui.ql.QlEditor;
 import com._1c.g5.v8.dt.qw.ui.utils.ExpressionEditingType;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManager;
 import com._1c.g5.v8.dt.validation.git.IGitMarkerFilterManagerListener;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
  * Автодополнение в строковом литерале с текстом запроса без ИР (issue 837). Список даёт
@@ -3484,21 +3488,146 @@ final class BslQueryLiteralSupport
     }
 
     /**
-     * Живая отметка ошибки запроса. Быстрых исправлений у неё нет: штатные по её позиции —
-     * исправления хаба («Подавить предупреждение» вставляет {@code //@skip-check bsl-ql-hub}),
-     * к живой отметке они не относятся.
+     * Живая отметка ошибки запроса. Штатные исправления по её позиции — от отметок хаба, к ней
+     * не относятся: вместо них {@link #liveQueryProposals}.
      */
     static boolean isLiveQueryAnnotation(Annotation annotation)
     {
         return annotation instanceof QueryProblemAnnotation;
     }
 
+    /**
+     * Исправления живой отметки: только подавление хаба {@code //@skip-check bsl-ql-hub}, как у
+     * штатной отметки хаба. Есть и при отключённой проверке хаба (issue 870). Модель не читает.
+     */
+    static ICompletionProposal[] liveQueryProposals(Annotation annotation)
+    {
+        if (!(annotation instanceof QueryProblemAnnotation live))
+            return new ICompletionProposal[0];
+        return new ICompletionProposal[] { new SuppressHubProposal(live) };
+    }
+
     /** Ошибка запроса в литерале, найденная проверкой скрытого редактора запроса. */
     private static final class QueryProblemAnnotation extends Annotation
     {
-        QueryProblemAnnotation(String type, String text)
+        final Severity severity;
+        /** Позиция в модели аннотаций редактора: сдвигается вместе с текстом. */
+        final Position position;
+
+        QueryProblemAnnotation(String type, String text, Severity severity, Position position)
         {
             super(type, false, text);
+            this.severity = severity;
+            this.position = position;
+        }
+    }
+
+    /**
+     * «Подавить ошибку» живой отметки: комментарий вставляет штатный {@link BslCheckSuppressor} —
+     * тот же, что у исправления отметки хаба ({@code BslQuickfixProvider.skipCheckQuickFix}).
+     */
+    private static final class SuppressHubProposal implements ICompletionProposal
+    {
+        private final QueryProblemAnnotation annotation;
+
+        SuppressHubProposal(QueryProblemAnnotation annotation)
+        {
+            this.annotation = annotation;
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            Position position = annotation.position;
+            if (!(document instanceof XtextDocument xtext) || position == null || position.isDeleted())
+                return;
+            BslCheckSuppressor suppressor = bslUiInstance(BslCheckSuppressor.class);
+            if (suppressor == null)
+            {
+                ToastNotification.show("Подавить ошибку", "Штатное подавление проверки недоступно", 5_000); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            int offset = position.getOffset();
+            try
+            {
+                org.eclipse.text.edits.TextEdit edit = xtext.readOnly(resource ->
+                {
+                    if (resource == null)
+                        return null;
+                    EObject object = new EObjectAtOffsetHelper().resolveContainedElementAt(resource, offset);
+                    if (object == null)
+                        return null;
+                    Issue.IssueImpl issue = new Issue.IssueImpl();
+                    issue.setCode(HUB_CHECK_ID);
+                    issue.setSeverity(annotation.severity);
+                    issue.setMessage(annotation.getText());
+                    issue.setOffset(offset);
+                    issue.setLength(position.getLength());
+                    issue.setUriToProblem(EcoreUtil.getURI(object));
+                    org.eclipse.text.edits.TextEdit result = suppressor.suppressIssue(issue, object);
+                    Global.tempLog("query-skip-check", "suppress offset=" + offset + " object=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + object.eClass().getName() + " uri=" + issue.getUriToProblem() + " edit=" + result); //$NON-NLS-1$ //$NON-NLS-2$
+                    return result;
+                });
+                if (edit != null)
+                    edit.apply(document);
+            }
+            catch (Exception | LinkageError e)
+            {
+                Global.tempLog("query-skip-check", "suppress failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show("Подавить ошибку", "Не удалось подавить: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public Point getSelection(IDocument document)
+        {
+            return null;
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return "Добавить комментарий «//@skip-check " + HUB_CHECK_ID //$NON-NLS-1$
+                + "» перед оператором" + Global.pluginSignForTooltip(); //$NON-NLS-1$
+        }
+
+        /** Как штатное «Подавить ошибку: {0}» с текстом отметки хаба. */
+        @Override
+        public String getDisplayString()
+        {
+            String action = annotation.severity == Severity.WARNING ? "Подавить предупреждение: " //$NON-NLS-1$
+                : annotation.severity == Severity.INFO ? "Подавить сообщение: " : "Подавить ошибку: "; //$NON-NLS-1$ //$NON-NLS-2$
+            return action + HUB_PREFIXES[0] + annotation.getText();
+        }
+
+        @Override
+        public Image getImage()
+        {
+            return null;
+        }
+
+        @Override
+        public IContextInformation getContextInformation()
+        {
+            return null;
+        }
+    }
+
+    /** Сервис из Guice-инжектора языка BSL ({@link BslOccurrenceMarkerHook#bslUiInjector}). */
+    private static <T> T bslUiInstance(Class<T> type)
+    {
+        try
+        {
+            com.google.inject.Injector injector = BslOccurrenceMarkerHook.bslUiInjector();
+            // Временный лог issue 870: прежний путь через BslUiPlugin молча давал null.
+            Global.tempLog("query-skip-check", "injector=" + injector); //$NON-NLS-1$ //$NON-NLS-2$
+            return injector == null ? null : injector.getInstance(type);
+        }
+        catch (Exception | LinkageError e)
+        {
+            Global.tempLog("query-skip-check", "injector failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
         }
     }
 
@@ -3620,10 +3749,10 @@ final class BslQueryLiteralSupport
          * Готовый ответ для текущего текста и набора литералов или {@code null}: тогда расчёт
          * запущен в фоне и по готовности сам назначит новый проход.
          */
-        private Set<Integer> concatenatedFromBackground(List<Literal> literals)
+        private LiteralFlags concatenatedFromBackground(List<Literal> literals)
         {
             if (literals.isEmpty())
-                return Set.of();
+                return LiteralFlags.EMPTY;
             if (!(document instanceof IDocumentExtension4 stamped))
                 return null;
             long stamp = stamped.getModificationStamp();
@@ -3641,15 +3770,19 @@ final class BslQueryLiteralSupport
             if (request.equals(concatenatedPending))
                 return null;
             concatenatedPending = request;
-            Job job = Job.create("Комфорт: склеенные литералы запроса", (org.eclipse.core.runtime.ICoreRunnable)monitor -> //$NON-NLS-1$
+            IProject project = resolveProject(editor);
+            Job job = Job.create("Комфорт: проверка запросов в литералах", (org.eclipse.core.runtime.ICoreRunnable)monitor -> //$NON-NLS-1$
             {
-                Set<Integer> result = concatenatedLiterals(document, bounds);
+                LiteralFlags result = concatenatedLiterals(document, bounds, project);
                 if (!PlatformUI.isWorkbenchRunning())
                     return;
                 PlatformUI.getWorkbench().getDisplay().asyncExec(() ->
                 {
                     if (request.equals(concatenatedPending))
                         concatenatedPending = null;
+                    // Пары скобок берутся из проверок запросов: «пары нет» до новых проверок уже неверно.
+                    if (result != null && result.fresh())
+                        PAIR_CACHE.clear();
                     if (!MARKER_SESSIONS.containsKey(editor) || stamped.getModificationStamp() != stamp)
                         return; // новая правка сама назначит проход
                     if (result == null)
@@ -3803,11 +3936,13 @@ final class BslQueryLiteralSupport
             List<Literal> literals = visibleQueryLiterals(document, top, bottom);
             // Дерево читается в фоне: блокировку документа подолгу держит проверка модуля EDT,
             // и ожидание её здесь останавливало ввод. Пока ответа нет — прежние отметки на месте.
-            Set<Integer> concatenated = concatenatedFromBackground(literals);
-            if (concatenated == null)
+            LiteralFlags flags = concatenatedFromBackground(literals);
+            if (flags == null)
                 return;
             IProject project = literals.isEmpty() ? null : resolveProject(editor);
             listenToBaseline(project);
+            // Критичность — из настроек проверки хаба: живые отметки заменяют её отметки (issue 870).
+            Severity hubSeverity = project == null ? null : hubSeverity(project);
             List<Annotation> remove = new ArrayList<>();
             Map<Annotation, Position> add = new LinkedHashMap<>();
             java.util.Set<Coverage> matched = new java.util.HashSet<>();
@@ -3824,25 +3959,24 @@ final class BslQueryLiteralSupport
                         coverage = candidate;
                 }
                 String query = lit.text.toString();
-                boolean skipValidation = concatenated.contains(start);
-                BslTempTableSessions.Session tempTables = tempTables(document, lit);
-                String cacheKey = project.getName() + '\n' + tempTables.fingerprint() + '\n' + query;
+                // Склеенный литерал не проверяется; подавленный «//@skip-check bsl-ql-hub» — тоже,
+                // как и штатная проверка хаба (issue 870).
+                boolean skipValidation = flags.concatenated().contains(start) || flags.suppressed().contains(start);
+                // Проверка — фоновая, путём хаба (concatenatedLiterals); UI только раскладывает отметки.
                 QueryValidation validation = skipValidation
-                    ? new QueryValidation(query, List.of(), List.of(), List.of()) : ISSUES_CACHE.get(cacheKey);
+                    ? new QueryValidation(query, List.of(), List.of(), List.of()) : flags.validations().get(start);
                 if (validation == null)
                 {
-                    validation = validate(project, query, tempTables);
-                    if (validation == null)
-                    {
-                        // Сбой проверки: покрытие (если было) не трогаем.
-                        if (coverage != null)
-                            matched.add(coverage);
-                        continue;
-                    }
-                    ISSUES_CACHE.put(cacheKey, validation);
-                    // Пары скобок берутся из этой проверки: «пары нет» до неё уже неверно.
-                    PAIR_CACHE.clear();
+                    // Сбой проверки: покрытие (если было) не трогаем.
+                    if (coverage != null)
+                        matched.add(coverage);
+                    continue;
                 }
+                // Временный лог issue 870: текст схемы отличается от нашего только переводами строк.
+                if (!skipValidation)
+                    Global.tempLog("query-live-background", "apply openQuote=" + start + " textEqual=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + validation.query().replace("\r\n", "\n").equals(query) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " issues=" + validation.issues().size()); //$NON-NLS-1$
                 if (coverage == null)
                 {
                     Position range = track(start, end - start);
@@ -3860,18 +3994,39 @@ final class BslQueryLiteralSupport
                 coverage.ours.clear();
                 for (Issue issue : validation.issues())
                 {
-                    String type = annotationType(issue.getSeverity());
+                    // Важность самой ошибки запроса решает лишь, показывать ли её (IGNORE — нет).
+                    String type = annotationType(issue.getSeverity()) == null ? null : annotationType(hubSeverity);
+                    // #region agent log — временный лог issue 870: почему живая отметка не ставится
+                    Global.tempLog("query-live-apply", "issue openQuote=" + start + " sev=" + issue.getSeverity() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " hubSev=" + hubSeverity + " type=" + type + " offset=" + issue.getOffset() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " length=" + issue.getLength() + " schemaLen=" + validation.query().length() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " litLen=" + query.length() + " msg=" + issue.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                     if (type == null || issue.getOffset() == null || issue.getMessage() == null)
                         continue;
-                    int offset = issue.getOffset();
+                    // Смещения ошибки — в тексте схемы (строки через \r\n), литерал — через \n.
+                    String schemaText = validation.query();
+                    int schemaOffset = Math.min(issue.getOffset(), schemaText.length());
                     int length = issue.getLength() != null ? Math.max(1, issue.getLength()) : 1;
+                    int offset = QueryBrackets.lineEndingOffset(schemaText, schemaOffset, query);
+                    int offsetEnd = QueryBrackets.lineEndingOffset(schemaText,
+                        Math.min(schemaOffset + length, schemaText.length()), query);
                     int problemStart = lit.docOffset(offset);
-                    int problemEnd = Math.max(problemStart + 1, lit.docOffset(offset + length));
-                    if (hiddenByBaseline(problemStart))
+                    int problemEnd = Math.max(problemStart + 1, lit.docOffset(Math.max(offsetEnd, offset + 1)));
+                    boolean baselineHidden = hiddenByBaseline(problemStart);
+                    // #region agent log — временный лог issue 870
+                    Global.tempLog("query-live-apply", "place openQuote=" + start + " litOffset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                        + " litEnd=" + offsetEnd + " doc=" + problemStart + ".." + problemEnd //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " baselineHidden=" + baselineHidden); //$NON-NLS-1$
+                    // #endregion
+                    if (baselineHidden)
                         continue;
-                    QueryProblemAnnotation annotation = new QueryProblemAnnotation(type, issue.getMessage());
+                    // Модель аннотаций сдвигает этот же экземпляр позиции вместе с текстом.
+                    Position position = new Position(problemStart, problemEnd - problemStart);
+                    QueryProblemAnnotation annotation = new QueryProblemAnnotation(type, issue.getMessage(),
+                        hubSeverity, position);
                     coverage.ours.add(annotation);
-                    add.put(annotation, new Position(problemStart, problemEnd - problemStart));
+                    add.put(annotation, position);
                 }
             }
             // Покрытие в видимой области, где литерала-запроса больше нет, снимается.
@@ -3897,6 +4052,22 @@ final class BslQueryLiteralSupport
                 }
             }
             hideHubUnderCoverage(model, allAnnotations(model));
+            // #region agent log — временный лог issue 870: сколько живых отметок осталось в модели
+            int present = 0;
+            int ours = 0;
+            for (Coverage coverage : coverages)
+            {
+                for (QueryProblemAnnotation annotation : coverage.ours)
+                {
+                    ours++;
+                    if (model.getPosition(annotation) != null)
+                        present++;
+                }
+            }
+            Global.tempLog("query-live-apply", "run literals=" + literals.size() + " coverages=" + coverages.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " added=" + add.size() + " removed=" + remove.size() + " ours=" + ours + " inModel=" + present //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " model=" + model.getClass().getName()); //$NON-NLS-1$
+            // #endregion
         }
 
         /**
@@ -3967,6 +4138,11 @@ final class BslQueryLiteralSupport
                 if (coverage == null)
                     continue;
                 boolean inOwner = owner != null && owner.getPosition(annotation) != null;
+                // #region agent log — временный лог issue 870: какие отметки хаба убраны
+                Global.tempLog("query-live-apply", "hideHub at=" + position.getOffset() + "+" + position.getLength() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " cover=" + coverage.range.getOffset() + "+" + coverage.range.getLength() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ours=" + coverage.ours.size() + " type=" + annotation.getType() + " text=" + annotation.getText()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
                 (inOwner ? owner : visual).removeAnnotation(annotation);
                 if (visual.getPosition(annotation) == null)
                     coverage.hubHidden++;
@@ -4039,6 +4215,39 @@ final class BslQueryLiteralSupport
         };
     }
 
+    /**
+     * Важность отметки по критичности проверки {@code bsl-ql-hub} в проекте — как
+     * {@code CheckExecutor.toDiagnosticSeverity}: блокирующая, критичная, важная — ошибка; незначительная —
+     * предупреждение; тривиальная — информация. Проверка не найдена — её штатная «незначительная». UI.
+     */
+    private static Severity hubSeverity(IProject project)
+    {
+        try
+        {
+            ICheckRepository checks = Global.getOsgiService(ICheckRepository.class);
+            if (checks != null)
+            {
+                for (var uid : checks.getCheckUidForCheckId(HUB_CHECK_ID, project))
+                {
+                    var settings = checks.getSettings(uid, project);
+                    if (settings == null || settings.getSeverity() == null)
+                        continue;
+                    return switch (settings.getSeverity())
+                    {
+                        case BLOCKER, CRITICAL, MAJOR -> Severity.ERROR;
+                        case MINOR -> Severity.WARNING;
+                        default -> Severity.INFO;
+                    };
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLog("query-skip-check", "hub severity failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return Severity.WARNING;
+    }
+
     private static boolean isHubAnnotation(Annotation annotation)
     {
         String text = annotation.getText();
@@ -4106,24 +4315,148 @@ final class BslQueryLiteralSupport
             result.add(lit);
     }
 
-    private static record ConcatenatedState(String key, Set<Integer> result) {}
+    private static record ConcatenatedState(String key, LiteralFlags result) {}
+
+    /**
+     * Фоновый проход по видимым литералам. {@code concatenated}, {@code suppressed} — открывающие кавычки
+     * литералов, которые живая проверка пропускает: склеенные операцией «+» и подавленные комментарием
+     * {@code //@skip-check bsl-ql-hub} (или {@code @skip-all}). {@code validations} — проверки остальных
+     * по открывающей кавычке (нет ключа — сбой проверки). {@code fresh} — среди них есть новые, не из кэша.
+     */
+    private static record LiteralFlags(Set<Integer> concatenated, Set<Integer> suppressed,
+        Map<Integer, QueryValidation> validations, boolean fresh)
+    {
+        static final LiteralFlags EMPTY = new LiteralFlags(Set.of(), Set.of(), Map.of(), false);
+    }
+
+    /** Литерал, схему которого проверить вне блокировки документа. */
+    private static record PendingValidation(int openQuote, com._1c.g5.v8.dt.ql.model.QuerySchema schema,
+        BslTempTableSessions.Session session, String text) {}
+
+    /** Опция ресурса QL-СКД, которую хаб выключает перед проверкой ({@code BslQlDelegatingCheck.check}). */
+    private static final String DCS_VALIDATION_MODE_OPTION = "DcsValidationModeOption"; //$NON-NLS-1$
+
+    /**
+     * Проверка схемы литерала тем же путём, что у {@code bsl-ql-hub}: штатный валидатор ресурса схемы
+     * ({@code CheckMode.ALL}, режим СКД выключен) плюс поля временных таблиц менеджера (issue 889).
+     * Вне блокировки документа модуля: ввод её не ждёт. Схема — общая штатная, её же может проверять хаб;
+     * сбой этого прохода ловится, следующий проход повторит. {@code null} — сбой.
+     */
+    private static QueryValidation validateSchema(PendingValidation pending)
+    {
+        try
+        {
+            if (!(pending.schema().eResource() instanceof XtextResource resource))
+                return null;
+            BslTempTableSessions.enrich(resource, pending.session());
+            if (resource instanceof com._1c.g5.v8.dt.ql.dcs.resource.QlDcsResource dcs)
+                dcs.addOptions(DCS_VALIDATION_MODE_OPTION, Boolean.FALSE);
+            List<Issue> nativeIssues = resource.getResourceServiceProvider().getResourceValidator()
+                .validate(resource, CheckMode.ALL, CancelIndicator.NullImpl);
+            List<Issue> issues = nativeIssues == null ? new ArrayList<>() : new ArrayList<>(nativeIssues);
+            issues.addAll(BslTempTableSessions.validateFields(resource));
+            var parsed = resource.getParseResult();
+            var root = parsed == null ? null : parsed.getRootNode();
+            return new QueryValidation(root == null ? pending.text() : root.getText(), List.copyOf(issues),
+                QueryBracketSupport.collect(root), QueryBracketSupport.collectPairs(root));
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLog("query-live-background", "validate failed openQuote=" + pending.openQuote() + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** Код штатной проверки запросов в строковых литералах. */
+    static final String HUB_CHECK_ID = "bsl-ql-hub"; //$NON-NLS-1$
+    private static final String SKIP_ALL_ID = "@skip-all"; //$NON-NLS-1$
+
+    /**
+     * Диапазоны подавления модуля для хаба — тем же штатным расчётом, которым пользуется
+     * проверка ({@code BslValidationContributor}): {@code BslSuppressionProvider} из сервисов ресурса.
+     * {@code null} — расчёт недоступен. Только под чтением документа.
+     */
+    private static List<BslSuppressionProvider.BslSuppressionRange> hubSuppressionRanges(XtextResource resource)
+    {
+        try
+        {
+            if (resource.getContents().isEmpty() || !(resource.getContents().get(0) instanceof Module module))
+                return null;
+            BslSuppressionProvider provider = resource.getResourceServiceProvider().get(BslSuppressionProvider.class);
+            if (provider == null)
+                return null;
+            List<BslSuppressionProvider.BslSuppressionRange> result = new ArrayList<>();
+            for (var ranges : provider.computeSuppressionRanges(module).values())
+            {
+                for (var range : ranges)
+                {
+                    Set<String> ids = range.getCheckIds();
+                    if (ids != null && (ids.contains(HUB_CHECK_ID) || ids.contains(SKIP_ALL_ID)))
+                        result.add(range);
+                }
+            }
+            return result;
+        }
+        catch (RuntimeException | LinkageError e)
+        {
+            Global.tempLog("query-skip-check", "ranges failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /**
+     * Как {@code BslElementRegionProvider.isSuppressed}: диапазон охватывает строки узла целиком
+     * (строки узла — из {@code getTextRegionWithLineInformation}, как там).
+     */
+    private static boolean isHubSuppressed(StringLiteral literal,
+        List<BslSuppressionProvider.BslSuppressionRange> ranges)
+    {
+        if (ranges == null || ranges.isEmpty())
+            return false;
+        var node = NodeModelUtils.findActualNodeFor(literal);
+        if (node == null)
+            return false;
+        var region = node.getTextRegionWithLineInformation();
+        int first = region.getLineNumber();
+        int last = region.getEndLineNumber();
+        boolean suppressed = false;
+        StringBuilder log = new StringBuilder();
+        for (var range : ranges)
+        {
+            boolean covers = range.getStartLine() <= first && range.getEndLine() >= last;
+            suppressed |= covers;
+            log.append(" [").append(range.getStartLine()).append("..").append(range.getEndLine()) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(' ').append(range.getCheckIds()).append(covers ? " covers]" : "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // Временный лог issue 870: сопоставление строк узла с диапазонами подавления не проверено.
+        Global.tempLog("query-skip-check", "literal lines=" + first + ".." + last + " startLine=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            + node.getStartLine() + " suppressed=" + suppressed + log); //$NON-NLS-1$
+        return suppressed;
+    }
 
     /**
      * Скобки не создают узла в BSL AST: родитель литерала сразу содержит операцию «+».
      * Ждёт блокировку документа — только вне UI-потока. {@code bounds} — пары открывающей и
      * закрывающей кавычки.
      */
-    private static Set<Integer> concatenatedLiterals(IDocument document, int[][] bounds)
+    private static LiteralFlags concatenatedLiterals(IDocument document, int[][] bounds, IProject project)
     {
         if (!(document instanceof XtextDocument xtext))
             return null;
+        Map<Integer, QueryValidation> validations = new HashMap<>();
+        List<PendingValidation> pending = new ArrayList<>();
+        // Под чтением модуля — только дешёвое: литерал, временные таблицы, готовая штатная схема.
+        // Проверка схем — после, вне блокировки: ввод не ждёт её.
         // Проверка литералов не меняет текст модели. Обычный tryReadOnly побочно
         // вызывает modelChanged и держит документ на подсветке/проверке всего модуля.
-        return ContentAssistSessionReloader.readOnlyPeekAst(xtext, resource -> BslNodeLookup.read(state ->
+        long lockStart = System.nanoTime();
+        LiteralFlags flags = ContentAssistSessionReloader.readOnlyPeekAst(xtext, resource -> BslNodeLookup.read(state ->
         {
             if (resource == null)
                 return null;
             Set<Integer> result = new HashSet<>();
+            Set<Integer> suppressed = new HashSet<>();
+            List<BslSuppressionProvider.BslSuppressionRange> suppressionRanges = hubSuppressionRanges(resource);
             EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
             for (int[] literal : bounds)
             {
@@ -4140,15 +4473,57 @@ final class BslQueryLiteralSupport
                     return null;
                 if (isConcatenatedLiteral(model))
                     result.add(openQuote);
+                else if (isHubSuppressed(model, suppressionRanges))
+                    suppressed.add(openQuote);
                 else
+                {
                     // Проверяются все видимые запросы, а не только метод под кареткой.
-                    // Их схемы должны быть готовы до запуска проверки в UI.
-                    BslTempTableSessions.compute(model, CancelIndicator.NullImpl);
+                    BslTempTableSessions.Session computed = BslTempTableSessions.compute(model, CancelIndicator.NullImpl);
+                    BslTempTableSessions.Session session = computed != null ? computed : BslTempTableSessions.EMPTY;
+                    if (project == null)
+                        continue;
+                    String text = new DefaultStringLiteralTextProvider(model).getText();
+                    QueryValidation cached = ISSUES_CACHE.get(validationKey(project, session, text));
+                    if (cached != null)
+                        validations.put(openQuote, cached);
+                    else
+                    {
+                        com._1c.g5.v8.dt.ql.model.QuerySchema schema =
+                            BslQueryResultTypes.literalSchema(model, CancelIndicator.NullImpl);
+                        if (schema != null)
+                            pending.add(new PendingValidation(openQuote, schema, session, text));
+                    }
+                }
             }
             // Публикует рассчитанные схемы из кэша; -1 не запускает расчёт других методов.
             BslTempTableSessions.refreshDocument(document, resource, -1);
-            return result;
+            return new LiteralFlags(result, suppressed, Map.of(), false);
         }, resource));
+        long lockMs = (System.nanoTime() - lockStart) / 1_000_000;
+        if (flags == null)
+            return null;
+        long validateStart = System.nanoTime();
+        int cachedCount = validations.size();
+        for (PendingValidation item : pending)
+        {
+            QueryValidation validation = validateSchema(item);
+            if (validation == null)
+                continue;
+            ISSUES_CACHE.put(validationKey(project, item.session(), item.text()), validation);
+            validations.put(item.openQuote(), validation);
+        }
+        // Временный лог issue 870: время под чтением модуля и вне его.
+        Global.tempLog("query-live-background", "literals=" + bounds.length + " cached=" //$NON-NLS-1$ //$NON-NLS-2$
+            + cachedCount + " validated=" + pending.size() + " failed=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (cachedCount + pending.size() - validations.size()) + " lockMs=" + lockMs //$NON-NLS-1$
+            + " validateMs=" + (System.nanoTime() - validateStart) / 1_000_000); //$NON-NLS-1$
+        return new LiteralFlags(flags.concatenated(), flags.suppressed(), Map.copyOf(validations), !pending.isEmpty());
+    }
+
+    /** Ключ кэша проверки: проект, временные таблицы менеджера и текст запроса без различия переводов строк. */
+    private static String validationKey(IProject project, BslTempTableSessions.Session session, String text)
+    {
+        return project.getName() + '\n' + session.fingerprint() + '\n' + text.replace("\r\n", "\n"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Проверка текста запроса штатным валидатором языка запросов; {@code null} — сбой. Только UI. */

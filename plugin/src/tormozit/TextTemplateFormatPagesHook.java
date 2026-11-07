@@ -516,9 +516,6 @@ public final class TextTemplateFormatPagesHook implements IStartup
             if (widget == null || widget.isDisposed() || viewer.getSelectionProvider() == null)
                 return;
             int[] saved = load();
-            Global.tempLog("text-template-position", "start key=" + key + " saved=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (saved == null ? null : saved[0] + ":" + saved[1]) //$NON-NLS-1$
-                + " height=" + widget.getClientArea().height); //$NON-NLS-1$
             restoring = saved != null;
             viewer.getSelectionProvider().addSelectionChangedListener(event -> remember());
             widget.addListener(SWT.FocusOut, event -> STORE.flush());
@@ -556,7 +553,6 @@ public final class TextTemplateFormatPagesHook implements IStartup
                 IRegion info = document.getLineInformation(line);
                 int offset = info.getOffset() + Math.max(0, Math.min(saved[1], info.getLength()));
                 textEditor.selectAndReveal(offset, 0);
-                Global.tempLog("text-template-position", "restored line=" + line + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
             catch (BadLocationException ignored)
             {

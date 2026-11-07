@@ -11502,6 +11502,12 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return raw instanceof ConfigurableCompletionProposal cp ? CtorMinParamsInsert.readSignatureObject(cp) : null;
     }
 
+    /** Число параметров сигнатуры выбранного пункта списка; {@code -1} — сигнатура неизвестна. */
+    static int selectedSignatureParamCount(ICompletionProposal proposal)
+    {
+        return CtorMinParamsInsert.signatureSlotHint(selectedSignature(proposal));
+    }
+
     /**
      * Текст вставки EDT-{@code apply}: {@code CustomBslConfigurableCompletionProposal}
      * берёт {@code initialReplacementContent}, не {@code setReplacementString}.
@@ -13641,7 +13647,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             return null;
         }
 
-        private static int signatureSlotHint(EObject signature)
+        static int signatureSlotHint(EObject signature)
         {
             if (signature instanceof FakeCtor fake)
                 return fake.getParams() != null ? fake.getParams().size() : -1;

@@ -81,6 +81,40 @@ public final class BslDebugSourceHook implements IStartup
     private static final Map<Annotation, Appearance> APPEARANCES = new WeakHashMap<>();
     private static final Set<Session> SESSIONS = Collections.newSetFromMap(new WeakHashMap<>());
     private static Field stackFrameField;
+    // Все созданные каталоги выгрузок (SOURCES слабая — по ней при закрытии не всё найти).
+    private static final List<Path> EXPORT_DIRECTORIES = new ArrayList<>();
+
+    /** Удалить каталоги выгрузок исполняемых модулей; вызывается при закрытии EDT. */
+    static void deleteExportDirectories()
+    {
+        List<Path> directories;
+        synchronized (EXPORT_DIRECTORIES)
+        {
+            directories = new ArrayList<>(EXPORT_DIRECTORIES);
+            EXPORT_DIRECTORIES.clear();
+        }
+        for (Path directory : directories)
+        {
+            try (var paths = Files.walk(directory))
+            {
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path ->
+                {
+                    try
+                    {
+                        Files.deleteIfExists(path);
+                    }
+                    catch (java.io.IOException ignored)
+                    {
+                        // Остаток уберёт очистка временной папки ОС.
+                    }
+                });
+            }
+            catch (java.io.IOException ignored)
+            {
+                // Каталог уже удалён или недоступен.
+            }
+        }
+    }
 
     @Override
     public void earlyStartup()
@@ -698,9 +732,11 @@ public final class BslDebugSourceHook implements IStartup
                 }
                 else
                     throw new IllegalStateException("Недоступен менеджер проектов EDT");
-                Path directory = Path.of("C:\\VC\\EDT.Comfort", ".tmp", "debug-source",
-                    UUID.randomUUID().toString());
-                Files.createDirectories(directory);
+                Path directory = Files.createTempDirectory("comfort-debug-source-");
+                synchronized (EXPORT_DIRECTORIES)
+                {
+                    EXPORT_DIRECTORIES.add(directory);
+                }
                 export(active.get(0), generation, extension, ownerName, directory);
                 exported = new ExportedSource(directory, key.owner);
                 cache.put(key, exported);

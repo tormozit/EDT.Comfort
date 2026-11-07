@@ -1041,6 +1041,20 @@ boolean inLiteral = endCaret >= 0
         DataEventDiag after = readDataEventDiag(bslListener, text);
         int open = text.indexOf('(');
         int desiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
+        if (!after.hasKey && desiredCaret >= 0)
+        {
+            // Для пункта EDT не завела DataEvent под текст вставки (в карте только чужая
+            // запись) — штатной LinkedMode-подсказки не будет. Показываем свою, если у
+            // сигнатуры пункта есть параметры (без параметров — не показывать, issue 557).
+            ICompletionProposal selected = lastAssistSelection;
+            if (selected == null)
+                selected = ContentAssistPopupSync.peekSelectedProposal(assistant);
+            if (SmartContentAssistProcessor.selectedSignatureParamCount(selected) > 0)
+            {
+                scheduleParamHintForExistingCall(desiredCaret);
+                pendingParamHintSignature = SmartContentAssistProcessor.selectedSignature(selected);
+            }
+        }
         // Штатный ParametersHover строится из objects; если все отфильтрованы
         // (прикладной метод / bm:// без RSP) — подсказку параметров откроем сами.
         // В поле кода BSL нашу подсказку показываем сразу после вставки метода, не

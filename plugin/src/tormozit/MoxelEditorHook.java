@@ -344,7 +344,6 @@ public class MoxelEditorHook implements IStartup
         private static final char SEP = '\t';
         private static final int RETRY_MS = 100;
         private static final int MAX_ATTEMPTS = 100;
-        private static final String TOPIC = "mxl-position"; //$NON-NLS-1$
 
         private static final EditorMemoryStore STORE = new EditorMemoryStore("spreadsheetPosition.entries", 300); //$NON-NLS-1$
 
@@ -391,7 +390,6 @@ public class MoxelEditorHook implements IStartup
                     }
                 }
                 restoring = saved != null;
-                Global.tempLog(TOPIC, "start key=" + key + " saved=" + raw); //$NON-NLS-1$ //$NON-NLS-2$
                 // Сразу, без очереди: через asyncExec контрол успевает отрисовать выделение по умолчанию.
                 attach(0);
             }
@@ -431,11 +429,10 @@ public class MoxelEditorHook implements IStartup
                     {
                         control.replaceAllSelection(new CellsSelection(sheet, saved[0], saved[1], saved[2], saved[3]));
                         control.ensureSelectionVisible();
-                        Global.tempLog(TOPIC, "restored attempt=" + attempt + " rect=" + java.util.Arrays.toString(saved)); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                     catch (RuntimeException e)
                     {
-                        Global.tempLog(TOPIC, "restore failed: " + e); //$NON-NLS-1$
+                        // Восстановление не удалось — остаётся выделение по умолчанию.
                     }
                     restoring = false;
                 }
@@ -444,8 +441,6 @@ public class MoxelEditorHook implements IStartup
             private void remember(MoxelControl control)
             {
                 Selection tail = control.getTailSelection();
-                Global.tempLog(TOPIC, "selection restoring=" + restoring + " tail=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (tail == null ? null : tail.getClass().getSimpleName()));
                 if (restoring || !(tail instanceof CellsSelection cells))
                     return;
                 Rectangle r = cells.getNormalizedPosition();
