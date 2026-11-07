@@ -1345,7 +1345,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 }
                 if (found.isEmpty())
                     return;
-                found.values().forEach(this::add);
+                // Ключи уже в нижнем регистре, имена без пробелов по краям: повторный lower не нужен.
+                found.forEach(values::putIfAbsent);
                 branch("stockProposals"); //$NON-NLS-1$
                 pathAware = true;
                 full = true;
@@ -3057,16 +3058,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     {
                         // Шаблон платформы описывает произвольное имя, а не реальное свойство.
                         if (property.isDependsOnMetadata())
-                        {
-                            Global.tempLog("literal-property-names", "skip template type=" + type.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                                + " property=" + property.getName()); //$NON-NLS-1$
-                            continue;
-                        }
+                        continue;
                         addUnique(names, dualName(property));
                         rememberProperty(property);
                     }
             }
-            Global.tempLog("literal-property-names", "properties types=" + types.size() + " names=" + names); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return names;
         }
 

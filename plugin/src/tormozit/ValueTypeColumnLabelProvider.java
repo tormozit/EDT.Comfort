@@ -53,10 +53,10 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         TypeDescription type = typeOf.apply(element);
         if (type != null && type.getTypes().size() == 1)
         {
-            String name = typeName(resolve(type.getTypes().get(0), element));
-            String shortName = singleReferenceName(name);
-            if (shortName != null)
-                return shortName + DefinedTypeDecorator.suffix(resolve(type.getTypes().get(0), element));
+            TypeItem item = resolve(type.getTypes().get(0), element);
+            String shortText = singleText(typeName(item), item);
+            if (shortText != null)
+                return shortText;
         }
         return fullText(element, type);
     }
@@ -82,7 +82,7 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         {
             String baseToolTip = base.getToolTipText(element);
             if (baseToolTip != null && !baseToolTip.isEmpty())
-                return TooltipText.wrap(control, TypeDescriptionPresentationHook.sortText(
+                return TooltipText.wrap(control, compositeText(
                     typeOf.apply(element), contextOf.apply(element), baseToolTip));
         }
         TypeDescription type = typeOf.apply(element);
@@ -113,8 +113,7 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
         if (base != null)
         {
             String text = base.getText(element);
-            return text != null ? TypeDescriptionPresentationHook.sortText(type, contextOf.apply(element), text)
-                : ""; //$NON-NLS-1$
+            return text != null ? compositeText(type, contextOf.apply(element), text) : ""; //$NON-NLS-1$
         }
         if (type == null)
             return ""; //$NON-NLS-1$
@@ -125,8 +124,7 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
             if (name != null && !name.isBlank())
                 names.add(name);
         }
-        return TypeDescriptionPresentationHook.sortText(type, contextOf.apply(element),
-            String.join(", ", names)); //$NON-NLS-1$
+        return compositeText(type, contextOf.apply(element), String.join(", ", names)); //$NON-NLS-1$
     }
 
     private TypeItem resolve(TypeItem item, Object element)
@@ -144,6 +142,37 @@ class ValueTypeColumnLabelProvider extends ColumnLabelProvider
             return null;
         String name = McoreUtil.getTypeNameRu(item);
         return name == null || name.isBlank() ? McoreUtil.getTypeName(item) : name;
+    }
+
+    /**
+     * Единое представление составного типа: порядок как в списке реквизитов формы, имена
+     * ссылочных типов без категории («СправочникСсылка.»). Не список названий — без изменений.
+     */
+    static String compositeText(TypeDescription type, EObject context, String text)
+    {
+        String sorted = TypeDescriptionPresentationHook.sortText(type, context, text);
+        if (type == null || type.getTypes().size() < 2 || sorted == null)
+            return sorted;
+        String[] parts = sorted.split(",\\s*", -1); //$NON-NLS-1$
+        if (parts.length != type.getTypes().size())
+            return sorted;
+        for (int i = 0; i < parts.length; i++)
+        {
+            String shortName = singleReferenceName(parts[i]);
+            if (shortName != null)
+                parts[i] = shortName;
+        }
+        return String.join(", ", parts); //$NON-NLS-1$
+    }
+
+    /**
+     * Единое представление простого типа: имя ссылочного типа без категории плюс суффикс
+     * определяемого типа; null, если тип показывается полным именем.
+     */
+    static String singleText(String name, TypeItem item)
+    {
+        String shortName = singleReferenceName(name);
+        return shortName != null ? shortName + DefinedTypeDecorator.suffix(item) : null;
     }
 
     /** Чистое имя одинарного ссылочного типа; null для остальных типов. */

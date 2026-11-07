@@ -847,9 +847,8 @@ public final class ParamHintHtmlModifier
                 viewer.revealRange(offset, 0);
                 handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
             }
-            catch (Exception e)
+            catch (Exception ignored)
             {
-                Global.tempLog("parameter-hint-link", "offset=" + offset + " " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         });
     }
@@ -5751,8 +5750,6 @@ public final class ParamHintHtmlModifier
             typeOpen = previousIndex.replaceFirst(""); //$NON-NLS-1$
             typeOpen = typeOpen.substring(0, typeOpen.length() - 1)
                 + " data-comfort-param-index=\"" + selectedIndex + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("parameter-hint-content", "page=" + ctx.pageIndex + " stock=" + ctx.paramIndex //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " selected=" + highlight + " staleContent=" + staleContent); //$NON-NLS-1$ //$NON-NLS-2$
             currentParam = highlight >= 0;
             paramContent = currentParam ? Global.invoke(page, "getParameter", //$NON-NLS-1$
                 Integer.valueOf(highlight)) : null;

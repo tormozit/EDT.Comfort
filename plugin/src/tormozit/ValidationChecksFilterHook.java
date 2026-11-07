@@ -760,11 +760,11 @@ public final class ValidationChecksFilterHook implements IStartup
         var bundle = org.eclipse.core.runtime.Platform.getBundle("com.e1c.g5.v8.dt.md.check"); //$NON-NLS-1$
         if (bundle == null)
             return null;
-        // Область и условия подтверждены по байткоду обеих проверок именно этих сборок EDT.
+        // Область и условия подтверждены по байткоду проверок версий 1.0.700 и 1.0.701.
         // На непроверенных версиях сохраняем штатное описание.
-        String version = bundle.getVersion().toString();
-        if (!"1.0.700.v202605050943".equals(version) //$NON-NLS-1$
-            && !"1.0.701.v202607090722".equals(version)) //$NON-NLS-1$
+        var version = bundle.getVersion();
+        if (version.getMajor() != 1 || version.getMinor() != 0
+            || (version.getMicro() != 700 && version.getMicro() != 701))
             return null;
         return settings.getDescription()
             + "<p>Проверяются только ссылочные значения свойства «Значение заполнения» стандартных реквизитов.</p>"; //$NON-NLS-1$

@@ -103,6 +103,10 @@ public final class BslXtextDocumentHook implements IStartup
     {
         private static final String TOPIC = "xtext-validation-cycle"; //$NON-NLS-1$
         private static final String PROPERTY = "tormozit.bslXtextDoc.validationTrace"; //$NON-NLS-1$
+        /** Совпадает с {@code EarlyWeaving.PROP_VALIDATION_ERROR}: вплетённый ATHROW кладёт сюда исключение. */
+        private static final String PROP_ERROR = PROPERTY + ".error"; //$NON-NLS-1$
+        /** Исключение, снятое вплетённым ATHROW на текущем потоке; читается и очищается в трейсе. */
+        private static final ThreadLocal<Throwable> LAST_ERROR = new ThreadLocal<>();
         private static final AtomicBoolean INSTALLED = new AtomicBoolean();
         private static final java.util.concurrent.atomic.AtomicLong SEQUENCE =
             new java.util.concurrent.atomic.AtomicLong();
@@ -116,6 +120,8 @@ public final class BslXtextDocumentHook implements IStartup
         static void install()
         {
             System.getProperties().put(PROPERTY, (BiConsumer<Object, String>) ValidationTrace::documentEvent);
+            System.getProperties().put(PROP_ERROR,
+                (java.util.function.Consumer<Object>) ValidationTrace::recordError);
             if (!INSTALLED.compareAndSet(false, true))
                 return;
             java.util.Timer summaries = new java.util.Timer("ComfortXtextValidationSummary", true); //$NON-NLS-1$
@@ -131,7 +137,7 @@ public final class BslXtextDocumentHook implements IStartup
             Global.tempLog(TOPIC, "installed" + patches() //$NON-NLS-1$
                 + "; expected base=3 bsl=1; detailEvery=" + DETAIL_EVERY + "; summaryMs=5000; pending jobs follow"); //$NON-NLS-1$ //$NON-NLS-2$
             for (Job job : Job.getJobManager().find(null))
-                jobEvent("existing", job, "", false); //$NON-NLS-1$ //$NON-NLS-2$
+                jobEvent("existing", job, "", 0, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static String identity(Object value)
@@ -199,29 +205,71 @@ public final class BslXtextDocumentHook implements IStartup
 
         private static String caller()
         {
+            return caller(Integer.MAX_VALUE);
+        }
+
+        /** Первые {@code max} кадров: короткий стек для частых событий (отмена, исключение). */
+        private static String caller(int max)
+        {
             StringBuilder text = new StringBuilder(" caller="); //$NON-NLS-1$
+            int frames = 0;
             for (StackTraceElement frame : Thread.currentThread().getStackTrace())
             {
                 String name = frame.getClassName();
                 if (name.equals(Thread.class.getName()) || name.startsWith(ValidationTrace.class.getName()))
                     continue;
+                if (frames++ >= max)
+                    break;
                 text.append(frame).append(" <- "); //$NON-NLS-1$
             }
             return text.toString();
         }
 
+        /** Приёмник вплетённого ATHROW: запоминает исключение до вызова трейса на том же потоке. */
+        private static void recordError(Object error)
+        {
+            if (error instanceof Throwable throwable)
+                LAST_ERROR.set(throwable);
+        }
+
+        /**
+         * Текст исключения, снятого вплетённым ATHROW. Метку потока снимаем при любом событии,
+         * иначе она утекла бы в следующее: события ниже порога подробностей не пишутся.
+         */
+        private static String takeThrown(String phase)
+        {
+            Throwable error = LAST_ERROR.get();
+            LAST_ERROR.remove();
+            if (error == null || !phase.endsWith(".throw")) //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
+            StringBuilder text = new StringBuilder(" error=").append(error.getClass().getName()); //$NON-NLS-1$
+            String message = error.getMessage();
+            if (message != null && !message.isEmpty())
+            {
+                text.append(": "); //$NON-NLS-1$
+                text.append(message.length() > 400 ? message.substring(0, 400) + "…" : message); //$NON-NLS-1$
+            }
+            StackTraceElement[] trace = error.getStackTrace();
+            for (int i = 0; i < trace.length && i < 5; i++)
+                text.append(i == 0 ? " at " : " <- ").append(trace[i]); //$NON-NLS-1$ //$NON-NLS-2$
+            return text.toString().replace('\n', ' ');
+        }
+
         private static void documentEvent(Object document, String phase)
         {
+            String thrown = takeThrown(phase);
             try
             {
                 long count = count(phase, document);
-                if (!detailed(count))
+                // Исключение пишем каждый раз: ищем именно его текст, а не статистику повторов.
+                if (!detailed(count) && thrown.isEmpty())
                     return;
+                String where = phase.endsWith(".enter") ? caller() //$NON-NLS-1$
+                    : thrown.isEmpty() ? "" : caller(8); //$NON-NLS-1$
                 Global.tempLog(TOPIC, "seq=" + SEQUENCE.incrementAndGet() + " " + phase //$NON-NLS-1$ //$NON-NLS-2$
                     + " count=" + count //$NON-NLS-1$
                     + " thread=" + Thread.currentThread().getName() + documentState(document) //$NON-NLS-1$
-                    + patches()
-                    + (phase.endsWith(".enter") ? caller() : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                    + patches() + thrown + where);
             }
             catch (Throwable error)
             {
@@ -229,7 +277,8 @@ public final class BslXtextDocumentHook implements IStartup
             }
         }
 
-        private static void jobEvent(String phase, Job job, String detail, boolean stack)
+        /** {@code frames < 0} — полный стек, {@code 0} — без стека, иначе первые {@code frames} кадров. */
+        private static void jobEvent(String phase, Job job, String detail, int frames, boolean force)
         {
             try
             {
@@ -237,7 +286,8 @@ public final class BslXtextDocumentHook implements IStartup
                 if (!observed(job))
                     return;
                 long count = count("job." + phase, job); //$NON-NLS-1$
-                if (!detailed(count))
+                // Отмену пишем всегда: нужен тот, кто отменил проверку, а не счётчик повторов.
+                if (!detailed(count) && !force)
                     return;
                 Object document = Global.getField(job, "xtextDocument"); //$NON-NLS-1$
                 if (name.contains("ContentAssistResourceSync")) //$NON-NLS-1$
@@ -248,7 +298,7 @@ public final class BslXtextDocumentHook implements IStartup
                     + " thread=" + Thread.currentThread().getName() + " skip=" + Global.getField(job, "skip") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " rule=" + identity(job.getRule()) + detail + documentState(document) //$NON-NLS-1$
                     + patches()
-                    + (stack ? caller() : "")); //$NON-NLS-1$
+                    + (frames < 0 ? caller() : frames > 0 ? caller(frames) : "")); //$NON-NLS-1$
             }
             catch (Throwable error)
             {
@@ -267,13 +317,13 @@ public final class BslXtextDocumentHook implements IStartup
         @Override
         public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
         {
-            jobEvent("scheduled", event.getJob(), " delayMs=" + event.getDelay(), true); //$NON-NLS-1$ //$NON-NLS-2$
+            jobEvent("scheduled", event.getJob(), " delayMs=" + event.getDelay(), -1, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
         public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
         {
-            jobEvent("aboutToRun", event.getJob(), "", false); //$NON-NLS-1$ //$NON-NLS-2$
+            jobEvent("aboutToRun", event.getJob(), "", 0, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
@@ -285,7 +335,7 @@ public final class BslXtextDocumentHook implements IStartup
             {
                 started.put(event.getJob(), System.nanoTime());
             }
-            jobEvent("running", event.getJob(), "", false); //$NON-NLS-1$ //$NON-NLS-2$
+            jobEvent("running", event.getJob(), "", 0, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
@@ -298,21 +348,24 @@ public final class BslXtextDocumentHook implements IStartup
             {
                 since = started.remove(event.getJob());
             }
+            org.eclipse.core.runtime.IStatus result = event.getResult();
+            boolean canceled = result != null
+                && result.getSeverity() == org.eclipse.core.runtime.IStatus.CANCEL;
             jobEvent("done", event.getJob(), " elapsedMs=" //$NON-NLS-1$ //$NON-NLS-2$
                 + (since == null ? -1L : (System.nanoTime() - since) / 1_000_000L)
-                + " result=" + event.getResult(), false); //$NON-NLS-1$
+                + " result=" + result, canceled ? 12 : 0, canceled); //$NON-NLS-1$
         }
 
         @Override
         public void sleeping(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
         {
-            jobEvent("sleeping", event.getJob(), "", true); //$NON-NLS-1$ //$NON-NLS-2$
+            jobEvent("sleeping", event.getJob(), "", -1, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         @Override
         public void awake(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
         {
-            jobEvent("awake", event.getJob(), "", true); //$NON-NLS-1$ //$NON-NLS-2$
+            jobEvent("awake", event.getJob(), "", -1, false); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

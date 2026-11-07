@@ -53,6 +53,7 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.Version;
 
 import com._1c.g5.v8.derived.DerivedDataStatus;
 import com._1c.g5.v8.derived.IDerivedDataManager;
@@ -79,6 +80,7 @@ final class IndexFreshness
     private static final String INDEXING_SEGMENT = "FTS_INDEXING_SEGMENT";
     private static final Set<String> SEGMENTS = Set.of(INDEXING_SEGMENT, "FTS_CLEANER_SEGMENT");
     private static final String RECOVERY_COUNT = " Обновлено устаревших элементов: ";
+    private static final String DIAGNOSTIC_LOG = "search-index-2026";
     private static final AtomicInteger REPAIR_REVISION = new AtomicInteger();
     private static final ISchedulingRule REPAIR_RULE = new ISchedulingRule()
     {
@@ -323,6 +325,7 @@ final class IndexFreshness
         Display display = label.getDisplay();
         checkJob = Job.create("Проверка полноты индекса поиска", (ICoreRunnable)monitor ->
         {
+            Global.tempLog(DIAGNOSTIC_LOG, "Начало сверки, изменённых файлов=" + saved.size());
             List<String> missing = new ArrayList<>();
             String status;
             boolean complete = false;
@@ -332,14 +335,17 @@ final class IndexFreshness
                 complete = missing.isEmpty();
                 status = complete ? "Индекс поиска актуален."
                     : "Индекс содержит пропуски или устаревшие записи. Модулей: " + missing.size() + ".";
+                Global.tempLog(DIAGNOSTIC_LOG, status + " Обновлено: " + repairedCount.get());
             }
             catch (OperationCanceledException ex)
             {
                 status = "Проверка полноты прервана.";
+                Global.tempLog(DIAGNOSTIC_LOG, status);
             }
-            catch (CoreException | IOException | ReflectiveOperationException | RuntimeException ex)
+            catch (CoreException | IOException | ReflectiveOperationException | RuntimeException | LinkageError ex)
             {
                 status = "Не удалось проверить полноту индекса.";
+                Global.tempLogException(DIAGNOSTIC_LOG, status, ex);
             }
             String result = status;
             boolean confirmed = complete;
@@ -377,6 +383,11 @@ final class IndexFreshness
         throws IOException, CoreException, ReflectiveOperationException
     {
         List<IProject> projects = workspaceProjects();
+        Bundle searchBundle = FrameworkUtil.getBundle(ITextSearchIndex.class);
+        Bundle luceneBundle = FrameworkUtil.getBundle(DirectoryReader.class);
+        Global.tempLog(DIAGNOSTIC_LOG, "Бандлы: search.core=" + (searchBundle == null ? "нет" : searchBundle.getVersion())
+            + ", lucene.core=" + (luceneBundle == null ? "нет" : luceneBundle.getVersion())
+            + ", открытых проектов=" + projects.size());
         if (projects.isEmpty())
             throw new IOException("Нет доступных проектов EDT");
         FtsAccess access = FtsAccess.create();
@@ -393,9 +404,11 @@ final class IndexFreshness
             updateAnalysis(projectIndex, projects.size(), 0, found);
             monitor.subTask(project.getName());
             var source = project.getFolder("src");
+            Global.tempLog(DIAGNOSTIC_LOG, "Проект " + project.getName() + ", src доступен=" + source.isAccessible());
             if (!source.isAccessible())
                 continue;
             ITextSearchIndex textIndex = requireIndex(indexProvider, project);
+            Global.tempLog(DIAGNOSTIC_LOG, "Индекс проекта " + project.getName() + ": " + textIndex.getClass().getName());
             if (!FtsAccess.isLocalIndex(textIndex))
             {
                 unsupportedProject = true;
@@ -540,8 +553,8 @@ final class IndexFreshness
         private static final int SEGMENT_COUNT = 16;
         private static final int BATCH_SIZE = 100;
         private static final Set<String> STORED_BLOCK_FIELDS = Set.of("text", "lineNumber", "lineOffset", "blockOffset");
-        private static final Set<String> SUPPORTED = Set.of("12.3.100.v202605050943", "13.0.0.v202607090722",
-            "14.0.0.v202610211527");
+        private static final Set<Version> SUPPORTED = Set.of(new Version(12, 3, 100), new Version(13, 0, 0),
+            new Version(14, 0, 0));
         private final Bundle bundle;
 
         private FtsAccess(Bundle bundle)
@@ -552,7 +565,11 @@ final class IndexFreshness
         private static FtsAccess create()
         {
             Bundle bundle = FrameworkUtil.getBundle(ITextSearchIndex.class);
-            return bundle != null && SUPPORTED.contains(bundle.getVersion().toString()) ? new FtsAccess(bundle) : null;
+            if (bundle == null)
+                return null;
+            Version version = bundle.getVersion();
+            Version numericVersion = new Version(version.getMajor(), version.getMinor(), version.getMicro());
+            return SUPPORTED.contains(numericVersion) ? new FtsAccess(bundle) : null;
         }
 
         private static boolean isLocalIndex(ITextSearchIndex index)

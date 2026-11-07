@@ -15,7 +15,33 @@ import javax.xml.stream.XMLStreamException;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextViewerExtension5;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.ui.IEditorInput;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetQuery;
+import com._1c.g5.v8.dt.dcs.model.schema.DataSet;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.XtextSourceViewer;
+import org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor;
+import com._1c.g5.v8.dt.common.ui.widgets.tableex.TableExTreeViewer;
+import com._1c.g5.v8.dt.ql.model.QlPackage;
+import com._1c.g5.v8.dt.ql.model.QuerySchema;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.PageChangedEvent;
@@ -24,6 +50,7 @@ import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.jface.viewers.EditingSupport;
 import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Button;
@@ -177,6 +204,8 @@ public class DataCompositionSchemaEditorHook implements IStartup
         QueryOptionsLayout.install(dcsEditor.getControlContext());
         DcsComputedValueTypes.install(dcsEditor.getControlContext());
         FieldTypeAutofill.install(dcsEditor.getControlContext());
+        QueryFieldNavigation.install(dcsEditor.getControlContext());
+        DataSetPositionMemory.install(page, dcsEditor);
         DataSets firstPage = (DataSets) dcsEditor.getPages().get(0);
         ToolBar toolbar = findToolbar((Composite) firstPage);
         if (toolbar == null || toolbar.isDisposed()) {
@@ -551,6 +580,482 @@ public class DataCompositionSchemaEditorHook implements IStartup
     }
 
     /** Ширины таблиц конструктора, общие для схем, но отдельные для каждой страницы и таблицы. */
+    /**
+     * Переход между псевдонимом поля в тексте последнего запроса набора данных и полем набора
+     * данных (#1005). Ctrl+щелчок по псевдониму в списке выбираемых полей последнего запроса
+     * выделяет одноимённое поле в таблице полей; двойной щелчок по полю набора данных выделяет
+     * его псевдоним в тексте запроса. Слушатели — display-фильтры, потому что редактор запроса
+     * ({@code DataSetsQuery.qlEditor}) создаётся лениво.
+     */
+    static final class QueryFieldNavigation
+    {
+        private static final String INSTALLED_KEY = "tormozit.dcs.queryFieldNavigation"; //$NON-NLS-1$
+        /** Пары «редактор запроса» / «таблица полей» страницы DataSets: полный и в объединении. */
+        private static final String[][] PAIRS = {
+            { "queryFullViewer", "queryFieldsFullViewer" }, //$NON-NLS-1$ //$NON-NLS-2$
+            { "queryInUnionViewer", "queryFieldsInUnionViewer" } }; //$NON-NLS-1$ //$NON-NLS-2$
+
+        static void install(DataCompositionSchemaControlContext context)
+        {
+            if (context == null)
+                return;
+            for (EditorPage editorPage : context.getPages())
+            {
+                if (!(editorPage instanceof Composite page) || page.isDisposed()
+                    || !"DataSets".equals(editorPage.getClass().getSimpleName()) //$NON-NLS-1$
+                    || page.getData(INSTALLED_KEY) != null)
+                    continue;
+                page.setData(INSTALLED_KEY, Boolean.TRUE);
+                Display display = page.getDisplay();
+                Listener filter = event -> onEvent(page, event);
+                display.addFilter(SWT.MouseDown, filter);
+                display.addFilter(SWT.MouseDoubleClick, filter);
+                page.addListener(SWT.Dispose, event ->
+                {
+                    display.removeFilter(SWT.MouseDown, filter);
+                    display.removeFilter(SWT.MouseDoubleClick, filter);
+                });
+            }
+        }
+
+        private static void onEvent(Composite page, Event event)
+        {
+            if (page.isDisposed() || !(event.widget instanceof Control control) || control.isDisposed())
+                return;
+            for (String[] pair : PAIRS)
+            {
+                Object queryComposite = Global.getField(page, pair[0]);
+                Object fieldsViewer = Global.getField(page, pair[1]);
+                Object fieldsTree = fieldsViewer == null ? null : Global.invoke(fieldsViewer, "getViewer"); //$NON-NLS-1$
+                Object editorObj = queryComposite == null ? null : Global.invoke(queryComposite, "getQueryEditor"); //$NON-NLS-1$
+                if (queryComposite == null || fieldsViewer == null
+                    || !(fieldsTree instanceof TableExTreeViewer fields))
+                    continue;
+                EmbeddedEditor editor = editorObj instanceof EmbeddedEditor found ? found : null;
+                if (editor == null || editor.getViewer() == null)
+                    continue;
+                if (event.type == SWT.MouseDown)
+                {
+                    if (control == editor.getViewer().getTextWidget())
+                    {
+                        if (event.button == 1 && (event.stateMask & SWT.MOD1) != 0
+                            && selectFieldByAlias(editor, fields, event))
+                            event.doit = false;
+                        return;
+                    }
+                }
+                else if (isInside(control, fields.getControl()))
+                {
+                    if (event.button == 1
+                        && fieldNameCellAt(fieldsViewer, fields, control, event) instanceof DataCompositionSchemaDataSetField field
+                        && selectAliasByField(editor, field))
+                        event.doit = false;
+                    return;
+                }
+            }
+        }
+
+        private static boolean isInside(Control control, Control root)
+        {
+            for (Control current = control; current != null; current = current.getParent())
+                if (current == root)
+                    return true;
+            return false;
+        }
+
+        private static boolean selectFieldByAlias(EmbeddedEditor editor, TableExTreeViewer fields, Event event)
+        {
+            XtextSourceViewer viewer = editor.getViewer();
+            int widgetOffset = viewer.getTextWidget().getOffsetAtPoint(new Point(event.x, event.y));
+            if (widgetOffset < 0)
+                return false;
+            int offset = viewer instanceof ITextViewerExtension5 extension
+                ? extension.widgetOffset2ModelOffset(widgetOffset) : widgetOffset;
+            String alias = editor.getDocument().readOnly(resource -> aliasAt(resource, offset));
+            if (alias == null)
+                return false;
+            DataCompositionSchemaDataSetField field = findField(fields, alias);
+            if (field == null)
+                return false;
+            fields.setSelection(new StructuredSelection(field), true);
+            fields.getControl().setFocus();
+            return true;
+        }
+
+        /**
+         * Элемент строки, если двойной щелчок пришёлся на колонку «Поле» и штатно эта ячейка не
+         * правится (у полей набора-запроса имя задаёт запрос, {@code DataSetsFieldsEditingSupport.canEdit}
+         * → {@code false}). Иначе {@code null} — двойной щелчок остаётся штатным (правка ячейки).
+         *
+         * <p>Запись {@link TableEx} занимает несколько строк {@code Grid} («Путь» над «Автозаголовком»),
+         * поэтому индекс колонки {@code Grid} ≠ индексу колонки просмотрщика, а
+         * {@code ColumnViewer.getCell} на нижних строках записи отдаёт {@code null}. Перевод —
+         * штатными {@code TableEx.getColumnIndexByGridColumn} / {@code getItemByGridItem}.
+         */
+        private static Object fieldNameCellAt(Object fieldsViewer, TableExTreeViewer fields, Control control, Event event)
+        {
+            if (!(control instanceof org.eclipse.nebula.widgets.grid.Grid grid)
+                || !(fields.getControl() instanceof TableEx table))
+                return null;
+            Point point = new Point(event.x, event.y);
+            org.eclipse.nebula.widgets.grid.GridItem gridItem = grid.getItem(point);
+            org.eclipse.nebula.widgets.grid.GridColumn gridColumn = grid.getColumn(point);
+            if (gridItem == null || gridColumn == null)
+                return null;
+            int index = table.getColumnIndexByGridColumn(gridItem, grid.indexOf(gridColumn));
+            Object nameColumn = DcsComputedValueTypes.fieldsColumn(fieldsViewer, "FIELD_COL_INDEX"); //$NON-NLS-1$
+            Object item = table.getItemByGridItem(gridItem);
+            Object element = item instanceof org.eclipse.swt.widgets.Item swtItem ? swtItem.getData() : null;
+            boolean nameCell = nameColumn != null
+                && Global.invoke(fieldsViewer, "getColumnIndex", nameColumn) instanceof Integer nameIndex //$NON-NLS-1$
+                && nameIndex == index;
+            Object canEdit = null;
+            if (nameCell && Global.invoke(fields, "getViewerColumn", index) instanceof ViewerColumn column //$NON-NLS-1$
+                && Global.getField(column, "editingSupport") instanceof EditingSupport support) //$NON-NLS-1$
+                canEdit = Global.invoke(support, "canEdit", element); //$NON-NLS-1$
+            return nameCell && !Boolean.TRUE.equals(canEdit) ? element : null;
+        }
+
+        private static boolean selectAliasByField(EmbeddedEditor editor, DataCompositionSchemaDataSetField field)
+        {
+            if (field.getField() == null)
+                return false;
+            String name = field.getField();
+            int[] range = editor.getDocument().readOnly(resource -> aliasRange(resource, name));
+            if (range == null)
+                return false;
+            XtextSourceViewer viewer = editor.getViewer();
+            viewer.setSelectedRange(range[0], range[1]);
+            viewer.revealRange(range[0], range[1]);
+            viewer.getTextWidget().setFocus();
+            return true;
+        }
+
+        /** Поля выборки последнего запроса пакета (имена результата задаёт первое объединяемое выражение). */
+        private static List<QuerySchemaExpression> lastQueryFields(XtextResource resource)
+        {
+            if (resource == null || resource.getContents().isEmpty())
+                return List.of();
+            EObject root = resource.getContents().get(0);
+            QuerySchema schema = root instanceof QuerySchema direct ? direct
+                : EcoreUtil2.getAllContentsOfType(root, QuerySchema.class).stream().findFirst().orElse(null);
+            if (schema == null || schema.getQueries().isEmpty()
+                || !(schema.getQueries().get(schema.getQueries().size() - 1) instanceof QuerySchemaSelectQuery select)
+                || select.getOperators().isEmpty())
+                return List.of();
+            return select.getOperators().get(0).getSelectFields();
+        }
+
+        private static String aliasAt(XtextResource resource, int offset)
+        {
+            if (resource == null || resource.getParseResult() == null)
+                return null;
+            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+            if (leaf == null)
+                return null;
+            QuerySchemaExpression expression = EcoreUtil2
+                .getContainerOfType(NodeModelUtils.findActualSemanticObjectFor(leaf), QuerySchemaExpression.class);
+            if (expression == null || expression.getAlias() == null
+                || !lastQueryFields(resource).contains(expression))
+                return null;
+            for (INode node : NodeModelUtils.findNodesForFeature(expression, QlPackage.Literals.QUERY_SCHEMA_EXPRESSION__ALIAS))
+                if (offset >= node.getOffset() && offset <= node.getEndOffset())
+                    return expression.getAlias();
+            return null;
+        }
+
+        private static int[] aliasRange(XtextResource resource, String name)
+        {
+            for (QuerySchemaExpression expression : lastQueryFields(resource))
+            {
+                if (!name.equalsIgnoreCase(expression.getAlias()))
+                    continue;
+                List<INode> nodes = NodeModelUtils.findNodesForFeature(expression,
+                    QlPackage.Literals.QUERY_SCHEMA_EXPRESSION__ALIAS);
+                if (!nodes.isEmpty())
+                    return new int[] { nodes.get(0).getOffset(), nodes.get(0).getLength() };
+            }
+            return null;
+        }
+
+        private static DataCompositionSchemaDataSetField findField(TableExTreeViewer viewer, String alias)
+        {
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+                return null;
+            return findField(provider, provider.getElements(viewer.getInput()), alias);
+        }
+
+        private static DataCompositionSchemaDataSetField findField(ITreeContentProvider provider, Object[] elements,
+            String alias)
+        {
+            if (elements == null)
+                return null;
+            for (Object element : elements)
+            {
+                if (element instanceof DataCompositionSchemaDataSetField field && alias.equalsIgnoreCase(field.getField()))
+                    return field;
+                DataCompositionSchemaDataSetField nested = findField(provider, provider.getChildren(element), alias);
+                if (nested != null)
+                    return nested;
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Запоминает последний активный набор данных схемы и позицию каретки в тексте его запроса —
+     * по аналогии с {@link BslModulePositionMemoryHook}. Хранение между сеансами EDT —
+     * {@link EditorMemoryStore}, ключ — файл макета. Страница наборов данных заполняется и
+     * создаёт редактор запроса лениво, поэтому восстановление идёт короткими повторами.
+     */
+    private static final class DataSetPositionMemory
+    {
+        private static final String INSTALLED_KEY = "tormozit.dcs.dataSetPositionMemory"; //$NON-NLS-1$
+        private static final String HOOKED_KEY = "tormozit.dcs.dataSetPositionMemory.editor"; //$NON-NLS-1$
+        private static final char SEP = '\t';
+        private static final int RETRY_MS = 100;
+        private static final int MAX_ATTEMPTS = 100;
+
+        private static final EditorMemoryStore STORE =
+            new EditorMemoryStore("dcsDataSetPosition.entries", 300); //$NON-NLS-1$
+
+        static void install(DtGranularEditorEmbeddedEditorPage<?> hostPage, DataCompositionSchemaEditor dcsEditor)
+        {
+            if (dcsEditor.getPages().isEmpty() || !(dcsEditor.getPages().get(0) instanceof DataSets dataSets)
+                || dataSets.isDisposed() || dataSets.getData(INSTALLED_KEY) != null)
+                return;
+            IEditorInput input = hostPage.getEditor() == null ? null : hostPage.getEditor().getEditorInput();
+            IFile file = input == null ? null : input.getAdapter(IFile.class);
+            if (file == null)
+                return;
+            dataSets.setData(INSTALLED_KEY, Boolean.TRUE);
+            new Session(file.getFullPath().toString(), dataSets).start();
+        }
+
+        private static final class Session
+        {
+            private final String key;
+            private final DataSets dataSets;
+            private final Display display;
+            private String savedName;
+            private int savedLine;
+            private int savedColumn;
+            /** Пока true — события выделения не перезаписывают запомненное (идёт восстановление). */
+            private boolean restoring;
+
+            Session(String key, DataSets dataSets)
+            {
+                this.key = key;
+                this.dataSets = dataSets;
+                this.display = dataSets.getDisplay();
+            }
+
+            void start()
+            {
+                String raw = STORE.load(key);
+                if (raw != null)
+                {
+                    String[] parts = raw.split(String.valueOf(SEP), -1);
+                    try
+                    {
+                        if (parts.length == 3 && !parts[0].isEmpty())
+                        {
+                            savedName = parts[0];
+                            savedLine = Integer.parseInt(parts[1]);
+                            savedColumn = Integer.parseInt(parts[2]);
+                        }
+                    }
+                    catch (NumberFormatException ignored)
+                    {
+                        savedName = null;
+                    }
+                }
+                restoring = savedName != null;
+                dataSets.getDataSetsViewer().addSelectionChangedListener(event ->
+                {
+                    if (restoring)
+                        return;
+                    Object first = event.getStructuredSelection().getFirstElement();
+                    if (first instanceof DataSet dataSet && dataSet.getName() != null)
+                    {
+                        STORE.updateMemory(key, dataSet.getName() + SEP + 0 + SEP + 0);
+                        hookEditor(0);
+                    }
+                });
+                dataSets.addListener(SWT.Dispose, event -> STORE.flush());
+                dataSets.getDataSetsViewer().getControl().addListener(SWT.FocusOut, event -> STORE.flush());
+                if (restoring)
+                    display.asyncExec(() -> restore(0));
+                else
+                    hookEditor(0);
+            }
+
+            private void restore(int attempt)
+            {
+                if (dataSets.isDisposed())
+                    return;
+                TreeViewer tree = dataSets.getDataSetsViewer();
+                DataSet target = tree.getInput() == null ? null : findDataSet(tree, savedName);
+                if (target == null)
+                {
+                    if (attempt >= MAX_ATTEMPTS)
+                        restoring = false;
+                    else
+                        display.timerExec(RETRY_MS, () -> restore(attempt + 1));
+                    return;
+                }
+                if (dataSets.getCurrentDataSet() != target)
+                    tree.setSelection(new StructuredSelection(target), true);
+                restoreCaret(target, attempt);
+            }
+
+            private void restoreCaret(DataSet target, int attempt)
+            {
+                if (dataSets.isDisposed())
+                    return;
+                if (!(target instanceof DataCompositionSchemaDataSetQuery))
+                {
+                    restoring = false;
+                    return;
+                }
+                EmbeddedEditor editor = dataSets.getQueryEditor();
+                XtextSourceViewer viewer = editor == null ? null : editor.getViewer();
+                IDocument document = viewer == null ? null : viewer.getDocument();
+                DataSet current = dataSets.getCurrentDataSet();
+                if (document == null || document.getLength() == 0 || current == null
+                    || !java.util.Objects.equals(current.getName(), target.getName()))
+                {
+                    if (attempt >= MAX_ATTEMPTS)
+                        restoring = false;
+                    else
+                        display.timerExec(RETRY_MS, () -> restoreCaret(target, attempt + 1));
+                    return;
+                }
+                try
+                {
+                    int line = Math.max(0, Math.min(savedLine, document.getNumberOfLines() - 1));
+                    IRegion info = document.getLineInformation(line);
+                    int offset = info.getOffset() + Math.max(0, Math.min(savedColumn, info.getLength()));
+                    viewer.setSelectedRange(offset, 0);
+                    viewer.revealRange(offset, 0);
+                    refocusAfterStockFocusReturn(viewer);
+                    display.timerExec(0, () -> focusQueryText(viewer));
+                }
+                catch (BadLocationException ignored)
+                {
+                    // Текст короче запомненной позиции — остаёмся в начале.
+                }
+                restoring = false;
+                hookEditor(0);
+            }
+
+            /**
+             * Штатное отложенное обновление таблицы полей после смены набора заканчивается
+             * {@code DataSets.setFocus()} (DataSetsFieldsViewerBase.lambda$6) и возвращает фокус в дерево
+             * наборов уже после нашей установки. Один раз за 3 с переносим фокус обратно в текст запроса.
+             */
+            private void refocusAfterStockFocusReturn(XtextSourceViewer viewer)
+            {
+                final long until = System.currentTimeMillis() + 3000;
+                final boolean[] done = { false };
+                Listener[] filter = new Listener[1];
+                filter[0] = event ->
+                {
+                    if (done[0] || System.currentTimeMillis() > until || dataSets.isDisposed()
+                        || !(event.widget instanceof Control control) || control == viewer.getTextWidget())
+                        return;
+                    for (Control c = control; c != null; c = c.getParent())
+                        if (c == dataSets)
+                        {
+                            done[0] = true;
+                            display.removeFilter(SWT.FocusIn, filter[0]);
+                            display.asyncExec(() -> focusQueryText(viewer));
+                            return;
+                        }
+                };
+                display.addFilter(SWT.FocusIn, filter[0]);
+                display.timerExec(3500, () -> display.removeFilter(SWT.FocusIn, filter[0]));
+            }
+
+            /** Фокус в текст запроса, если он пуст или остался внутри страницы наборов данных. */
+            private void focusQueryText(XtextSourceViewer viewer)
+            {
+                StyledText text = viewer.getTextWidget();
+                if (dataSets.isDisposed() || text == null || text.isDisposed() || text.isFocusControl())
+                    return;
+                Control focused = display.getFocusControl();
+                boolean focusFree = focused == null;
+                for (Control c = focused; c != null && !focusFree; c = c.getParent())
+                    focusFree = c == dataSets;
+                if (focusFree)
+                    text.setFocus();
+            }
+
+            /** Подписка на каретку редактора запроса; он создаётся лениво, поэтому с повторами. */
+            private void hookEditor(int attempt)
+            {
+                if (dataSets.isDisposed())
+                    return;
+                EmbeddedEditor editor = dataSets.getQueryEditor();
+                XtextSourceViewer viewer = editor == null ? null : editor.getViewer();
+                if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+                {
+                    if (attempt < 30)
+                        display.timerExec(RETRY_MS, () -> hookEditor(attempt + 1));
+                    return;
+                }
+                if (viewer.getTextWidget().getData(HOOKED_KEY) != null)
+                    return;
+                viewer.getTextWidget().setData(HOOKED_KEY, Boolean.TRUE);
+                viewer.addSelectionChangedListener(event -> rememberCaret(editor));
+            }
+
+            private void rememberCaret(EmbeddedEditor editor)
+            {
+                if (restoring || dataSets.isDisposed() || dataSets.getQueryEditor() != editor)
+                    return;
+                DataSet current = dataSets.getCurrentDataSet();
+                XtextSourceViewer viewer = editor.getViewer();
+                IDocument document = viewer == null ? null : viewer.getDocument();
+                if (current == null || current.getName() == null || document == null)
+                    return;
+                try
+                {
+                    int offset = viewer.getSelectedRange().x;
+                    int line = document.getLineOfOffset(offset);
+                    int column = offset - document.getLineOffset(line);
+                    STORE.updateMemory(key, current.getName() + SEP + line + SEP + column);
+                }
+                catch (BadLocationException ignored)
+                {
+                    // Документ в момент подмены текста — пропускаем событие.
+                }
+            }
+
+            private static DataSet findDataSet(TreeViewer tree, String name)
+            {
+                if (!(tree.getContentProvider() instanceof ITreeContentProvider provider))
+                    return null;
+                return findDataSet(provider, provider.getElements(tree.getInput()), name);
+            }
+
+            private static DataSet findDataSet(ITreeContentProvider provider, Object[] elements, String name)
+            {
+                if (elements == null)
+                    return null;
+                for (Object element : elements)
+                {
+                    if (element instanceof DataSet dataSet && name.equals(dataSet.getName()))
+                        return dataSet;
+                    DataSet nested = findDataSet(provider, provider.getChildren(element), name);
+                    if (nested != null)
+                        return nested;
+                }
+                return null;
+            }
+        }
+    }
+
     private static final class ColumnWidths
     {
         private static final String ATTACHED_KEY = "tormozit.dcsColumnWidths"; //$NON-NLS-1$

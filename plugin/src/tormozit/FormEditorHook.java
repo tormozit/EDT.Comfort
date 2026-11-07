@@ -168,6 +168,8 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.dcs.model.core.DataCompositionField;
+import com._1c.g5.v8.dt.dcs.model.core.Presentation;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField;
 import com._1c.g5.v8.dt.dcs.model.settings.DcsFactory;
 import com._1c.g5.v8.dt.dcs.model.settings.DcsPackage;
 import com._1c.g5.v8.dt.dcs.model.settings.DataCompositionAppearanceField;
@@ -1804,6 +1806,40 @@ public class FormEditorHook implements IStartup
         }
 
         PropertyInfo selected = getSelectedPropertyInfo(tree);
+
+        // Поле реквизита-списка: настройки списка с активным полем набора данных (#1007).
+        FormAttribute listAttribute = null;
+        PropertyInfo listField = null;
+        for (PropertyInfo cur = selected, below = null; cur != null; below = cur, cur = parentPropertyInfo(cur))
+        {
+            if (cur.getSource() instanceof FormAttribute attribute
+                && attribute.getExtInfo() instanceof DynamicListExtInfo)
+            {
+                if (below != null)
+                {
+                    listAttribute = attribute;
+                    listField = below;
+                }
+                break;
+            }
+        }
+        Global.tempLog("dl-field-reveal", "attrTree dblclick selected=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (selected == null ? "null" : selected.getName()) + " listAttribute=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (listAttribute == null ? "null" : listAttribute.getName()) + " field=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (listField == null ? "null" : listField.getName())); //$NON-NLS-1$
+        if (listAttribute != null)
+        {
+            e.doit = false;
+            Display listDisplay = e.display;
+            if (listDisplay != null && !listDisplay.isDisposed())
+            {
+                FormAttribute attributeFinal = listAttribute;
+                String[] names = { listField.getName(), listField.getNameRu() };
+                listDisplay.asyncExec(() -> ItemsTree.openDynamicListFieldSettings(page, attributeFinal, false, names));
+            }
+            return;
+        }
+
         if (selected == null || isUserFormAttribute(selected))
             return;
 
@@ -3444,25 +3480,76 @@ public class FormEditorHook implements IStartup
             /** Имя поля, если у объекта-источника ни заголовка, ни синонима нет. */
             final String fallbackName;
 
+            /** То же имя на русском варианте встроенного языка; {@code null} — имя одно. */
+            final String fallbackNameRu;
+
+            /**
+             * Поле динамического списка, к которому привязан элемент. Его явный «Заголовок»
+             * перекрывает представление метаданных — так же, как у платформы.
+             */
+            final DataCompositionSchemaDataSetField listField;
+
+            /** Заголовка нет ни у поля, ни у метаданных — он построен по имени и помечается «*». */
+            final boolean derivedFromName;
+
             Source(EObject object, EffectiveTitle.Origin origin, String fallbackName)
+            {
+                this(object, origin, fallbackName, null, null, false);
+            }
+
+            Source(EObject object, EffectiveTitle.Origin origin, String fallbackName, String fallbackNameRu,
+                DataCompositionSchemaDataSetField listField, boolean derivedFromName)
             {
                 this.object = object;
                 this.origin = origin;
                 this.fallbackName = fallbackName;
+                this.fallbackNameRu = fallbackNameRu;
+                this.listField = listField;
+                this.derivedFromName = derivedFromName;
+            }
+
+            /** Тот же источник, но сначала — явный заголовок поля динамического списка. */
+            Source withListField(DataCompositionSchemaDataSetField field)
+            {
+                return new Source(object, origin, fallbackName, fallbackNameRu, field, derivedFromName);
             }
 
             /** Текст заголовка читается из источника каждый раз — правка заголовка видна сразу. */
-            EffectiveTitle.Info toInfo(String language)
+            EffectiveTitle.Info toInfo(String language, ScriptVariant variant)
             {
+                if (listField != null)
+                {
+                    String own = listFieldTitle(listField, language);
+                    if (own != null)
+                        return new EffectiveTitle.Info(own, EffectiveTitle.Origin.FORM_OBJECT, listField);
+                }
                 if (origin == null)
                     return null;
-                String text = titleOf(object, language);
+                // Имя самого источника — только если своего двуязычного имени поля нет: у стандартного
+                // реквизита («Ссылка») имя одно, английское (Ref).
+                String text = titleOf(object, language, fallbackNameRu == null);
                 if (text == null)
-                    text = EffectiveTitle.trimToNull(fallbackName);
+                {
+                    text = EffectiveTitle.trimToNull(
+                        variant == ScriptVariant.RUSSIAN && fallbackNameRu != null ? fallbackNameRu : fallbackName);
+                    if (text != null && derivedFromName)
+                        text += "*"; //$NON-NLS-1$
+                }
                 return text == null ? null : new EffectiveTitle.Info(text, origin, object);
             }
 
-            private static String titleOf(EObject source, String language)
+            /** Явный «Заголовок» поля набора данных: на языке редактирования, иначе нелокализованная строка. */
+            private static String listFieldTitle(DataCompositionSchemaDataSetField field, String language)
+            {
+                Presentation title = field.getTitle();
+                if (title == null)
+                    return null;
+                if (title.getLocalValue() != null)
+                    return EffectiveTitle.localized(title.getLocalValue().getContent(), language);
+                return EffectiveTitle.trimToNull(title.getValue());
+            }
+
+            private static String titleOf(EObject source, String language, boolean useSourceName)
             {
                 if (source == null)
                     return null;
@@ -3480,7 +3567,7 @@ public class FormEditorHook implements IStartup
                 String synonym = EffectiveTitle.localizedByGetter(source, "getSynonym", language); //$NON-NLS-1$
                 if (synonym != null)
                     return synonym;
-                return Global.invoke(source, "getName") instanceof String name //$NON-NLS-1$
+                return useSourceName && Global.invoke(source, "getName") instanceof String name //$NON-NLS-1$
                     ? EffectiveTitle.trimToNull(name) : null;
             }
         }
@@ -3562,7 +3649,8 @@ public class FormEditorHook implements IStartup
         {
             try
             {
-                return (now ? resolveNow(page, item) : cached(page, item)).toInfo(language);
+                return withCurrentListField(page, item, now ? resolveNow(page, item) : cached(page, item))
+                    .toInfo(language, EffectiveTitle.scriptVariant(page));
             }
             catch (IllegalStateException removed)
             {
@@ -3572,12 +3660,40 @@ public class FormEditorHook implements IStartup
                 return null;
             try
             {
-                return resolveNow(page, item).toInfo(language);
+                return withCurrentListField(page, item, resolveNow(page, item))
+                    .toInfo(language, EffectiveTitle.scriptVariant(page));
             }
             catch (IllegalStateException removed)
             {
                 return null;
             }
+        }
+
+        /**
+         * Источник с полем набора данных по текущему состоянию списка: «ОК» в настройках списка
+         * подменяет поля набора новыми, а закешированное остаётся со старым заголовком (#1007).
+         * Поиск — по уже загруженному реквизиту формы, без BM; найденное поле сразу кладётся
+         * в кеш, чтобы при следующей отрисовке расхождения уже не было.
+         */
+        private static Source withCurrentListField(FormEditorPage page, FormItem item, Source source)
+        {
+            if (source.listField == null || !(item instanceof DataItem dataItem))
+                return source;
+            AbstractDataPath path = dataItem.getDataPath();
+            DynamicListExtInfo list = dynamicList(path);
+            DataCompositionSchemaDataSetField live = list == null ? null : dynamicListField(list, path);
+            if (live == null || live == source.listField)
+                return source;
+            Source updated = source.withListField(live);
+            PageState state = STATES.get(page);
+            if (state != null && state.resolved.get(item) == source)
+                state.resolved.put(item, updated);
+            // #region agent log #1007 — строка на каждую подмену поля (после неё кеш обновлён)
+            Global.tempLog("form-title-1007", item.getName() + " поле набора подменено: кеш title=" //$NON-NLS-1$ //$NON-NLS-2$
+                + Source.listFieldTitle(source.listField, "ru") + " текущее title=" //$NON-NLS-1$ //$NON-NLS-2$
+                + Source.listFieldTitle(live, "ru")); //$NON-NLS-1$
+            // #endregion
+            return updated;
         }
 
         /** Забыть разрешённый источник элемента и поставить элемент в очередь заново. */
@@ -3877,7 +3993,11 @@ public class FormEditorHook implements IStartup
                 }
                 if (item instanceof DataItem dataItem)
                 {
-                    Source fromData = sourceOf(referredObject(dataItem.getDataPath()));
+                    AbstractDataPath path = dataItem.getDataPath();
+                    DynamicListExtInfo list = dynamicList(path);
+                    if (list != null)
+                        return dynamicListSource(item, path, dynamicListField(list, path));
+                    Source fromData = sourceOf(referredObject(path));
                     if (fromData != null)
                         return fromData;
                 }
@@ -3887,6 +4007,94 @@ public class FormEditorHook implements IStartup
                 return NONE;
             }
             return NONE;
+        }
+
+        /**
+         * Колонка динамического списка. Порядок как у платформы: явный «Заголовок» поля набора
+         * данных; иначе представление поля метаданных, к которому ведёт последний сегмент пути;
+         * иначе заголовок, построенный по имени поля (с пометкой «*»). Сам реквизит «Список»
+         * источником заголовка колонки не бывает.
+         *
+         * @param listField поле набора данных; {@code null} — в списке такого поля нет
+         */
+        private static Source dynamicListSource(FormItem item, AbstractDataPath path,
+            DataCompositionSchemaDataSetField listField)
+        {
+            int last = path.getSegments().size() - 1;
+            EObject fieldObject = referredObject(path, last);
+            // #region agent log #1006
+            StringBuilder refs = new StringBuilder();
+            for (Object ref : path.getObjects())
+                if (ref instanceof DataPathReferredObject referred)
+                {
+                    EObject object = referred.getObject();
+                    refs.append(" [").append(referred.getSegmentIdx())
+                        .append(referred.isVirtual() ? " virtual" : "").append(referred.isIndex() ? " index" : "")
+                        .append(' ').append(object == null ? "null" : object.getClass().getSimpleName())
+                        .append(object instanceof DbViewFieldDef def
+                            ? " name=" + def.getName() + " nameRu=" + def.getNameRu()
+                                + " presSrc=" + (def.getPresentationSource() == null ? "null"
+                                    : def.getPresentationSource().getClass().getSimpleName())
+                                + " md=" + (def.getMdObject() == null ? "null"
+                                    : def.getMdObject().getClass().getSimpleName())
+                            : "")
+                        .append(']');
+                }
+            Global.tempLog("form-title-1006", item.getName() + " path=" + path.getSegments() //$NON-NLS-1$
+                + (listField == null ? " listField=null" : " listField=" + listField.getDataPath() + " title=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (listField.getTitle() == null ? "null" : listField.getTitle().getValue() + "/" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (listField.getTitle().getLocalValue() == null ? "null" //$NON-NLS-1$
+                        : listField.getTitle().getLocalValue().getContent())))
+                + " fieldObject=" + (fieldObject == null ? "null" : fieldObject.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " refs:" + refs); //$NON-NLS-1$
+            // #endregion
+            Source fromMetadata = fieldObject != null && !(fieldObject instanceof AbstractFormAttribute)
+                ? sourceOf(fieldObject) : null;
+            if (fromMetadata != null)
+                return fromMetadata.withListField(listField);
+            String name = path.getSegments().get(last);
+            return new Source(listField, EffectiveTitle.Origin.FORM_OBJECT, StringUtils.nameToText(name),
+                null, listField, true);
+        }
+
+        /**
+         * Динамический список, колонку которого показывает путь «Список.Поле»; {@code null} — путь
+         * не про динамический список. Реквизит берётся из первого сегмента: он в той же форме,
+         * BM за ним не ходит.
+         */
+        private static DynamicListExtInfo dynamicList(AbstractDataPath path)
+        {
+            if (path == null || path.getSegments().size() < 2)
+                return null;
+            return referredObject(path, 0) instanceof FormAttribute attribute
+                && attribute.getExtInfo() instanceof DynamicListExtInfo extInfo ? extInfo : null;
+        }
+
+        /** Поле набора данных списка по пути «Список.Поле»; {@code null} — поля в списке нет. */
+        private static DataCompositionSchemaDataSetField dynamicListField(DynamicListExtInfo extInfo,
+            AbstractDataPath path)
+        {
+            List<String> segments = path.getSegments();
+            String fieldPath = String.join(".", segments.subList(1, segments.size())); //$NON-NLS-1$
+            for (Object field : extInfo.getFields())
+            {
+                if (field instanceof DataCompositionSchemaDataSetField dataSetField
+                    && fieldPath.equalsIgnoreCase(dataSetField.getDataPath()))
+                    return dataSetField;
+            }
+            return null;
+        }
+
+        /** Объект ровно этого сегмента пути; {@code null} — сегмент без объекта. */
+        private static EObject referredObject(AbstractDataPath path, int segmentIdx)
+        {
+            for (Object ref : path.getObjects())
+            {
+                if (ref instanceof DataPathReferredObject referred && referred.getSegmentIdx() == segmentIdx
+                    && !referred.isVirtual() && !referred.isIndex())
+                    return referred.getObject();
+            }
+            return null;
         }
 
         private static Source sourceOf(Object candidate)
@@ -3904,7 +4112,7 @@ public class FormEditorHook implements IStartup
                 if (presentation == null)
                     presentation = fieldDef.getMdObject();
                 return new Source(presentation != null ? ContentUtil.getActualObject(presentation) : null,
-                    EffectiveTitle.Origin.METADATA, fieldDef.getName());
+                    EffectiveTitle.Origin.METADATA, fieldDef.getName(), fieldDef.getNameRu(), null, false);
             }
             return new Source(ContentUtil.getActualObject(source), EffectiveTitle.Origin.METADATA,
                 nameOf(source));
@@ -10110,6 +10318,38 @@ public class FormEditorHook implements IStartup
                 revealProperty(page, viewer, item, null, TITLE_FEATURE);
                 return;
             }
+            // Заголовок «взят» у самого реквизита-списка: поле — не метаданные, а поле набора
+            // данных списка. Там он и задаётся — открываем настройки списка на этом поле (#1007).
+            List<String> pathSegments = dataPathSegments(item);
+            Global.tempLog("dl-field-reveal", "title dblclick origin=" + info.origin + " source=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (info.source == null ? "null" : info.source.eClass().getName()) + " path=" + pathSegments); //$NON-NLS-1$ //$NON-NLS-2$
+            // Источник — либо само поле набора данных (у поля есть свой заголовок), либо
+            // реквизит-список (поле в наборе есть, но заголовок не задан).
+            DynamicListExtInfo listInfo = item instanceof DataItem dataItem
+                ? InheritedTitles.dynamicList(dataItem.getDataPath()) : null;
+            if (info.origin == EffectiveTitle.Origin.FORM_OBJECT && listInfo != null
+                && listInfo.eContainer() instanceof FormAttribute listAttribute
+                && (info.source instanceof DataCompositionSchemaDataSetField || info.source == listAttribute)
+                && pathSegments.size() >= 2)
+            {
+                String fieldName = pathSegments.get(1);
+                Display listDisplay = tree == null ? null : tree.getDisplay();
+                if (listDisplay == null || listDisplay.isDisposed())
+                    return;
+                // Окно, открытое при выделенном элементе формы, с формой не связано: «ОК» в нём
+                // изменений в форму не вносит. Поэтому сначала поле активируется в дереве
+                // реквизитов, и дальше — тот же путь, что у двойного клика по нему.
+                TreeViewer attributes = attributesViewer(page);
+                PropertyInfo fieldNode = attributes == null ? null : findAttributeNode(page, item, null);
+                Global.tempLog("dl-field-reveal", "title dblclick fieldNode=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (fieldNode == null ? "null" : fieldNode.getName())); //$NON-NLS-1$
+                String[] names = fieldNode == null ? new String[] { fieldName }
+                    : new String[] { fieldNode.getName(), fieldNode.getNameRu() };
+                if (fieldNode != null)
+                    selectAttributeNode(attributes, fieldNode);
+                listDisplay.asyncExec(() -> openDynamicListFieldSettings(page, listAttribute, true, names));
+                return;
+            }
             // Клик по колонке «Заголовок» штатное дерево не выделяет (нет FULL_SELECTION),
             // FormTreeInteraction ставит строку только в asyncExec. «Перейти» до этого видит
             // прежнюю строку — поэтому выделяем сейчас, а саму команду зовём на следующем
@@ -10305,6 +10545,78 @@ public class FormEditorHook implements IStartup
                     return new StructuredSelection(proxy);
             }
             return metadata != null ? new StructuredSelection(metadata) : selection;
+        }
+
+        /**
+         * Открывает настройки динамического списка и активирует в них поле набора данных.
+         * Ссылка «Открыть» есть в панели «Свойства» только у самого реквизита-списка, поэтому
+         * он сначала выделяется в дереве реквизитов, и палитра показывает его свойства.
+         *
+         * @param title {@code true} — ячейка «Заголовок», иначе «Путь»
+         */
+        private static void openDynamicListFieldSettings(FormEditorPage page, EObject dynamicList,
+            boolean title, String... fieldNames)
+        {
+            TreeViewer viewer = attributesViewer(page);
+            if (viewer == null || page.getSite() == null
+                || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
+            {
+                Global.tempLog("dl-field-reveal", "openDynamicListFieldSettings: нет дерева реквизитов"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Object[] roots = content.getElements(viewer.getInput());
+            PropertyInfo root = findPropertyInfo(content, roots, dynamicList, 0);
+            if (root == null)
+            {
+                // Реквизит из пути к данным элемента — экземпляр из другого контекста модели,
+                // с объектом дерева не совпадает: ищем корневой реквизит-список по имени.
+                String name = Global.invoke(dynamicList, "getName") instanceof String n ? n : null; //$NON-NLS-1$
+                for (Object element : roots)
+                {
+                    if (name != null && element instanceof PropertyInfo info
+                        && info.getSource() instanceof FormAttribute attribute
+                        && attribute.getExtInfo() instanceof DynamicListExtInfo
+                        && name.equalsIgnoreCase(attribute.getName()))
+                    {
+                        root = info;
+                        break;
+                    }
+                }
+            }
+            Global.tempLog("dl-field-reveal", "openDynamicListFieldSettings root=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (root == null ? "null" : root.getName())); //$NON-NLS-1$
+            if (root == null)
+                return;
+            // Дальше — объект самого дерева: с ним сверяется палитра и ключ открытого окна.
+            EObject listObject = root.getSource() instanceof EObject treeObject ? treeObject : dynamicList;
+            // Ссылка «Открыть» есть в палитре только у самого списка. Строку дерева не трогаем:
+            // штатный setSelectionAndNavigateToProperties отдаёт выделение прямо палитре
+            // (IPropertySheetPage.selectionChanged). Как только окно появилось, палитре
+            // возвращается то, что она показывала до этого.
+            IStructuredSelection forSheet = propertiesSelectionOf(new StructuredSelection(root));
+            Object group = actionsGroupForSource(page, listObject);
+            if (group == null)
+                return;
+            ShowPropertiesHandler.run(page.getSite());
+            IWorkbenchPage workbenchPage = page.getSite().getPage();
+            IViewPart sheetView = findPropertySheetView(workbenchPage);
+            Object sheetPage = sheetView == null ? null : PropertyNameIdentifierHook.resolvePropertySheetPage(sheetView);
+            Object shownBefore = sheetPage == null ? null : Global.invoke(sheetPage, "getCurrentSelection"); //$NON-NLS-1$
+            Runnable showList = () -> Global.invokeVoid(group, "setSelectionAndNavigateToProperties", forSheet); //$NON-NLS-1$
+            boolean[] restored = { false };
+            Runnable restorePalette = () -> {
+                if (restored[0])
+                    return;
+                restored[0] = true;
+                if (sheetPage instanceof org.eclipse.ui.views.properties.IPropertySheetPage sheet
+                    && shownBefore instanceof ISelection before && !before.isEmpty())
+                    sheet.selectionChanged(page.getEditor(), before);
+                Global.tempLog("dl-field-reveal", "палитра возвращена: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (shownBefore == null ? "null" : shownBefore.getClass().getSimpleName())); //$NON-NLS-1$
+            };
+            showList.run();
+            DynamicListSettingsDialogHook.openFieldSettings(workbenchPage, listObject, title,
+                showList, restorePalette, fieldNames);
         }
 
         /**

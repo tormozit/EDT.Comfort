@@ -788,11 +788,7 @@ final class BslExpectedTypePremiums
             return;
         display.asyncExec(() -> {
             Snapshot snapshot = active;
-            boolean applicable = snapshot != null && snapshot.scene() == computed.scene()
-                && snapshot.context().sameAs(requested);
-            Global.tempLog("expected-type-assist", "refresh applicable=" + applicable //$NON-NLS-1$ //$NON-NLS-2$
-                + " start=" + computed.context().start()); //$NON-NLS-1$
-            if (!applicable)
+            if (snapshot == null || snapshot.scene() != computed.scene() || !snapshot.context().sameAs(requested))
                 return;
             ContentAssistSessionReloader.refreshContextPremiums(computed.context().document());
             ContentAssistSessionReloader.onContextPremiumsReady(computed.context().document());
@@ -983,8 +979,6 @@ final class BslExpectedTypePremiums
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                Global.tempLog("expected-type-assist", "job start=" + context.start() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " caret=" + context.caret() + " proposals=" + list.length); //$NON-NLS-1$ //$NON-NLS-2$
                 try
                 {
                     if (!context.sameAs(requested) || revision != foreignParameterRevision)
@@ -1000,11 +994,6 @@ final class BslExpectedTypePremiums
                     publish(computed);
                     if (active == computed && (basis == null || computed.premiums() != basis.premiums()))
                         refreshPublishedContext(computed);
-                }
-                catch (RuntimeException | LinkageError error)
-                {
-                    Global.tempLogException("expected-type-assist", "job start=" + context.start(), error); //$NON-NLS-1$ //$NON-NLS-2$
-                    throw error;
                 }
                 finally
                 {
@@ -1092,11 +1081,8 @@ final class BslExpectedTypePremiums
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException("expected-type-assist", "read start=" + context.start(), e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
-        Global.tempLog("expected-type-assist", "read start=" + context.start() + " complete=" + complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " result=" + read + " type=" + (scene[0] != null ? scene[0].expectedTypeText() : null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (!Boolean.TRUE.equals(read) || scene[0] == null)
             return null;
         Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
@@ -1149,13 +1135,16 @@ final class BslExpectedTypePremiums
             && !context.parent().isEmpty() ? formStatisticsContext(resource,
                 findExpression(resource, context.start(), context.anchor() - 1), context.anchor() - 1) : null;
         boolean insideExpression = insideExpression(context, site);
+        // В комментарии слово — не выражение, приёмника у него нет.
+        // После точки проверяем саму точку: каретка может стоять на границе комментария.
+        int partitionOffset = context.parent().isEmpty() ? context.caret() : context.anchor() - 1;
+        boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), partitionOffset);
+        boolean typeName = endsWithWord(stripEnd(context.preceding()), "Новый"); //$NON-NLS-1$
         Map<String, String> memberNames = new LinkedHashMap<>();
-        Map<String, Integer> frequencies = context.parent().isEmpty() ? Collections.emptyMap()
-            : memberFrequencies(resource, context, memberNames);
+        Map<String, Integer> frequencies = comment || typeName || context.parent().isEmpty()
+            ? Collections.emptyMap() : memberFrequencies(resource, context, memberNames);
         Map<String, List<String>> memberTypes = complete && !memberNames.isEmpty()
             ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
-        // В комментарии слово — не выражение, приёмника у него нет.
-        boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret());
         String receiverLine = comment ? null : receiverTypeLine(expectation, resource, context);
         String expectedTypeText = expectation == null || expectation.typeItems().isEmpty()
                 ? receiverTypes(expectation).isEmpty() ? "" //$NON-NLS-1$
@@ -2862,7 +2851,7 @@ final class BslExpectedTypePremiums
     }
 
     /** Комментарии, строковые литералы и {@code Новый Имя} заменяются пробелами (длина сохраняется). */
-    private static String withoutCommentsAndStrings(String text)
+    static String withoutCommentsAndStrings(String text)
     {
         StringBuilder result = new StringBuilder(text);
         int i = 0;
@@ -2967,6 +2956,9 @@ final class BslExpectedTypePremiums
             // Применяется редко, а по типу (возвращает Тип) поднимается высоко — штраф (решение пользователя)
             add(result, words, "изxmlтипа", -1, false); //$NON-NLS-1$
         }
+        // Оператор «Новый» изначально выше равных по фильтру слов: без премии его место решал порядок
+        // списка EDT, разный на разных путях расчёта, и слово тонуло среди «Новый…()» (решение пользователя)
+        add(result, words, "новый", 1, false); //$NON-NLS-1$
         boolean byType = adder == null || adder.run();
         if (scene.expectation() != null && byType)
             typePremiums(result, context, scene.expectation(), words, adder, MODULE_LANGUAGE);

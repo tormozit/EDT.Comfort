@@ -50,6 +50,7 @@ import org.eclipse.ltk.core.refactoring.RefactoringStatusEntry;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChange;
 import org.eclipse.ltk.core.refactoring.TextEditBasedChangeGroup;
 import org.eclipse.ltk.core.refactoring.TextFileChange;
+import org.eclipse.ltk.core.refactoring.participants.ProcessorBasedRefactoring;
 import org.eclipse.ltk.ui.refactoring.RefactoringWizard;
 import org.eclipse.ltk.ui.refactoring.UserInputWizardPage;
 import org.eclipse.swt.SWT;
@@ -82,6 +83,7 @@ import org.eclipse.swt.widgets.Widget;
 import org.eclipse.text.edits.MultiTextEdit;
 import org.eclipse.text.edits.TextEdit;
 
+import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.lcore.refactoring.IFullTextSearchChange;
 import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
@@ -429,6 +431,7 @@ public final class RefactoringPreviewHook
         String qualifiedNameSuitability;
         /** Искомый элемент (переименовываемый объект); {@code null} — колонка «Подходит» скрыта. */
         BslOccurrenceContextResolver.Sought sought;
+        CommonModuleMethod soughtMethod;
         /** Вхождение найдено полнотекстовым поиском (не разрешённая моделью ссылка). */
         boolean fullText;
 
@@ -476,8 +479,10 @@ public final class RefactoringPreviewHook
             lineText = context.lineText;
             highlightStart = context.highlightStart;
             highlightLength = context.highlightLength;
-            qualifiedNameSuitability = fullText ? BslOccurrenceContextResolver.suitabilityByQualifiedName(
-                sought, lineText, highlightStart, highlightLength) : null;
+            qualifiedNameSuitability = fullText && !needsMethodCheck()
+                ? BslOccurrenceContextResolver.suitabilityByQualifiedName(sought, lineText, highlightStart,
+                    highlightLength)
+                : null;
             if (qualifiedNameSuitability != null)
                 suitable = qualifiedNameSuitability;
             else if (sought != null && fullText
@@ -496,6 +501,11 @@ public final class RefactoringPreviewHook
         public void applyParentType(String type)
         {
             parentType = type;
+            if (needsMethodCheck())
+            {
+                checkMethod(type);
+                return;
+            }
             if (qualifiedNameSuitability != null)
             {
                 suitable = qualifiedNameSuitability;
@@ -520,6 +530,12 @@ public final class RefactoringPreviewHook
             if (type == null)
                 return;
             parentType = type;
+            if (needsMethodCheck())
+            {
+                if (!BslOccurrenceContextResolver.isSuitableYes(suitable))
+                    checkMethod(type);
+                return;
+            }
             if (qualifiedNameSuitability != null)
             {
                 suitable = qualifiedNameSuitability;
@@ -534,9 +550,29 @@ public final class RefactoringPreviewHook
             }
         }
 
+        private boolean needsMethodCheck()
+        {
+            return fullText && soughtMethod != null && BslOccurrenceContextResolver.KIND_METHOD.equals(syntaxKind);
+        }
+
+        private void checkMethod(String type)
+        {
+            boolean matches = soughtMethod.file().getProject().equals(file.getProject())
+                && soughtMethod.moduleName().equalsIgnoreCase(parent)
+                && soughtMethod.moduleType().equalsIgnoreCase(type)
+                && highlightLength == soughtMethod.name().length()
+                && lineText.regionMatches(true, highlightStart, soughtMethod.name(), 0, highlightLength);
+            suitable = matches ? BslOccurrenceContextResolver.SUITABLE_YES
+                : BslOccurrenceContextResolver.SUITABLE_UNKNOWN;
+        }
+
         @Override public String occurrenceLineText() { return lineText; }
         @Override public int occurrenceHighlightStart() { return highlightStart; }
         @Override public int occurrenceHighlightLength() { return highlightLength; }
+    }
+
+    private record CommonModuleMethod(IFile file, String moduleType, String moduleName, String name)
+    {
     }
 
     /** Таблица вместо дерева изменений и всё её поведение. */
@@ -598,6 +634,7 @@ public final class RefactoringPreviewHook
         private TableColumn suitableColumn;
         /** Искомый элемент (переименовываемый объект) — из заголовка окна; {@code null} → колонка «Подходит» скрыта. */
         private BslOccurrenceContextResolver.Sought sought;
+        private CommonModuleMethod soughtMethod;
         private OccurrenceContextResolveJob contextResolver;
         private IAction toggleAction;
         private IAction markedOnlyAction;
@@ -659,6 +696,16 @@ public final class RefactoringPreviewHook
             PreviewTablePane result =
                 new PreviewTablePane(treeViewer, stack, stackLayout, tableHost, table, viewer);
             result.sought = resolveSought(tree.getShell());
+            try
+            {
+                result.soughtMethod = resolveSoughtMethod(tree.getShell());
+            }
+            catch (RuntimeException e)
+            {
+                // Если процессор не вернул цель, сохраняем общую оценку вхождений.
+            }
+            if (result.sought == null && result.soughtMethod != null)
+                result.sought = BslOccurrenceContextResolver.parseSought(result.soughtMethod.moduleType());
             result.createColumns(columnLayout);
 
             stackLayout.topControl = tree;
@@ -681,6 +728,29 @@ public final class RefactoringPreviewHook
                 return null;
             return shell.getData(RefactoringWizardTitleHook.SHELL_RENAME_FULL_NAME_KEY) instanceof String fqn
                 ? BslOccurrenceContextResolver.parseSought(fqn) : null;
+        }
+
+        private static CommonModuleMethod resolveSoughtMethod(Shell shell)
+        {
+            if (!(shell.getData() instanceof IWizardContainer container))
+                return null;
+            IWizardPage page = container.getCurrentPage();
+            if (page == null
+                || !(page.getWizard() instanceof RefactoringWizard wizard)
+                || !(wizard.getRefactoring() instanceof ProcessorBasedRefactoring refactoring))
+                return null;
+            // Публичный BslBmRenameElementProcessor.getContextElement(). Из заголовка окна
+            // можно узнать лишь имя модуля, из которого запустили команду.
+            Object target = Global.invoke(refactoring.getProcessor(), "getContextElement"); //$NON-NLS-1$
+            if (!(target instanceof Method method) || !method.isExport() || method.getName() == null)
+                return null;
+            IFile file = modelFile(method);
+            String moduleType = file != null
+                ? GetRef.pathToFullName(file.getProjectRelativePath().toString()) : null;
+            String prefix = "ОбщийМодуль."; //$NON-NLS-1$
+            if (moduleType == null || !moduleType.startsWith(prefix) || moduleType.indexOf('.', prefix.length()) >= 0)
+                return null;
+            return new CommonModuleMethod(file, moduleType, moduleType.substring(prefix.length()), method.getName());
         }
 
         private static final java.util.Set<String> TEXT_REPLACEMENT_WIZARDS = java.util.Set.of(
@@ -1369,6 +1439,7 @@ public final class RefactoringPreviewHook
                 row.parentType = ""; //$NON-NLS-1$
             applyMdPropertyContext(row, node);
             row.sought = sought;
+            row.soughtMethod = soughtMethod;
             row.fullText = isFullTextOccurrence(node);
             if (sought != null && !row.fullText)
                 // Вхождение-ссылку EDT уже разрешил как настоящую ссылку на объект — подходит.

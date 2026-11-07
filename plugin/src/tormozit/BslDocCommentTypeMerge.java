@@ -107,6 +107,7 @@ public final class BslDocCommentTypeMerge
                     ? skipVisitedLinkTarget(args[0] instanceof EObject target ? target : null, visited)
                     : args[0];
             });
+        BslMethodParameterTypes.installReturnTypesMemo();
 
         Object prev = System.getProperties().get(BslDocCommentDescriptionFix.PROP_AFTER_PARSE);
         @SuppressWarnings("unchecked")
@@ -214,7 +215,7 @@ public final class BslDocCommentTypeMerge
     {
         try
         {
-            if (target == null || visited == null || visited.isEmpty())
+            if (target == null || visited == null)
                 return target;
             org.eclipse.emf.common.util.URI uri = null;
             if (target instanceof com._1c.g5.v8.dt.bsl.model.Method method)
@@ -223,7 +224,11 @@ public final class BslDocCommentTypeMerge
                 && exported.isSetCommentLineLocalOffsets() && exported.isSetCommentLines()
                 && exported.eResource() != null)
                 uri = exported.getSourceUri();
-            if (uri == null || !visited.contains(uri.toString()))
+            if (uri == null)
+                return target;
+            // Чтение множества — часть пути обхода для запоминания типов возврата, даже при пустом.
+            BslMethodParameterTypes.recordConsulted(uri.toString());
+            if (!visited.contains(uri.toString()))
                 return target;
             return null;
         }

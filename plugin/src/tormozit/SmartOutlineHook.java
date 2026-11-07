@@ -543,6 +543,7 @@ public class SmartOutlineHook implements IStartup {
                 // --- Флажок «Только помеченные» в filterRow справа от SearchBox ---
                 installOnlyMarkedCheckbox(patchedShell, viewer, smartFilter,
                         highlightControl, aefTree, filterRow);
+                installTypeNamesButton(patchedShell, filterRow);
                 installIrBestTypeButton(patchedShell, viewer, filterRow);
             } else {
                 fc = filterControl;
@@ -1892,6 +1893,93 @@ public class SmartOutlineHook implements IStartup {
         });
 
         buttonParent.layout(true, true);
+    }
+
+    /**
+     * Кнопка «Имена типов» слева от «ОК» диалога «Редактирование типа данных» (#1009): имена всех
+     * помеченных типов через запятую — в буфер обмена, с тостом.
+     *
+     * @param fallbackParent куда положить кнопку, если «ОК» не найдена (строка фильтра)
+     */
+    private static void installTypeNamesButton(Shell shell, Composite fallbackParent)
+    {
+        Button ok = shell.getDefaultButton();
+        if (ok == null || ok.isDisposed())
+            ok = findButtonRecursive(shell, "OK"); //$NON-NLS-1$
+        Composite buttonParent = ok != null && !ok.isDisposed() ? ok.getParent() : fallbackParent;
+        if (buttonParent == null || buttonParent.isDisposed())
+            return;
+        if (buttonParent.getLayout() instanceof GridLayout grid)
+            grid.numColumns++;
+        Button button = new Button(buttonParent, SWT.PUSH);
+        button.setText("Имена типов"); //$NON-NLS-1$
+        GridData gd = new GridData(ok != null ? SWT.FILL : SWT.BEGINNING, SWT.CENTER, false, false);
+        if (ok != null && ok.getLayoutData() instanceof GridData okGd)
+            gd.widthHint = Math.max(okGd.widthHint, button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
+        button.setLayoutData(gd);
+        if (ok != null)
+            button.moveAbove(ok);
+        button.setToolTipText(TooltipText.wrap(button,
+            "Скопировать в буфер обмена имена помеченных типов через запятую" + Global.pluginSignForTooltip())); //$NON-NLS-1$
+        button.addListener(SWT.Selection, e ->
+        {
+            Object multiItems = resolveMultiItems(shell);
+            java.util.List<String> names = new java.util.ArrayList<>();
+            if (multiItems instanceof java.util.List<?> list)
+            {
+                // Порядок как в диалоге и ячейках: приоритет категории, затем имя (#768).
+                java.util.List<Object> sorted = new java.util.ArrayList<>(list);
+                java.util.Map<Object, TypeDescriptionPresentationHook.TypeOrder> orders = new java.util.IdentityHashMap<>();
+                boolean sortable = true;
+                for (Object item : sorted)
+                {
+                    TypeDescriptionPresentationHook.TypeOrder order = item instanceof com._1c.g5.v8.dt.mcore.TypeItem ti
+                        ? TypeDescriptionPresentationHook.assistOrder(ti) : null;
+                    if (order == null)
+                    {
+                        sortable = false;
+                        break;
+                    }
+                    orders.put(item, order);
+                }
+                if (sortable)
+                    sorted.sort((a, b) -> orders.get(a).compareTo(orders.get(b)));
+                for (Object item : sorted)
+                {
+                    if (item == null)
+                        continue;
+                    // Русское имя («СправочникСсылка.Справочник1»); getName() отдаёт английское.
+                    Object name = Global.invoke(item, "getNameRu"); //$NON-NLS-1$
+                    if (!(name instanceof String s) || s.isBlank())
+                        name = Global.invoke(item, "getName"); //$NON-NLS-1$
+                    if (name instanceof String s2 && !s2.isBlank())
+                        names.add(s2.strip());
+                }
+            }
+            if (names.isEmpty())
+            {
+                ToastNotification.show("Имена типов", "Нет помеченных типов", 3000); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String text = String.join(", ", names); //$NON-NLS-1$
+            Clipboard clipboard = new Clipboard(shell.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+            ToastNotification.show("Скопировано", text, 4000); //$NON-NLS-1$
+        });
+        int need = buttonParent.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x - availableRowWidth(buttonParent);
+        if (need > 0 && buttonParent.getSize().x > 0)
+        {
+            Point size = shell.getSize();
+            shell.setSize(size.x + need, size.y);
+        }
+        shell.layout(true, true);
     }
 
     /**

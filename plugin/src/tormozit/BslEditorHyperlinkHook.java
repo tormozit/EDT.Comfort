@@ -75,7 +75,11 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
+import com._1c.g5.v8.dt.mcore.FieldSource;
 import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.Property;
+import com._1c.g5.v8.dt.mcore.SourceType;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
@@ -275,7 +279,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             return readModel(document, false, resource ->
             {
-                var target = BslStructureInsertCommentTypes.propertySourceUriAt(resource, offset);
+                Property property = BslStructureInsertCommentTypes.propertyAt(resource, offset);
+                var target = BslStructureInsertCommentTypes.propertySourceUriFor(property, resource);
                 if (resource.getParseResult() == null)
                     return null;
                 ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
@@ -284,6 +289,9 @@ public final class BslEditorHyperlinkHook implements IStartup
                 IRegion region = new Region(leaf.getOffset(), leaf.getLength());
                 if (target != null)
                     return new PropertyHyperlink(region, target, editor, page);
+                IHyperlink member = tableMemberLink(property, resource, region, editor, page);
+                if (member != null)
+                    return member;
                 return BslQueryResultTypes.isQueryFieldAt(resource, offset)
                     ? new DeferredQueryPropertyHyperlink(region, document, offset, editor, page) : null;
             });
@@ -291,6 +299,78 @@ public final class BslEditorHyperlinkHook implements IStartup
         catch (RuntimeException | LinkageError failure)
         {
             return null;
+        }
+    }
+
+    /**
+     * Общий или стандартный реквизит объекта ({@code Объект.Комментарий}, {@code Объект.Код}): штатная
+     * ссылка общего реквизита открывает его собственный редактор, у стандартного ссылки нет вовсе.
+     * Ведём в редактор объекта метаданных таблицы на строку реквизита — как из окон запросов
+     * ({@link BslQueryLiteralSupport#openTableMember}). Таблица — владелец типа, которому принадлежит свойство.
+     */
+    private static IHyperlink tableMemberLink(Property property, XtextResource resource, IRegion region,
+        BslXtextEditor editor, IWorkbenchPage page)
+    {
+        if (property == null || property.getName() == null)
+            return null;
+        EObject origin = property instanceof DerivedProperty derived ? derived.getSource() : null;
+        if (origin != null && origin.eIsProxy())
+            origin = EcoreUtil.resolve(origin, resource);
+        TypeItem ownerType = org.eclipse.xtext.EcoreUtil2.getContainerOfType(property, TypeItem.class);
+        MdObject table = ownerType == null ? null : typeProducer(ownerType);
+        boolean common = origin != null && "CommonAttribute".equals(origin.eClass().getName()); //$NON-NLS-1$
+        boolean standard = false;
+        String fieldName = property.getName();
+        // Стандартные поля таблицы — поля FieldSource с SourceType.STANDARD_FIELDS (тот же признак, что у
+        // MdStandardObjectsInferrer); StandardAttributeUtil.getStandardAttributes хранит только изменённые.
+        if (!common && table instanceof FieldSource fields && (origin == null || origin == table
+            || "StandardAttribute".equals(origin.eClass().getName()))) //$NON-NLS-1$
+            for (com._1c.g5.v8.dt.mcore.Field field : fields.getFields())
+                if (field != null && field.getSourceTypes().contains(SourceType.STANDARD_FIELDS)
+                    && (property.getName().equalsIgnoreCase(field.getName())
+                        || property.getNameRu() != null && property.getNameRu().equalsIgnoreCase(field.getNameRu())))
+                {
+                    standard = true;
+                    fieldName = field.getName();
+                    break;
+                }
+        if (table == null || !common && !standard)
+            return null;
+        return new TableMemberHyperlink(region, table, common ? origin : null, fieldName, editor, page);
+    }
+
+    private static final class TableMemberHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final MdObject table;
+        private final EObject common;
+        private final String fieldName;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        TableMemberHyperlink(IRegion region, MdObject table, EObject common, String fieldName,
+            BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.table = table;
+            this.common = common;
+            this.fieldName = fieldName;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Перейти к определению реквизита"; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                BslQueryLiteralSupport.openTableMember(table, common, fieldName, source, source.getSite().getShell());
+                scope.opened = true;
+            }
         }
     }
 

@@ -2519,6 +2519,8 @@ boolean inLiteral = endCaret >= 0
     static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
         IUnitOfWork<T, XtextResource> queryWork = withQueryCalculationScope(work);
+        DeferTrace.log("assistRead.enter", doc, null, 0, //$NON-NLS-1$
+            "ui=" + (Display.getCurrent() != null)); //$NON-NLS-1$
         // Без удержания перепарсинга штатное чтение идёт одновременно с ним
         // (withModelSyncHeld): так упало «Unhandled event loop exception: StackOverflowError»
         // из подсказки параметров сразу после вставки УстановитьТекстЗапроса(Текст)
@@ -2528,11 +2530,14 @@ boolean inLiteral = endCaret >= 0
         // повторит или обойдётся без ответа.
         if (Display.getCurrent() != null && isModelSyncBusy(doc))
         {
+            DeferTrace.log("assistRead.uiSkip", doc, null, 0, ""); //$NON-NLS-1$ //$NON-NLS-2$
             SmartContentAssistProcessor.uiBlockLog("modelSync.uiSkip", "read"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         Object result = withModelSyncHeld(doc, null,
             () -> invokeBslRead(doc, "readOnlyForContentAssist", queryWork)); //$NON-NLS-1$
+        DeferTrace.log("assistRead.exit", doc, null, 0, //$NON-NLS-1$
+            result == BSL_READ_MISSING ? "missing" : "read"); //$NON-NLS-1$ //$NON-NLS-2$
         if (result != BSL_READ_MISSING)
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
@@ -2543,6 +2548,65 @@ boolean inLiteral = endCaret >= 0
             return typed;
         }
         return doc == null || queryWork == null ? null : doc.readOnly(queryWork);
+    }
+
+    /** Предел ожидания проверки фоновым читателем: дольше ждать нечего, читаем как раньше. */
+    private static final long VALIDATION_WAIT_CAP_MS = 10_000;
+    /** Шаг ожидания: между шагами проверяем отмену монитора и начало расчёта подсказки. */
+    private static final long VALIDATION_WAIT_STEP_MS = 50;
+
+    /**
+     * Фоновое чтение не снимает идущую проверку. Модуль ~629 КБ проверяется 3–7 с,
+     * и каждое снятие выбрасывает уже сделанную работу (замер 06.11.2026: 60 снятий
+     * за 74 минуты, около 118 с выброшенного счёта). Штатное {@code readOnlyForContentAssist}
+     * снимает проверку само, поэтому сначала ждём её завершения — так же, как ждём
+     * догоняющий разбор модели. Подсказка важнее подсветки: началась — ожидание бросаем.
+     */
+    private static void awaitIdleValidation(IXtextDocument doc,
+                                            org.eclipse.core.runtime.IProgressMonitor monitor)
+    {
+        if (doc == null)
+            return;
+        Object candidate = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+        if (!(candidate instanceof org.eclipse.core.runtime.jobs.Job job))
+            return;
+        long started = System.nanoTime();
+        String why = "idle"; //$NON-NLS-1$
+        while (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+        {
+            if (monitor != null && monitor.isCanceled())
+            {
+                why = "canceled"; //$NON-NLS-1$
+                break;
+            }
+            if (AssistPriority.isPending(doc))
+            {
+                why = "assist"; //$NON-NLS-1$
+                break;
+            }
+            if ((System.nanoTime() - started) / 1_000_000L >= VALIDATION_WAIT_CAP_MS)
+            {
+                why = "cap"; //$NON-NLS-1$
+                break;
+            }
+            try
+            {
+                job.join(VALIDATION_WAIT_STEP_MS, null);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                why = "interrupted"; //$NON-NLS-1$
+                break;
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException e)
+            {
+                why = "canceled"; //$NON-NLS-1$
+                break;
+            }
+        }
+        DeferTrace.log("validation.wait", doc, job, 0, //$NON-NLS-1$
+            "waitedMs=" + (System.nanoTime() - started) / 1_000_000L + " why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Защищённый фоновый читатель уступает подсказкам, не отменяя собственный монитор вложенным assist. */
@@ -2562,7 +2626,12 @@ boolean inLiteral = endCaret >= 0
     private static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
         IUnitOfWork<T, XtextResource> work, boolean peekOnly)
     {
+        DeferTrace.log(peekOnly ? "low.enter.peek" : "low.enter", doc, null, 0, ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!peekOnly)
+            awaitIdleValidation(doc, monitor);
         boolean invoked = false;
+        boolean restartNeeded = true;
+        long stamp = -1;
         try
         {
             org.eclipse.core.runtime.jobs.Job sync = assistSyncJob(doc);
@@ -2607,8 +2676,17 @@ boolean inLiteral = endCaret >= 0
                     if (monitor.isCanceled())
                         return null;
                     invoked = true;
+                    if (!peekOnly)
+                    {
+                        restartNeeded = !isValidatedAndIdle(doc);
+                        stamp = modificationStamp(doc);
+                    }
+                    DeferTrace.log(peekOnly ? "low.invoke.peek" : "low.invoke", doc, null, 0, //$NON-NLS-1$ //$NON-NLS-2$
+                        "before restartNeeded=" + restartNeeded); //$NON-NLS-1$
                     Object result = invokeBslRead(doc,
                         peekOnly ? "readOnlyDataModelWithoutSync" : "readOnlyForContentAssist", work); //$NON-NLS-1$ //$NON-NLS-2$
+                    DeferTrace.log(peekOnly ? "low.invoke.peek" : "low.invoke", doc, null, 0, //$NON-NLS-1$ //$NON-NLS-2$
+                        result == BSL_READ_MISSING ? "missing" : "read"); //$NON-NLS-1$ //$NON-NLS-2$
                     if (result == BSL_READ_MISSING)
                     {
                         return null;
@@ -2625,9 +2703,37 @@ boolean inLiteral = endCaret >= 0
         }
         finally
         {
+            // Штатное чтение снимает идущую проверку и глушит постановку на время чтения: проверку
+            // ставим заново, если она могла пострадать. Простаивающая проверка, уже прошедшая
+            // по этому тексту, не тронута — повтор только удвоил бы её.
             if (invoked && !peekOnly)
-                Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+            {
+                boolean changed = stamp == -1 || modificationStamp(doc) != stamp;
+                DeferTrace.log("low.restart", doc, null, 0, //$NON-NLS-1$
+                    "restartNeeded=" + restartNeeded + " changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
+                if (restartNeeded || changed)
+                    Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+            }
         }
+    }
+
+    /**
+     * Проверка документа простаивает и после последней правки завершилась успешно. Без сведений
+     * о правках (документ не меняли с открытия) — {@code false}: судить не по чему.
+     */
+    private static boolean isValidatedAndIdle(IDocument doc)
+    {
+        if (!(Global.invoke(doc, "getValidationJob") instanceof org.eclipse.core.runtime.jobs.Job job) //$NON-NLS-1$
+            || job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
+            return false;
+        ValidationWatch watch = VALIDATION_WATCHES.get(doc);
+        return watch != null && watch.validatedAt != 0 && watch.validatedAt >= watch.changedAt;
+    }
+
+    private static long modificationStamp(IDocument doc)
+    {
+        return doc instanceof org.eclipse.jface.text.IDocumentExtension4 extension
+            ? extension.getModificationStamp() : -1;
     }
 
     /** Разрешение открытого документа действует и при синхронном переходе в чужие модули. */
@@ -2867,10 +2973,20 @@ boolean inLiteral = endCaret >= 0
      * Члены после точки: готовность текста до точки проверяем под удержанием разбора,
      * даже если синхронизация хвоста уже поставлена. Удержание сохраняем до конца body;
      * штатный расчёт выполняет собственное защищённое чтение документа.
+     *
+     * <p>Документ не BSL (язык запросов: «Редактор запроса», динамический список, схема
+     * компоновки) не умеет {@code readOnlyDataModelWithoutSync} — это метод только
+     * {@code BslXtextDocument}, и проверка через {@link #readOnlyPeekAst} не дала бы «готово»
+     * никогда (issue 1003). Для него — ожидание без блокировки документа
+     * ({@link #waitModelReadyUpTo}), как до введения удержания.
      */
     static <T> T withMemberModelReady(IXtextDocument doc, int end,
         java.util.function.BooleanSupplier abort, java.util.function.Supplier<T> body)
     {
+        if (!hasPeekRead(doc))
+        {
+            return waitModelReadyUpTo(doc, end, abort) ? body.get() : null;
+        }
         long started = System.nanoTime();
         long[] matchedAt = { 0L };
         int[] state = { 0 };
@@ -2946,6 +3062,35 @@ boolean inLiteral = endCaret >= 0
 
     private record MemberModelResult<T>(T value) {}
 
+    /** Классы документов → есть ли {@code readOnlyDataModelWithoutSync} (только BSL). */
+    private static final java.util.Map<Class<?>, Boolean> PEEK_READ_SUPPORT =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Умеет ли документ чтение для {@link #readOnlyPeekAst}. По методу, а не по типу
+     * {@code BslXtextDocument}: ссылка на тип тянет в сборку его родителя из handly.
+     */
+    static boolean hasPeekRead(IDocument doc)
+    {
+        if (doc == null)
+            return false;
+        return PEEK_READ_SUPPORT.computeIfAbsent(doc.getClass(), type ->
+        {
+            for (Class<?> cls = type; cls != null; cls = cls.getSuperclass())
+            {
+                try
+                {
+                    cls.getDeclaredMethod("readOnlyDataModelWithoutSync", IUnitOfWork.class); //$NON-NLS-1$
+                    return Boolean.TRUE;
+                }
+                catch (NoSuchMethodException ignored)
+                {
+                }
+            }
+            return Boolean.FALSE;
+        }).booleanValue();
+    }
+
     /** Текст модели до {@code end} совпадает с текстом документа. */
     private static boolean modelTextMatchesUpTo(IDocument doc, int end)
     {
@@ -3000,6 +3145,47 @@ boolean inLiteral = endCaret >= 0
      */
     private static final java.util.Set<org.eclipse.core.runtime.IProgressMonitor> LOW_PRIORITY_HOLDERS =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Временная диагностика отмен проверки модуля: кто снимает {@code BslValidationJob}
+     * и в каком окне. Отдельный файл {@code .tmp/temp-logs/validation-defer.log};
+     * пишем каждый вызов, без порогов.
+     */
+    private static final class DeferTrace
+    {
+        private static final String TOPIC = "validation-defer"; //$NON-NLS-1$
+
+        private DeferTrace()
+        {
+        }
+
+        static void log(String phase, Object document, Object job, int users, String detail)
+        {
+            String length = document instanceof IDocument doc ? Integer.toString(doc.getLength()) : "?"; //$NON-NLS-1$
+            String jobId = job == null ? "null" //$NON-NLS-1$
+                : job.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(job)); //$NON-NLS-1$
+            Global.tempLog(TOPIC, phase + " len=" + length + " user=" + users //$NON-NLS-1$ //$NON-NLS-2$
+                + " job=" + jobId + " state=" + state(job) //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+                + (detail == null || detail.isEmpty() ? "" : " " + detail)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String state(Object job)
+        {
+            if (!(job instanceof org.eclipse.core.runtime.jobs.Job typed))
+                return "?"; //$NON-NLS-1$
+            int state = typed.getState();
+            if (state == org.eclipse.core.runtime.jobs.Job.NONE)
+                return "NONE"; //$NON-NLS-1$
+            if (state == org.eclipse.core.runtime.jobs.Job.SLEEPING)
+                return "SLEEPING"; //$NON-NLS-1$
+            if (state == org.eclipse.core.runtime.jobs.Job.WAITING)
+                return "WAITING"; //$NON-NLS-1$
+            if (state == org.eclipse.core.runtime.jobs.Job.RUNNING)
+                return "RUNNING"; //$NON-NLS-1$
+            return Integer.toString(state);
+        }
+    }
 
     /**
      * Проверка уступает ещё ДО входа в монитор документа. Штатное чтение отменяет её
@@ -3062,6 +3248,7 @@ boolean inLiteral = endCaret >= 0
 
         private void deferValidation(org.eclipse.core.runtime.jobs.Job job, String phase)
         {
+            DeferTrace.log("cancel." + phase, document.get(), job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
                 interrupted.set(true);
             job.cancel();
@@ -3088,13 +3275,18 @@ boolean inLiteral = endCaret >= 0
             // В этом случае ждём фактического выхода проверки и восстанавливаем её.
             if (users.get() == 0 && interrupted.getAndSet(false)
                 && (event.getResult() == null || !event.getResult().isOK()))
+            {
+                DeferTrace.log("resume.afterDone", document.get(), event.getJob(), users.get(), //$NON-NLS-1$
+                    "result=" + event.getResult()); //$NON-NLS-1$
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
+            }
         }
 
         @Override
         public void close()
         {
             int remaining = users.decrementAndGet();
+            DeferTrace.log("close", document.get(), validation.get(), remaining, ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (remaining == 0)
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
         }
@@ -3104,18 +3296,32 @@ boolean inLiteral = endCaret >= 0
             IDocument doc = document.get();
             org.eclipse.core.runtime.jobs.Job job = validation.get();
             if (doc == null || job == null || Global.getField(doc, "resource") == null) //$NON-NLS-1$
+            {
+                DeferTrace.log("resume.skip", doc, job, users.get(), "noDocument"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             boolean pending = isPending(doc);
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
             if (pending)
-                return; // последний close() снова запланирует возобновление
-            if (skip || isModelSyncBusy(doc))
             {
+                DeferTrace.log("resume.pending", doc, job, users.get(), "skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$
+                return; // последний close() снова запланирует возобновление
+            }
+            boolean busy = isModelSyncBusy(doc);
+            if (skip || busy)
+            {
+                DeferTrace.log("resume.defer", doc, job, users.get(), //$NON-NLS-1$
+                    "skip=" + skip + " busy=" + busy); //$NON-NLS-1$ //$NON-NLS-2$
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
                 return;
             }
             if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
+            {
+                DeferTrace.log("resume.restart", doc, job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+            }
+            else
+                DeferTrace.log("resume.busy", doc, job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

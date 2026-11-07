@@ -12,7 +12,12 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.QualifiedName;
 import org.eclipse.jface.text.ITextOperationTarget;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.jface.text.source.SourceViewerConfiguration;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.browser.Browser;
@@ -396,6 +401,7 @@ public final class TextTemplateFormatPagesHook implements IStartup
             TextEditorOccurrencesSupport.registerViewer(viewer);
             installToolbar();
             formatted.start(loadChoice(file));
+            new CaretMemory(file.getFullPath().toString(), textEditor, viewer).start();
         }
 
         /**
@@ -476,6 +482,120 @@ public final class TextTemplateFormatPagesHook implements IStartup
                 Global.pluginSignForTooltip(),
                 chosen -> saveChoice(file, chosen));
             body.layout(true, true);
+        }
+    }
+
+    /**
+     * Запоминает позицию каретки в сыром тексте макета (#1011) и восстанавливает при повторном
+     * открытии, как в модуле. Хранение между сеансами — {@link EditorMemoryStore}, ключ — файл макета.
+     */
+    private static final class CaretMemory
+    {
+        private static final char SEP = '\t';
+
+        private static final EditorMemoryStore STORE = new EditorMemoryStore("textTemplatePosition.entries", 300); //$NON-NLS-1$
+
+        private final String key;
+
+        private final ITextEditor textEditor;
+
+        private final SourceViewer viewer;
+
+        private boolean restoring;
+
+        CaretMemory(String key, ITextEditor textEditor, SourceViewer viewer)
+        {
+            this.key = key;
+            this.textEditor = textEditor;
+            this.viewer = viewer;
+        }
+
+        void start()
+        {
+            StyledText widget = viewer.getTextWidget();
+            if (widget == null || widget.isDisposed() || viewer.getSelectionProvider() == null)
+                return;
+            int[] saved = load();
+            Global.tempLog("text-template-position", "start key=" + key + " saved=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (saved == null ? null : saved[0] + ":" + saved[1]) //$NON-NLS-1$
+                + " height=" + widget.getClientArea().height); //$NON-NLS-1$
+            restoring = saved != null;
+            viewer.getSelectionProvider().addSelectionChangedListener(event -> remember());
+            widget.addListener(SWT.FocusOut, event -> STORE.flush());
+            widget.addListener(SWT.Dispose, event -> STORE.flush());
+            if (saved == null)
+                return;
+            if (widget.getClientArea().height > 0)
+                restore(saved);
+            else
+            {
+                // Страница ещё не раскладана: прокрутка к каретке сработает только по готовому размеру.
+                Listener[] once = new Listener[1];
+                once[0] = event ->
+                {
+                    if (widget.isDisposed() || widget.getClientArea().height <= 0)
+                        return;
+                    widget.removeListener(SWT.Resize, once[0]);
+                    restore(saved);
+                };
+                widget.addListener(SWT.Resize, once[0]);
+            }
+        }
+
+        private void restore(int[] saved)
+        {
+            IDocument document = viewer.getDocument();
+            if (document == null || viewer.getTextWidget().isDisposed())
+            {
+                restoring = false;
+                return;
+            }
+            try
+            {
+                int line = Math.max(0, Math.min(saved[0], document.getNumberOfLines() - 1));
+                IRegion info = document.getLineInformation(line);
+                int offset = info.getOffset() + Math.max(0, Math.min(saved[1], info.getLength()));
+                textEditor.selectAndReveal(offset, 0);
+                Global.tempLog("text-template-position", "restored line=" + line + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (BadLocationException ignored)
+            {
+                // Текст короче запомненной позиции — остаёмся в начале.
+            }
+            restoring = false;
+        }
+
+        private void remember()
+        {
+            IDocument document = viewer.getDocument();
+            if (restoring || document == null)
+                return;
+            try
+            {
+                int offset = viewer.getSelectedRange().x;
+                int line = document.getLineOfOffset(offset);
+                STORE.updateMemory(key, line + "" + SEP + (offset - document.getLineOffset(line))); //$NON-NLS-1$
+            }
+            catch (BadLocationException ignored)
+            {
+                // Документ в момент подмены текста — пропускаем событие.
+            }
+        }
+
+        private int[] load()
+        {
+            String raw = STORE.load(key);
+            if (raw == null)
+                return null;
+            String[] parts = raw.split(String.valueOf(SEP), -1);
+            try
+            {
+                return parts.length == 2 ? new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) } : null;
+            }
+            catch (NumberFormatException ignored)
+            {
+                return null;
+            }
         }
     }
 

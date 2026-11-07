@@ -224,7 +224,10 @@ final class BslTypeCatalog
             if (!constructor && !description && !name.equals(PROVIDERS + "StringLiteralProposalProviderMethodType"))
                 return null;
             var bundle = org.osgi.framework.FrameworkUtil.getBundle(provider.getClass());
-            if (bundle == null || !bundle.getVersion().toString().equals("22.0.0.v202605050943"))
+            if (bundle == null)
+                return null;
+            var version = bundle.getVersion();
+            if (version.getMajor() != 22 || version.getMinor() != 0 || version.getMicro() != 0)
                 return null;
             EObject context = (EObject)args[1];
             if (!(context.eResource() instanceof XtextResource resource) || !(args[2] instanceof String typed))

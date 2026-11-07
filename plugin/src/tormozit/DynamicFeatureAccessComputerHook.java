@@ -24,6 +24,14 @@ import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
+import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
+import com._1c.g5.v8.dt.bsl.model.IndexAccess;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.PropertyType;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.NamingCollectionServiceProvider;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
@@ -36,6 +44,7 @@ import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCharacteristicTypes;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 
@@ -62,6 +71,12 @@ import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
  * Копии Filter конкретных регистров находятся в модели метаданных; их проверка имён остаётся
  * штатной. Это вплетение ставит
  * ранний бандл {@code tormozit.comfort.early}, до загрузки вычислителя BSL.
+ *
+ * <p>Члены после закрытых коллекций метаданных проверяет динамическая проверка
+ * («Свойство (метод) объекта не обнаружено»), но только там, где не работает статическая: обе
+ * сообщают через один {@code unknownLeftPart}, и на слове после {@code Справочники.} было по две
+ * пометки — {@code …-static-feature-access…} и {@code …-dynamic-feature-access…}. Разделение
+ * делает {@link #dynamicAllowed}.
  *
  * <p>Строковая специализация {@code КлючИЗначение}: общий список свойств модели исключает
  * унаследованный произвольный ключ; собственный строковый ключ получает код документации
@@ -112,14 +127,192 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) FormItemTypes::expand);
         System.getProperties().put("tormozit.dynamicFeatureAccess.methodTypes", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.withChildren(FormItemTypes.expand(args), args[1], args[2]));
+        System.getProperties().put("tormozit.bslValidator.checkLastMember",
+            (Function<Object[], Object>) DynamicFeatureAccessComputerHook::checkLastMember);
         System.getProperties().put("tormozit.bslValidator.openType", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.validatorOpenType(args[0], args[1], args[2], args[3], args[4]));
+        System.getProperties().put("tormozit.bslValidator.dynamicAllowed", //$NON-NLS-1$
+            (Function<Object[], Object>) DynamicFeatureAccessComputerHook::dynamicAllowed);
         System.getProperties().put("tormozit.dynamicFeatureAccess.namingCollections", //$NON-NLS-1$
             (Function<Object[], Object>) SpecialMemberTemplates::namingCollections);
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
         BundleContext context = bundle != null ? bundle.getBundleContext() : null;
         if (context != null)
             context.registerService(WeavingHook.class, new ProviderWeavingHook(), null);
+    }
+
+
+    /** Типы-менеджеры метаданных: именованные члены такого типа EDT получает из произведённых типов. */
+    private static final java.util.Set<String> METADATA_MANAGERS = java.util.Set.of(
+        "CatalogsManager", "DocumentsManager", "ChartsOfCharacteristicTypesManager",
+        "ChartsOfCalculationTypesManager", "ExchangePlansManager", "EnumsManager",
+        "InformationRegistersManager", "AccumulationRegistersManager", "ConstantsManager", "SequencesManager",
+        "DocumentJournalsManager", "ReportsManager", "DataProcessorsManager", "TasksManager",
+        "FilterCriteriaManager", "SettingsStoragesManager", "BusinessProcessesManager", "WSReferencesManager",
+        "CalculationRegistersManager", "ChartsOfAccountsManager", "ExternalDataSourcesManager",
+        "IntegrationServicesManager", "AccountingRegistersManager");
+    /** Те же имена в нижнем регистре — сверка с именами типов модели без учёта регистра. */
+    private static final java.util.Set<String> METADATA_MANAGERS_LOWER = METADATA_MANAGERS.stream()
+        .map(name -> name.toLowerCase(java.util.Locale.ROOT))
+        .collect(java.util.stream.Collectors.toUnmodifiableSet());
+
+    /**
+     * Разрешение динамической проверке рассмотреть цепочку: {@code {обращение, окружения, значение}} из
+     * {@code BslJavaValidator.checkDynamicFeatureAccessForUnknownLeftPart}. Наружу — только {@link Boolean}:
+     * в байткоде после вызова стоит {@code CHECKCAST Boolean}. {@code false} — цепочку уже проверяет
+     * статическая проверка ({@link #staticallyChecked}), иначе обе сообщали бы об одном слове через
+     * {@code unknownLeftPart}.
+     */
+    private static Object dynamicAllowed(Object[] args)
+    {
+        Object value = args[2];
+        boolean enabled = value instanceof Boolean flag ? flag : Integer.valueOf(1).equals(value);
+        try
+        {
+            if (enabled && args[0] instanceof DynamicFeatureAccess feature
+                && args[1] instanceof Environments environments)
+            {
+                TypesComputer types = typesComputer(feature);
+                if (types != null && staticallyChecked(feature, environments, types))
+                    return Boolean.FALSE;
+            }
+        }
+        catch (RuntimeException exception)
+        {
+            // Остаётся штатное поведение проверки.
+        }
+        return Boolean.valueOf(enabled);
+    }
+
+    /**
+     * Итог {@code getLastObject} для {@code BslJavaValidator.checkDynamicFeatureAccessForUnknownLeftPart}:
+     * член не найден, а левая часть — закрытая коллекция метаданных, значит обращение ошибочно. Цепочку,
+     * которую уже проверяет статическая проверка, не трогаем — см. {@link #staticallyChecked}.
+     */
+    private static Object checkLastMember(Object[] args)
+    {
+        var entries = (Collection<?>) args[0];
+        var access = (DynamicFeatureAccess) args[1];
+        var environments = (Environments) args[2];
+        if (!(access.eResource() instanceof XtextResource resource) || resource.getResourceServiceProvider() == null)
+            return args;
+
+        var services = resource.getResourceServiceProvider();
+        TypesComputer types = services.get(TypesComputer.class);
+        DynamicFeatureAccessComputer members = services.get(DynamicFeatureAccessComputer.class);
+        DynamicFeatureAccess missing = null;
+        for (DynamicFeatureAccess part = access; part != null; part = precedingMember(part))
+        {
+            Collection<?> known = part == access ? entries : part.getFeatureEntries();
+            if (part.getSource() == null || part.getName() == null || part.getName().isEmpty()
+                || isMethodAccess(part) || hasResolvedMember(known))
+                continue;
+            var sourceTypes = types.computeTypes(part.getSource(), environments);
+            if (sourceTypes.isEmpty() || !sourceTypes.stream().allMatch(DynamicFeatureAccessComputerHook::isClosedCollection))
+                continue;
+            if (part == access || !hasResolvedMember(members.getLastObject(part, environments, true)))
+                missing = part;
+        }
+        return missing == null ? args : new Object[] {java.util.List.of(), missing};
+    }
+
+    private static boolean hasResolvedMember(Collection<?> entries)
+    {
+        return entries.stream().anyMatch(entry ->
+            !(entry instanceof FeatureEntry feature && feature.getFeature() instanceof DerivedProperty property
+                && property.getSource() == null && property.eContainer() == null));
+    }
+
+    private static DynamicFeatureAccess precedingMember(DynamicFeatureAccess access)
+    {
+        var source = access.getSource();
+        if (source instanceof Invocation invocation)
+            return invocation.getMethodAccess() instanceof DynamicFeatureAccess member ? member : null;
+        if (source instanceof IndexAccess index)
+            source = index.getSource();
+        return source instanceof DynamicFeatureAccess member ? member : null;
+    }
+
+    private static boolean isMethodAccess(DynamicFeatureAccess access)
+    {
+        return access.eContainer() instanceof Invocation invocation && invocation.getMethodAccess() == access;
+    }
+
+    private static boolean isClosedCollection(TypeItem type)
+    {
+        return METADATA_MANAGERS.contains(java.util.Objects.toString(McoreUtil.getTypeName(type), ""))
+            || type instanceof PropertyType property && isMetadataCollection(property.getName())
+                && !property.getPropertyName().isEmpty();
+    }
+
+    private static boolean isMetadataCollection(String name)
+    {
+        return "MetadataObjectCollection".equals(name) || "MetadataObjectPropertyValueCollection".equals(name);
+    }
+
+    /**
+     * Цепочку уже проверяет статическая проверка
+     * {@code BslJavaValidator.checkStaticFeatureAccessForUnknownLeftPart}. Её корень — обращение с типом,
+     * для которого EDT ищет члены пользователя ({@code canHaveUserMethodOrProperty} того же валидатора):
+     * набор типов, имя с квалификатором ({@code CatalogObject.Имя}), тип-менеджер метаданных или
+     * {@code ConfigurationMetadataObject} (обращения к {@code Метаданные}). Тогда статическая проверка
+     * сама доходит до верха цепочки и сообщает об отсутствующем члене, а динамическая только
+     * продублировала бы пометку на том же слове: обе сообщают через {@code unknownLeftPart}.
+     * Поэтому динамическая оставляет себе цепочки, в которые статическая не входит, — с корнем-вызовом
+     * типа без квалификатора ({@code РеквизитФормыВЗначение(…).Товары.Реквизит}).
+     */
+    private static boolean staticallyChecked(DynamicFeatureAccess access, Environments environments,
+        TypesComputer computer)
+    {
+        StaticFeatureAccess name = leftmostName(access);
+        if (name == null)
+            return false;
+        java.util.List<TypeItem> declared;
+        try
+        {
+            declared = computer.computeTypes(name, environments);
+        }
+        catch (RuntimeException exception)
+        {
+            return false;
+        }
+        for (TypeItem item : declared)
+        {
+            if (item instanceof TypeSet)
+                return true;
+            String typeName = McoreUtil.getTypeName(item);
+            if (typeName != null && (typeName.indexOf('.') >= 0 || "ConfigurationMetadataObject".equals(typeName)
+                || METADATA_MANAGERS_LOWER.contains(typeName.toLowerCase(java.util.Locale.ROOT))))
+                return true;
+        }
+        return false;
+    }
+
+    /** Самое левое обращение цепочки; {@code null}, если цепочка начинается не с имени. */
+    private static StaticFeatureAccess leftmostName(DynamicFeatureAccess access)
+    {
+        EObject current = access.getSource();
+        for (int depth = 0; current != null && depth < 32; depth++)
+        {
+            if (current instanceof StaticFeatureAccess name)
+                return name;
+            if (current instanceof DynamicFeatureAccess part)
+                current = part.getSource();
+            else if (current instanceof Invocation invocation)
+                current = invocation.getMethodAccess();
+            else if (current instanceof IndexAccess index)
+                current = index.getSource();
+            else
+                return null;
+        }
+        return null;
+    }
+
+    private static TypesComputer typesComputer(EObject object)
+    {
+        return object != null && object.eResource() instanceof XtextResource resource
+            && resource.getResourceServiceProvider() != null
+            ? resource.getResourceServiceProvider().get(TypesComputer.class) : null;
     }
 
     @Override
@@ -278,6 +471,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             // БиблиотекаКартинок: набор членов полный, EDT пропускает тип напрасно — проверяется всегда.
             if ("PictureLib".equals(name)) //$NON-NLS-1$
                 return name + ".comfort-members-complete"; //$NON-NLS-1$
+            if ("SequencesManager".equals(name))
+                return name + ".comfort-members-complete";
             if (ABSTRACT_TYPE.equals(name))
                 return verified ? name + ".comfort-members-merged" : name; //$NON-NLS-1$
             return flaggedIsMethodCall(access, parts, index) ? name + ".comfort-method-checked" : name; //$NON-NLS-1$
@@ -297,7 +492,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                 return null;
             Version version = versions.getRuntimeVersionOrDefault(resource, Version.LATEST);
             for (Object candidate : names)
-                if (candidate instanceof String text && collections.isNamingCollectionTypeName(text, version))
+                if (candidate instanceof String text && !isMetadataCollection(text) && !METADATA_MANAGERS.contains(text)
+                    && collections.isNamingCollectionTypeName(text, version))
                     return text;
             return null;
         }

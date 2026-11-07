@@ -39,8 +39,6 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
-        // Временно отключено по просьбе пользователя: без перехватов и записи лога #972.
-        // DeadlockDiagnostics.install(context);
         CheckSchedulerWeaving.install(context);
         AssistLeafLookupWeaving.install(context);
         ApplicationResetDiagnostics.install(context);
@@ -617,533 +615,6 @@ public final class Activator
             if (touched.get())
                 woven.setBytes(writer.toByteArray());
             System.getProperties().put(CALLBACK + ".woven", touched.get()); //$NON-NLS-1$
-        }
-    }
-
-    /**
-     * Временная диагностика #972. Только наблюдение: не открывает модель, не меняет
-     * транзакции, ожидания или разрешения шлюза. Пишет только в temp-logs;
-     * после очистки восстанавливает словарь стеков.
-     */
-    private static final class DeadlockDiagnostics implements WeavingHook
-    {
-        private static final String CALLBACK = "tormozit.deadlock972.event";
-        private static final String BM = "com._1c.g5.v8.bm.core.internal.SynchronizedPlatformOrchestrator";
-        private static final String CHECK = "com.e1c.g5.v8.dt.internal.check.CheckScheduler";
-        private static final String WORKSPACE = "com._1c.g5.v8.dt.internal.core.platform.WorkspaceOrchestrator";
-        private static final String RESTART = "com._1c.g5.v8.dt.core.lifecycle.ProjectRestartJob";
-        private static final java.util.Set<String> TARGETS = java.util.Set.of(BM, CHECK, WORKSPACE, RESTART,
-            CHECK + "$4", CHECK + "$CompatibilityChangeListener");
-        private static final java.util.Set<String> BM_METHODS = java.util.Set.of("beginTransaction", "endTransaction",
-            "beginServiceOperation", "endServiceOperation", "beginStart", "endStart", "beginClose", "endClose",
-            "beginNonInterruptableOperation", "finishNonInterruptableOperation");
-        private static final Map<String, String> BM_FIELDS = Map.of("activeTransactionCount", "I",
-            "waitingServiceOperationCount", "I", "serviceOperationRunning", "Z", "lock", "Ljava/lang/Object;");
-        private final java.nio.file.Path mirror;
-        private final java.util.concurrent.ConcurrentLinkedQueue<Object> queue = new java.util.concurrent.ConcurrentLinkedQueue<>();
-        private final Map<String, Integer> stacks = new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<String, String> coverage = new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<String, String> pending = new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<Object, Integer> platforms = new java.util.IdentityHashMap<>();
-        private final Map<Integer, String> platformNames = new java.util.concurrent.ConcurrentHashMap<>();
-        private final Map<Long, String> threadNames = new java.util.concurrent.ConcurrentHashMap<>();
-        private final java.util.concurrent.ConcurrentLinkedQueue<HotSlot> slots = new java.util.concurrent.ConcurrentLinkedQueue<>();
-        private final ThreadLocal<HotThread> hotThreads = ThreadLocal.withInitial(HotThread::new);
-        private final long nanoBase = System.nanoTime();
-        private final java.util.concurrent.atomic.AtomicLong sequence = new java.util.concurrent.atomic.AtomicLong();
-        private final java.util.concurrent.atomic.AtomicInteger stackIds = new java.util.concurrent.atomic.AtomicInteger();
-        private final String session = java.time.LocalDateTime.now() + " pid=" + ProcessHandle.current().pid();
-        private final StringBuilder retry = new StringBuilder(); // Только поток записи.
-        private long nextSnapshot;
-        private String mirrorFailure;
-
-        DeadlockDiagnostics(java.nio.file.Path root)
-        {
-            mirror = root.resolve("temp-logs/deadlock-972.log.gz");
-        }
-
-        static void install(BundleContext context)
-        {
-            DeadlockDiagnostics diagnostics = new DeadlockDiagnostics(java.nio.file.Path.of("C:/VC/EDT.Comfort/.tmp"));
-            System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
-            System.getProperties().put(CALLBACK + ".hot", (BiFunction<Object, Object, Object>) (platform, code) ->
-            {
-                diagnostics.hot(platform, ((Integer) code).intValue());
-                return null;
-            });
-            context.registerService(WeavingHook.class, diagnostics, null);
-            diagnostics.line("installed; early=" + context.getBundle().getVersion()
-                + "; file=" + diagnostics.mirror);
-            diagnostics.flush();
-            diagnostics.writeStatus();
-            var writer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
-            {
-                Thread thread = new Thread(runnable, "Comfort: deadlock 972 log writer");
-                thread.setDaemon(true);
-                return thread;
-            });
-            writer.scheduleAtFixedRate(diagnostics::tick, 1000, 1000, java.util.concurrent.TimeUnit.MILLISECONDS);
-        }
-
-        @Override
-        public void weave(WovenClass woven)
-        {
-            if (woven.getState() != WovenClass.TRANSFORMING || !target(woven.getClassName()))
-                return;
-            try
-            {
-                byte[] bytes = instrument(woven.getClassName(), woven.getBytes());
-                if (bytes != null)
-                    woven.setBytes(bytes);
-            }
-            catch (Throwable failure)
-            {
-                coverage.put(woven.getClassName(), "FAILED " + failure);
-                line("weave-failed; class=" + woven.getClassName() + "; error=" + failure);
-            }
-        }
-
-        private static boolean target(String name)
-        {
-            return TARGETS.contains(name);
-        }
-
-        /** Используется также из изолированной пробы на настоящих class-файлах EDT. */
-        byte[] instrument(String name, byte[] bytes)
-        {
-            ClassReader reader = new ClassReader(bytes);
-            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-            var fields = new java.util.HashMap<String, String>();
-            var methods = new java.util.ArrayList<String>();
-            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-            {
-                @Override
-                public FieldVisitor visitField(int access, String field, String descriptor, String signature, Object value)
-                {
-                    fields.put(field, descriptor);
-                    return super.visitField(access, field, descriptor, signature, value);
-                }
-
-                @Override
-                public MethodVisitor visitMethod(int access, String method, String descriptor, String signature, String[] exceptions)
-                {
-                    MethodVisitor original = super.visitMethod(access, method, descriptor, signature, exceptions);
-                    if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0
-                        || !selected(name, method))
-                        return original;
-                    methods.add(method + descriptor);
-                    boolean hotTransaction = BM.equals(name)
-                        && (method.equals("beginTransaction") || method.equals("endTransaction"));
-                    return new MethodVisitor(Opcodes.ASM9, original)
-                    {
-                        private void emitHot()
-                        {
-                            // Две записи на транзакцию вместо шести: фактический захват и освобождение.
-                            // Без Object[8], описаний объектов, стеков и строк в вызывающем потоке.
-                            EarlyWeaving.emitGetProperty(mv, CALLBACK + ".hot", "java/util/function/BiFunction");
-                            mv.visitVarInsn(Opcodes.ALOAD, 0);
-                            mv.visitVarInsn(Opcodes.ALOAD, 0);
-                            mv.visitFieldInsn(Opcodes.GETFIELD, name.replace('.', '/'), "activeTransactionCount", "I");
-                            mv.visitInsn(Opcodes.ICONST_1);
-                            mv.visitInsn(Opcodes.ISHL);
-                            mv.visitInsn(method.equals("beginTransaction") ? Opcodes.ICONST_1 : Opcodes.ICONST_0);
-                            mv.visitInsn(Opcodes.IOR);
-                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
-                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
-                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
-                            mv.visitInsn(Opcodes.POP);
-                        }
-
-                        private void emit(String phase)
-                        {
-                            EarlyWeaving.emitGetProperty(mv, CALLBACK, "java/util/function/Consumer");
-                            mv.visitLdcInsn(8);
-                            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
-                            for (int i = 0; i < 8; i++)
-                            {
-                                mv.visitInsn(Opcodes.DUP);
-                                mv.visitLdcInsn(i);
-                                if (i == 0)
-                                    mv.visitLdcInsn(name + "." + method + descriptor);
-                                else if (i == 1)
-                                    mv.visitLdcInsn(phase);
-                                else if (i == 2)
-                                    mv.visitVarInsn(Opcodes.ALOAD, 0);
-                                else if (i == 3 && (descriptor.startsWith("(L") || descriptor.startsWith("([")))
-                                    mv.visitVarInsn(Opcodes.ALOAD, 1);
-                                else if (i >= 4 && BM.equals(name))
-                                {
-                                    String field = switch (i)
-                                    {
-                                        case 4 -> "activeTransactionCount";
-                                        case 5 -> "waitingServiceOperationCount";
-                                        case 6 -> "serviceOperationRunning";
-                                        default -> "lock";
-                                    };
-                                    String type = BM_FIELDS.get(field);
-                                    mv.visitVarInsn(Opcodes.ALOAD, 0);
-                                    mv.visitFieldInsn(Opcodes.GETFIELD, name.replace('.', '/'), field, type);
-                                    if ("I".equals(type))
-                                        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
-                                    else if ("Z".equals(type))
-                                        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
-                                }
-                                else
-                                    mv.visitInsn(Opcodes.ACONST_NULL);
-                                mv.visitInsn(Opcodes.AASTORE);
-                            }
-                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
-                        }
-
-                        @Override
-                        public void visitCode()
-                        {
-                            super.visitCode();
-                            if (!hotTransaction)
-                                emit("enter");
-                        }
-
-                        @Override
-                        public void visitInsn(int opcode)
-                        {
-                            if (!hotTransaction && opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
-                                emit("return");
-                            else if (opcode == Opcodes.ATHROW)
-                                emit("throw-instruction"); // Может быть пойман внутри самого метода.
-                            super.visitInsn(opcode);
-                        }
-
-                        @Override
-                        public void visitFieldInsn(int opcode, String owner, String field, String type)
-                        {
-                            super.visitFieldInsn(opcode, owner, field, type);
-                            if (BM.equals(name) && opcode == Opcodes.PUTFIELD && BM_FIELDS.containsKey(field))
-                            {
-                                if (hotTransaction && field.equals("activeTransactionCount"))
-                                    emitHot();
-                                else
-                                    emit("state:" + field);
-                            }
-                        }
-
-                        @Override
-                        public void visitMethodInsn(int opcode, String owner, String called, String type, boolean isInterface)
-                        {
-                            String phase = owner.equals("java/lang/Object") && called.equals("wait") ? "wait"
-                                : owner.equals("java/util/concurrent/CompletableFuture") && called.equals("get") ? "future-get"
-                                : owner.equals("java/util/concurrent/CompletableFuture") && called.equals("runAsync") ? "future-submit" : null;
-                            if (phase != null)
-                                emit(phase + "-before");
-                            super.visitMethodInsn(opcode, owner, called, type, isInterface);
-                            if (phase != null)
-                                emit(phase + "-after");
-                        }
-                    };
-                }
-            }, 0);
-            var found = methods.stream().map(method -> method.substring(0, method.indexOf('(')))
-                .collect(java.util.stream.Collectors.toSet());
-            java.util.Set<String> required = BM.equals(name) ? BM_METHODS
-                : CHECK.equals(name) ? java.util.Set.of("scheduleValidation", "scheduleScopedFullRebuild", "scheduleModelScopedFullRebuild", "lambda$7")
-                : WORKSPACE.equals(name) ? java.util.Set.of("cleanRestartProjects", "stopContext")
-                : RESTART.equals(name) ? java.util.Set.of("run", "doRestart")
-                : (CHECK + "$4").equals(name) ? java.util.Set.of("update") : java.util.Set.of("handleAsyncEvent");
-            if (!found.containsAll(required) || (BM.equals(name) && !fields.entrySet().containsAll(BM_FIELDS.entrySet())))
-            {
-                coverage.put(name, "NOT WOVEN; fields=" + fields + "; methods=" + methods);
-                line("NOT WOVEN; class=" + name + "; coverage=" + coverage.get(name));
-                return null;
-            }
-            coverage.put(name, "woven; methods=" + methods);
-            line("woven; class=" + name + "; methods=" + methods);
-            return writer.toByteArray();
-        }
-
-        private static boolean selected(String name, String method)
-        {
-            if (BM.equals(name))
-                return BM_METHODS.contains(method);
-            if (CHECK.equals(name))
-                return method.equals("scheduleValidation") || method.equals("scheduleScopedFullRebuild")
-                    || method.equals("scheduleModelScopedFullRebuild") || method.equals("lambda$7");
-            if (WORKSPACE.equals(name))
-                return method.equals("cleanRestartProjects") || method.equals("stopContext");
-            if (RESTART.equals(name))
-                return method.equals("run") || method.equals("doRestart");
-            return (CHECK + "$4").equals(name) ? method.equals("update") : method.equals("handleAsyncEvent");
-        }
-
-        private void record(Object[] event)
-        {
-            try
-            {
-                Thread thread = Thread.currentThread();
-                String method = (String) event[0];
-                String phase = (String) event[1];
-                String receiver = identity(event[2]);
-                String key = receiver + "/" + thread.getId();
-                int stackId = 0;
-                // Стек нужен у инициатора редкой операции и в точке ожидания, а не у
-                // каждого счётчика/возврата. Каждое внедрённое событие всё равно записывается.
-                if (phase.equals("enter") || phase.endsWith("-before") || phase.equals("throw-instruction"))
-                {
-                    String stack = java.util.Arrays.stream(thread.getStackTrace())
-                        .map(frame -> "\n    at " + frame).collect(java.util.stream.Collectors.joining());
-                    stackId = stacks.computeIfAbsent(stack, text ->
-                    {
-                        int id = stackIds.incrementAndGet();
-                        line("stack=" + id + text);
-                        return id;
-                    });
-                }
-                long id = sequence.incrementAndGet();
-                String text = "event=" + id + "; nano=" + System.nanoTime() + "; thread=" + thread.getId()
-                    + "/" + thread.getName() + "; receiver=" + receiver + "; method=" + method + "; phase=" + phase
-                    + "; arg=" + identity(event[3]) + "; active=" + event[4] + "; waitingService=" + event[5]
-                    + "; serviceRunning=" + event[6] + "; lock=" + identity(event[7]) + "; stack=" + stackId;
-                line(text);
-                if (phase.equals("wait-before") || phase.equals("future-get-before"))
-                    pending.put(key + "/" + method, text);
-                else if (phase.equals("wait-after") || phase.equals("future-get-after") || phase.equals("return"))
-                    pending.remove(key + "/" + method);
-            }
-            catch (Throwable failure)
-            {
-                line("record-failed; error=" + failure);
-            }
-        }
-
-        private static final class HotThread
-        {
-            final long id = Thread.currentThread().getId();
-            final Map<Object, HotSlot> platforms = new java.util.IdentityHashMap<>();
-            String name;
-            long sequence;
-        }
-
-        private static final class HotSlot
-        {
-            final long thread;
-            final int platform;
-            volatile int depth;
-            volatile long start;
-            volatile long first;
-
-            HotSlot(long thread, int platform)
-            {
-                this.thread = thread;
-                this.platform = platform;
-            }
-        }
-
-        private static final class HotEvent
-        {
-            final long nano;
-            final long thread;
-            final long sequence;
-            final int platform;
-            final int code;
-
-            HotEvent(long nano, long thread, long sequence, int platform, int code)
-            {
-                this.nano = nano;
-                this.thread = thread;
-                this.sequence = sequence;
-                this.platform = platform;
-                this.code = code;
-            }
-
-            void appendTo(StringBuilder out)
-            {
-                out.append("T ").append(nano).append(' ').append(thread).append(' ').append(sequence)
-                    .append(' ').append(platform).append(' ').append(code).append('\n');
-            }
-        }
-
-        private void hot(Object platform, int code)
-        {
-            try
-            {
-                HotThread thread = hotThreads.get();
-                HotSlot slot = thread.platforms.get(platform);
-                if (slot == null)
-                {
-                    int id;
-                    synchronized (platforms)
-                    {
-                        id = platforms.computeIfAbsent(platform, ignored -> platforms.size() + 1);
-                    }
-                    String name = identity(platform);
-                    if (platformNames.putIfAbsent(id, name) == null)
-                        line("P " + id + " " + name);
-                    slot = new HotSlot(thread.id, id);
-                    thread.platforms.put(platform, slot);
-                    slots.add(slot);
-                }
-                String name = Thread.currentThread().getName();
-                if (!name.equals(thread.name))
-                {
-                    thread.name = name;
-                    threadNames.put(thread.id, name);
-                    line("N " + thread.id + " " + name);
-                }
-                long now = System.nanoTime() - nanoBase;
-                long id = ++thread.sequence;
-                if ((code & 1) != 0)
-                {
-                    if (slot.depth == 0)
-                    {
-                        slot.start = now;
-                        slot.first = id;
-                    }
-                    slot.depth++;
-                }
-                else
-                    slot.depth--;
-                queue.add(new HotEvent(now, thread.id, id, slot.platform, code));
-            }
-            catch (Throwable failure)
-            {
-                line("hot-record-failed; error=" + failure);
-            }
-        }
-
-        private static String identity(Object value)
-        {
-            // Никаких EObject.toString/getURI/hashCode/getProject: они могут открыть транзакцию.
-            if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean)
-                return String.valueOf(value);
-            if (value instanceof Enum<?> item)
-                return item.name();
-            // Имя ресурса workspace — метаданные Eclipse, не обращение к BM-модели.
-            if (value.getClass().getName().equals("org.eclipse.core.internal.resources.Project"))
-                try
-                {
-                    return "project=" + value.getClass().getMethod("getName").invoke(value);
-                }
-                catch (ReflectiveOperationException ignored)
-                {
-                    // Для неизвестной реализации достаточно идентичности экземпляра.
-                }
-            return value.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(value));
-        }
-
-        private void line(String text)
-        {
-            queue.add(java.time.LocalDateTime.now() + " " + text + "\n");
-        }
-
-        private void tick()
-        {
-            try
-            {
-                long now = System.nanoTime();
-                if (now >= nextSnapshot)
-                {
-                    nextSnapshot = now + 5_000_000_000L;
-                    line("heartbeat; session=" + session + "; coverage=" + coverage
-                        + "; writeFailure=" + mirrorFailure);
-                    StringBuilder active = new StringBuilder("active-transactions=");
-                    for (HotSlot slot : slots)
-                        if (slot.depth != 0)
-                            active.append(" [thread=").append(slot.thread).append(" platform=").append(slot.platform)
-                                .append(" depth=").append(slot.depth).append(" first=").append(slot.first)
-                                .append(" startNano=").append(slot.start).append(']');
-                    line(active.toString());
-                    line("pending=" + pending);
-                    if (!pending.isEmpty())
-                        threadDump();
-                    writeStatus();
-                }
-            }
-            catch (Throwable failure)
-            {
-                line("tick-failed; error=" + failure);
-            }
-            flush();
-        }
-
-        private void writeStatus()
-        {
-            boolean ready = java.util.stream.Stream.of(BM, CHECK, WORKSPACE)
-                .allMatch(name -> coverage.getOrDefault(name, "").startsWith("woven;"));
-            StringBuilder status = new StringBuilder("session=" + session + "\nupdated=" + java.time.LocalDateTime.now()
-                + "\nready=" + ready + "\nfile=" + mirror
-                + "\nfullRebuildExecutor=" + System.getProperty(CheckSchedulerWeaving.STATUS, "NOT INSTALLED")
-                + "\nwriteFailure=" + mirrorFailure + "\n");
-            TARGETS.stream().sorted().forEach(name -> status.append(name).append(": ")
-                .append(coverage.getOrDefault(name, "NOT LOADED / not observed")).append('\n'));
-            try
-            {
-                java.nio.file.Files.createDirectories(mirror.getParent());
-                java.nio.file.Files.writeString(mirror.resolveSibling("deadlock-972-status.log"), status);
-            }
-            catch (Exception failure)
-            {
-                line("status-write-failed; error=" + failure);
-            }
-            System.setProperty(CALLBACK + ".status", status.toString());
-        }
-
-        private void threadDump()
-        {
-            StringBuilder dump = new StringBuilder("THREAD-DUMP session=" + session + "; nano=" + System.nanoTime());
-            var mx = java.lang.management.ManagementFactory.getThreadMXBean();
-            for (var info : mx.dumpAllThreads(mx.isObjectMonitorUsageSupported(), mx.isSynchronizerUsageSupported()))
-            {
-                dump.append("\n\"").append(info.getThreadName()).append("\" id=").append(info.getThreadId())
-                    .append(' ').append(info.getThreadState()).append(" waiting=").append(info.getLockInfo())
-                    .append(" owner=").append(info.getLockOwnerId()).append('/').append(info.getLockOwnerName());
-                for (StackTraceElement frame : info.getStackTrace())
-                    dump.append("\n    at ").append(frame);
-                for (var monitor : info.getLockedMonitors())
-                    dump.append("\n    locked ").append(monitor).append(" at depth=").append(monitor.getLockedStackDepth());
-                for (var synchronizer : info.getLockedSynchronizers())
-                    dump.append("\n    synchronizer ").append(synchronizer);
-            }
-            line(dump.toString());
-        }
-
-        private void flush()
-        {
-            Object text;
-            // При ошибке записи сохраняем текущую пачку для повторной попытки.
-            if (retry.length() == 0)
-                while ((text = queue.poll()) != null)
-                    if (text instanceof HotEvent event)
-                        event.appendTo(retry);
-                    else
-                        retry.append(text);
-            if (retry.length() == 0)
-                return;
-            try
-            {
-                    java.nio.file.Files.createDirectories(mirror.getParent());
-                    StringBuilder prelude = new StringBuilder();
-                    if (!java.nio.file.Files.exists(mirror))
-                    {
-                        prelude.append("session=").append(session).append(" nanoBase=").append(nanoBase)
-                            .append("\nformat=972-v2; T relativeNano thread sequence platform code; code=(activeCount<<1)|acquired\n")
-                            .append("coverage=").append(coverage).append('\n');
-                        stacks.forEach((stack, id) -> prelude.append("stack=").append(id).append(stack).append('\n'));
-                        platformNames.forEach((id, name) -> prelude.append("P ").append(id).append(' ').append(name).append('\n'));
-                        threadNames.forEach((id, name) -> prelude.append("N ").append(id).append(' ').append(name).append('\n'));
-                    }
-                    // Сжатие и форматирование — только здесь, в фоновом потоке записи.
-                    var bytes = new java.io.ByteArrayOutputStream();
-                    try (var gzip = new java.util.zip.GZIPOutputStream(bytes))
-                    {
-                        gzip.write((prelude.toString() + retry).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                    }
-                    java.nio.file.Files.write(mirror, bytes.toByteArray(), java.nio.file.StandardOpenOption.CREATE,
-                        java.nio.file.StandardOpenOption.APPEND);
-                    retry.setLength(0);
-                    mirrorFailure = null;
-            }
-            catch (Exception failure)
-            {
-                mirrorFailure = failure.toString();
-            }
         }
     }
 
@@ -2533,17 +2004,21 @@ public final class Activator
     private static final class UnknownMemberWeaving implements WeavingHook
     {
         private static final String CALLBACK = "tormozit.bslValidator.openType"; //$NON-NLS-1$
+        private static final String CHECK_LAST_MEMBER = "tormozit.bslValidator.checkLastMember";
+        private static final String DYNAMIC_ALLOWED = "tormozit.bslValidator.dynamicAllowed"; //$NON-NLS-1$
         private static final String STATUS = "tormozit.bslValidator.unknownMemberPatch"; //$NON-NLS-1$
         private static final String TARGET = "com._1c.g5.v8.dt.bsl.validation.BslJavaValidator"; //$NON-NLS-1$
         private static final String TARGET_INTERNAL = TARGET.replace('.', '/');
         /** Типы из списка открытых в {@code unknownLeftPart}: динамические ключи или объединяемые члены. */
         private static final java.util.Set<String> OPEN_TYPES = java.util.Set.of("MetadataObject", "Structure", //$NON-NLS-1$ //$NON-NLS-2$
             "FixedStructure", "ValueTableRow", "ValueTreeRow", "QueryResultSelection", "ConstantsSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-            "FormDataStructure", "FormDataCollectionItem", "FormDataTreeItem", "PictureLib"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            "FormDataStructure", "FormDataCollectionItem", "FormDataTreeItem", "PictureLib", "SequencesManager"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 
         static void install(BundleContext context)
         {
             System.getProperties().putIfAbsent(CALLBACK, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(CHECK_LAST_MEMBER, (Function<Object[], Object>) args -> args);
+            System.getProperties().putIfAbsent(DYNAMIC_ALLOWED, (Function<Object[], Object>) args -> Boolean.TRUE);
             context.registerService(WeavingHook.class, new UnknownMemberWeaving(), null);
         }
 
@@ -2582,6 +2057,8 @@ public final class Activator
                                     super.visitFieldInsn(opcode, owner, field, fieldDescriptor);
                                 }
                             };
+                        if (mv != null && "checkDynamicFeatureAccessForUnknownLeftPart".equals(name))
+                            return checkLastMember(mv);
                         if (mv == null || !"unknownLeftPart".equals(name)) //$NON-NLS-1$
                             return mv;
                         return new MethodVisitor(Opcodes.ASM9, mv)
@@ -2646,6 +2123,85 @@ public final class Activator
                 System.getProperties().put(STATUS, "failed: " + error); //$NON-NLS-1$
             }
         }
+
+        private static MethodVisitor checkLastMember(MethodVisitor delegate)
+        {
+            return new MethodVisitor(Opcodes.ASM9, delegate)
+            {
+                @Override
+                public void visitFieldInsn(int opcode, String owner, String name, String descriptor)
+                {
+                    super.visitFieldInsn(opcode, owner, name, descriptor);
+                    if (opcode == Opcodes.GETSTATIC && TARGET_INTERNAL.equals(owner)
+                        && "exhaustiveValidation".equals(name) && "Z".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                        emitDynamicAllowed(this);
+                }
+
+                @Override
+                public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface)
+                {
+                    super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                    if (!"com/_1c/g5/v8/dt/bsl/resource/DynamicFeatureAccessComputer".equals(owner)
+                        || !"getLastObject".equals(name)
+                        || !"(Lcom/_1c/g5/v8/dt/bsl/model/DynamicFeatureAccess;Lcom/_1c/g5/v8/dt/mcore/util/Environments;Z)Ljava/util/List;".equals(descriptor))
+                        return;
+                    super.visitVarInsn(Opcodes.ASTORE, 4);
+                    EarlyWeaving.emitGetProperty(this, CHECK_LAST_MEMBER, "java/util/function/Function");
+                    super.visitInsn(Opcodes.ICONST_3);
+                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                    int[] slots = {4, 1, 3}; // Результат разрешения, обращение, окружения.
+                    for (int i = 0; i < slots.length; i++)
+                    {
+                        super.visitInsn(Opcodes.DUP);
+                        super.visitInsn(Opcodes.ICONST_0 + i);
+                        super.visitVarInsn(Opcodes.ALOAD, slots[i]);
+                        super.visitInsn(Opcodes.AASTORE);
+                    }
+                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                        "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                    super.visitTypeInsn(Opcodes.CHECKCAST, "[Ljava/lang/Object;");
+                    super.visitInsn(Opcodes.DUP);
+                    super.visitInsn(Opcodes.ICONST_1);
+                    super.visitInsn(Opcodes.AALOAD);
+                    super.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/bsl/model/DynamicFeatureAccess");
+                    super.visitVarInsn(Opcodes.ASTORE, 1);
+                    super.visitInsn(Opcodes.ICONST_0);
+                    super.visitInsn(Opcodes.AALOAD);
+                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/List");
+                }
+            };
+        }
+
+        /**
+         * Стек при {@code GETSTATIC exhaustiveValidation}: {@code [boolean]}. Значение заменяется на
+         * {@code {обращение, окружения, значение}} — основной бандл возвращает {@code false}, если цепочку
+         * проверяет статическая проверка. Вставка без ветвлений, кадры стека не меняются.
+         */
+        private static void emitDynamicAllowed(MethodVisitor visitor)
+        {
+            visitor.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                "(I)Ljava/lang/Integer;", false); //$NON-NLS-1$
+            visitor.visitVarInsn(Opcodes.ASTORE, 5);
+            EarlyWeaving.emitGetProperty(visitor, DYNAMIC_ALLOWED, "java/util/function/Function"); //$NON-NLS-1$
+            visitor.visitInsn(Opcodes.ICONST_3);
+            visitor.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            visitor.visitInsn(Opcodes.DUP);
+            visitor.visitInsn(Opcodes.ICONST_0);
+            visitor.visitVarInsn(Opcodes.ALOAD, 1);
+            visitor.visitInsn(Opcodes.AASTORE);
+            visitor.visitInsn(Opcodes.DUP);
+            visitor.visitInsn(Opcodes.ICONST_1);
+            visitor.visitVarInsn(Opcodes.ALOAD, 3);
+            visitor.visitInsn(Opcodes.AASTORE);
+            visitor.visitInsn(Opcodes.DUP);
+            visitor.visitInsn(Opcodes.ICONST_2);
+            visitor.visitVarInsn(Opcodes.ALOAD, 5);
+            visitor.visitInsn(Opcodes.AASTORE);
+            visitor.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            visitor.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+            visitor.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     /** Типы элементов массива: ранний перехват обоих штатных способов чтения типа. */
@@ -2655,6 +2211,7 @@ public final class Activator
         private static final String TYPE_HINT_ENVIRONMENTS = "tormozit.preprocessor.typeHintEnvironments"; //$NON-NLS-1$
         private static final String TARGET = "com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil"; //$NON-NLS-1$
         private static final String COMPUTER_TARGET = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final String PROPOSAL_TARGET = "com._1c.g5.v8.dt.bsl.ui.contentassist.BslProposalProvider"; //$NON-NLS-1$
         private static final String STATUS = "tormozit.arrayElementTypes.early"; //$NON-NLS-1$
 
         private static void adjustTypeHintEnvironments(MethodVisitor visitor)
@@ -2687,11 +2244,13 @@ public final class Activator
         {
             String name = woven.getClassName();
             if (woven.getState() != WovenClass.TRANSFORMING
-                || !TARGET.equals(name) && !COMPUTER_TARGET.equals(name))
+                || !TARGET.equals(name) && !COMPUTER_TARGET.equals(name) && !PROPOSAL_TARGET.equals(name))
                 return;
             try
             {
-                byte[] transformed = transform(name.replace('.', '/'), woven.getBytes());
+                byte[] transformed = PROPOSAL_TARGET.equals(name)
+                    ? transformMemberProposalEnvironments(woven.getBytes())
+                    : transform(name.replace('.', '/'), woven.getBytes());
                 if (transformed == null)
                     throw new IllegalStateException("Array element types method not found: " + name); //$NON-NLS-1$
                 woven.setBytes(transformed);
@@ -2701,6 +2260,47 @@ public final class Activator
                 System.getProperties().put(STATUS + "." + name, Boolean.FALSE); //$NON-NLS-1$
                 System.getProperties().put(STATUS + ".failure", failure.toString()); //$NON-NLS-1$
             }
+        }
+
+        /** EDT прекращает подбор членов сразу после getEnvsForDynamicFeatureAccess, если окружение пусто. */
+        private static byte[] transformMemberProposalEnvironments(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean changed = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor delegate = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (delegate == null || !"getEnvsForDynamicFeatureAccess".equals(name) //$NON-NLS-1$
+                        || !"(Lorg/eclipse/emf/ecore/EObject;)Lcom/_1c/g5/v8/dt/mcore/util/Environments;".equals(descriptor)) //$NON-NLS-1$
+                        return delegate;
+                    return new MethodVisitor(Opcodes.ASM9, delegate)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                // Стек: исходное окружение -> callback, узел, исходное окружение.
+                                EarlyWeaving.emitGetProperty(this, TYPE_HINT_ENVIRONMENTS, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/mcore/util/Environments"); //$NON-NLS-1$
+                                changed.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return changed.get() ? writer.toByteArray() : null;
         }
 
         static byte[] transform(String className, byte[] bytes)
@@ -2880,12 +2480,18 @@ public final class Activator
             context.registerService(WeavingHook.class, new StringLiteralTypeNamesWeaving(), null);
         }
 
+        private static boolean supportsBundleVersion(WovenClass woven)
+        {
+            var version = woven.getBundleWiring().getBundle().getVersion();
+            return version.getMajor() == 22 && version.getMinor() == 0 && version.getMicro() == 0;
+        }
+
         @Override
         public void weave(WovenClass woven)
         {
             String target = woven.getClassName();
             if (woven.getState() == WovenClass.TRANSFORMING && CTOR_TARGET.equals(target)
-                && woven.getBundleWiring().getBundle().getVersion().toString().equals("22.0.0.v202605050943"))
+                && supportsBundleVersion(woven))
             {
                 try
                 {
@@ -2904,8 +2510,7 @@ public final class Activator
                 return;
             try
             {
-                String version = woven.getBundleWiring().getBundle().getVersion().toString();
-                if (!version.equals("22.0.0.v202605050943"))
+                if (!supportsBundleVersion(woven))
                 {
                     return;
                 }
@@ -3303,11 +2908,20 @@ public final class Activator
         private static final String CONVERTER = "com._1c.g5.v8.dt.internal.platform.core.uconverter.UObjectConverterServiceProvider"; //$NON-NLS-1$
         private static final String DOCUMENTATION = "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"; //$NON-NLS-1$
         private static final String PAGE = "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil"; //$NON-NLS-1$
+        private static final String RETURN_MEMO = "returnMemo"; //$NON-NLS-1$
+        /** Закрытый {@code computeReturnTypes} с множеством посещённых: вход запоминания типов возврата. */
+        private static final String RETURN_TYPES_DESCRIPTOR = "(Lorg/eclipse/xtext/scoping/IScope;" //$NON-NLS-1$
+            + "Lorg/eclipse/xtext/scoping/IScopeProvider;Lorg/eclipse/xtext/naming/IQualifiedNameConverter;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/bsl/documentation/comment/BslMultiLineCommentDocumentationProvider;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/dt/core/platform/IV8ProjectManager;ZLorg/eclipse/emf/ecore/EObject;Ljava/util/Set;" //$NON-NLS-1$
+            + "Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)Ljava/util/Collection;"; //$NON-NLS-1$
 
         static void install(BundleContext context)
         {
             for (String operation : List.of("comment", "convert", "reference", "html", "property", "docDependency")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
                 System.getProperties().putIfAbsent(PREFIX + operation, (Function<Object[], Object>) args -> args[0]);
+            // null — штатный расчёт; основной бандл подставляет запомненный результат.
+            System.getProperties().putIfAbsent(PREFIX + RETURN_MEMO, (Function<Object[], Object>) args -> null);
             context.registerService(WeavingHook.class, new FormDataWeaving(), null);
             System.getProperties().put(PREFIX + "early", Boolean.TRUE); //$NON-NLS-1$
         }
@@ -3338,6 +2952,61 @@ public final class Activator
                     String signature, String[] exceptions)
                 {
                     MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (visitor != null && COMMENT.equals(className) && "computeReturnTypes".equals(name) //$NON-NLS-1$
+                        && RETURN_TYPES_DESCRIPTOR.equals(descriptor) && (access & Opcodes.ACC_STATIC) == 0)
+                    {
+                        // Пролог: r = returnMemo([this, аргументы…]); if (r != null) return r;
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                Label stock = new Label();
+                                org.objectweb.asm.Type[] args = org.objectweb.asm.Type.getArgumentTypes(descriptor);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                super.visitLdcInsn(PREFIX + RETURN_MEMO);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitIntInsn(Opcodes.BIPUSH, args.length + 1);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.AASTORE);
+                                int slot = 1;
+                                for (int i = 0; i < args.length; i++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitIntInsn(Opcodes.BIPUSH, i + 1);
+                                    if (args[i].getSort() == org.objectweb.asm.Type.BOOLEAN)
+                                    {
+                                        super.visitVarInsn(Opcodes.ILOAD, slot);
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                                    }
+                                    else
+                                        super.visitVarInsn(Opcodes.ALOAD, slot);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    slot += args[i].getSize();
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitJumpInsn(Opcodes.IFNULL, stock);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.ARETURN);
+                                super.visitLabel(stock);
+                                // Кадр относительно начального: локальные — параметры метода, на стеке null.
+                                super.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] {"java/lang/Object"}); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.POP);
+                                touched.set(true);
+                                System.getProperties().put(PREFIX + RETURN_MEMO + ".woven", Boolean.TRUE); //$NON-NLS-1$
+                            }
+                        };
+                    }
                     if (visitor != null && COMMENT.equals(className)
                         && "computeTypesByLinkPart".equals(name)) //$NON-NLS-1$
                     {
@@ -5509,6 +5178,8 @@ public final class Activator
         private static final String XTEXT_DOCUMENT = "org.eclipse.xtext.ui.editor.model.XtextDocument"; //$NON-NLS-1$
         private static final String BSL_XTEXT_DOCUMENT = "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument"; //$NON-NLS-1$
         private static final String PROP_VALIDATION_TRACE = "tormozit.bslXtextDoc.validationTrace"; //$NON-NLS-1$
+        /** Совпадает с {@code BslXtextDocumentHook.ValidationTrace.PROP_ERROR}: текст исключения из ATHROW. */
+        private static final String PROP_VALIDATION_ERROR = "tormozit.bslXtextDoc.validationTrace.error"; //$NON-NLS-1$
         private static final String PROP_MODEL_HIGHLIGHTING = "tormozit.bslHighlighting.modelChanged"; //$NON-NLS-1$
         private static final String DOC_LOCKER =
             "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
@@ -5625,6 +5296,8 @@ public final class Activator
                 (java.util.function.BiPredicate<Object, Object>) (reconciler, resource) -> false);
             System.getProperties().putIfAbsent(PROP_VALIDATION_TRACE,
                 (java.util.function.BiConsumer<Object, String>) (document, phase) -> {});
+            System.getProperties().putIfAbsent(PROP_VALIDATION_ERROR,
+                (java.util.function.Consumer<Object>) error -> {});
             System.getProperties().put(PROP_VALIDATION_REENTRY,
                 (java.util.function.BiPredicate<Object, Object>) (work, currentJob) ->
                     currentJob != null && work != null && HANDLY_RECONCILING_WORK.equals(work.getClass().getName()));
@@ -6801,9 +6474,26 @@ public final class Activator
                         @Override
                         public void visitInsn(int opcode)
                         {
+                            if (opcode == Opcodes.ATHROW)
+                                emitThrown();
                             if (opcode == Opcodes.RETURN || opcode == Opcodes.ATHROW)
                                 emitTrace(phaseName + (opcode == Opcodes.RETURN ? ".exit" : ".throw")); //$NON-NLS-1$ //$NON-NLS-2$
                             super.visitInsn(opcode);
+                        }
+
+                        /**
+                         * Стек {@code [throwable]} → {@code [throwable]}: дубликат уходит приёмнику
+                         * исключения (основной бандл пишет его текст), сам throwable остаётся для
+                         * штатного ATHROW и последующего трейса. Вставка без ветвлений — кадры
+                         * стека остаются исходными.
+                         */
+                        private void emitThrown()
+                        {
+                            super.visitInsn(Opcodes.DUP);
+                            emitGetProperty(this, PROP_VALIDATION_ERROR, "java/util/function/Consumer"); //$NON-NLS-1$
+                            super.visitInsn(Opcodes.SWAP);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", //$NON-NLS-1$
+                                "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
                         }
 
                         private void emitTrace(String phase)

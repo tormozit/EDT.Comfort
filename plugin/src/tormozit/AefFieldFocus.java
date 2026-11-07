@@ -513,8 +513,30 @@ final class AefFieldFocus
         if (focusSource == null)
             return false;
         Object result = Global.invoke(nativeControl, "setFocus", focusSource); //$NON-NLS-1$
-        return Boolean.TRUE.equals(result)
-            || Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused")); //$NON-NLS-1$
+        if (Boolean.TRUE.equals(result) || Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused"))) //$NON-NLS-1$
+            return true;
+        // SwtLightControl — обёртка над обычным SWT-контролом (список/дерево AEF в редакторе МД):
+        // LWT-фокус на обёртку ввод не переводит, нужен SWT-фокус на сам список внутри неё.
+        Object swt = Global.invoke(nativeControl, "getSwtControl"); //$NON-NLS-1$
+        Control target = swt instanceof Control control ? firstListControl(control) : null;
+        return target != null && !target.isDisposed() && target.setFocus() && target.isFocusControl();
+    }
+
+    /** Сам контрол, если он не контейнер, иначе первое дерево/таблица внутри. */
+    private static Control firstListControl(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return null;
+        if (control instanceof org.eclipse.swt.widgets.Tree || control instanceof org.eclipse.swt.widgets.Table
+            || !(control instanceof org.eclipse.swt.widgets.Composite composite))
+            return control;
+        for (Control child : composite.getChildren())
+        {
+            Control found = firstListControl(child);
+            if (found instanceof org.eclipse.swt.widgets.Tree || found instanceof org.eclipse.swt.widgets.Table)
+                return found;
+        }
+        return null;
     }
 
     private static Object lwtKeyboardFocusSource(Object nativeControl)

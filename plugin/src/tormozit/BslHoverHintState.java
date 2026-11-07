@@ -140,6 +140,16 @@ final class BslHoverHintState
      */
     static void installOnCompareViewer(ISourceViewer viewer)
     {
+        installOnViewer(viewer, true);
+    }
+
+    /**
+     * Поле текста вне редакторов (окно сравнения, окна языка запросов): применять к нему состояние
+     * вместе с редакторами. {@code hookMenu=false} — пункт в его меню добавляет хук, который это
+     * меню уже собирает ({@link #addMenuItem}).
+     */
+    static void installOnViewer(ISourceViewer viewer, boolean hookMenu)
+    {
         if (viewer == null)
             return;
         StyledText text = viewer.getTextWidget();
@@ -150,6 +160,8 @@ final class BslHoverHintState
         if (display.getThread() == Thread.currentThread())
         {
             applyToViewer(viewer);
+            if (!hookMenu)
+                return;
             hookContextMenu(text, 0);
             /*
              * Если меню создаётся только к первому правому клику (позже наших повторов) —
@@ -165,8 +177,14 @@ final class BslHoverHintState
         else
         {
             // timerExec/меню — только из потока UI (иначе SWTException и молчащий пункт)
-            display.asyncExec(() -> installOnCompareViewer(viewer));
+            display.asyncExec(() -> installOnViewer(viewer, hookMenu));
         }
+    }
+
+    /** Поле подключено через {@link #installOnViewer}. */
+    static boolean isInstalledOn(ISourceViewer viewer)
+    {
+        return viewer != null && extraViewers.contains(viewer);
     }
 
     /**

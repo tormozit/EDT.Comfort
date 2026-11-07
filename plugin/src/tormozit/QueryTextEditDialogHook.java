@@ -264,6 +264,21 @@ public final class QueryTextEditDialogHook implements IStartup
                 IrQueryConstructorHandler.openQueryConstructor(viewer, queryDialog);
             }
         });
+
+        if (BslHoverHintState.isInstalledOn(viewer))
+        {
+            MenuItem hoverItem = BslHoverHintState.addMenuItem(comfortSub);
+            // Пункты этого меню живут между показами: состояние могли сменить в другом окне.
+            comfortSub.addMenuListener(new MenuAdapter()
+            {
+                @Override
+                public void menuShown(MenuEvent e)
+                {
+                    if (!hoverItem.isDisposed())
+                        hoverItem.setSelection(BslHoverHintState.isEnabled());
+                }
+            });
+        }
     }
 
     /** Только корневое контекстное меню {@link StyledText}, не каскады вроде нашего подменю. */

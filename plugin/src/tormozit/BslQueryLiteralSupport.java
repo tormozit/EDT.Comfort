@@ -27,6 +27,7 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DefaultPositionUpdater;
 import org.eclipse.jface.text.DocumentEvent;
@@ -125,6 +126,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
+import com._1c.g5.v8.dt.md.ui.sattribute.StandardObjectProxy;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewSelectDef;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.mcore.TypeItem;
@@ -2458,19 +2460,32 @@ final class BslQueryLiteralSupport
         Literal lit = viewer == null ? null : parse(viewer.getDocument(), offset, true);
         if (lit == null || !lit.isQuery())
             return null;
+        return keywordAt(resolveProject(editor), lit.text.toString(), lit.probeIndex,
+            tempTables(viewer.getDocument(), lit));
+    }
+
+    /** Ключевое слово или имя функции QL в окне языка запросов (Ctrl+F1); только UI. */
+    static String queryEditorKeyword(IProject project, IDocument document, int offset)
+    {
+        if (document == null || offset < 0 || offset > document.getLength())
+            return null;
+        return keywordAt(project, document.get(), offset, BslTempTableSessions.EMPTY);
+    }
+
+    /** Разбор копии запроса в скрытом редакторе; живой документ не читается. Только UI. */
+    private static String keywordAt(IProject project, String query, int probe, BslTempTableSessions.Session tempTables)
+    {
         try
         {
-            IProject project = resolveProject(editor);
             if (project == null)
                 return null;
             QlEditor ql = hiddenEditor(project);
             EmbeddedEditor embedded = ql.getEmbeddedQlEditor();
-            String query = lit.text.toString();
-            prepareHidden(ql, query, tempTables(viewer.getDocument(), lit));
+            prepareHidden(ql, query, tempTables);
             String keyword = embedded.getDocument().readOnly(resource -> {
                 if (resource == null || resource.getParseResult() == null)
                     return null;
-                var leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), lit.probeIndex);
+                var leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), probe);
                 if (leaf == null || leaf.isHidden())
                     return null;
                 // FunctionWord допускает ID: ПОДСТРОКА, ЕСТЬNULL и другие функции
@@ -2481,13 +2496,17 @@ final class BslQueryLiteralSupport
                 if (function != null)
                     for (var name : NodeModelUtils.findNodesForFeature(function,
                         QlPackage.Literals.FUNCTION_INVOCATION_EXPRESSION__FUNCTION_TYPE))
-                        if (lit.probeIndex >= name.getOffset() && lit.probeIndex < name.getEndOffset())
+                        if (probe >= name.getOffset() && probe < name.getEndOffset())
                             return name.getText().trim();
-                return leaf.getGrammarElement() instanceof Keyword word
-                    && !word.getValue().isEmpty() && Character.isLetter(word.getValue().charAt(0))
-                        ? word.getValue() : null;
+                if (!(leaf.getGrammarElement() instanceof Keyword word)
+                    || word.getValue().isEmpty() || !Character.isLetter(word.getValue().charAt(0)))
+                    return null;
+                // Системные поля «Ссылка», «Дата» совпадают с ключевыми словами: поле — не ключевое слово.
+                EObject field = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class)
+                    .resolveElementAt(resource, probe);
+                return field instanceof DbViewElement ? null : word.getValue();
             });
-            Global.tempLog("query-syntax-assist", "offset=" + offset + ", keyword=" + keyword); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.tempLog("query-syntax-assist", "offset=" + probe + ", keyword=" + keyword); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return keyword;
         }
         catch (Exception | LinkageError error)
@@ -2641,6 +2660,40 @@ final class BslQueryLiteralSupport
             tempTables(viewer.getDocument(), lit));
     }
 
+    /**
+     * Подсказка при наведении в окнах языка запросов («Редактор запроса», динамический список,
+     * схема компоновки; issue 1003): тот же расчёт, что у запроса в литерале модуля, — по копии
+     * текста в скрытом редакторе, модель живого документа окна не читается.
+     */
+    static QueryHover queryEditorHover(Supplier<IProject> projectSource, IDocument document, int offset)
+    {
+        if (projectSource == null || document == null || offset < 0)
+            return null;
+        // Поставщик проекта вызывается в UI-потоке (внутри queryDescription).
+        return queryDescription(null, projectSource, document.get(), offset, BslTempTableSessions.EMPTY);
+    }
+
+    /** Область слова под указателем в окне языка запросов. */
+    static IRegion queryEditorHoverRegion(IDocument document, int offset)
+    {
+        if (document == null || offset < 0 || offset > document.getLength())
+            return null;
+        try
+        {
+            int start = offset;
+            int end = offset;
+            while (start > 0 && isIdentifierChar(document.getChar(start - 1)))
+                start--;
+            while (end < document.getLength() && isIdentifierChar(document.getChar(end)))
+                end++;
+            return end > start ? new Region(start, end - start) : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
     /** Одинаковый расчёт для существующего слова и выбранного предложения списка. */
     private static QueryHover queryDescription(BslXtextEditor sourceEditor, Supplier<IProject> projectSource,
         String query, int offset, BslTempTableSessions.Session tempTables)
@@ -2679,18 +2732,20 @@ final class BslQueryLiteralSupport
                     {
                         return null;
                     }
-                    if (leaf.getGrammarElement() instanceof Keyword)
-                    {
-                        Global.tempLog("query-syntax-assist", "подсказка ключевого слова подавлена: " //$NON-NLS-1$ //$NON-NLS-2$
-                            + leaf.getText() + ", offset=" + offset); //$NON-NLS-1$
-                        return null;
-                    }
                     // QL хранит обращение к полю как выражение, а не обычную
                     // cross-reference Xtext. QlRuntimeModule связывает этот сервис
                     // с QlEObjectAtOffsetHelper; resolveElementAt вычисляет DbView
                     // через QlMapper / IDynamicDbViewFieldComputer, как Ctrl+клик EDT.
                     EObjectAtOffsetHelper resolver = resource.getResourceServiceProvider().get(EObjectAtOffsetHelper.class);
                     EObject field = resolver.resolveElementAt(resource, offset);
+                    // Имена системных полей «Ссылка», «Дата» и т.п. совпадают с ключевыми словами
+                    // языка запросов: подавлять только ключевое слово, за которым нет поля.
+                    if (leaf.getGrammarElement() instanceof Keyword && !(field instanceof DbViewElement))
+                    {
+                        Global.tempLog("query-syntax-assist", "подсказка ключевого слова подавлена: " //$NON-NLS-1$ //$NON-NLS-2$
+                            + leaf.getText() + ", offset=" + offset); //$NON-NLS-1$
+                        return null;
+                    }
                     if (field == null || field.eIsProxy())
                         return null;
                     result[0] = new QueryHover(description.getHoverInfo(field, qlViewer,
@@ -2910,20 +2965,194 @@ final class BslQueryLiteralSupport
     static boolean openMdObjectOfDbView(org.eclipse.xtext.ui.editor.model.IXtextDocument document,
                                         org.eclipse.emf.common.util.URI target, IEditorPart editor, Shell shell)
     {
+        EObject[] table = new EObject[1];
+        String[] fieldName = new String[1];
         EObject md = document == null || target == null ? null : document.readOnly(resource ->
         {
             if (resource == null || resource.getResourceSet() == null)
                 return null;
             EObject object = resource.getResourceSet().getEObject(target, true);
-            if (!(object instanceof DbViewElement element) || element.getMdObject() == null)
+            if (object instanceof DbViewFieldDef field)
+            {
+                fieldName[0] = field.getName();
+                if (field.eContainer() instanceof DbViewElement view && view.getMdObject() != null)
+                    table[0] = view.getMdObject().eIsProxy()
+                        ? org.eclipse.emf.ecore.util.EcoreUtil.resolve(view.getMdObject(), resource) : view.getMdObject();
+            }
+            // Только поле: таблицу (псевдоним источника) открывает штатная ссылка —
+            // OpenHelper.openEditor на самой таблице падает.
+            if (!(object instanceof DbViewFieldDef element) || element.getMdObject() == null)
                 return null;
             EObject owner = element.getMdObject();
             return owner.eIsProxy() ? org.eclipse.emf.ecore.util.EcoreUtil.resolve(owner, resource) : owner;
         });
         if (md == null || md.eIsProxy())
             return false;
+        // Стандартный реквизит (за полем стоит сама таблица) и общий реквизит (отдельный объект
+        // верхнего уровня) — открываем редактор объекта метаданных таблицы и активируем строку
+        // поля на его странице «Данные». Обычный реквизит OpenHelper сам открывает у владельца.
+        EObject tableObject = table[0];
+        boolean standard = tableObject != null && sameEObject(md, tableObject);
+        boolean common = !standard && tableObject != null && "CommonAttribute".equals(md.eClass().getName()); //$NON-NLS-1$
+        if (standard || common)
+        {
+            openTableMember(tableObject, standard ? null : md, fieldName[0], editor, shell);
+            return true;
+        }
         CompareConfigOpenObjectHandler.openInEditor(md, editor, shell);
+        // openEditor активирует реквизит в редакторе объекта, но панель «Свойства» не показывает;
+        // показываем, как при переходе к проблеме на свойстве (ProblemViewOpenTargetHook).
+        // Без активации: фокус остаётся на реквизите в редакторе.
+        if (ConfigSearchResultsHook.PropertyFieldFocus.hasPanelOwner(md))
+            showPropertiesView();
         return true;
+    }
+
+    /**
+     * Стандартный или общий реквизит таблицы: открыть редактор объекта метаданных таблицы,
+     * активировать строку реквизита на странице «Данные» и показать «Свойства» (у строки свойства
+     * в панели есть всегда). Общий для окон запросов и редактора модуля.
+     *
+     * @param common общий реквизит; {@code null} — стандартный реквизит {@code fieldName}
+     *     (английское имя, как {@code Code})
+     */
+    static void openTableMember(EObject table, EObject common, String fieldName, IEditorPart editor, Shell shell)
+    {
+        CompareConfigOpenObjectHandler.openInEditor(table, editor, shell);
+        StandardAttributeReveal.schedule(common, fieldName, table, 0);
+        showPropertiesView();
+    }
+
+    private static void showPropertiesView()
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window == null && PlatformUI.getWorkbench().getWorkbenchWindows().length > 0)
+            window = PlatformUI.getWorkbench().getWorkbenchWindows()[0];
+        IWorkbenchPage page = window == null ? null : window.getActivePage();
+        try
+        {
+            if (page != null)
+                page.showView(org.eclipse.ui.IPageLayout.ID_PROP_SHEET, null, IWorkbenchPage.VIEW_VISIBLE);
+        }
+        catch (org.eclipse.ui.PartInitException e)
+        {
+            // Панель не открылась — реквизит в редакторе уже активирован.
+        }
+    }
+
+    /** Один объект: тот же экземпляр или тот же EMF-URI (BM отдаёт разные экземпляры). */
+    private static boolean sameEObject(EObject left, EObject right)
+    {
+        if (left == null || right == null)
+            return false;
+        if (left == right)
+            return true;
+        URI leftUri = EcoreUtil.getURI(left);
+        return leftUri != null && leftUri.equals(EcoreUtil.getURI(right));
+    }
+
+    /**
+     * Активация поля запроса в открытом редакторе объекта метаданных таблицы: страница «Данные»
+     * ({@code *.pages.data}, как {@code MdEditorAttributeMenuHook.isDataPage}) и строка поля на
+     * ней. Строку выделяет сам компонент дерева ({@code setSelection} по его отображённой модели)
+     * — как строку состава в {@code ConfigSearchResultsHook.selectContentRow}: выделение, которое
+     * шлёт страница, до дерева AEF не доходит. Стандартный реквизит — строка
+     * {@link StandardObjectProxy} с именем поля у этой таблицы; общий реквизит — строка, которая
+     * показывает этот общий реквизит. Страница строится позже открытия редактора — несколько попыток.
+     */
+    private static final class StandardAttributeReveal
+    {
+        private static final int MAX_ATTEMPTS = 20;
+        private static final int RETRY_MS = 100;
+        private static final String DATA_PAGE_SUFFIX = ".pages.data"; //$NON-NLS-1$
+
+        /**
+         * @param common общий реквизит; {@code null} — стандартный реквизит {@code fieldName}
+         * @param table объект метаданных таблицы, чей редактор открыт
+         */
+        static void schedule(EObject common, String fieldName, EObject table, int attempt)
+        {
+            Display display = Display.getCurrent();
+            if (display == null || display.isDisposed() || attempt >= MAX_ATTEMPTS)
+                return;
+            display.timerExec(attempt == 0 ? 0 : RETRY_MS, () ->
+            {
+                if (!select(common, fieldName, table, attempt))
+                    schedule(common, fieldName, table, attempt + 1);
+            });
+        }
+
+        private static boolean select(EObject common, String fieldName, EObject table, int attempt)
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null && PlatformUI.getWorkbench().getWorkbenchWindows().length > 0)
+                window = PlatformUI.getWorkbench().getWorkbenchWindows()[0];
+            IWorkbenchPage page = window == null ? null : window.getActivePage();
+            IEditorPart editor = page == null ? null : page.getActiveEditor();
+            if (!(editor instanceof com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor<?> granular))
+                return false;
+            org.eclipse.ui.forms.editor.IFormPage formPage = granular.getActivePageInstance();
+            if (formPage == null || formPage.getId() == null || !formPage.getId().endsWith(DATA_PAGE_SUFFIX))
+            {
+                org.eclipse.ui.forms.editor.IFormPage data = MdEditorAttributeMenuHook.findPage(granular,
+                    p -> p.getId() != null && p.getId().endsWith(DATA_PAGE_SUFFIX));
+                if (data != null)
+                    granular.setActivePage(data.getId());
+                return false;
+            }
+            Object root = Global.getField(formPage, "pageComponent"); //$NON-NLS-1$
+            Object[] found = find(root, common, fieldName, table, 0);
+            boolean done = found != null && Global.invokeVoid(found[0], "setSelection", List.of(found[1])); //$NON-NLS-1$
+            // Выделение строки фокус в список не переводит — ставим его штатным путём полей AEF.
+            if (done)
+                AefFieldFocus.focusComponent(Global.invoke(found[0], "getScene"), found[0]); //$NON-NLS-1$
+            return done;
+        }
+
+        /** Компонент дерева и его строка для поля; {@code null} — ещё не построено. */
+        private static Object[] find(Object component, EObject common, String fieldName, EObject table, int depth)
+        {
+            if (component == null || depth > 20)
+                return null;
+            Object mapper = Global.invoke(component, "getMapper"); //$NON-NLS-1$
+            Object models = mapper == null ? null : Global.invoke(mapper, "getMappedModels"); //$NON-NLS-1$
+            if (models instanceof Iterable<?> iterable)
+                for (Object candidate : iterable)
+                    if (matches(candidate, common, fieldName, table)
+                        || common == null && fieldName != null && candidate instanceof String key
+                            && component instanceof com._1c.g5.v8.dt.md.ui.aef.components.StandardObjectsTreeComponent
+                            && key.equalsIgnoreCase(Global.invoke(table, "getName") + "." + fieldName)) //$NON-NLS-1$ //$NON-NLS-2$
+                        // Строка дерева «Стандартные реквизиты» — ключ «Таблица.Реквизит»
+                        // (у табличной части ключ длиннее — «Таблица.ТЧ.Реквизит»).
+                        return new Object[] { component, candidate };
+            for (Object child : AefFieldFocus.childComponents(component))
+            {
+                Object[] found = find(child, common, fieldName, table, depth + 1);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static boolean matches(Object candidate, EObject common, String fieldName, EObject table)
+        {
+            if (common != null)
+                return candidate instanceof StandardObjectProxy proxy && sameEObject(proxy.getStandardObject(), common)
+                    || sameEObject(NavigatorElementModels.resolveEObject(candidate), common);
+            if (fieldName == null)
+                return false;
+            // Стандартный реквизит самой таблицы, не одноимённый у её табличной части.
+            if (candidate instanceof StandardObjectProxy proxy)
+                return (fieldName.equalsIgnoreCase(proxy.getName()) || fieldName.equalsIgnoreCase(proxy.getNameRu()))
+                    && (proxy.getOwner() == null || sameEObject(proxy.getOwner(), table));
+            // Дерево «Стандартные реквизиты» — дерево навигатора: строка — узел, объект — StandardAttribute.
+            EObject resolved = NavigatorElementModels.resolveEObject(candidate);
+            return resolved != null && "StandardAttribute".equals(resolved.eClass().getName()) //$NON-NLS-1$
+                && (fieldName.equalsIgnoreCase(String.valueOf(Global.invoke(resolved, "getName"))) //$NON-NLS-1$
+                    || fieldName.equalsIgnoreCase(String.valueOf(Global.invoke(resolved, "getNameRu")))) //$NON-NLS-1$
+                && (resolved.eContainer() == null || sameEObject(resolved.eContainer(), table));
+        }
+
     }
 
     /**

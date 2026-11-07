@@ -139,13 +139,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
-        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess access
-            && RESULT_METHODS.contains(lower(access.getName())))
-            Global.tempLog("query-result-columns", "getTypes uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + (method == null ? null : method.getName()) + " offset=" + start(invocation) //$NON-NLS-1$ //$NON-NLS-2$
-                + " call=" + access.getName() + " plan=" + (plan != null) //$NON-NLS-1$ //$NON-NLS-2$
-                + " complete=" + (plan != null && plan.complete) + " planned=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (planned == null ? null : planned.stream().map(TypeItem::getName).toList()));
         if (planned != null)
             return planned;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
@@ -521,9 +514,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
-        Global.tempLog("query-result-columns", "refresh uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-            + " method=" + method.getName() + " offset=" + offset + " previous=" + (previous != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " current=" + current(previous, text) + " complete=" + (previous != null && previous.complete)); //$NON-NLS-1$ //$NON-NLS-2$
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -557,10 +547,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         catch (RuntimeException | LinkageError failure)
         {
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
-            java.io.StringWriter trace = new java.io.StringWriter();
-            failure.printStackTrace(new java.io.PrintWriter(trace));
-            Global.tempLog("query-result-columns", "refresh.failure uri=" + resource.getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + method.getName() + "\n" + trace); //$NON-NLS-1$ //$NON-NLS-2$
             session.plans.remove(method);
         }
         }
@@ -1310,11 +1296,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     || !RESULT_METHODS.contains(lower(access.getName())))
                     continue;
                 Shape shape = shape(invocation, Collections.newSetFromMap(new IdentityHashMap<>()));
-                Global.tempLog("query-result-columns", "prepare uri=" + method.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " method=" + method.getName() + " offset=" + start(invocation) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " call=" + access.getName() + " shape=" + (shape == null ? null : shape.kind) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " fields=" + (shape == null ? null : shape.results.stream() //$NON-NLS-1$
-                        .map(result -> result.fields.stream().map(Field::name).toList()).toList()));
                 // Строки выводит штатная система типов из общего типа таблицы.
                 if (shape == null || shape.kind.equals("ValueTableRow")) //$NON-NLS-1$
                     continue;
@@ -1927,11 +1908,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     column.setTypeContainer(types);
                     columns.getContextDef().getProperties().add(column);
                 }
-            Global.tempLog("query-result-columns", "valueTable uri=" + method.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + method.getName() + " row=" //$NON-NLS-1$ //$NON-NLS-2$
-                + row.getContextDef().getProperties().stream().map(property -> property.getName()).toList()
-                + " columns=" + columns.getContextDef().getProperties().stream() //$NON-NLS-1$
-                    .map(property -> property.getName()).toList());
             return table;
         }
 

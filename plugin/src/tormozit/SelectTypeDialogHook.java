@@ -157,38 +157,44 @@ public class SelectTypeDialogHook implements IStartup
         {
             if (resource == null || resource.getContents().isEmpty() || types.isEmpty())
                 return;
-            Bundle core = Platform.getBundle(TYPE_PROVIDER_BUNDLE);
-            Object info = Global.newInstance(core.loadClass(
-                "com._1c.g5.v8.dt.platform.core.typeinfo.TypeDescriptionInfoWithTypeInfo")); //$NON-NLS-1$
-            Class<?> typeInfoClass = core.loadClass("com._1c.g5.v8.dt.platform.core.typeinfo.TypeInfo"); //$NON-NLS-1$
-            java.util.List<Object> items = new java.util.ArrayList<>();
             TypeDescription description = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeDescription();
-            for (TypeItem type : types)
-            {
-                String name = McoreUtil.getTypeName(type);
-                String russian = McoreUtil.getTypeNameRu(type);
-                Object classifier = TypeDescriptionPresentationHook.typeClassifier(type);
-                if (name == null || classifier == null)
-                    throw new IllegalStateException("Не получено описание типа " + (russian != null ? russian : name)); //$NON-NLS-1$
-                Object item = Global.newInstance(typeInfoClass, type, classifier,
-                    org.eclipse.xtext.naming.QualifiedName.create(name.split("\\.")), //$NON-NLS-1$
-                    org.eclipse.xtext.naming.QualifiedName.create((russian != null ? russian : name).split("\\.")), //$NON-NLS-1$
-                    com._1c.g5.v8.dt.mcore.util.Environments.ALL);
-                if (item == null)
-                    throw new IllegalStateException("Не удалось создать описание типа " + name); //$NON-NLS-1$
-                items.add(item);
-                description.getTypes().add(type);
-            }
-            if (!Global.invokeVoid(info, "setTypeInfos", items)) //$NON-NLS-1$
-                throw new IllegalStateException("Не удалось передать список типов"); //$NON-NLS-1$
-            Global.invokeVoid(info, "setCompositeTypeEnable", Boolean.TRUE); //$NON-NLS-1$
-            Global.invokeVoid(info, "setMixSingleEnable", Boolean.TRUE); //$NON-NLS-1$
-            openReadOnly(parent, description, resource.getContents().get(0), info);
+            description.getTypes().addAll(types);
+            openReadOnly(parent, description, resource.getContents().get(0), ownTypesInfo(types));
         }
         catch (ReflectiveOperationException | RuntimeException | LinkageError error)
         {
             ToastNotification.show("Открыть типы", "Не удалось открыть описание типов: " + error.getMessage(), 5000); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    /** Описание доступных типов из самих типов — для просмотра, когда штатный источник владельца пуст. */
+    private static Object ownTypesInfo(java.util.List<TypeItem> types) throws ReflectiveOperationException
+    {
+        Bundle core = Platform.getBundle(TYPE_PROVIDER_BUNDLE);
+        Object info = Global.newInstance(core.loadClass(
+            "com._1c.g5.v8.dt.platform.core.typeinfo.TypeDescriptionInfoWithTypeInfo")); //$NON-NLS-1$
+        Class<?> typeInfoClass = core.loadClass("com._1c.g5.v8.dt.platform.core.typeinfo.TypeInfo"); //$NON-NLS-1$
+        java.util.List<Object> items = new java.util.ArrayList<>();
+        for (TypeItem type : types)
+        {
+            String name = McoreUtil.getTypeName(type);
+            String russian = McoreUtil.getTypeNameRu(type);
+            Object classifier = TypeDescriptionPresentationHook.typeClassifier(type);
+            if (name == null || classifier == null)
+                throw new IllegalStateException("Не получено описание типа " + (russian != null ? russian : name)); //$NON-NLS-1$
+            Object item = Global.newInstance(typeInfoClass, type, classifier,
+                org.eclipse.xtext.naming.QualifiedName.create(name.split("\\.")), //$NON-NLS-1$
+                org.eclipse.xtext.naming.QualifiedName.create((russian != null ? russian : name).split("\\.")), //$NON-NLS-1$
+                com._1c.g5.v8.dt.mcore.util.Environments.ALL);
+            if (item == null)
+                throw new IllegalStateException("Не удалось создать описание типа " + name); //$NON-NLS-1$
+            items.add(item);
+        }
+        if (!Global.invokeVoid(info, "setTypeInfos", items)) //$NON-NLS-1$
+            throw new IllegalStateException("Не удалось передать список типов"); //$NON-NLS-1$
+        Global.invokeVoid(info, "setCompositeTypeEnable", Boolean.TRUE); //$NON-NLS-1$
+        Global.invokeVoid(info, "setMixSingleEnable", Boolean.TRUE); //$NON-NLS-1$
+        return info;
     }
 
     private static void openReadOnly(Shell parent, TypeDescription type, EObject context, Object suppliedInfo)
@@ -231,6 +237,10 @@ public class SelectTypeDialogHook implements IStartup
             Object info = suppliedInfo != null ? suppliedInfo
                 : Global.invoke(service, "getTypeDescriptionInfoWithTypeInfo", //$NON-NLS-1$
                     owner, owner.eContainer(), feature, null);
+            // Владельцы вроде колонки динамического списка: штатный источник даёт пустой перечень типов.
+            if (suppliedInfo == null && info != null && Global.invoke(info, "getTypeInfos") instanceof java.util.List<?> known //$NON-NLS-1$
+                && known.isEmpty())
+                info = ownTypesInfo(type.getTypes());
             if (info == null)
                 throw new IllegalStateException("Не получено описание доступных типов"); //$NON-NLS-1$
             registerTypeProvider(bundle);

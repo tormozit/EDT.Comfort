@@ -150,7 +150,7 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
      * штатная страница EDT «Неоднозначный элемент» / «Ничего не найдено» со списком вариантов:
      * неоднозначность должна оставаться отличимой от определившейся роли.
      */
-    private static void show(List<?> pages, String query)
+    static void show(List<?> pages, String query)
     {
         if (BslSyntaxAssist.showView() == null)
             return;

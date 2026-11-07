@@ -153,7 +153,11 @@ final class TypeDescriptionPresentationHook
                 throw new IllegalStateException("Нет провайдера представления поля типа"); //$NON-NLS-1$
             List<String> names = new ArrayList<>();
             for (Object item : sorted)
-                names.add(provider.getText(item));
+            {
+                String name = provider.getText(item);
+                String shortName = ValueTypeColumnLabelProvider.singleReferenceName(name);
+                names.add(shortName != null ? shortName : name);
+            }
             String text = String.join(", ", names); //$NON-NLS-1$
             Global.invokeVoid(viewModel, "setValue", text); //$NON-NLS-1$
         }

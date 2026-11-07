@@ -501,8 +501,13 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 }
                 names.add(name);
             }
-            return String.join(separator, names);
+            if (names.size() <= MAX_TYPES_IN_MESSAGE)
+                return String.join(separator, names);
+            return String.join(separator, new ArrayList<>(names).subList(0, MAX_TYPES_IN_MESSAGE)) + ", ..."; //$NON-NLS-1$
         }
+
+        /** Больше типов в тексте ошибки не показываем (#965). */
+        private static final int MAX_TYPES_IN_MESSAGE = 10;
 
         /**
          * BslUtil.intersectTypeItem через getCastingType допускает Date вместо Number/Boolean

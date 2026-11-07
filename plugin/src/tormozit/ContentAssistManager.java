@@ -182,15 +182,14 @@ public final class ContentAssistManager
 
         ISourceViewer viewer = QueryTextEditDialogHook.resolveViewerForShell(shell);
         if (viewer == null || !(viewer instanceof SourceViewer sourceViewer))
-        {
             return;
-        }
 
         Object dialog = QueryTextEditDialogHook.resolveDialogForShell(shell);
         Object qlEditor = dialog != null ? Global.getField(dialog, "qlEditor") : null; //$NON-NLS-1$
         QueryTextEditorFacade facade = new QueryTextEditorFacade(qlEditor, sourceViewer, dialog);
+        QueryEditorHover.install(sourceViewer, facade);
 
-        boolean patched = ContentAssistPatcher.applyPatch(
+        ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
     }
 
@@ -222,16 +221,85 @@ public final class ContentAssistManager
         Object firstPage = dcsEditor.getPages().get(0);
         if (!(firstPage instanceof DataSets dataSets))
             return;
+        // Редактор запроса набора данных создаётся лениво — при выборе набора, уже после
+        // активации страницы (issue 1003). Поэтому подключаемся ещё и на фокус поля запроса.
+        installDcsQueryFocusPatch(dataSets);
         Object qlEditor = dataSets.getQueryEditor();
         if (qlEditor == null)
             return;
+        patchDcsQueryEditor(qlEditor, null);
+    }
+
+    private static final String DCS_FOCUS_PATCH_KEY = "tormozit.dcs.queryAssistFocusPatch"; //$NON-NLS-1$
+    private static final String DCS_PATCHED_TEXT_KEY = "tormozit.dcs.queryAssistPatched"; //$NON-NLS-1$
+    /** Поля страницы DataSets с редакторами запроса: полный и в объединении (см. dcs-ui). */
+    private static final String[] DCS_QUERY_COMPOSITES = { "queryFullViewer", "queryInUnionViewer" }; //$NON-NLS-1$ //$NON-NLS-2$
+
+    /** Display-фильтр фокуса: подключить автодополнение к лениво созданному редактору запроса. */
+    private void installDcsQueryFocusPatch(DataSets dataSets)
+    {
+        if (!(dataSets instanceof org.eclipse.swt.widgets.Composite page) || page.isDisposed()
+            || page.getData(DCS_FOCUS_PATCH_KEY) != null)
+            return;
+        page.setData(DCS_FOCUS_PATCH_KEY, Boolean.TRUE);
+        Display display = page.getDisplay();
+        org.eclipse.swt.widgets.Listener filter = event ->
+        {
+            if (page.isDisposed() || !(event.widget instanceof org.eclipse.swt.custom.StyledText text)
+                || text.isDisposed() || text.getData(DCS_PATCHED_TEXT_KEY) != null
+                || !isInside(text, page))
+                return;
+            for (String field : DCS_QUERY_COMPOSITES)
+            {
+                Object composite = Global.getField(page, field);
+                Object ql = composite != null ? Global.invoke(composite, "getQueryEditor") : null; //$NON-NLS-1$
+                if (patchDcsQueryEditor(ql, text))
+                    return;
+            }
+            patchDcsQueryEditor(dataSets.getQueryEditor(), text);
+        };
+        display.addFilter(org.eclipse.swt.SWT.FocusIn, filter);
+        page.addListener(org.eclipse.swt.SWT.Dispose,
+            event -> display.removeFilter(org.eclipse.swt.SWT.FocusIn, filter));
+    }
+
+    private static boolean isInside(org.eclipse.swt.widgets.Control control,
+                                    org.eclipse.swt.widgets.Control root)
+    {
+        for (org.eclipse.swt.widgets.Control c = control; c != null; c = c.getParent())
+            if (c == root)
+                return true;
+        return false;
+    }
+
+    /**
+     * @param focusText поле, получившее фокус; {@code null} — подключить без сверки с полем
+     * @return {@code true}, если редактор {@code qlEditor} — тот, что принадлежит {@code focusText}
+     */
+    private boolean patchDcsQueryEditor(Object qlEditor, org.eclipse.swt.custom.StyledText focusText)
+    {
+        if (qlEditor == null || !settings.isEnabled())
+            return false;
         Object viewerObj = Global.invoke(qlEditor, "getViewer"); //$NON-NLS-1$
         if (!(viewerObj instanceof SourceViewer sourceViewer))
-            return;
+            return false;
+        org.eclipse.swt.custom.StyledText text = sourceViewer.getTextWidget();
+        if (focusText != null && text != focusText)
+            return false;
+        // Повторное подключение при активации страницы/смене настроек не пропускаем: оно
+        // переключает фильтры списка; от повторов по фокусу защищает сам фильтр.
+        if (text == null || text.isDisposed())
+            return true;
         QueryTextEditorFacade facade =
             new QueryTextEditorFacade(qlEditor, sourceViewer, null);
-        ContentAssistPatcher.applyPatch(
+        QueryEditorHover.install(sourceViewer, facade);
+        // Ctrl+клик по полю таблицы — переход к реквизиту, как в окнах запросов (issue 837).
+        BslQueryLiteralSupport.wrapQueryEditorHyperlinks(sourceViewer);
+        boolean patched = ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
+        if (patched)
+            text.setData(DCS_PATCHED_TEXT_KEY, Boolean.TRUE);
+        return true;
     }
 
     private void registerPartListener(IWorkbenchWindow window)
@@ -323,6 +391,196 @@ public final class ContentAssistManager
             }
             if (page instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
                 applyPatchToDcsQueryInPage(embeddedPage);
+        }
+    }
+
+    /**
+     * Подсказка при наведении в окнах языка запросов (issue 1003). Штатный QL описание поля не
+     * даёт ({@code QlEObjectHoverProvider} не знает {@code DbView}); описание — то же, что у
+     * запроса в литерале модуля ({@link BslQueryLiteralSupport#queryEditorHover}). Нет описания —
+     * штатная подсказка.
+     */
+    private static final class QueryEditorHover
+        implements org.eclipse.jface.text.ITextHover, org.eclipse.jface.text.ITextHoverExtension,
+        org.eclipse.jface.text.ITextHoverExtension2
+    {
+        private static final String MARKER = "tormozit.queryEditorHover"; //$NON-NLS-1$
+        private final org.eclipse.jface.text.ITextHover delegate;
+        private final QueryTextEditorFacade facade;
+        private volatile org.eclipse.jface.text.IInformationControlCreator lastCreator;
+
+        private QueryEditorHover(org.eclipse.jface.text.ITextHover delegate, QueryTextEditorFacade facade)
+        {
+            this.delegate = delegate;
+            this.facade = facade;
+        }
+
+        static void install(SourceViewer viewer, QueryTextEditorFacade facade)
+        {
+            org.eclipse.swt.custom.StyledText text = viewer == null ? null : viewer.getTextWidget();
+            if (text == null || text.isDisposed() || text.getData(MARKER) != null)
+                return;
+            text.setData(MARKER, Boolean.TRUE);
+            @SuppressWarnings("unchecked")
+            Map<Object, org.eclipse.jface.text.ITextHover> hovers =
+                (Map<Object, org.eclipse.jface.text.ITextHover>) Global.getField(viewer, "fTextHovers"); //$NON-NLS-1$
+            if (hovers == null || hovers.isEmpty())
+                viewer.setTextHover(new QueryEditorHover(null, facade),
+                    org.eclipse.jface.text.IDocument.DEFAULT_CONTENT_TYPE);
+            else
+                for (Map.Entry<Object, org.eclipse.jface.text.ITextHover> entry : hovers.entrySet())
+                    if (!(entry.getValue() instanceof QueryEditorHover))
+                        entry.setValue(new QueryEditorHover(entry.getValue(), facade));
+            // Переключатель «Подсказки при наведении без Ctrl» — как в редакторе модуля; после
+            // обёртки: копия подсказки на Ctrl берётся уже с нашей. Пункт в меню добавляют хуки
+            // меню окон запросов.
+            BslHoverHintState.installOnViewer(viewer, false);
+            QuerySyntaxAssistKey.install(viewer, facade);
+        }
+
+        @Override
+        public org.eclipse.jface.text.IRegion getHoverRegion(org.eclipse.jface.text.ITextViewer viewer, int offset)
+        {
+            org.eclipse.jface.text.IRegion region =
+                BslQueryLiteralSupport.queryEditorHoverRegion(viewer.getDocument(), offset);
+            if (region != null)
+                return region;
+            return delegate != null ? delegate.getHoverRegion(viewer, offset) : null;
+        }
+
+        @Override
+        public Object getHoverInfo2(org.eclipse.jface.text.ITextViewer viewer, org.eclipse.jface.text.IRegion region)
+        {
+            lastCreator = null;
+            if (region != null)
+            {
+                var hover = BslQueryLiteralSupport.queryEditorHover(() ->
+                {
+                    IDtProject dtProject = facade.getDtProject();
+                    return dtProject != null ? dtProject.getWorkspaceProject() : null;
+                }, viewer.getDocument(), region.getOffset());
+                if (hover != null && hover.info() != null)
+                {
+                    lastCreator = hover.creator();
+                    return hover.info();
+                }
+            }
+            if (delegate instanceof org.eclipse.jface.text.ITextHoverExtension2 ext2)
+                return ext2.getHoverInfo2(viewer, region);
+            return delegate != null ? delegate.getHoverInfo(viewer, region) : null;
+        }
+
+        @Override
+        @Deprecated
+        public String getHoverInfo(org.eclipse.jface.text.ITextViewer viewer, org.eclipse.jface.text.IRegion region)
+        {
+            Object info = getHoverInfo2(viewer, region);
+            return info == null ? null : info instanceof String text ? text : info.toString();
+        }
+
+        @Override
+        public org.eclipse.jface.text.IInformationControlCreator getHoverControlCreator()
+        {
+            org.eclipse.jface.text.IInformationControlCreator creator = lastCreator;
+            if (creator != null)
+                return creator;
+            return delegate instanceof org.eclipse.jface.text.ITextHoverExtension ext
+                ? ext.getHoverControlCreator() : null;
+        }
+    }
+
+    /**
+     * Ctrl+F1 в окнах языка запросов — как «Открыть синтакс-помощник» редактора модуля: поиск слова
+     * в верхней части панели, для ключевого слова или функции QL — статья раздела языка запросов
+     * в нижней. Команда EDT здесь не активна (её контекст — редактор модуля), поэтому клавиша
+     * перехватывается на поле; у {@code StyledText} — только {@code addVerifyKeyListener}.
+     */
+    private static final class QuerySyntaxAssistKey
+    {
+        static void install(SourceViewer viewer, QueryTextEditorFacade facade)
+        {
+            org.eclipse.swt.custom.StyledText text = viewer.getTextWidget();
+            text.addVerifyKeyListener(event ->
+            {
+                if (event.keyCode != org.eclipse.swt.SWT.F1
+                    || (event.stateMask & org.eclipse.swt.SWT.MODIFIER_MASK) != org.eclipse.swt.SWT.MOD1)
+                    return;
+                event.doit = false;
+                // Windows шлёт за F1 запрос справки (SWT.Help) в фокус. Панель, открытая сразу,
+                // забирает фокус в редакторе среды (схема компоновки) — и справка Eclipse
+                // открывается по ней. Поэтому запрос справки этого нажатия поглощаем на поле,
+                // а панель открываем после него.
+                org.eclipse.swt.widgets.Listener swallowHelp = new org.eclipse.swt.widgets.Listener()
+                {
+                    @Override
+                    public void handleEvent(org.eclipse.swt.widgets.Event help)
+                    {
+                        text.removeListener(org.eclipse.swt.SWT.Help, this);
+                    }
+                };
+                text.addListener(org.eclipse.swt.SWT.Help, swallowHelp);
+                Display display = text.getDisplay();
+                display.asyncExec(() ->
+                {
+                    if (!text.isDisposed())
+                        open(viewer, facade);
+                });
+                display.timerExec(500, () ->
+                {
+                    if (!text.isDisposed())
+                        text.removeListener(org.eclipse.swt.SWT.Help, swallowHelp);
+                });
+            });
+        }
+
+        private static void open(SourceViewer viewer, QueryTextEditorFacade facade)
+        {
+            org.eclipse.jface.text.IDocument document = viewer.getDocument();
+            if (document == null)
+                return;
+            // Модельное смещение, не виджетное: со свёртками они расходятся.
+            org.eclipse.swt.graphics.Point range = viewer.getSelectedRange();
+            IDtProject dtProject = facade.getDtProject();
+            org.eclipse.core.resources.IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
+            String selected = null;
+            try
+            {
+                if (range.y > 0)
+                    selected = document.get(range.x, range.y).replaceAll("\\R", ""); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                // выделения нет — ищем слово под кареткой
+            }
+            String keyword = BslQueryLiteralSupport.queryEditorKeyword(project, document, range.x);
+            String word = selected != null && !selected.isBlank() ? selected
+                : keyword != null ? keyword : wordAt(document, range.x);
+            if (keyword == null)
+            {
+                SyntaxAssistOpenElementHandler.show(java.util.List.of(), word);
+                return;
+            }
+            // Статьи документации платформы читаются долго — вне потока UI, как в редакторе модуля.
+            Display display = viewer.getTextWidget().getDisplay();
+            java.util.concurrent.CompletableFuture.runAsync(() ->
+            {
+                java.util.List<?> pages = BslSyntaxAssist.queryKeywordPages(project, keyword);
+                if (!display.isDisposed())
+                    display.asyncExec(() -> SyntaxAssistOpenElementHandler.show(pages, word));
+            });
+        }
+
+        private static String wordAt(org.eclipse.jface.text.IDocument document, int offset)
+        {
+            org.eclipse.jface.text.IRegion region = BslQueryLiteralSupport.queryEditorHoverRegion(document, offset);
+            try
+            {
+                return region == null ? null : document.get(region.getOffset(), region.getLength());
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                return null;
+            }
         }
     }
 

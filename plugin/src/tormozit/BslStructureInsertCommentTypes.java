@@ -1866,7 +1866,7 @@ public final class BslStructureInsertCommentTypes
      * в штатной подсказке: {@code DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(…, true)}.
      * Из нескольких одноимённых свойств (несколько типов) — первое, у которого есть описание.
      */
-    private static Property propertyAt(Resource resource, int offset)
+    static Property propertyAt(Resource resource, int offset)
     {
         if (!(resource instanceof org.eclipse.xtext.resource.XtextResource xtext))
             return null;
@@ -3095,19 +3095,18 @@ public final class BslStructureInsertCommentTypes
         {
             int index = method.getFormalParams().indexOf(param);
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-            if (index < 0 || module == null || module.eResource() == null)
+            if (index < 0 || module == null || module.eResource() == null || method.getName() == null)
                 return types;
             Set<EObject> returning = RETURNING.get();
             if (!returning.add(param))
                 return types;
             try
             {
-                List<com._1c.g5.v8.dt.bsl.model.Invocation> calls = PLANS.get(module, module.eResource(),
-                    () -> EcoreUtil2.getAllContentsOfType(module, com._1c.g5.v8.dt.bsl.model.Invocation.class));
-                for (com._1c.g5.v8.dt.bsl.model.Invocation call : calls)
+                java.util.Map<String, List<com._1c.g5.v8.dt.bsl.model.Invocation>> callsByName = PLANS.get(
+                    new CallIndexKey(module), module.eResource(), () -> callIndex(module));
+                for (com._1c.g5.v8.dt.bsl.model.Invocation call : callsByName.getOrDefault(method.getName(), List.of()))
                 {
                     if (!(call.getMethodAccess() instanceof StaticFeatureAccess access)
-                        || !method.getName().equalsIgnoreCase(access.getName())
                         || access.getFeatureEntries().stream().noneMatch(entry -> entry.getFeature() == method)
                         || call.getParams().size() <= index)
                         continue;
@@ -3126,6 +3125,23 @@ public final class BslStructureInsertCommentTypes
                     RETURNING.remove();
             }
             return types;
+        }
+
+        private record CallIndexKey(Module module) {}
+
+        /**
+         * Вызовы модуля по имени метода, без учёта регистра, в порядке текста. Без индекса каждый
+         * параметр перебирал все вызовы модуля: на 1,8 МБ это основная доля проверки модуля.
+         */
+        private static java.util.Map<String, List<com._1c.g5.v8.dt.bsl.model.Invocation>> callIndex(Module module)
+        {
+            java.util.Map<String, List<com._1c.g5.v8.dt.bsl.model.Invocation>> index =
+                new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            for (com._1c.g5.v8.dt.bsl.model.Invocation call : EcoreUtil2.getAllContentsOfType(module,
+                com._1c.g5.v8.dt.bsl.model.Invocation.class))
+                if (call.getMethodAccess() instanceof StaticFeatureAccess access && access.getName() != null)
+                    index.computeIfAbsent(access.getName(), key -> new ArrayList<>()).add(call);
+            return index;
         }
 
         static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)

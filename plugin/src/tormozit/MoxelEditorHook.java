@@ -213,6 +213,8 @@ public class MoxelEditorHook implements IStartup
         if (!(embeddedEditor instanceof MoxelEditor))
             return;
         MoxelEditor moxelEditor = (MoxelEditor) embeddedEditor;
+        if (SPREADSHEET_PAGE_ID.equals(page.getId()))
+            SpreadsheetPositionMemory.install(granularEditor, moxelEditor);
         Control partControl = page.getPartControl();
         if (!(partControl instanceof Composite))
             return;
@@ -330,6 +332,126 @@ public class MoxelEditorHook implements IStartup
         if (moxelEditor == null) return null;
         MoxelViewer viewer = moxelEditor.getInternalViewer();
         return viewer != null ? viewer.getMoxelControl() : null;
+    }
+
+    /**
+     * Запоминает выделение ячеек табличного документа макета (#1011) и восстанавливает его при
+     * повторном открытии, как позицию каретки в модуле. Хранение между сеансами — {@link EditorMemoryStore},
+     * ключ — файл макета. Документ в контрол попадает лениво, поэтому восстановление идёт повторами.
+     */
+    private static final class SpreadsheetPositionMemory
+    {
+        private static final char SEP = '\t';
+        private static final int RETRY_MS = 100;
+        private static final int MAX_ATTEMPTS = 100;
+        private static final String TOPIC = "mxl-position"; //$NON-NLS-1$
+
+        private static final EditorMemoryStore STORE = new EditorMemoryStore("spreadsheetPosition.entries", 300); //$NON-NLS-1$
+
+        private static final java.util.Set<MoxelEditor> HOOKED =
+            java.util.Collections.newSetFromMap(new WeakHashMap<>());
+
+        static void install(DtGranularEditor<?> host, MoxelEditor editor)
+        {
+            if (host.getEditorInput() == null || !(host.getEditorInput().getAdapter(IFile.class) instanceof IFile file)
+                || !HOOKED.add(editor))
+                return;
+            new Session(file.getFullPath().toString(), editor).start();
+        }
+
+        private static final class Session
+        {
+            private final String key;
+            private final MoxelEditor editor;
+            private int[] saved;
+            private boolean restoring;
+            private boolean listening;
+
+            Session(String key, MoxelEditor editor)
+            {
+                this.key = key;
+                this.editor = editor;
+            }
+
+            void start()
+            {
+                String raw = STORE.load(key);
+                if (raw != null)
+                {
+                    String[] parts = raw.split(String.valueOf(SEP), -1);
+                    try
+                    {
+                        if (parts.length == 4)
+                            saved = new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]),
+                                Integer.parseInt(parts[2]), Integer.parseInt(parts[3]) };
+                    }
+                    catch (NumberFormatException ignored)
+                    {
+                        saved = null;
+                    }
+                }
+                restoring = saved != null;
+                Global.tempLog(TOPIC, "start key=" + key + " saved=" + raw); //$NON-NLS-1$ //$NON-NLS-2$
+                // Сразу, без очереди: через asyncExec контрол успевает отрисовать выделение по умолчанию.
+                attach(0);
+            }
+
+            private void attach(int attempt)
+            {
+                MoxelControl control = getMoxelControl(editor);
+                SheetAccessor sheet = null;
+                try
+                {
+                    sheet = control == null || control.isDisposed() ? null : control.getSheet();
+                }
+                catch (RuntimeException ignored)
+                {
+                    // Документ ещё не передан контролу.
+                }
+                if (sheet == null)
+                {
+                    if (control != null && control.isDisposed())
+                        return;
+                    if (attempt < MAX_ATTEMPTS)
+                        Display.getDefault().timerExec(RETRY_MS, () -> attach(attempt + 1));
+                    else
+                        restoring = false;
+                    return;
+                }
+                if (!listening)
+                {
+                    listening = true;
+                    control.addSelectionChangedListener(event -> remember(control));
+                    control.addDisposeListener(event -> STORE.flush());
+                    control.addListener(SWT.FocusOut, event -> STORE.flush());
+                }
+                if (restoring)
+                {
+                    try
+                    {
+                        control.replaceAllSelection(new CellsSelection(sheet, saved[0], saved[1], saved[2], saved[3]));
+                        control.ensureSelectionVisible();
+                        Global.tempLog(TOPIC, "restored attempt=" + attempt + " rect=" + java.util.Arrays.toString(saved)); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    catch (RuntimeException e)
+                    {
+                        Global.tempLog(TOPIC, "restore failed: " + e); //$NON-NLS-1$
+                    }
+                    restoring = false;
+                }
+            }
+
+            private void remember(MoxelControl control)
+            {
+                Selection tail = control.getTailSelection();
+                Global.tempLog(TOPIC, "selection restoring=" + restoring + " tail=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (tail == null ? null : tail.getClass().getSimpleName()));
+                if (restoring || !(tail instanceof CellsSelection cells))
+                    return;
+                Rectangle r = cells.getNormalizedPosition();
+                STORE.updateMemory(key, r.x + "" + SEP + r.y + SEP + r.width + SEP + r.height); //$NON-NLS-1$
+            }
+        }
     }
 
     /** Снимок выделения ячеек до selectAll/copy. */

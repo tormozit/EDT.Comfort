@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
@@ -15,6 +16,7 @@ import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.osgi.framework.Bundle;
 
+import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com.google.inject.Injector;
 
 /**
@@ -202,11 +204,34 @@ public final class BslSyntaxAssist
     /** Статьи QL берутся только из раздела языка запросов, а не из документации строки BSL. */
     static List<?> queryKeywordPages(EObject context, String keyword)
     {
+        Object provider = documentationProvider();
+        Object version = context == null || provider == null ? null : Global.invoke(provider, "getVersion", context); //$NON-NLS-1$
+        return queryKeywordPages(provider, version, keyword);
+    }
+
+    /** То же для окон языка запросов: контекста модуля нет, версия платформы — по проекту. */
+    static List<?> queryKeywordPages(IProject project, String keyword)
+    {
+        Object provider = documentationProvider();
+        Object version = null;
+        try
+        {
+            if (project != null && provider != null
+                && Global.getField(provider, "versionSupport") instanceof IRuntimeVersionSupport support) //$NON-NLS-1$
+                version = support.getRuntimeVersion(project);
+        }
+        catch (RuntimeException | LinkageError error)
+        {
+            // Версия не определилась — статей нет, поиск всё равно запустится.
+        }
+        return queryKeywordPages(provider, version, keyword);
+    }
+
+    private static List<?> queryKeywordPages(Object provider, Object version, String keyword)
+    {
         List<Object> pages = new ArrayList<>();
         try
         {
-            Object provider = documentationProvider();
-            Object version = context == null ? null : Global.invoke(provider, "getVersion", context); //$NON-NLS-1$
             Object platform = Global.getField(provider, "platformDocumentationProvider"); //$NON-NLS-1$
             Object tree = version == null ? null : Global.invoke(platform, "getTree", version); //$NON-NLS-1$
             Object root = Global.invoke(tree, "getNode", "SyntaxHelperQueries/root.html"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -296,6 +321,9 @@ public final class BslSyntaxAssist
         try
         {
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            // Из модального окна запроса активного окна среды нет — берём первое.
+            if (window == null && PlatformUI.getWorkbench().getWorkbenchWindows().length > 0)
+                window = PlatformUI.getWorkbench().getWorkbenchWindows()[0];
             IWorkbenchPage page = window != null ? window.getActivePage() : null;
             if (page != null)
                 page.showView(VIEW_ID);

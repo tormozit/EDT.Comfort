@@ -3233,6 +3233,33 @@ return;
                         }
                         raw = EMPTY;
                     }
+                    // Язык запросов (документ не BSL) с начала уже набранного слова отдаёт
+                    // пусто, а с каретки — список (лог #1003: «Валюты, докум» — 0 против 112).
+                    // Зонд в начале слова нужен BSL ради полного списка; здесь — каретка.
+                    if ((raw == null || raw.length == 0) && lastProbe != offset
+                        && !ContentAssistSessionReloader.hasPeekRead(doc)
+                        && !monitor.isCanceled() && epoch == wordListEpoch && gen == memberStockContextGen)
+                    {
+                        try
+                        {
+                            final int caretProbe = offset;
+                            raw = ContentAssistSessionReloader.withMemberModelReady(xtextDocument, caretProbe,
+                                () -> monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen,
+                                () -> BslDataEventGuard.runIsolated(
+                                    () -> computeMemberStockViaSelectionProxy(viewer, caretProbe)));
+                            events = BslDataEventGuard.drainIsolated(doc);
+                            lastProbe = caretProbe;
+                        }
+                        catch (Exception | LinkageError e)
+                        {
+                            if (isCanceledByNewerRequest(e))
+                                return Status.CANCEL_STATUS;
+                            raw = EMPTY;
+                        }
+                    }
+                    // Список кэшируется и дальше только фильтруется: эхо слова на момент расчёта
+                    // убираем здесь, по живому слову его потом уже не узнать (issue 1003).
+                    raw = dropQueryTextEcho(doc, lastProbe, raw);
                     // mode == 2 — штатный расчёт отдал второй проход: полный проход
                     // (mode 1) вернул пусто, а второй даёт лишь то, что не зависит от
                     // режима. Такой список брать за словарь нельзя: замер 12.09.2026
@@ -3574,9 +3601,63 @@ return;
             return list;
         try
         {
-            return dropTypedEcho(list, computeIdentifierFilter(doc, offset));
+            return dropQueryTextEcho(doc, offset,
+                dropTypedEcho(list, computeIdentifierFilter(doc, offset)));
         }
         catch (RuntimeException e)
+        {
+            return list;
+        }
+    }
+
+    /**
+     * Слово, которое язык запросов предлагает только потому, что его сейчас набирают: QL берёт в
+     * список и имена из текста запроса, а там уже стоит недописанное слово (issue 1003). Как у
+     * встроенного языка ({@code ЗаполнитьЛокальныеСвойстваИМетодыПоТексту} → частота
+     * {@code Родитель.Член} в {@link BslExpectedTypePremiums}): считаются вхождения полного пути
+     * слова у каретки без комментариев и строк, минус само вхождение у каретки. Других нет —
+     * предложение с этим именем убирается. Только документ языка запросов (не BSL): у литерала
+     * в модуле текст запроса — не весь документ.
+     */
+    static ICompletionProposal[] dropQueryTextEcho(IDocument doc, int offset, ICompletionProposal[] list)
+    {
+        if (doc == null || list == null || list.length == 0 || offset < 0
+            || ContentAssistSessionReloader.hasPeekRead(doc) || !isQueryProposalList(list))
+            return list;
+        int[] range = identifierRangeAtCaret(doc, offset);
+        if (range == null || range[1] <= range[0])
+            return list;
+        try
+        {
+            String word = doc.get(range[0], range[1] - range[0]);
+            if (word.isEmpty() || word.charAt(0) == '&')
+                return list;
+            // Полный путь: «Родитель.Родитель.Слово» — как родительский контекст у встроенного языка.
+            int pathStart = range[0];
+            while (pathStart > 0 && doc.getChar(pathStart - 1) == '.')
+            {
+                int p = pathStart - 1;
+                while (p > 0 && isFilterChar(doc.getChar(p - 1)) && doc.getChar(p - 1) != '&')
+                    p--;
+                if (p == pathStart - 1)
+                    break;
+                pathStart = p;
+            }
+            String path = doc.get(pathStart, range[1] - pathStart);
+            String clean = BslExpectedTypePremiums.withoutCommentsAndStrings(doc.get());
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "(?<![\\p{L}\\p{N}_.&])" + java.util.regex.Pattern.quote(path) + "(?![\\p{L}\\p{N}_])", //$NON-NLS-1$ //$NON-NLS-2$
+                java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE).matcher(clean);
+            while (matcher.find())
+                if (matcher.start() != pathStart)
+                    return list;
+            java.util.List<ICompletionProposal> kept = new java.util.ArrayList<>(list.length);
+            for (ICompletionProposal p : list)
+                if (!word.equalsIgnoreCase(stripAllServicePrefixes(filterMatchName(unwrapProposal(p)))))
+                    kept.add(p);
+            return kept.size() == list.length ? list : kept.toArray(new ICompletionProposal[0]);
+        }
+        catch (Exception e)
         {
             return list;
         }

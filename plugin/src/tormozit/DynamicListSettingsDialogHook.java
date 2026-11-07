@@ -152,6 +152,448 @@ public final class DynamicListSettingsDialogHook implements IStartup
         log("install Resize + Show + hyperlink-guard filters"); //$NON-NLS-1$
     }
 
+    // --- двойной клик по полю списка: открыть настройки и активировать поле (#1007) ----------
+
+    /** Поле набора данных, которое нужно выделить в только что открытом окне настроек. */
+    private static final class FieldReveal
+    {
+        final String[] names;
+
+        final boolean title;
+
+        /** Заново показывает список в палитре, если она переключилась на другое. */
+        final Runnable showListInPalette;
+
+        /** Возвращает палитре прежнее содержимое, когда ссылка уже не нужна. */
+        final Runnable restoreSelection;
+
+        FieldReveal(String[] names, boolean title, Runnable showListInPalette, Runnable restoreSelection)
+        {
+            this.names = names;
+            this.title = title;
+            this.showListInPalette = showListInPalette;
+            this.restoreSelection = restoreSelection;
+        }
+
+        void showList()
+        {
+            if (showListInPalette != null)
+                showListInPalette.run();
+        }
+
+        void restore()
+        {
+            if (restoreSelection != null)
+                restoreSelection.run();
+        }
+    }
+
+    private static final String TEMP_TOPIC = "dl-field-reveal"; //$NON-NLS-1$
+
+    private static final int REVEAL_ATTEMPTS = 20;
+
+    /** Запрос, ждущий появления окна настроек; забирается в {@link #onDelayedSetup}. */
+    private static FieldReveal pendingReveal;
+
+    /**
+     * Открывает окно настроек списка (через ссылку «Открыть» панели «Свойства», где уже выделен
+     * реквизит-список) и активирует в нём поле набора данных. Если окно этого списка уже
+     * открыто — выводит его вперёд.
+     *
+     * @param names имена поля (русское и английское) — совпадение по пути поля набора данных
+     * @param title {@code true} — активировать ячейку «Заголовок», иначе «Путь»
+     * @param showListInPalette показать список в палитре — повторяется, пока палитра показывает другое
+     * @param restoreSelection вернуть палитре прежнее содержимое — вызывается, как только окно
+     *        открылось (или открыть не удалось)
+     */
+    static void openFieldSettings(IWorkbenchPage workbenchPage, EObject attr, boolean title,
+        Runnable showListInPalette, Runnable restoreSelection, String... names)
+    {
+        FieldReveal request = new FieldReveal(names, title, showListInPalette, restoreSelection);
+        Shell existing = attr == null ? null : OPEN_BY_LIST.get(EcoreUtil.getURI(attr).toString());
+        Global.tempLog(TEMP_TOPIC, "[v10] openFieldSettings names=" + java.util.Arrays.toString(names) //$NON-NLS-1$
+            + " title=" + title + " existing=" + (existing != null && !existing.isDisposed())); //$NON-NLS-1$ //$NON-NLS-2$
+        if (existing != null && !existing.isDisposed())
+        {
+            request.restore();
+            activateExistingShell(existing);
+            scheduleReveal(existing, request, 0);
+            return;
+        }
+        pendingReveal = request;
+        scheduleOpenLink(workbenchPage, attr, 0);
+    }
+
+    private static void scheduleOpenLink(IWorkbenchPage workbenchPage, EObject attr, int attempt)
+    {
+        Display display = Display.getCurrent();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(attempt == 0 ? 50 : 100, () -> {
+            if (pendingReveal == null)
+            {
+                Global.tempLog(TEMP_TOPIC, "openLink attempt=" + attempt + ": pendingReveal уже снят"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (activateSettingsLink(workbenchPage, attr))
+                return;
+            Global.tempLog(TEMP_TOPIC, "openLink attempt=" + attempt + ": ссылки нет"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (attempt < REVEAL_ATTEMPTS)
+                scheduleOpenLink(workbenchPage, attr, attempt + 1);
+            else
+            {
+                Global.tempLog(TEMP_TOPIC, "settings link not found"); //$NON-NLS-1$
+                FieldReveal request = pendingReveal;
+                pendingReveal = null;
+                request.restore();
+            }
+        });
+    }
+
+    /** Ищет в панели «Свойства» ссылку «Открыть» и активирует её. */
+    private static boolean activateSettingsLink(IWorkbenchPage workbenchPage, EObject attr)
+    {
+        Object sheetPage = propertySheetPage(workbenchPage);
+        org.eclipse.swt.widgets.Composite palette =
+            sheetPage == null ? null : PropertySheetUiContext.findPaletteContent(sheetPage);
+        if (palette == null || palette.isDisposed())
+        {
+            Global.tempLog(TEMP_TOPIC, "palette=" + (palette == null ? "null" : "disposed")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return false;
+        }
+        // Палитра перестраивается после смены выделения не сразу: пока она показывает прежний
+        // объект (например, само поле), ссылки «Открыть» в ней чужие — ждём сам список.
+        EObject shown = PropertySheetControlInterop.selectionEObjectForCopy(sheetPage);
+        if (!sameObject(shown, attr))
+        {
+            Global.tempLog(TEMP_TOPIC, "палитра показывает " //$NON-NLS-1$
+                + (shown == null ? "null" : shown.eClass().getName() + " " + Global.invoke(shown, "getName"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (pendingReveal != null)
+                pendingReveal.showList();
+            return false;
+        }
+        java.util.List<org.eclipse.ui.forms.widgets.Hyperlink> links = new java.util.ArrayList<>();
+        collectSettingsLinks(palette, links);
+        for (int i = 0; i < links.size(); i++)
+        {
+            org.eclipse.ui.forms.widgets.Hyperlink link = links.get(i);
+            org.eclipse.swt.graphics.Rectangle bounds = link.getDisplay().map(link.getParent(), null, link.getBounds());
+            Global.tempLog(TEMP_TOPIC, "candidate #" + i + " marked=" + (link.getData(LINK_IS_DYNLIST_KEY) != null) //$NON-NLS-1$ //$NON-NLS-2$
+                + " y=" + bounds.y + " section=[" + sectionTitle(link) + "] rowLabel=[" + rowLabel(link) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "] siblings=" + siblingTexts(link)); //$NON-NLS-1$
+        }
+        if (links.isEmpty())
+            return false;
+        // «Настройка списка» — единственная ссылка «Открыть» в секции «Объект»; «Просмотр» и
+        // «Редактировать» (тоже «Открыть») лежат в «Использовании». Секция «Объект» достраивается
+        // позже остальных: пока её ссылки нет, ждём, а не жмём чужую (#1007).
+        org.eclipse.ui.forms.widgets.Hyperlink target = null;
+        for (org.eclipse.ui.forms.widgets.Hyperlink link : links)
+        {
+            String section = sectionTitle(link);
+            String near = (siblingTexts(link) + siblingTexts(link.getParent())).toLowerCase();
+            if ("Объект".equalsIgnoreCase(section) || "Object".equalsIgnoreCase(section) //$NON-NLS-1$ //$NON-NLS-2$
+                || near.contains("настройка списка") || near.contains("list settings")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                target = link;
+                break;
+            }
+        }
+        for (org.eclipse.ui.forms.widgets.Hyperlink link : links)
+        {
+            if (link.getData(LINK_IS_DYNLIST_KEY) != null)
+            {
+                target = link;
+                break;
+            }
+        }
+        if (target == null)
+        {
+            Global.tempLog(TEMP_TOPIC, "ссылки секции «Объект» ещё нет, ждём"); //$NON-NLS-1$
+            return false;
+        }
+        Event wrapEvent = new Event();
+        wrapEvent.widget = target;
+        wrapSettingsHyperlink(wrapEvent);
+        org.eclipse.ui.forms.events.HyperlinkEvent hyperlinkEvent =
+            new org.eclipse.ui.forms.events.HyperlinkEvent(target, target.getHref(), target.getText(), 0);
+        Global.tempLog(TEMP_TOPIC, "activating link #" + links.indexOf(target) + " of " + links.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " rowLabel=[" + rowLabel(target) + "] wrapped=" + (target.getData(LINK_WRAPPED_KEY) != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " listeners=" + hyperlinkListeners(target).size()); //$NON-NLS-1$
+        for (org.eclipse.ui.forms.events.IHyperlinkListener listener : hyperlinkListeners(target))
+            listener.linkActivated(hyperlinkEvent);
+        return true;
+    }
+
+    private static Object propertySheetPage(IWorkbenchPage workbenchPage)
+    {
+        if (workbenchPage == null)
+            return null;
+        for (org.eclipse.ui.IViewReference reference : workbenchPage.getViewReferences())
+        {
+            org.eclipse.ui.IViewPart view = reference.getView(false);
+            if (view != null && PropertyNameIdentifierHook.isPropertySheetView(view))
+                return PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+        }
+        return null;
+    }
+
+    /** Тот же объект модели: экземпляр палитры может быть другой копией того же реквизита. */
+    private static boolean sameObject(EObject shown, EObject expected)
+    {
+        if (shown == null || expected == null)
+            return true; // палитра не говорит, что показывает, — проверить нечем
+        if (shown == expected || EcoreUtil.isAncestor(expected, shown))
+            return true;
+        String expectedUri = EcoreUtil.getURI(expected).toString();
+        String shownUri = EcoreUtil.getURI(shown).toString();
+        return shownUri.equals(expectedUri) || shownUri.startsWith(expectedUri + "/"); //$NON-NLS-1$
+    }
+
+    private static void collectSettingsLinks(org.eclipse.swt.widgets.Composite parent,
+        java.util.List<org.eclipse.ui.forms.widgets.Hyperlink> result)
+    {
+        for (org.eclipse.swt.widgets.Control child : parent.getChildren())
+        {
+            if (child.isDisposed() || !child.isVisible())
+                continue;
+            if (child instanceof org.eclipse.ui.forms.widgets.Hyperlink link && isSettingsLinkLabel(link.getText()))
+                result.add(link);
+            else if (child instanceof org.eclipse.swt.widgets.Composite composite)
+                collectSettingsLinks(composite, result);
+        }
+    }
+
+    private static String sectionTitle(org.eclipse.swt.widgets.Control control)
+    {
+        for (org.eclipse.swt.widgets.Control cur = control.getParent(); cur != null; cur = cur.getParent())
+            if (cur instanceof org.eclipse.ui.forms.widgets.Section section)
+                return String.valueOf(section.getText());
+        return ""; //$NON-NLS-1$
+    }
+
+    /** Тексты соседних надписей рядом со ссылкой — для опознания её в логе. */
+    private static String siblingTexts(org.eclipse.swt.widgets.Control control)
+    {
+        StringBuilder texts = new StringBuilder();
+        org.eclipse.swt.widgets.Composite parent = control.getParent();
+        if (parent == null)
+            return ""; //$NON-NLS-1$
+        for (org.eclipse.swt.widgets.Control child : parent.getChildren())
+        {
+            String text = child instanceof org.eclipse.swt.widgets.Label label ? label.getText()
+                : child instanceof org.eclipse.ui.forms.widgets.Hyperlink link ? link.getText() : null;
+            texts.append(child.getClass().getSimpleName());
+            if (text != null)
+                texts.append('=').append(text);
+            texts.append("; "); //$NON-NLS-1$
+        }
+        return texts.toString();
+    }
+
+    /**
+     * SWT-надпись в той же строке палитры слева от ссылки (по пересечению по вертикали
+     * в координатах экрана), или пусто, если надписи — не SWT-виджеты.
+     */
+    private static String rowLabel(org.eclipse.swt.widgets.Control link)
+    {
+        org.eclipse.swt.widgets.Composite section = link.getParent();
+        while (section != null && !(section instanceof org.eclipse.ui.forms.widgets.Section))
+            section = section.getParent();
+        if (section == null)
+            return ""; //$NON-NLS-1$
+        org.eclipse.swt.graphics.Rectangle linkBounds = link.getDisplay().map(link.getParent(), null, link.getBounds());
+        StringBuilder found = new StringBuilder();
+        collectRowLabels(section, linkBounds, found);
+        return found.toString();
+    }
+
+    private static void collectRowLabels(org.eclipse.swt.widgets.Composite parent,
+        org.eclipse.swt.graphics.Rectangle row, StringBuilder found)
+    {
+        for (org.eclipse.swt.widgets.Control child : parent.getChildren())
+        {
+            if (child.isDisposed() || !child.isVisible())
+                continue;
+            if (child instanceof org.eclipse.swt.widgets.Label label)
+            {
+                org.eclipse.swt.graphics.Rectangle b = child.getDisplay().map(parent, null, child.getBounds());
+                if (b.x < row.x && b.y < row.y + row.height && b.y + b.height > row.y)
+                    found.append(label.getText()).append(';');
+            }
+            else if (child instanceof org.eclipse.swt.widgets.Composite composite)
+                collectRowLabels(composite, row, found);
+        }
+    }
+
+    /** Забирает запрос выделения поля для только что настроенного окна. */
+    private static void consumePendingReveal(Shell shell)
+    {
+        FieldReveal request = pendingReveal;
+        pendingReveal = null;
+        Global.tempLog(TEMP_TOPIC, "consumePendingReveal request=" //$NON-NLS-1$
+            + (request == null ? "null" : java.util.Arrays.toString(request.names))); //$NON-NLS-1$
+        if (request != null)
+        {
+            request.restore();
+            scheduleReveal(shell, request, 0);
+        }
+    }
+
+    private static void scheduleReveal(Shell shell, FieldReveal request, int attempt)
+    {
+        Display display = shell.isDisposed() ? null : shell.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(150, () -> {
+            if (shell.isDisposed())
+            {
+                Global.tempLog(TEMP_TOPIC, "reveal attempt=" + attempt + ": окно закрыто"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Global.tempLog(TEMP_TOPIC, "reveal attempt=" + attempt); //$NON-NLS-1$
+            boolean done;
+            try
+            {
+                done = revealField(shell, request);
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                Global.tempLogException(TEMP_TOPIC, "revealField failed", e); //$NON-NLS-1$
+                done = true;
+            }
+            if (!done && attempt < REVEAL_ATTEMPTS)
+                scheduleReveal(shell, request, attempt + 1);
+            else if (!done)
+                Global.tempLog(TEMP_TOPIC, "reveal gave up"); //$NON-NLS-1$
+        });
+    }
+
+    /** @return {@code true} — ячейка активирована (или искать больше нечего) */
+    private static boolean revealField(Shell shell, FieldReveal request)
+    {
+        Object dialog = resolveDialog(shell);
+        if (dialog == null
+            || !(Global.getField(dialog, "context") instanceof DataCompositionSchemaControlContext context)) //$NON-NLS-1$
+        {
+            Global.tempLog(TEMP_TOPIC, "  нет диалога/context, dialog=" + dialog); //$NON-NLS-1$
+            return false;
+        }
+        com._1c.g5.v8.dt.dcs.ui.datasets.DataSets dataSets = null;
+        StringBuilder pageNames = new StringBuilder();
+        for (com._1c.g5.v8.dt.dcs.ui.EditorPage page : context.getPages())
+        {
+            pageNames.append(page == null ? "null" : page.getClass().getSimpleName()).append(','); //$NON-NLS-1$
+            if (page instanceof com._1c.g5.v8.dt.dcs.ui.datasets.DataSets found)
+                dataSets = found;
+        }
+        if (dataSets == null || context.getDataCompositionSchema() == null)
+        {
+            Global.tempLog(TEMP_TOPIC, "  dataSets=" + (dataSets != null) + " schema=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (context.getDataCompositionSchema() != null) + " pages=" + pageNames); //$NON-NLS-1$
+            return false;
+        }
+        com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField field =
+            findField(context.getDataCompositionSchema(), request.names);
+        if (field == null)
+        {
+            StringBuilder paths = new StringBuilder();
+            for (com._1c.g5.v8.dt.dcs.model.schema.DataSet dataSet : context.getDataCompositionSchema().getDataSets())
+            {
+                java.util.Iterator<EObject> contents = dataSet.eAllContents();
+                while (contents.hasNext())
+                    if (contents.next() instanceof com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField f)
+                        paths.append(f.getDataPath()).append(',');
+            }
+            Global.tempLog(TEMP_TOPIC, "  field not found " + java.util.Arrays.toString(request.names) //$NON-NLS-1$
+                + " dataSets=" + context.getDataCompositionSchema().getDataSets().size() + " paths=" + paths); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
+        EObject owner = field.eContainer();
+        while (owner != null && !(owner instanceof com._1c.g5.v8.dt.dcs.model.schema.DataSet))
+            owner = owner.eContainer();
+        // В окне динамического списка набор один и дерева наборов нет (getDataSetsViewer() == null,
+        // getCurrentDataSet() == null) — переключать нечего, таблица полей уже показывает его.
+        if (owner != null && dataSets.getDataSetsViewer() != null && dataSets.getCurrentDataSet() != null
+            && dataSets.getCurrentDataSet() != owner)
+        {
+            Global.tempLog(TEMP_TOPIC, "  выбираю набор данных " //$NON-NLS-1$
+                + ((com._1c.g5.v8.dt.dcs.model.schema.DataSet) owner).getName() + ", текущий=" //$NON-NLS-1$
+                + (dataSets.getCurrentDataSet() == null ? "null" : dataSets.getCurrentDataSet().getName())); //$NON-NLS-1$
+            dataSets.getDataSetsViewer().setSelection(new org.eclipse.jface.viewers.StructuredSelection(owner), true);
+            return false;
+        }
+        Object fieldsViewer = dataSets.getCurrentFieldsViewer();
+        if (fieldsViewer == null)
+            fieldsViewer = Global.getField(dataSets, "queryFieldsFullViewer"); //$NON-NLS-1$
+        Object treeViewer = fieldsViewer == null ? null : Global.invoke(fieldsViewer, "getViewer"); //$NON-NLS-1$
+        if (treeViewer == null)
+        {
+            Global.tempLog(TEMP_TOPIC, "  fieldsViewer=" + fieldsViewer + " treeViewer=null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        Global.invoke(treeViewer, "setSelection", //$NON-NLS-1$
+            (org.eclipse.jface.viewers.ISelection) new org.eclipse.jface.viewers.StructuredSelection(field), true);
+        try
+        {
+            Class<?> columnEnum = fieldsViewer.getClass().getClassLoader()
+                .loadClass("com._1c.g5.v8.dt.dcs.ui.datasets.fields.DataSetsFieldsViewerBase$FieldsColumn"); //$NON-NLS-1$
+            Object column = Global.invoke(columnEnum, "valueOf", request.title ? "TITLE_COL_INDEX" : "PATH_COL_INDEX"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Object index = Global.invoke(fieldsViewer, "getColumnIndex", column); //$NON-NLS-1$
+            // TableEx раскладывает логические колонки по нескольким строкам и колонкам сетки
+            // (у поля набора «Путь» в первой строке, «Заголовок» — во второй), а setCellSelection
+            // принимает координаты самой сетки. Перевод — штатный: getDataItem/getDataColumn
+            // от логической колонки и первой строки сетки, занятой выделенным полем.
+            Object table = Global.invoke(treeViewer, "getTable"); //$NON-NLS-1$
+            Object grid = table == null ? null : Global.invoke(table, "getDataControl"); //$NON-NLS-1$
+            Object gridRows = grid == null ? null : Global.invoke(grid, "getSelectionIndices"); //$NON-NLS-1$
+            if (!(index instanceof Integer col) || !(gridRows instanceof int[] selected) || selected.length == 0)
+            {
+                Global.tempLog(TEMP_TOPIC, "  column=" + column + " index=" + index + " grid=" + grid //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " rows=" + (gridRows instanceof int[] r ? java.util.Arrays.toString(r) : String.valueOf(gridRows))); //$NON-NLS-1$
+                return false;
+            }
+            int baseRow = java.util.Arrays.stream(selected).min().getAsInt();
+            org.eclipse.swt.graphics.Point logical = new org.eclipse.swt.graphics.Point(col.intValue(), baseRow);
+            Object dataItem = Global.invoke(table, "getDataItem", logical); //$NON-NLS-1$
+            Object gridColumn = Global.invoke(table, "getDataColumn", logical); //$NON-NLS-1$
+            Object gridRow = dataItem == null ? null : Global.invoke(grid, "indexOf", dataItem); //$NON-NLS-1$
+            if (!(gridColumn instanceof Integer cellX) || !(gridRow instanceof Integer cellY) || cellY.intValue() < 0)
+            {
+                Global.tempLog(TEMP_TOPIC, "  нет ячейки сетки: col=" + col + " base=" + baseRow //$NON-NLS-1$ //$NON-NLS-2$
+                    + " dataItem=" + dataItem + " gridColumn=" + gridColumn + " gridRow=" + gridRow); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return false;
+            }
+            Global.invoke(table, "setCellSelection", new org.eclipse.swt.graphics.Point(cellX.intValue(), cellY.intValue())); //$NON-NLS-1$
+            Global.tempLog(TEMP_TOPIC, "cell activated col=" + col + " gridRows=" + java.util.Arrays.toString(selected) //$NON-NLS-1$ //$NON-NLS-2$
+                + " cell=" + cellX + "," + cellY); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
+        catch (ClassNotFoundException | RuntimeException e)
+        {
+            Global.tempLogException(TEMP_TOPIC, "revealField", e); //$NON-NLS-1$
+            return true;
+        }
+    }
+
+    private static com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField findField(
+        com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema schema, String[] names)
+    {
+        for (com._1c.g5.v8.dt.dcs.model.schema.DataSet dataSet : schema.getDataSets())
+        {
+            java.util.Iterator<EObject> contents = dataSet.eAllContents();
+            while (contents.hasNext())
+            {
+                if (!(contents.next() instanceof com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField field))
+                    continue;
+                for (String name : names)
+                    if (name != null && name.equalsIgnoreCase(field.getDataPath()))
+                        return field;
+            }
+        }
+        return null;
+    }
+
     // --- ссылка «Открыть» = открыть или активировать окно ----------------------------------
 
     private static void wrapSettingsHyperlink(Event event)
@@ -317,6 +759,8 @@ public final class DynamicListSettingsDialogHook implements IStartup
     private static void onShellDetected(Shell shell, int eventType)
     {
         shell.setData(SHELL_HOOKED_KEY, Boolean.TRUE);
+        Global.tempLog(TEMP_TOPIC, "onShellDetected type=" + eventType + " pending=" + (pendingReveal != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " pendingLink=" + (pendingLink != null)); //$NON-NLS-1$
 
         // Клик, который к этому привёл, был именно по ссылке настроек динамического списка —
         // помечаем её, чтобы впредь перехватывать только эту ссылку (а не чужие «Открыть»).
@@ -339,6 +783,11 @@ public final class DynamicListSettingsDialogHook implements IStartup
 
         // Пока панель «Свойства» ещё показывает этот список — запомнить её AEF-компонент и модель.
         captureDynamicListComponent(shell);
+
+        // Окно уже есть, компонент списка захвачен — палитре, переключённой на список ради
+        // ссылки «Открыть», можно вернуть прежнее содержимое, не дожидаясь настройки окна.
+        if (pendingReveal != null)
+            pendingReveal.restore();
 
         installMaintenance(shell);
         installOwnerAttributeActivation(shell, dialog, formInput, formEditorId);
@@ -365,8 +814,13 @@ public final class DynamicListSettingsDialogHook implements IStartup
         if (attrName != null)
             shell.setData(ATTR_NAME_KEY, attrName);
 
+        Global.tempLog(TEMP_TOPIC, "onDelayedSetup attr=" + attrName + " pending=" + (pendingReveal != null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (listKey != null && closeDuplicateFor(listKey, shell))
         {
+            Global.tempLog(TEMP_TOPIC, "onDelayedSetup: дубль окна, закрыт"); //$NON-NLS-1$
+            Shell kept = OPEN_BY_LIST.get(listKey);
+            if (kept != null && !kept.isDisposed())
+                consumePendingReveal(kept);
             log("duplicate settings window for " + listKey //$NON-NLS-1$
                 + " — closed, existing activated"); //$NON-NLS-1$
             return;
@@ -382,11 +836,13 @@ public final class DynamicListSettingsDialogHook implements IStartup
         {
             DcsComputedValueTypes.install(context);
             TableExHeaderAccent.install(context);
+            DataCompositionSchemaEditorHook.QueryFieldNavigation.install(context);
         }
         shell.setData(DEMODALIZED_KEY, Boolean.TRUE);
         demodalize(shell);
         pinAboveOwner(shell);
         scheduleTitle(shell, editorAtOpen, 0);
+        consumePendingReveal(shell);
     }
 
     /**

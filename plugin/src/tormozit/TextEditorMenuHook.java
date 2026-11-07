@@ -564,6 +564,9 @@ public class TextEditorMenuHook implements IStartup
                         });
                         addedItems.add(irEditorItem);
                     }
+                    // Поле запроса схемы компоновки: переключатель подсказок, как в редакторе модуля.
+                    if (viewer != null && BslHoverHintState.isInstalledOn(viewer))
+                        addedItems.add(BslHoverHintState.addMenuItem(comfortSub));
                 }
 
                 @Override

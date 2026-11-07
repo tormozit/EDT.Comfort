@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.io.StringReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -41,12 +42,14 @@ import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.e4.ui.model.application.ui.menu.MHandledToolItem;
 import org.eclipse.e4.ui.model.application.ui.menu.MToolBar;
 import org.eclipse.e4.ui.model.application.ui.menu.MToolBarElement;
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.ViewerCell;
@@ -81,6 +84,7 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.XMLMemento;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.eclipse.ui.handlers.HandlerUtil;
@@ -537,6 +541,8 @@ public final class ProblemViewHook implements IStartup
         }
         showSuppressIssueToolbarButton(view);
         Display.getDefault().asyncExec(() -> showSuppressIssueToolbarButton(view));
+        CreationDateSorting.enable(view);
+        SelectionKeeper.install(view);
         installResultChangeGate(view);
         installScopeLabel(view);
         installOpenOverride(view);
@@ -2512,6 +2518,434 @@ public final class ProblemViewHook implements IStartup
         }
     }
 
+    /**
+     * Сортировка по колонке «Создано» (issue 1010). Штатный {@code CreationDateField} уже
+     * умеет сравнивать строки по {@code Marker.getCreatedAt()}, но создаётся с
+     * {@code setCanSorted(false)}, и клик по шапке игнорируется. Флажок включаем на
+     * общем экземпляре поля в {@code ProblemSettings}.
+     *
+     * <p>Сохранённую сортировку {@code ProblemSettings.load} к этому моменту уже сбросила
+     * на умолчание (несортируемое поле отвергается), поэтому выбор «Создано» один раз
+     * перечитываем из того же XML в настройках бандла ({@code ownerId + ".Settings"}).
+     */
+    private static final class CreationDateSorting
+    {
+        private static final String FIELD_CLASS =
+            "com._1c.g5.v8.dt.internal.ui.validation.CreationDateField"; //$NON-NLS-1$
+        private static final String SORTING_FIELD_KEY = "sortingField"; //$NON-NLS-1$
+        private static volatile boolean enabled;
+
+        private CreationDateSorting() {}
+
+        static void enable(IViewPart view)
+        {
+            if (enabled)
+                return;
+            try
+            {
+                Class<?> pluginClass = view.getClass().getClassLoader().loadClass(PLUGIN_CLASS);
+                Object settings = pluginClass.getMethod("getProblemSettings").invoke(null); //$NON-NLS-1$
+                Object field = creationDateField(settings);
+                if (field == null)
+                    return;
+                enabled = true;
+                if (Boolean.TRUE.equals(Global.invoke(field, "canBeSorted"))) //$NON-NLS-1$
+                    return;
+                Global.invoke(field, "setCanSorted", Boolean.TRUE); //$NON-NLS-1$
+                String saved = savedSortingField(pluginClass, settings);
+                if (FIELD_CLASS.equals(saved) && Global.invoke(settings, "getSortingField") != field) //$NON-NLS-1$
+                {
+                    Global.invoke(settings, "setSortingField", field); //$NON-NLS-1$
+                    Global.invoke(settings, "update"); //$NON-NLS-1$
+                }
+            }
+            catch (Exception | LinkageError e)
+            {
+                // Внутреннее API EDT изменилось — колонка просто остаётся несортируемой.
+            }
+        }
+
+        private static Object creationDateField(Object settings)
+        {
+            if (!(Global.invoke(settings, "getAllFields") instanceof Collection<?> fields)) //$NON-NLS-1$
+                return null;
+            for (Object field : fields)
+            {
+                if (field != null && FIELD_CLASS.equals(field.getClass().getName()))
+                    return field;
+            }
+            return null;
+        }
+
+        /** Идентификатор поля сортировки, как его записал штатный {@code ProblemSettings.save}. */
+        private static String savedSortingField(Class<?> pluginClass, Object settings) throws Exception
+        {
+            Object plugin = pluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
+            Object owner = Global.getField(settings, "ownerId"); //$NON-NLS-1$
+            if (!(Global.invoke(plugin, "getPreferenceStore") instanceof IPreferenceStore store) //$NON-NLS-1$
+                || !(Global.invoke(settings, "getRootTag") instanceof String root)) //$NON-NLS-1$
+                return null;
+            String xml = store.getString(owner + "." + root); //$NON-NLS-1$
+            if (xml == null || xml.isEmpty())
+                return null;
+            return XMLMemento.createReadRoot(new StringReader(xml)).getString(SORTING_FIELD_KEY);
+        }
+    }
+
+    /**
+     * Текущая строка переживает полное перестроение списка (issue 1010): щелчок по шапке
+     * колонки (сортировка), набор колонок, группировку, любой отбор — область, критичность,
+     * тип, «Показывать все», строку поиска, отбор по проверке.
+     *
+     * <p>В этих случаях панель строит дерево заново: новый корень и {@code setInput}, все узлы
+     * пересоздаются, выделение теряется. Штатное восстановление строки
+     * ({@code getSelectedPaths} → {@code LazyTreeNodeContentProvider.loadAllPaths} →
+     * {@code expandToLevel(node, 0)} + {@code setSelection}) есть только в частичном обновлении.
+     *
+     * <p>Источников перестроения много, поэтому строку не снимаем в момент каждого из них, а
+     * помним последнюю выбранную пользователем (слушатель выделения) и восстанавливаем после
+     * каждого задания обновления, сменившего корень ({@link UpdateWaitIndicator}, окончание
+     * задания). Строку, скрытую отбором, заменяет ближайшая видимая группа, но цель остаётся
+     * прежней и возвращается, когда отбор снова её покажет.
+     */
+    private static final class SelectionKeeper
+    {
+        private static final String KEY = "tormozit.problemViewSelectionKeeper"; //$NON-NLS-1$
+
+        /** Последняя выбранная пользователем строка панели. */
+        private static final class Target
+        {
+            /** Корень, для которого цель уже восстановлена (или в котором выбрана). */
+            Object root;
+            /** Проблемы выделенных строк; пусто — выделены только группы. */
+            List<Object> markers = List.of();
+            /** Пути выделенных строк — для групп ({@code getSelectedPaths}). */
+            List<?> paths = List.of();
+            /** Выделение, поставленное нами вместо скрытой строки: не перезаписывает цель. */
+            List<?> substitute = List.of();
+            /** Своё {@code setSelection} — не принимать его за выбор пользователя. */
+            boolean restoring;
+        }
+
+        private SelectionKeeper() {}
+
+        static void install(IViewPart view)
+        {
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Tree tree = viewer != null ? viewer.getTree() : null;
+            if (tree == null || tree.isDisposed() || tree.getData(KEY) != null)
+                return;
+            Target target = new Target();
+            target.root = viewer.getInput();
+            tree.setData(KEY, target);
+            viewer.addSelectionChangedListener(event -> remember(view, viewer, target,
+                event.getStructuredSelection().toList()));
+        }
+
+        private static void remember(IViewPart view, TreeViewer viewer, Target target, List<?> selected)
+        {
+            if (target.restoring)
+                return;
+            if (selected.isEmpty())
+            {
+                // Пустое выделение при новом корне — это перестроение, а не снятие выделения.
+                if (viewer.getInput() == target.root)
+                    forget(target);
+                return;
+            }
+            if (selected.equals(target.substitute))
+                return;
+            List<Object> markers = new java.util.ArrayList<>();
+            for (Object node : selected)
+            {
+                Object marker = Global.invoke(node, "getMarker"); //$NON-NLS-1$
+                if (marker != null)
+                    markers.add(marker);
+            }
+            target.markers = markers;
+            target.paths = Global.invoke(view, "getSelectedPaths") instanceof List<?> paths ? paths : List.of(); //$NON-NLS-1$
+            target.substitute = List.of();
+            target.root = viewer.getInput();
+        }
+
+        private static void forget(Target target)
+        {
+            target.markers = List.of();
+            target.paths = List.of();
+            target.substitute = List.of();
+        }
+
+        private static Target targetOf(TreeViewer viewer)
+        {
+            Tree tree = viewer != null ? viewer.getTree() : null;
+            return tree != null && !tree.isDisposed() && tree.getData(KEY) instanceof Target target ? target : null;
+        }
+
+        /**
+         * Перезагрузка того же корня (отбор по проверке): новый корень не появляется, поэтому
+         * {@link #afterUpdate} её не замечает — строку возвращаем сразу после перезагрузки.
+         */
+        static void reloadRoot(IViewPart view, Runnable reload)
+        {
+            Target target = targetOf(view.getAdapter(TreeViewer.class));
+            if (target == null)
+            {
+                reload.run();
+                return;
+            }
+            target.restoring = true;
+            try
+            {
+                reload.run();
+            }
+            finally
+            {
+                target.restoring = false;
+            }
+            target.root = null;
+            afterUpdate(view);
+        }
+
+        /** Окончание задания обновления панели: если корень сменился — вернуть строку. */
+        static void afterUpdate(IViewPart view)
+        {
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Target target = targetOf(viewer);
+            if (target == null)
+                return;
+            Object root = viewer.getInput();
+            if (root == null || root == target.root)
+                return;
+            target.root = root;
+            List<?> current = viewer.getStructuredSelection().toList();
+            // Пользователь уже выбрал строку в новом списке — его выбор важнее.
+            if (!current.isEmpty() && !current.equals(target.substitute))
+                return;
+            if (!target.markers.isEmpty())
+                restoreMarkers(view, viewer, target);
+            else if (!target.paths.isEmpty())
+                restore(view, viewer, target);
+        }
+
+        /**
+         * Выделенные проблемы ищем по маркеру, а не по старому пути: при смене группировки у
+         * той же проблемы другие группы-предки, и штатный {@code LazyTreeNode.equals} (он
+         * сравнивает и родителя) старый путь в новом дереве не находит. Спускаемся от корня,
+         * на каждом уровне выбирая узел самого маркера, его проекта или группы, которую для
+         * маркера даёт одна из текущих группировок ({@code MarkerGroupping.createGroup}).
+         */
+        private static void restoreMarkers(IViewPart view, TreeViewer viewer, Target target)
+        {
+            Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
+            Object root = viewer.getInput();
+            ClassLoader loader = view.getClass().getClassLoader();
+            if (provider == null || root == null)
+                return;
+            List<Object> markers = target.markers;
+            Object[] found = new Object[markers.size()];
+            boolean[] hidden = { false };
+            int[] pending = { markers.size() };
+            for (int i = 0; i < markers.size(); i++)
+            {
+                int index = i;
+                Object marker = markers.get(i);
+                List<Object> groups = markerGroups(loader, marker);
+                descend(provider, loader, root, marker, groups, node ->
+                {
+                    found[index] = node;
+                    if (!marker.equals(Global.invoke(node, "getMarker"))) //$NON-NLS-1$
+                        hidden[0] = true;
+                    if (--pending[0] > 0)
+                        return;
+                    // Пока искали, список успели перестроить ещё раз — восстановит следующее задание.
+                    if (viewer.getInput() != root)
+                        return;
+                    List<Object> nodes = new java.util.ArrayList<>();
+                    for (Object item : found)
+                    {
+                        if (item != null && item != root && !nodes.contains(item))
+                            nodes.add(item);
+                    }
+                    selectNodes(viewer, target, nodes, hidden[0]);
+                });
+            }
+        }
+
+        /** Группы маркера по всем текущим группировкам панели. */
+        private static List<Object> markerGroups(ClassLoader loader, Object marker)
+        {
+            List<Object> groups = new java.util.ArrayList<>();
+            try
+            {
+                Object settings = loader.loadClass(PLUGIN_CLASS).getMethod("getProblemSettings").invoke(null); //$NON-NLS-1$
+                if (Global.invoke(settings, "getGrouppings") instanceof List<?> grouppings) //$NON-NLS-1$
+                {
+                    for (Object groupping : grouppings)
+                    {
+                        Object group = Global.invoke(groupping, "createGroup", marker); //$NON-NLS-1$
+                        if (group != null)
+                            groups.add(group);
+                    }
+                }
+            }
+            catch (Exception | LinkageError e)
+            {
+                // Без групп поиск остановится на проекте — строка не восстановится, но и не сломает список.
+            }
+            return groups;
+        }
+
+        /**
+         * Один уровень спуска: подгрузить потомков {@code node} и перейти к подходящему.
+         * {@code done} получает узел маркера или, если дальше пути нет, последний найденный предок.
+         */
+        private static void descend(Object provider, ClassLoader loader, Object node, Object marker,
+            List<Object> groups, java.util.function.Consumer<Object> done)
+        {
+            Object consumer = childrenConsumer(loader, children ->
+            {
+                int index = matchingChild(children, marker, groups);
+                if (index < 0)
+                {
+                    done.accept(node);
+                    return;
+                }
+                // Ленивый узел отдаёт потомков порциями — открыть порцию с найденным, как loadPath.
+                Global.invoke(node, "hintExposedChildren", index + exposedChunk(provider)); //$NON-NLS-1$
+                Object child = children.get(index);
+                if (marker.equals(Global.invoke(child, "getMarker"))) //$NON-NLS-1$
+                    done.accept(child);
+                else
+                    descend(provider, loader, child, marker, groups, done);
+            });
+            if (consumer == null || !Global.invokeVoid(provider, "withLoadedChildren", node, consumer)) //$NON-NLS-1$
+                done.accept(node);
+        }
+
+        private static int matchingChild(List<?> children, Object marker, List<Object> groups)
+        {
+            if (children == null)
+                return -1;
+            Object project = Global.invoke(marker, "getProject"); //$NON-NLS-1$
+            for (int i = 0; i < children.size(); i++)
+            {
+                Object child = children.get(i);
+                Object childMarker = Global.invoke(child, "getMarker"); //$NON-NLS-1$
+                if (childMarker != null)
+                {
+                    if (marker.equals(childMarker))
+                        return i;
+                    continue;
+                }
+                Object group = Global.invoke(child, "getGroup"); //$NON-NLS-1$
+                if (group != null ? groups.contains(group)
+                    : project != null && project.equals(Global.invoke(child, "getProject"))) //$NON-NLS-1$
+                    return i;
+            }
+            return -1;
+        }
+
+        /** {@code LazyTreeNodeContentProvider.ChildrenConsumer} — интерфейс неэкспортированного пакета. */
+        private static Object childrenConsumer(ClassLoader loader, java.util.function.Consumer<List<?>> body)
+        {
+            try
+            {
+                Class<?> type = loader.loadClass(
+                    "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyTreeNodeContentProvider$ChildrenConsumer"); //$NON-NLS-1$
+                return Proxy.newProxyInstance(loader, new Class<?>[] { type }, (proxy, method, args) ->
+                {
+                    if (!"accept".equals(method.getName())) //$NON-NLS-1$
+                        return defaultProxyResult(method, args, proxy);
+                    List<?> children = args[0] instanceof List<?> list ? list : null;
+                    Display display = Display.getDefault();
+                    if (Display.getCurrent() != null)
+                        body.accept(children);
+                    else if (!display.isDisposed())
+                        display.asyncExec(() -> body.accept(children));
+                    return null;
+                });
+            }
+            catch (Exception | LinkageError e)
+            {
+                return null;
+            }
+        }
+
+        private static int exposedChunk(Object provider)
+        {
+            try
+            {
+                Field field = provider.getClass().getDeclaredField("EXPOSED_CHILDREN_CHUNK"); //$NON-NLS-1$
+                field.setAccessible(true);
+                return field.getInt(null);
+            }
+            catch (Exception e)
+            {
+                return 1;
+            }
+        }
+
+        /**
+         * Выделить найденное. {@code hidden} — хотя бы одна строка скрыта отбором и заменена
+         * группой: такое выделение запоминается как замена и цель не перезаписывает.
+         */
+        private static void selectNodes(TreeViewer viewer, Target target, List<?> nodes, boolean hidden)
+        {
+            if (nodes.isEmpty() || viewer.getTree().isDisposed())
+                return;
+            List<?> current = viewer.getStructuredSelection().toList();
+            if (!current.isEmpty() && !current.equals(target.substitute))
+                return;
+            target.substitute = hidden ? List.copyOf(nodes) : List.of();
+            target.restoring = true;
+            try
+            {
+                for (Object node : nodes)
+                    viewer.expandToLevel(node, 0);
+                viewer.setSelection(new StructuredSelection(nodes), true);
+            }
+            finally
+            {
+                target.restoring = false;
+            }
+        }
+
+        /** Выделены только группы — штатный путь по сохранённым путям. */
+        private static void restore(IViewPart view, TreeViewer viewer, Target target)
+        {
+            Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
+            Object root = viewer.getInput();
+            List<?> paths = target.paths;
+            java.util.function.Consumer<List<?>> select = nodes ->
+            {
+                if (nodes == null || viewer.getTree().isDisposed() || viewer.getInput() != root)
+                    return;
+                boolean hidden = false;
+                for (int i = 0; i < nodes.size() && i < paths.size(); i++)
+                {
+                    if (paths.get(i) instanceof List<?> path && !path.isEmpty()
+                        && !path.get(path.size() - 1).equals(nodes.get(i)))
+                        hidden = true;
+                }
+                List<Object> visible = new java.util.ArrayList<>();
+                for (Object node : nodes)
+                {
+                    if (node != null && node != root && !visible.contains(node))
+                        visible.add(node);
+                }
+                selectNodes(viewer, target, visible, hidden);
+            };
+            Global.invoke(provider, "loadAllPaths", paths, (java.util.function.Consumer<List<?>>)nodes -> //$NON-NLS-1$
+            {
+                Display display = viewer.getTree().getDisplay();
+                if (Display.getCurrent() != null)
+                    select.accept(nodes);
+                else if (!display.isDisposed())
+                    display.asyncExec(() -> select.accept(nodes));
+            });
+        }
+    }
+
     /** Локализованная строка EDT из неэкспортированного {@code Messages}. */
     private static String message(ClassLoader loader, String fieldName)
     {
@@ -3257,6 +3691,8 @@ public final class ProblemViewHook implements IStartup
                     State state = stateOf(view);
                     if (updateFinished && state != null)
                         applyRootCheckCode(view, state, true);
+                    if (updateFinished)
+                        SelectionKeeper.afterUpdate(view);
                     apply(view, statusLabel(view));
                 }
             });
@@ -3959,16 +4395,19 @@ public final class ProblemViewHook implements IStartup
             // Сохраняем исходный фильтр отдельно: смена A → B и снятие отбора
             // не пересекаются с кодом, ранее установленным в этом же корне.
             state.checkCodeRootApplied = checkId;
-            boolean unloaded = Global.invokeVoid(root, "unload"); //$NON-NLS-1$
-            if (unloaded)
+            SelectionKeeper.reloadRoot(view, () ->
             {
-                // Штатный LazyTreeNodeContentProvider сбрасывает виртуальные строки
-                // через setHasChildren(false), затем заново запрашивает их число.
-                // refresh() сохраняет старые TreeItem и их уже загруженные узлы.
-                viewer.setHasChildren(root, false);
-                boolean hasChildren = Boolean.TRUE.equals(Global.invoke(root, "hasChildren")); //$NON-NLS-1$
-                viewer.setHasChildren(root, hasChildren);
-            }
+                boolean unloaded = Global.invokeVoid(root, "unload"); //$NON-NLS-1$
+                if (unloaded)
+                {
+                    // Штатный LazyTreeNodeContentProvider сбрасывает виртуальные строки
+                    // через setHasChildren(false), затем заново запрашивает их число.
+                    // refresh() сохраняет старые TreeItem и их уже загруженные узлы.
+                    viewer.setHasChildren(root, false);
+                    boolean hasChildren = Boolean.TRUE.equals(Global.invoke(root, "hasChildren")); //$NON-NLS-1$
+                    viewer.setHasChildren(root, hasChildren);
+                }
+            });
         }
 
         static void setCheckCode(IViewPart view, CheckUid uid)

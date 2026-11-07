@@ -343,17 +343,13 @@ final class DcsComputedValueTypes
             DcsComputedValueTypes instance = reference.get();
             if (instance == null || uri != null && instance.schemaUri != null && !uri.equals(instance.schemaUri))
                 continue;
-            String text = instance.typeFor(dataPath);
+            TypePresentation type = instance.types.get(pathKey(dataPath));
+            // Составной тип в колонке сокращён до имён без категории — для поиска нужны полные.
+            String text = type == null ? null : type.composite() ? type.referenceText() : type.text();
             if (text != null)
                 return List.of(text.split(", ")); //$NON-NLS-1$
         }
         return List.of();
-    }
-
-    private String typeFor(String dataPath)
-    {
-        TypePresentation type = dataPath == null ? null : types.get(pathKey(dataPath));
-        return type != null ? type.text() : null;
     }
 
     /** Фоновый расчёт — как {@code Settings.refreshAvailableFieldsSource}. */
@@ -388,14 +384,14 @@ final class DcsComputedValueTypes
                 for (String path : paths)
                 {
                     DcsAvailableFieldInfo info = infos.get(pathKey(path));
-                    String text = typeText(info, alias, true);
+                    String text = typeText(info, alias, true, schema);
                     if (text != null)
                     {
                         List<TypeItem> items = info.valueType.getTypes();
                         boolean composite = items.size() > 1;
                         String category = !composite && !items.isEmpty()
                             ? McoreUtil.getTypeCategory(items.get(0)) : null;
-                        String references = typeText(info, alias, false);
+                        String references = typeText(info, alias, false, schema);
                         result.put(pathKey(path), new TypePresentation(text, references,
                             org.eclipse.emf.ecore.util.EcoreUtil.copy(info.valueType.toTypeDescription()),
                             category, composite));
@@ -504,20 +500,25 @@ final class DcsComputedValueTypes
     }
 
     /** Короткие имена для колонки либо полные имена типов для навигации. */
-    private static String typeText(DcsAvailableFieldInfo info, int alias, boolean shortNames)
+    private static String typeText(DcsAvailableFieldInfo info, int alias, boolean shortNames, EObject context)
     {
         if (info == null || info.isFolder)
             return null;
         TypeDescriptionSource valueType = info.valueType;
         if (valueType == null || valueType.isEmpty())
             return null;
+        List<TypeItem> types = valueType.getTypes();
+        // Порядок составного типа — как в списке реквизитов формы; без порядка остаётся модельный.
+        int[] order = shortNames && types.size() > 1 ? TypeDescriptionPresentationHook.displayOrder(types, context)
+            : null;
         StringBuilder text = new StringBuilder();
-        for (TypeItem type : valueType.getTypes())
+        for (int i = 0; i < types.size(); i++)
         {
+            TypeItem type = types.get(order != null ? order[i] : i);
             String name = alias == 0 ? McoreUtil.getTypeName(type) : McoreUtil.getTypeNameRu(type);
             if (name == null || name.isEmpty())
                 continue;
-            if (shortNames && valueType.getTypes().size() == 1)
+            if (shortNames)
             {
                 String shortName = ValueTypeColumnLabelProvider.singleReferenceName(name);
                 if (shortName != null)
@@ -617,7 +618,7 @@ final class DcsComputedValueTypes
                         cell.setText(shortName);
                 }
                 else if (type != null && type.getTypes().size() > 1 && element instanceof EObject object)
-                    cell.setText(TypeDescriptionPresentationHook.sortText(type, object, text));
+                    cell.setText(compositeText(type, object, text));
                 return;
             }
             // Путь поля объекта может совпасть с путём поля другого набора — подсказку не даём.
@@ -647,8 +648,13 @@ final class DcsComputedValueTypes
         public String getToolTipText(Object element)
         {
             String text = delegate.getToolTipText(element);
-            return TypeDescriptionPresentationHook.sortText(valueType(element),
-                element instanceof EObject object ? object : null, text);
+            return compositeText(valueType(element), element instanceof EObject object ? object : null, text);
+        }
+
+        /** Составной тип: порядок как в списке реквизитов формы, имена без категории ссылки. */
+        private static String compositeText(TypeDescription type, EObject context, String text)
+        {
+            return ValueTypeColumnLabelProvider.compositeText(type, context, text);
         }
 
         @Override
