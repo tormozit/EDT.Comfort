@@ -87,6 +87,7 @@ public class Activator extends AbstractUIPlugin
         BuiltinCheckReplacements.start(context);
         QlHubOpenModules.start();
         SuppressionRanges.start();
+        ProblemViewHook.AnchorLocation.start();
         MarkerCreationDates.start();
         EmptyExceptStatementFix.start();
         UiWaitCheckDeferral.start();
@@ -264,6 +265,7 @@ public class Activator extends AbstractUIPlugin
         BuiltinCheckReplacements.stop();
         QlHubOpenModules.stop();
         SuppressionRanges.stop();
+        ProblemViewHook.AnchorLocation.stop();
         MarkerCreationDates.stop();
         EmptyExceptStatementFix.stop();
         UiWaitCheckDeferral.stop();

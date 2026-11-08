@@ -32,6 +32,8 @@ public final class ComfortCheckIds
     public static final String STATIC_ACCESS_COMPATIBILITY = "comfort-bsl-static-access-compatibility"; //$NON-NLS-1$
     public static final String STATIC_ACCESS_VARIABLE = "comfort-bsl-static-access-variable"; //$NON-NLS-1$
     public static final String STATIC_ACCESS_EVENT_HANDLER = "comfort-bsl-static-access-event-handler"; //$NON-NLS-1$
+    /** Член после точки не найден у части окружений (ветка {@code checkDynamicFeatureAccess}). */
+    public static final String DYNAMIC_ACCESS_UNKNOWN_MEMBER = "comfort-bsl-dynamic-access-unknown-member"; //$NON-NLS-1$
 
     /** {@code tormozit.checks.BslPreprocessorStraddleCheck} — {@code #Если}, разрывающая оператор. */
     public static final String BSL_PREPROCESSOR_STRADDLE = "comfort-bsl-preprocessor-straddle"; //$NON-NLS-1$
@@ -56,6 +58,9 @@ public final class ComfortCheckIds
         "bsl-legacy-check-static-feature-access", List.of( //$NON-NLS-1$
             STATIC_ACCESS_PARAMETERS, STATIC_ACCESS_OBSOLETE, STATIC_ACCESS_COMPATIBILITY,
             STATIC_ACCESS_VARIABLE, STATIC_ACCESS_EVENT_HANDLER),
+        "bsl-legacy-check-dynamic-feature-access", List.of( //$NON-NLS-1$
+            STATIC_ACCESS_PARAMETERS, STATIC_ACCESS_OBSOLETE, STATIC_ACCESS_COMPATIBILITY,
+            STATIC_ACCESS_VARIABLE, DYNAMIC_ACCESS_UNKNOWN_MEMBER),
         "bsl-legacy-check-for-each-statetement-collection", List.of(BSL_FOR_EACH_COLLECTION), //$NON-NLS-1$
         "bsl-legacy-check-expression-type", List.of(BSL_VALUE_TYPE), //$NON-NLS-1$
         "bsl-legacy-check-string-literal", List.of(BSL_UNKNOWN_LITERAL)); //$NON-NLS-1$

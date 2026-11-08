@@ -2034,36 +2034,48 @@ public final class ProblemViewHook implements IStartup
         return null;
     }
 
-    /** Маркер строки проблемы или {@code null} для группы. */
-    private static Marker markerOf(Object element, ClassLoader loader)
-    {
-        if (element instanceof Marker marker)
-            return marker;
-        if (element == null || loader == null)
-            return null;
-        try
-        {
-            Class<?> lazy = loader.loadClass(
-                "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyTreeNode"); //$NON-NLS-1$
-            Object node = lazy.isInstance(element) ? element : Adapters.adapt(element, lazy);
-            return node != null && Global.invoke(node, "getMarker") instanceof Marker marker ? marker : null; //$NON-NLS-1$
-        }
-        catch (Exception ignored)
-        {
-            return null;
-        }
-    }
-
     /**
      * «Положение» маркера модуля и запроса СКД/динамического списка: «ИмяМетодаИлиТаблицы: НомерСтроки» по
      * якорю, который {@code Activator.MarkerCreationDates} пишет в маркер при проверке. Маркер без якоря —
      * штатная подпись. Сортировку колонки не меняет: штатный {@code LocationField} сравнивает номер строки.
+     *
+     * <p>Подставляется функцией {@link #CALLBACK} в вызовы {@code Marker.getLocation()} штатных
+     * {@code MarkerTreeElementLabelProvider} и {@code LocationField} (вплетение раннего бандла
+     * {@code LocationCellTextWeaving}): один источник для ячейки, подсказки, копирования и экспорта.
      */
-    private static final class AnchorLocation
+    static final class AnchorLocation
     {
         static final String FIELD_CLASS = "com._1c.g5.v8.dt.internal.ui.validation.LocationField"; //$NON-NLS-1$
 
+        private static final String CALLBACK = "tormozit.problemView.locationText"; //$NON-NLS-1$
+
         private AnchorLocation() {}
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK,
+                (java.util.function.BiFunction<Object, Object, Object>)AnchorLocation::apply);
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный класс продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK,
+                (java.util.function.BiFunction<Object, Object, Object>)(marker, text) -> text);
+        }
+
+        private static Object apply(Object marker, Object text)
+        {
+            try
+            {
+                String anchored = marker instanceof Marker m ? text(m) : null;
+                return anchored != null ? anchored : text;
+            }
+            catch (RuntimeException e)
+            {
+                return text;
+            }
+        }
 
         /** Текст ячейки или {@code null} — оставить штатный. */
         static String text(Marker marker)
@@ -2175,13 +2187,9 @@ public final class ProblemViewHook implements IStartup
                     cell.setText(max);
                 return;
             }
+            // Текст «Положение» подменяет вплетение в Marker.getLocation() (AnchorLocation); имя типа здесь не заменять.
             if (location)
-            {
-                String text = AnchorLocation.text(markerOf(cell.getElement(), loader));
-                if (text != null)
-                    cell.setText(text);
                 return;
-            }
             String rewritten = rewrite(cell.getElement(), cell.getText());
             if (rewritten != null && !rewritten.equals(cell.getText()))
                 cell.setText(rewritten);
@@ -2191,6 +2199,8 @@ public final class ProblemViewHook implements IStartup
         public String getToolTipText(Object element)
         {
             Object tip = Global.invoke(delegate, "getToolTipText", element); //$NON-NLS-1$
+            if (location)
+                return tip instanceof String s ? s : null;
             return rewrite(element, tip instanceof String s ? s : null);
         }
 

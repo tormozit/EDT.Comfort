@@ -57,6 +57,7 @@ import tormozit.BslLiteralValues;
 import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
+import tormozit.TypeDescriptionPresentationHook;
 
 /**
  * Замена BslJavaValidator.checkExpressionType из com._1c.g5.v8.dt.bsl 28.0.1.v202605050943.
@@ -479,7 +480,16 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private static String typesLine(List<TypeItem> types, EObject context, Set<TypeItem> path, String separator)
         {
             Set<String> names = new java.util.LinkedHashSet<>();
-            for (TypeItem item : types)
+            // Порядок как в подсказках и полях ввода; сортируем до усечения списка (#965).
+            int[] order = TypeDescriptionPresentationHook.displayOrder(types, context);
+            List<TypeItem> sorted = types;
+            if (order != null)
+            {
+                sorted = new ArrayList<>(types.size());
+                for (int index : order)
+                    sorted.add(types.get(index));
+            }
+            for (TypeItem item : sorted)
             {
                 String name = BslUtil.createTypesLineStr(List.of(item), true);
                 if (item instanceof Type array && "Array".equals(McoreUtil.getTypeName(item)) //$NON-NLS-1$

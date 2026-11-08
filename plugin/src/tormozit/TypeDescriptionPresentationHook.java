@@ -47,7 +47,7 @@ import com.google.inject.Injector;
  * выбранных типов. Используются штатные TypeInfoSorter модели и ILabelProvider поля.
  * Колонки используют тот же порядок TypeInfo: priority, затем QualifiedName языка проекта.
  */
-final class TypeDescriptionPresentationHook
+public final class TypeDescriptionPresentationHook
 {
     private static final String TARGET =
         "com._1c.g5.v8.dt.md.ui.aef.components.type.TypeDescriptionComponent$6"; //$NON-NLS-1$
@@ -283,7 +283,7 @@ final class TypeDescriptionPresentationHook
      *
      * @return индексы {@code types} в порядке показа или {@code null}, если порядок не определить
      */
-    static int[] displayOrder(List<TypeItem> types, EObject context)
+    public static int[] displayOrder(List<TypeItem> types, EObject context)
     {
         try
         {

@@ -3,6 +3,7 @@ package tormozit.early;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -69,6 +70,7 @@ public final class Activator
         EmptyExceptStatementWeaving.install(context);
         QlHubOpenModulesWeaving.install(context);
         SuppressionRangesWeaving.install(context);
+        LocationCellTextWeaving.install(context);
         P2InstallOperationWeaving.install(context);
         DebugValueEditorDialogWeaving.install(context);
         FullRebuildContainmentChecksWeaving.install(context);
@@ -512,6 +514,89 @@ public final class Activator
             (java.util.function.BiPredicate<Object, Object>) (object, parameters) -> false);
         System.getProperties().put(SuppressionRangesWeaving.CALLBACK,
             (BiFunction<Object, Object, Object>) (module, ranges) -> ranges);
+        System.getProperties().put(LocationCellTextWeaving.CALLBACK,
+            (BiFunction<Object, Object, Object>) (marker, text) -> text);
+    }
+
+    /**
+     * ui.validation 5.0.300.v202605050943 (и 5.0.302.v202610211527): каждый вызов {@code Marker.getLocation()} в
+     * {@code MarkerTreeElementLabelProvider} (ячейка и подсказка колонки «Положение» панели «Проблемы») и
+     * {@code LocationField} (копирование, экспорт) проходит через функцию {@link #CALLBACK} основного бандла
+     * (маркер, текст) → текст. Сам {@code Marker.getLocation} не трогается: его читают и другие места EDT.
+     */
+    private static final class LocationCellTextWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.problemView.locationText"; //$NON-NLS-1$
+        private static final Set<String> TARGETS = Set.of(
+            "com._1c.g5.v8.dt.internal.ui.validation.LocationField", //$NON-NLS-1$
+            "com._1c.g5.v8.dt.internal.ui.validation.MarkerTreeElementLabelProvider"); //$NON-NLS-1$
+        private static final String MARKER = "com/_1c/g5/v8/dt/validation/marker/Marker"; //$NON-NLS-1$
+        private static final String FUNCTION = "java/util/function/BiFunction"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>) (marker, text) -> text);
+            context.registerService(WeavingHook.class, new LocationCellTextWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGETS.contains(woven.getClassName()))
+                return;
+            String status = CALLBACK + ".status." + woven.getClassName(); //$NON-NLS-1$
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /**
+                             * {@code marker.getLocation()} → {@code (String) callback.apply(marker, marker.getLocation())}.
+                             * Стек до и после — как у исходного вызова; ветвлений нет, кадры не меняются.
+                             */
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String methodName,
+                                String methodDescriptor, boolean isInterface)
+                            {
+                                if (opcode != Opcodes.INVOKEVIRTUAL || !MARKER.equals(owner)
+                                    || !"getLocation".equals(methodName) //$NON-NLS-1$
+                                    || !"()Ljava/lang/String;".equals(methodDescriptor)) //$NON-NLS-1$
+                                {
+                                    super.visitMethodInsn(opcode, owner, methodName, methodDescriptor, isInterface);
+                                    return;
+                                }
+                                // [m] → [m, m] → [m, loc] → [m, loc, fn] → [fn, m, loc, fn] → [fn, m, loc]
+                                mv.visitInsn(Opcodes.DUP);
+                                mv.visitMethodInsn(opcode, owner, methodName, methodDescriptor, isInterface);
+                                EarlyWeaving.emitGetProperty(mv, CALLBACK, FUNCTION);
+                                mv.visitInsn(Opcodes.DUP_X2);
+                                mv.visitInsn(Opcodes.POP);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION, "apply", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
+                                patched[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(status, patched[0] > 0 ? "woven calls=" + patched[0] : "skipped: no calls"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(status, "weave failed: " + failure); //$NON-NLS-1$
+            }
+        }
     }
 
     /**

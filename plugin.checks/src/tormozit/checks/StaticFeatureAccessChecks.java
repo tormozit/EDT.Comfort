@@ -13,6 +13,8 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.resource.XtextResource;
 
 import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils;
+import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.EmptyExpression;
@@ -24,6 +26,7 @@ import com._1c.g5.v8.dt.bsl.model.Function;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
@@ -53,40 +56,61 @@ import tormozit.Global;
 
 /**
  * Копия веток {@code BslJavaValidator.checkStaticFeatureAccess} из бандла {@code com._1c.g5.v8.dt.bsl 28.0.1}
- * (квалификатор при копировании не записан: {@code v202605050943} или {@code v202607090722}).
- * Каждая вложенная проверка исполняет только свою группу. Позиции и тексты взяты из
- * штатной проверки; одинаковый результат разных FeatureEntry выдаётся один раз.
+ * (квалификатор при копировании не записан: {@code v202605050943} или {@code v202607090722})
+ * и {@code BslJavaValidator.checkDynamicFeatureAccess} из {@code com._1c.g5.v8.dt.bsl 28.0.1.v202607090722}
+ * (#936). Каждая вложенная проверка исполняет только свою группу. Позиции и тексты взяты из
+ * штатных проверок; одинаковый результат разных FeatureEntry выдаётся один раз.
  */
 public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
 {
     private enum Group
     {
         PARAMETERS(ComfortCheckIds.STATIC_ACCESS_PARAMETERS, "Параметры вызова",
-            "Число и заполненность параметров вызова; вызов процедуры как функции.", IssueSeverity.MAJOR),
+            "Число и заполненность параметров вызова; вызов процедуры как функции.", IssueSeverity.MAJOR,
+            STATIC, DYNAMIC),
         OBSOLETE(ComfortCheckIds.STATIC_ACCESS_OBSOLETE, "Устаревшие методы и свойства",
-            "Использование методов и свойств, объявленных устаревшими.", IssueSeverity.MINOR),
+            "Использование методов и свойств, объявленных устаревшими.", IssueSeverity.MINOR,
+            STATIC, DYNAMIC),
         COMPATIBILITY(ComfortCheckIds.STATIC_ACCESS_COMPATIBILITY, "Режим совместимости",
-            "Метод или свойство недоступно в режиме совместимости проекта.", IssueSeverity.MAJOR),
+            "Метод или свойство недоступно в режиме совместимости проекта.", IssueSeverity.MAJOR,
+            STATIC, DYNAMIC),
         VARIABLE(ComfortCheckIds.STATIC_ACCESS_VARIABLE, "Доступ к переменной / свойству",
-            "Недопустимый доступ к переменной или свойству, включая чтение и запись.", IssueSeverity.MAJOR),
+            "Недопустимый доступ к переменной или свойству, включая чтение и запись.", IssueSeverity.MAJOR,
+            STATIC, DYNAMIC),
         EVENT_HANDLER(ComfortCheckIds.STATIC_ACCESS_EVENT_HANDLER, "Обработчик события",
-            "Недопустимый объект, указанный как обработчик события.", IssueSeverity.MAJOR);
+            "Недопустимый объект, указанный как обработчик события.", IssueSeverity.MAJOR,
+            STATIC),
+        UNKNOWN_MEMBER(ComfortCheckIds.DYNAMIC_ACCESS_UNKNOWN_MEMBER, "Свойство/метод после точки не обнаружено",
+            "Свойство или метод, к которому обращаются через точку, не найден у объекта в части окружений.",
+            IssueSeverity.MAJOR, DYNAMIC);
 
         final String id;
         final String title;
         final String description;
         final IssueSeverity severity;
+        final String[] replaces;
 
-        Group(String id, String title, String description, IssueSeverity severity)
+        Group(String id, String title, String description, IssueSeverity severity, String... replaces)
         {
             this.id = id;
             this.title = title;
             this.description = description;
             this.severity = severity;
+            this.replaces = replaces;
+        }
+
+        String replacementNote()
+        {
+            return replaces.length == 1 ? "<br><br>Динамически замещает штатную проверку " + replaces[0] + "."
+                : "<br><br>Динамически замещает штатные проверки " + String.join(", ", replaces) + ".";
         }
     }
 
-    private static final String REPLACEMENT_NOTE = "<br><br>Динамически замещает штатную проверку bsl-legacy-check-static-feature-access.";
+    private static final String STATIC = "bsl-legacy-check-static-feature-access"; //$NON-NLS-1$
+    private static final String DYNAMIC = "bsl-legacy-check-dynamic-feature-access"; //$NON-NLS-1$
+
+    /** Функция раннего бандла (#1012): {текст, имя} → «Свойство/метод 'Имя' объекта не обнаружено». */
+    private static final String UNKNOWN_MEMBER_MESSAGE = "tormozit.bslValidator.unknownMemberMessage"; //$NON-NLS-1$
 
     private static final IMessages MESSAGES = IMessages.INSTANCE;
 
@@ -102,9 +126,9 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
     protected final void configureCheck(CheckConfigurer configurer)
     {
         Group group = group();
-        configurer.title(group.title).description(group.description + REPLACEMENT_NOTE)
+        configurer.title(group.title).description(group.description + group.replacementNote())
             .complexity(CheckComplexity.NORMAL).severity(group.severity)
-            .issueType(group == Group.OBSOLETE ? IssueType.WARNING : IssueType.ERROR)
+            .issueType(group == Group.OBSOLETE || group == Group.UNKNOWN_MEMBER ? IssueType.WARNING : IssueType.ERROR)
             .module().checkedObjectType(BslPackage.Literals.MODULE);
     }
 
@@ -115,30 +139,58 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         if (!(object instanceof Module module))
             return;
         IV8ProjectManager projectManager = Global.getOsgiService(IV8ProjectManager.class);
-        IBslPreferences preferences = module.eResource() instanceof XtextResource resource
-            ? resource.getResourceServiceProvider().get(IBslPreferences.class) : null;
+        XtextResource resource = module.eResource() instanceof XtextResource xtext ? xtext : null;
+        IBslPreferences preferences = resource == null ? null
+            : resource.getResourceServiceProvider().get(IBslPreferences.class);
+        DynamicFeatureAccessComputer computer = resource == null ? null
+            : resource.getResourceServiceProvider().get(DynamicFeatureAccessComputer.class);
+        Group group = group();
         TreeIterator<EObject> all = module.eAllContents();
         while (all.hasNext() && !monitor.isCanceled())
         {
             EObject next = all.next();
             if (next instanceof StaticFeatureAccess access)
-                new Copy(access, access.getFeatureEntries(), acceptor, group(), projectManager, preferences).check();
-            else if (group() == Group.PARAMETERS && next instanceof DynamicFeatureAccess access
-                && BslUtil.getInvocation(access) != null)
+            {
+                if (group != Group.UNKNOWN_MEMBER)
+                    new Copy(access, access.getFeatureEntries(), acceptor, group, projectManager, preferences).check();
+                continue;
+            }
+            if (!(next instanceof DynamicFeatureAccess access))
+                continue;
+            if (group == Group.PARAMETERS && BslUtil.getInvocation(access) != null)
             {
                 List<FeatureEntry> entries = access.getFeatureEntries();
-                if (entries.isEmpty() && module.eResource() instanceof XtextResource resource)
-                {
-                    DynamicFeatureAccessComputer computer = resource.getResourceServiceProvider()
-                        .get(DynamicFeatureAccessComputer.class);
-                    if (computer != null)
-                        entries = DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer);
-                }
+                if (entries.isEmpty() && computer != null)
+                    entries = DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer);
                 // EDT проверяет число параметров динамического вызова только у mcore.Method.
                 // Для BSL Method используем ту же проверку, что и при вызове без точки.
-                new Copy(access, entries, acceptor, group(), projectManager, preferences).check();
+                new Copy(access, entries, acceptor, group, projectManager, preferences).check();
             }
+            if (group != Group.EVENT_HANDLER && computer != null && preferences != null && isUpperDynamicFeature(access))
+                checkDynamic(access, computer, acceptor, group, projectManager, preferences);
         }
+    }
+
+    /** Ветка {@code BslJavaValidator.checkDynamicFeatureAccess}: проверяется только последнее звено цепочки. */
+    private static void checkDynamic(DynamicFeatureAccess access, DynamicFeatureAccessComputer computer,
+        ResultAcceptor acceptor, Group group, IV8ProjectManager projectManager, IBslPreferences preferences)
+    {
+        Environmental environmental = EcoreUtil2.getContainerOfType(access, Environmental.class);
+        if (environmental == null)
+            return;
+        Environments actualEnvs = preferences.getLoadEnvs(access).intersect(environmental.environments());
+        if (actualEnvs.isEmpty())
+            return;
+        List<FeatureEntry> objects = computer.getLastObject(access, actualEnvs, true);
+        if (!objects.isEmpty())
+            new Copy(access, objects, acceptor, group, projectManager, preferences).checkDynamic(actualEnvs);
+    }
+
+    private static boolean isUpperDynamicFeature(DynamicFeatureAccess access)
+    {
+        EObject container = access.eContainer();
+        return !(container instanceof DynamicFeatureAccess)
+            && (!(container instanceof Invocation) || !(container.eContainer() instanceof DynamicFeatureAccess));
     }
 
     private static final class Copy
@@ -180,6 +232,108 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                 || group == Group.OBSOLETE)
             {
                 checkVariable();
+            }
+        }
+
+        /** {@code entries} — результат {@code getLastObject}; порядок проверок как у штатной. */
+        void checkDynamic(Environments actualEnvs)
+        {
+            Invocation invocation = BslUtil.getInvocation(access);
+            boolean correctParamSet = false;
+            boolean writableProperty = false;
+            Environments notCovered = new Environments(actualEnvs.toArray());
+            for (FeatureEntry entry : entries)
+            {
+                EObject feature = entry.getFeature();
+                if (feature instanceof com._1c.g5.v8.dt.mcore.Method method)
+                {
+                    if (invocation != null)
+                    {
+                        int actual = invocation.getParams().size();
+                        ParamSet set = method.actualParamSet(actual);
+                        correctParamSet = correctParamSet || (actual <= set.getMaxParams() || set.getMaxParams() == -1)
+                            && actual >= set.getMinParams();
+                    }
+                    if (group == Group.OBSOLETE && feature instanceof BslContextDefMethod contextMethod
+                        && contextMethod.isDeprecated())
+                        issue(MESSAGES.deprecated_method(), access, null, -1, method.environments());
+                }
+                else if (feature instanceof Method method && BslCommentUtils.isDeprecated(method))
+                {
+                    if (group == Group.OBSOLETE)
+                        issue(MESSAGES.deprecated_method(), access, null, -1, method.environments());
+                }
+                else if (feature instanceof Property property)
+                    writableProperty = writableProperty || property.isWritable();
+                if (feature instanceof Environmental)
+                    notCovered = notCovered.remove(entry.getEnvironments());
+            }
+            if (group == Group.UNKNOWN_MEMBER)
+            {
+                if (!notCovered.isEmpty())
+                    issue(unknownMemberMessage(), access, BslPackage.Literals.FEATURE_ACCESS__NAME, -1, notCovered);
+                return;
+            }
+            for (FeatureEntry entry : entries)
+                checkDynamicFeature(correctParamSet, writableProperty, entry, invocation);
+        }
+
+        private String unknownMemberMessage()
+        {
+            String message = MESSAGES.unknown_feature_for_left_part_of_expression();
+            if (System.getProperties().get(UNKNOWN_MEMBER_MESSAGE) instanceof java.util.function.Function<?, ?> format)
+            {
+                @SuppressWarnings("unchecked")
+                Object formatted = ((java.util.function.Function<Object[], Object>)format)
+                    .apply(new Object[] {message, access.getName()});
+                if (formatted instanceof String text)
+                    return text;
+            }
+            return message;
+        }
+
+        private void checkDynamicFeature(boolean correctParamSet, boolean writableProperty, FeatureEntry entry,
+            Invocation invocation)
+        {
+            EObject feature = entry.getFeature();
+            if (feature == null || feature.eIsProxy())
+                return;
+            Environments envs = entry.getEnvironments();
+            if (feature instanceof com._1c.g5.v8.dt.mcore.Method method)
+            {
+                if (invocation == null)
+                    return;
+                if (group == Group.PARAMETERS)
+                {
+                    if (!correctParamSet)
+                        checkContextMethodInvocation(method, invocation, envs);
+                    else
+                        checkContextMethodRetVal(method, invocation, envs);
+                }
+                else if (group == Group.COMPATIBILITY)
+                    checkCompatibility(method.getCompatibilityMode(), invocation,
+                        BslPackage.Literals.INVOCATION__METHOD_ACCESS);
+                else if (group == Group.OBSOLETE)
+                    checkDeprecated(method.getDeprecatedSince(), invocation,
+                        BslPackage.Literals.INVOCATION__METHOD_ACCESS);
+            }
+            else if (feature instanceof Property property)
+            {
+                if (group == Group.VARIABLE && !writableProperty && !property.isWritable()
+                    && access.eContainer() instanceof SimpleStatement
+                    && access.eContainmentFeature() == BslPackage.Literals.SIMPLE_STATEMENT__LEFT)
+                {
+                    boolean russian = projectManager != null
+                        && com._1c.g5.v8.dt.bsl.util.BslUtil.isRussian(access, projectManager);
+                    issue(MESSAGES.property_is_not_writable(russian ? property.getNameRu() : property.getName(),
+                        typeName(property, russian)), access, BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
+                }
+                else if (group == Group.COMPATIBILITY)
+                    checkCompatibility(property.getCompatibilityMode(), access,
+                        BslPackage.Literals.FEATURE_ACCESS__NAME);
+                else if (group == Group.OBSOLETE)
+                    checkDeprecated(property.getDeprecatedSince(), access,
+                        BslPackage.Literals.FEATURE_ACCESS__NAME);
             }
         }
 
@@ -259,11 +413,17 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                 issue(typeLine == null ? MESSAGES.not_enough_actual_parameters()
                     : MESSAGES.not_enough_actual_parameters_for_types(typeLine), invocation.getMethodAccess(),
                     BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
-            if (isBuiltInFunction())
+            if (access instanceof StaticFeatureAccess && isBuiltInFunction())
                 for (Expression parameter : invocation.getParams())
                     if (parameter == null || parameter instanceof EmptyExpression)
                         issue(MESSAGES.not_enough_actual_parameters(), invocation.getMethodAccess(),
                             BslPackage.Literals.FEATURE_ACCESS__NAME, -1, envs);
+            checkContextMethodRetVal(method, invocation, envs);
+        }
+
+        private void checkContextMethodRetVal(com._1c.g5.v8.dt.mcore.Method method, Invocation invocation,
+            Environments envs)
+        {
             if (!method.isRetVal() && (!BslUtil.isProcedureInvocation(invocation)
                 || invocation.eContainingFeature() == BslPackage.Literals.AWAIT_EXPRESSION__EXPRESSION))
                 issue(MESSAGES.procedure_called_as_function(), invocation.getMethodAccess(),
@@ -361,7 +521,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                 || required.getValue() <= project.getCompatibilityMode().getValue())
                 return;
             String mode = project.getCompatibilityMode().getLiteral();
-            issue(source instanceof StaticFeatureAccess
+            issue(source instanceof FeatureAccess
                 ? MESSAGES.property_is_not_accessible_in_compatiblity_mode_0(mode)
                 : MESSAGES.method_is_not_accessible_in_compatiblity_mode_0(mode), source, feature, -1, null);
         }
@@ -383,7 +543,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
                     mode = configuration.getConfigurationExtensionCompatibilityMode();
             }
             if (mode != null && deprecated.getValue() <= mode.getValue())
-                issue(source instanceof StaticFeatureAccess ? MESSAGES.deprecated_property()
+                issue(source instanceof FeatureAccess ? MESSAGES.deprecated_property()
                     : MESSAGES.deprecated_method(), source, feature, -1, null);
         }
 
@@ -457,5 +617,10 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
     public static final class EventHandler extends StaticFeatureAccessChecks
     {
         @Override protected Group group() { return Group.EVENT_HANDLER; }
+    }
+
+    public static final class UnknownMember extends StaticFeatureAccessChecks
+    {
+        @Override protected Group group() { return Group.UNKNOWN_MEMBER; }
     }
 }

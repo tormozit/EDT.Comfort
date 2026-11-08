@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Clean + full rebuild проекта plugin перед Launch Group → Eclipse Application.
+<!-- Clean + full rebuild проектов plugin и plugin.early перед Launch Group → Eclipse Application.
+     Автосборка рабочей области выключена: без plugin.early здесь его вплетения не пересобираются.
      Запускать только из PDE (задачи eclipse.*), в том же JRE, что workspace.
      Имя не build.xml: PDE считает plugin/build.xml сгенерированным и сносит его при Clean. -->
 <project name="plugin-clean-build" default="clean-build" basedir=".">
-	<target name="clean-build" description="Project → Clean… для plugin, затем полная сборка">
+	<target name="clean-build" description="Project → Clean… для plugin и plugin.early, затем полная сборка">
+		<eclipse.incrementalBuild project="plugin.early" kind="clean"/>
+		<eclipse.incrementalBuild project="plugin.early" kind="full"/>
 		<eclipse.incrementalBuild project="plugin" kind="clean"/>
 		<eclipse.incrementalBuild project="plugin" kind="full"/>
 	</target>
