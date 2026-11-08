@@ -3,9 +3,12 @@ package tormozit;
 import java.lang.reflect.Field;
 import java.text.Collator;
 import java.util.Locale;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -22,6 +25,8 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.ui.model.IWorkbenchAdapter;
 import org.osgi.framework.Bundle;
 
+import com._1c.g5.v8.dt.compare.model.CollectionElementComparisonNode;
+import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
 import com._1c.g5.aef2.standard.viewModels.TreeItemViewModel;
@@ -39,6 +44,9 @@ import com._1c.g5.aef2.standard.viewModels.TreeItemViewModel;
  * <p>Как и {@link CommonModuleGroupSorter} — ставится обёрткой поверх компаратора навигатора:
  * CNF не зовёт {@code commonSorter} стороннего расширения для узлов чужого расширения,
  * а весь навигатор EDT строит одно нативное расширение.
+ *
+ * <p>В дереве сравнения/объединения дополнительно упорядочивает элементы коллекций по главному
+ * источнику, см. {@link #orderByMainSide}.
  */
 final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
 {
@@ -182,6 +190,8 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     /** Ставит обёртку один раз на компаратор навигатора; см. {@link CommonModuleGroupSorter#installOn}. */
     static void installOn(Viewer viewer)
     {
+        Global.tempLog("compare-main-order", "installOn called viewer=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (viewer != null ? viewer.getClass().getName() : null)); // agent log — временно
         if (!(viewer instanceof StructuredViewer structured))
             return;
         Control control = structured.getControl();
@@ -193,6 +203,13 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
             if (control.isDisposed())
                 return;
             ViewerComparator current = structured.getComparator();
+            // #region agent log — временно
+            Global.tempLog("compare-main-order", "installOn viewer=" + structured.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " comparator=" + (current != null ? current.getClass().getName() : null) //$NON-NLS-1$
+                + " style=" + Integer.toHexString(control.getStyle()) //$NON-NLS-1$
+                + " contentProvider=" + (structured.getContentProvider() != null //$NON-NLS-1$
+                    ? structured.getContentProvider().getClass().getName() : null));
+            // #endregion
             if (current instanceof CommonNodeAlphabeticSorter)
                 return;
             structured.setComparator(new CommonNodeAlphabeticSorter(current));
@@ -223,6 +240,117 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         if (delegate instanceof TreePathViewerSorter treePathSorter)
             return treePathSorter.isSorterProperty(parentPath, element, property);
         return isSorterProperty(element, property);
+    }
+
+    @Override
+    public void sort(Viewer viewer, TreePath parentPath, Object[] elements)
+    {
+        super.sort(viewer, parentPath, elements);
+        orderByMainSide(elements);
+    }
+
+    @Override
+    public void sort(Viewer viewer, Object[] elements)
+    {
+        super.sort(viewer, elements);
+        orderByMainSide(elements);
+    }
+
+    /**
+     * Элементы коллекции в дереве сравнения — в порядке главного источника ({@code getMainPosition}),
+     * а не в порядке объединённой модели сравнения, как штатно. Элемент, которого в главном нет,
+     * встаёт за ближайшим предшествующим ему в другом источнике элементом, который в главном есть.
+     * Прочие элементы списка (папки и т.п.) остаются на своих местах.
+     */
+    private static void orderByMainSide(Object[] elements)
+    {
+        // #region agent log — временно: вход и причина раннего выхода
+        StringBuilder entry = new StringBuilder("sort n=").append(elements.length); //$NON-NLS-1$
+        for (int i = 0; i < Math.min(elements.length, 5); i++)
+        {
+            Object e = elements[i];
+            entry.append(" | ").append(e != null ? e.getClass().getSimpleName() : null); //$NON-NLS-1$
+            if (e instanceof IPartialModelNode p)
+            {
+                ComparisonNode cn = p.retrieveComparisonNode();
+                entry.append(' ').append(p.getLabel()).append(" cn=") //$NON-NLS-1$
+                    .append(cn != null ? cn.getClass().getSimpleName() : null);
+            }
+        }
+        Global.tempLog("compare-main-order", entry.toString()); //$NON-NLS-1$
+        // #endregion
+        List<Integer> slots = new ArrayList<>();
+        List<IPartialModelNode> partials = new ArrayList<>();
+        List<CollectionElementComparisonNode> nodes = new ArrayList<>();
+        // Все элементы — дети одного узла дерева. Сверять getParent() по ссылке нельзя:
+        // retrieveComparisonNode() каждый раз отдаёт новые экземпляры узлов (проверено логом).
+        for (int i = 0; i < elements.length; i++)
+        {
+            if (!(elements[i] instanceof IPartialModelNode partial))
+                continue;
+            ComparisonNode comparisonNode = partial.retrieveComparisonNode();
+            if (!(comparisonNode instanceof CollectionElementComparisonNode element))
+                continue;
+            slots.add(i);
+            partials.add(partial);
+            nodes.add(element);
+        }
+        int count = nodes.size();
+        if (count < 2)
+        {
+            Global.tempLog("compare-main-order", "exit: элементов коллекции " + count); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        long[][] keys = new long[count][];
+        List<Integer> byOther = new ArrayList<>();
+        for (int i = 0; i < count; i++)
+        {
+            Integer main = nodes.get(i).getMainPosition();
+            if (main != null)
+                keys[i] = new long[] { main, 0, 0 };
+            if (nodes.get(i).getOtherPosition() != null)
+                byOther.add(i);
+        }
+        byOther.sort(Comparator.comparingInt(i -> nodes.get(i).getOtherPosition()));
+        long anchor = -1;
+        for (int i : byOther)
+        {
+            if (keys[i] != null)
+                anchor = keys[i][0];
+            else
+                keys[i] = new long[] { anchor, 1, nodes.get(i).getOtherPosition() };
+        }
+        for (int i = 0; i < count; i++)
+            if (keys[i] == null)
+            {
+                Integer ancestor = nodes.get(i).getAncestorPosition();
+                keys[i] = new long[] { Long.MAX_VALUE, 2, ancestor != null ? ancestor : 0 };
+            }
+        Integer[] order = new Integer[count];
+        for (int i = 0; i < count; i++)
+            order[i] = i;
+        Arrays.sort(order, (a, b) -> Arrays.compare(keys[a], keys[b]));
+        // #region agent log — временно: проверка, что MAIN — главный источник и порядок совпал
+        IPartialModelNode owner = partials.get(0).getParent();
+        StringBuilder log = new StringBuilder("parent=").append(owner != null ? owner.getLabel() : null) //$NON-NLS-1$
+            .append(" orderSide=").append(Global.call(owner, "getOrderSide")) //$NON-NLS-1$ //$NON-NLS-2$
+            .append(" mergeRule=").append(Global.call(owner, "getMergeRule")) //$NON-NLS-1$ //$NON-NLS-2$
+            .append(" project.main=").append(owner != null ? owner.getComparisonSession().getProjectName( //$NON-NLS-1$
+                com._1c.g5.v8.dt.compare.model.ComparisonSide.MAIN) : null)
+            .append(" count=").append(count).append(" before="); //$NON-NLS-1$ //$NON-NLS-2$
+        for (int i = 0; i < Math.min(count, 40); i++)
+            log.append(partials.get(i).getLabel()).append('[').append(nodes.get(i).getMainPosition())
+                .append('/').append(nodes.get(i).getOtherPosition()).append("] "); //$NON-NLS-1$
+        log.append(" after="); //$NON-NLS-1$
+        for (int i = 0; i < Math.min(count, 40); i++)
+            log.append(partials.get(order[i]).getLabel()).append(' ');
+        Global.tempLog("compare-main-order", log.toString()); //$NON-NLS-1$
+        // #endregion
+        Object[] sorted = new Object[count];
+        for (int i = 0; i < count; i++)
+            sorted[i] = elements[slots.get(order[i])];
+        for (int i = 0; i < count; i++)
+            elements[slots.get(i)] = sorted[i];
     }
 
     @Override

@@ -50,7 +50,8 @@ import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
  * {@code com._1c.g5.v8.dt.bsl.ui.bslHoverContributor}. Предупреждения проверок
  * приходят в подсказку как {@link XtextAnnotation} с кодом {@code SU...}
  * (короткий код проверки в пределах проекта). Для внутренних диагностик BSL
- * используется исходный код из каталога страницы «Проверки».
+ * используется исходный код из каталога страницы «Проверки», для живой отметки
+ * ошибки запроса в литерале ({@link BslQueryLiteralSupport}) — {@code bsl-ql-hub}.
  *
  * <p>Отдельный файл, а не вложенный класс: точка входа из {@code plugin.xml}.
  */
@@ -75,14 +76,17 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
             return;
         Set<String> codes = collectCheckCodes(annotations);
         IProject project = resolveProject(annotations);
-        if (project == null && annotations.stream().anyMatch(XtextAnnotation.class::isInstance))
+        if (project == null && annotations.stream().anyMatch(a -> a instanceof XtextAnnotation
+            || BslQueryLiteralSupport.isLiveQueryAnnotation(a)))
             project = Global.getActiveProject(Global.getActivePage(), false);
         if (project == null)
             return;
         // Ошибка без кода проверки (например, синтаксическая) тоже есть в панели «Проблемы».
         if (!codes.isEmpty())
             addToToolBar(manager, new OpenCheckSettingsAction(new ArrayList<>(codes), annotations, project));
-        addToToolBar(manager, new FindInProblemsAction(annotations, project));
+        // Живая отметка запроса бывает и без маркера хаба в «Проблемах» — искать там нечего.
+        if (!annotations.stream().allMatch(BslQueryLiteralSupport::isLiveQueryAnnotation))
+            addToToolBar(manager, new FindInProblemsAction(annotations, project));
         if (!codes.isEmpty())
             replaceDescriptionDropdown(manager, annotations);
         Debug.log("fillToolBar: " + codes); //$NON-NLS-1$
@@ -182,9 +186,14 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         }
     }
 
-    /** Короткий UID проверки EDT или код внутренней диагностики из каталога. */
+    /**
+     * Короткий UID проверки EDT или код внутренней диагностики из каталога. Живая отметка
+     * ошибки запроса в литерале относится к проверке {@code bsl-ql-hub}.
+     */
     private static String checkCode(Annotation annotation)
     {
+        if (BslQueryLiteralSupport.isLiveQueryAnnotation(annotation))
+            return BslQueryLiteralSupport.HUB_CHECK_ID;
         if (!(annotation instanceof XtextAnnotation xtext) || xtext.getUriToProblem() == null)
             return null;
         String code = xtext.getIssueCode();

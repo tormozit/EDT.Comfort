@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -72,6 +73,8 @@ import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.dt.core.operations.model.IEditingContext;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.moxel.Columns;
@@ -104,6 +107,17 @@ public class MoxelEditorHook implements IStartup
     {
         ColorResetSupport.install();
         FixedTableScrollSupport.install();
+        DetachedSheetProjectSupport.install();
+    }
+
+    /**
+     * Проект для документа вне BM (#1015, окно {@link SpreadsheetMergeWindow}): штатный
+     * {@code SheetAccessor} ищет проект только через BM-движок документа. Регистрировать до
+     * {@code MoxelControl.setDocument}; запись слабая — живёт, пока жив документ.
+     */
+    static void registerDetachedSheetProject(SpreadsheetDocument document, IDtProject dtProject)
+    {
+        DetachedSheetProjectSupport.register(document, dtProject);
     }
 
     private static final String SPREADSHEET_PAGE_ID = "editors.commontemplate.pages.spreadsheet"; //$NON-NLS-1$
@@ -1055,6 +1069,234 @@ public class MoxelEditorHook implements IStartup
                 }
             }, 0);
             return patched[0] == 2 && patched[1] == 1 ? writer.toByteArray() : null;
+        }
+    }
+
+    /**
+     * Проект документа вне BM для {@code SheetAccessor} (#1015). Штатный приватный
+     * {@code getV8Project(EObject)} находит проект только через BM-движок объекта; у документа,
+     * загруженного из XML в собственный набор ресурсов, движка нет, и {@code MoxelControl.setDocument}
+     * падает в {@code getDefaultViewMode}. Метод переименовывается, а на его месте — прямолинейный
+     * (без ветвлений, кадры стека не нужны) вызов {@link BiFunction} из {@code System.getProperties()}
+     * с результатом штатного метода: для документов, зарегистрированных окном объединения,
+     * штатный {@code null} заменяется проектом сравнения, для остальных возвращается как есть.
+     *
+     * <p>Отрисовка: приватный {@code MoxelControl.onPaint} зовёт {@code doPaint} только внутри
+     * {@code getBmModel().executeReadonlyTask}, а без BM-модели молча ничего не рисует. Для
+     * зарегистрированных документов {@code onPaint} вызывает {@code doPaint} напрямую (документ —
+     * обычный EMF, транзакция ему не нужна), для остальных — исходный метод.
+     * Сигнатуры проверены в moxel 17 (EDT 2025.2) и 23 (EDT 2026.1).
+     */
+    private static final class DetachedSheetProjectSupport implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.moxel.sheet.SheetAccessor"; //$NON-NLS-1$
+        private static final String OWNER = TARGET.replace('.', '/');
+        private static final String CONTROL_TARGET = "com._1c.g5.v8.dt.moxel.ui.editor.MoxelControl"; //$NON-NLS-1$
+        private static final String CONTROL_OWNER = CONTROL_TARGET.replace('.', '/');
+        private static final String PAINT_DESCRIPTOR = "(Lorg/eclipse/swt/events/PaintEvent;)V"; //$NON-NLS-1$
+        private static final String PAINT_STOCK = "comfort$onPaintStock"; //$NON-NLS-1$
+        private static final String PROP_DETACHED_CONTROL = "tormozit.moxel.detachedSheetControl"; //$NON-NLS-1$
+        private static final String METHOD = "getV8Project"; //$NON-NLS-1$
+        private static final String DESCRIPTOR =
+            "(Lorg/eclipse/emf/ecore/EObject;)Lcom/_1c/g5/v8/dt/core/platform/IV8Project;"; //$NON-NLS-1$
+        private static final String STOCK = "comfort$getV8ProjectStock"; //$NON-NLS-1$
+        private static final String PROP_RESOLVE = "tormozit.moxel.detachedSheetProject"; //$NON-NLS-1$
+        private static final String TEMP_LOG = "spreadsheet-merge-1015"; //$NON-NLS-1$
+        private static final AtomicBoolean installed = new AtomicBoolean();
+        private static final Map<EObject, IDtProject> PROJECTS =
+            java.util.Collections.synchronizedMap(new WeakHashMap<>());
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            System.getProperties().put(PROP_RESOLVE,
+                (BiFunction<Object, Object, Object>) DetachedSheetProjectSupport::resolve);
+            System.getProperties().put(PROP_DETACHED_CONTROL,
+                (java.util.function.Predicate<Object>) DetachedSheetProjectSupport::isDetachedControl);
+            Bundle bundle = FrameworkUtil.getBundle(MoxelEditorHook.class);
+            BundleContext context = bundle != null ? bundle.getBundleContext() : null;
+            if (context != null)
+                context.registerService(WeavingHook.class, new DetachedSheetProjectSupport(), null);
+        }
+
+        static void register(SpreadsheetDocument document, IDtProject dtProject)
+        {
+            if (document != null && dtProject != null)
+                PROJECTS.put(document, dtProject);
+            Global.tempLog(TEMP_LOG, "weave: register document=" + System.identityHashCode(document) //$NON-NLS-1$
+                + ", project=" + (dtProject != null ? dtProject.getName() : null) //$NON-NLS-1$
+                + ", hookInstalled=" + installed.get()); //$NON-NLS-1$
+        }
+
+        /** Вызывается вплетённым кодом: {@code stock} — результат штатного метода. */
+        private static Object resolve(Object stock, Object object)
+        {
+            IDtProject dtProject = object instanceof EObject eObject ? PROJECTS.get(eObject) : null;
+            if (dtProject == null)
+                return stock;
+            Object result = stock;
+            if (stock == null)
+            {
+                try
+                {
+                    Object manager = Global.getServiceByClass(IV8ProjectManager.class);
+                    result = manager instanceof IV8ProjectManager projects ? projects.getProject(dtProject) : null;
+                }
+                catch (RuntimeException | LinkageError e)
+                {
+                    Global.tempLog(TEMP_LOG, "weave: resolve исключение " + e); //$NON-NLS-1$
+                }
+            }
+            Global.tempLog(TEMP_LOG, "weave: resolve document=" + System.identityHashCode(object) //$NON-NLS-1$
+                + ", stock=" + stock + ", result=" + result); //$NON-NLS-1$ //$NON-NLS-2$
+            return result;
+        }
+
+        /**
+         * Вызывается вплетённым {@code onPaint} на каждой отрисовке любого {@code MoxelControl}:
+         * только поиск в слабом реестре, без вывода (путь отрисовки).
+         */
+        private static boolean isDetachedControl(Object control)
+        {
+            if (PROJECTS.isEmpty() || !(control instanceof MoxelControl moxel))
+                return false;
+            SheetAccessor sheet = moxel.getSheet();
+            SpreadsheetDocument document = sheet != null ? sheet.getDocument() : null;
+            return document != null && PROJECTS.containsKey(document);
+        }
+
+        @Override
+        public void weave(WovenClass wovenClass)
+        {
+            if (CONTROL_TARGET.equals(wovenClass.getClassName()))
+            {
+                weaveControl(wovenClass);
+                return;
+            }
+            if (!TARGET.equals(wovenClass.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(wovenClass.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        if (!METHOD.equals(name) || !DESCRIPTOR.equals(descriptor)
+                            || (access & Opcodes.ACC_STATIC) != 0)
+                            return super.visitMethod(access, name, descriptor, signature, exceptions);
+                        patched[0]++;
+                        emitWrapper(super.visitMethod(access, name, descriptor, signature, exceptions));
+                        int stockAccess = (access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) | Opcodes.ACC_PRIVATE;
+                        return super.visitMethod(stockAccess, STOCK, descriptor, signature, exceptions);
+                    }
+                }, 0);
+                // Без логирования: вывод при определении чужого класса ломает саму подмену;
+                // срабатывание видно по строкам resolve во временном логе.
+                if (patched[0] == 1)
+                    wovenClass.setBytes(writer.toByteArray());
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                // Класс другой версии EDT — остаётся штатное поведение.
+            }
+        }
+
+        /** {@code onPaint} → обёртка; исходный метод сохраняется под {@link #PAINT_STOCK}. */
+        private static void weaveControl(WovenClass wovenClass)
+        {
+            try
+            {
+                ClassReader reader = new ClassReader(wovenClass.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        if (!"onPaint".equals(name) || !PAINT_DESCRIPTOR.equals(descriptor) //$NON-NLS-1$
+                            || (access & Opcodes.ACC_STATIC) != 0)
+                            return super.visitMethod(access, name, descriptor, signature, exceptions);
+                        patched[0]++;
+                        emitPaintWrapper(super.visitMethod(access, name, descriptor, signature, exceptions));
+                        int stockAccess = (access & ~(Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) | Opcodes.ACC_PRIVATE;
+                        return super.visitMethod(stockAccess, PAINT_STOCK, descriptor, signature, exceptions);
+                    }
+                }, 0);
+                if (patched[0] == 1)
+                    wovenClass.setBytes(writer.toByteArray());
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                // Класс другой версии EDT — остаётся штатная отрисовка.
+            }
+        }
+
+        /**
+         * <pre>
+         * if (((Predicate) System.getProperties().get(PROP)).test(this)) { doPaint(event); return; }
+         * PAINT_STOCK(event);
+         * </pre>
+         * Локальные на ветвлении те же, что на входе ({@code this}, {@code event}) — кадр {@code F_SAME}.
+         */
+        private static void emitPaintWrapper(MethodVisitor mv)
+        {
+            mv.visitCode();
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(PROP_DETACHED_CONTROL);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+            Label stock = new Label();
+            mv.visitJumpInsn(Opcodes.IFEQ, stock);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, CONTROL_OWNER, "doPaint", PAINT_DESCRIPTOR, false); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.RETURN);
+            mv.visitLabel(stock);
+            mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, CONTROL_OWNER, PAINT_STOCK, PAINT_DESCRIPTOR, false);
+            mv.visitInsn(Opcodes.RETURN);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
+        }
+
+        /**
+         * {@code return (IV8Project) ((BiFunction) System.getProperties().get(PROP))
+         *     .apply(this.STOCK(object), object);}
+         */
+        private static void emitWrapper(MethodVisitor mv)
+        {
+            mv.visitCode();
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(PROP_RESOLVE);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, OWNER, STOCK, DESCRIPTOR, false);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "com/_1c/g5/v8/dt/core/platform/IV8Project"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.ARETURN);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
         }
     }
 

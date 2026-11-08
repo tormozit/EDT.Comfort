@@ -174,7 +174,8 @@ public final class BslXtextDocumentHook implements IStartup
                     long total = entry.getValue().get();
                     Long previous = REPORTED.put(entry.getKey(), total);
                     long delta = total - (previous == null ? 0L : previous.longValue());
-                    if (delta != 0L)
+                    // Парные фазы (.exit, aboutToRun, running) повторяют enter/scheduled/done — не пишем.
+                    if (delta != 0L && !redundantSummary(entry.getKey()))
                         Global.tempLog(TOPIC, "summary " + entry.getKey() + " total=" + total + " delta=" + delta); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 }
             }
@@ -182,6 +183,12 @@ public final class BslXtextDocumentHook implements IStartup
             {
                 Global.tempLogException(TOPIC, "summary", error); //$NON-NLS-1$
             }
+        }
+
+        private static boolean redundantSummary(String key)
+        {
+            String phase = key.substring(0, Math.max(0, key.indexOf(' ')));
+            return phase.endsWith(".exit") || phase.equals("job.aboutToRun") || phase.equals("job.running"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
 
         private static String documentState(Object document)
@@ -269,7 +276,7 @@ public final class BslXtextDocumentHook implements IStartup
                 Global.tempLog(TOPIC, "seq=" + SEQUENCE.incrementAndGet() + " " + phase //$NON-NLS-1$ //$NON-NLS-2$
                     + " count=" + count //$NON-NLS-1$
                     + " thread=" + Thread.currentThread().getName() + documentState(document) //$NON-NLS-1$
-                    + patches() + thrown + where);
+                    + thrown + where);
             }
             catch (Throwable error)
             {
@@ -297,7 +304,6 @@ public final class BslXtextDocumentHook implements IStartup
                     + " job=" + identity(job) + " name=" + job.getName() + " state=" + job.getState() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " thread=" + Thread.currentThread().getName() + " skip=" + Global.getField(job, "skip") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " rule=" + identity(job.getRule()) + detail + documentState(document) //$NON-NLS-1$
-                    + patches()
                     + (frames < 0 ? caller() : frames > 0 ? caller(frames) : "")); //$NON-NLS-1$
             }
             catch (Throwable error)

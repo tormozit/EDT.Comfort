@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareEditorInput;
@@ -24,6 +25,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Shell;
 
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
@@ -41,6 +43,9 @@ public final class CompareDialogCurrentLinesHook
 {
     private static final String SHELL_HANDLED_KEY = "tormozit.compareDialogCurrentLinesShellHandled"; //$NON-NLS-1$
     private static final String PANEL_ATTACHED_KEY = "tormozit.compareDialogCurrentLinesAttached"; //$NON-NLS-1$
+    /** Сохранённый результат ручного табличного объединения: окно сразу заменяется табличным. */
+    private static final String SPREADSHEET_AUTO_KEY = "tormozit.compareDialogSpreadsheetAuto"; //$NON-NLS-1$
+    private static final String SAVED_RESULT_SUFFIX = " — результат объединения"; //$NON-NLS-1$
     /** FQCN-суффикс {@code com._1c.g5.v8.dt.compare.ui.DtCompareEditorInput}. */
     private static final String DT_COMPARE_INPUT_SUFFIX = ".DtCompareEditorInput"; //$NON-NLS-1$
 
@@ -73,9 +78,67 @@ public final class CompareDialogCurrentLinesHook
         if (!isDtCompareEditorInput(editorInput))
             return;
         shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
+        ITypedElement left = resolveLeft(editorInput);
+        ITypedElement right = resolveRight(editorInput);
+        if (CompareTabularDocumentsInIr.isMxlxTypedElement(left) || CompareTabularDocumentsInIr.isMxlxTypedElement(right))
+        {
+            String saved = SpreadsheetMergePlan.savedResult(SpreadsheetMergePlan.findSelectedNode(left, right));
+            if (saved != null)
+            {
+                // Окно сравнения текста не показываем: его закроет attach и откроет табличное окно
+                shell.setData(SPREADSHEET_AUTO_KEY, saved);
+                shell.setAlpha(0);
+                // Если панель так и не подключилась — вернуть окно, а не оставить невидимым
+                shell.getDisplay().timerExec(5000, () -> {
+                    if (!shell.isDisposed() && shell.getAlpha() == 0)
+                        shell.setAlpha(255);
+                });
+            }
+        }
         // SWT.Show приходит до показа окна средствами ОС: обе панели попадут в первый кадр.
         if (tryAttach(editorInput, shell) == ATTACH_WAIT)
             scheduleAttach(editorInput, shell, 0, false);
+    }
+
+    /**
+     * Табличное объединение двух сторон сравнения. «ОК» пишет результат в узел плана объединения и
+     * закрывает окно «Сравнение текста» {@code dialogShell}: после ручной настройки оно не нужно.
+     *
+     * @param savedXml сохранённый в плане результат — показывается на месте основной стороны
+     */
+    private static void openSpreadsheetMerge(Shell parent, Shell dialogShell, CompareConfiguration config,
+        ITypedElement left, ITypedElement right, String semanticLeft, String semanticRight, String savedXml)
+    {
+        IPartialModelNode node = SpreadsheetMergePlan.findSelectedNode(left, right);
+        Consumer<String> planWriter = SpreadsheetMergePlan.writer(node, "dialog"); //$NON-NLS-1$
+        Consumer<String> writer = planWriter == null ? null : planWriter.andThen(xml -> {
+            if (dialogShell != null && !dialogShell.isDisposed())
+                dialogShell.getDisplay().asyncExec(() -> {
+                    if (!dialogShell.isDisposed())
+                        dialogShell.close();
+                });
+        });
+        // Основная сторона плана — левая сторона сравнения
+        ITypedElement main = savedXml != null ? SpreadsheetMergePlan.textElement(left, savedXml) : left;
+        boolean mirrored = config != null && config.isMirrored();
+        ITypedElement uiLeft = mirrored ? right : main;
+        ITypedElement uiRight = mirrored ? main : right;
+        String leftLabel = TwoSideCurrentLinesSync.visualSideLabel(semanticLeft, semanticRight, mirrored, true);
+        String rightLabel = TwoSideCurrentLinesSync.visualSideLabel(semanticLeft, semanticRight, mirrored, false);
+        if (savedXml != null)
+        {
+            if (mirrored)
+                rightLabel += SAVED_RESULT_SUFFIX;
+            else
+                leftLabel += SAVED_RESULT_SUFFIX;
+        }
+        SpreadsheetMergeWindow.open(parent,
+            IrCompareValuesHandler.resolveDtProjectForCompare(
+                CompareTabularDocumentsInIr.resolveWorkspaceFile(left),
+                CompareTabularDocumentsInIr.resolveWorkspaceFile(right)),
+            new SpreadsheetMergeWindow.Side(leftLabel, uiLeft),
+            new SpreadsheetMergeWindow.Side(rightLabel, uiRight),
+            null, null, writer);
     }
 
     private static boolean isDtCompareEditorInput(Object input)
@@ -238,6 +301,7 @@ public final class CompareDialogCurrentLinesHook
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
         CompareWhitespaceSupport.installTwoWay(viewer);
+        moveInitialFocusOffToolbar(pane, leftText);
 
         wrapper.addDisposeListener(e ->
         {
@@ -331,6 +395,33 @@ public final class CompareDialogCurrentLinesHook
         if (mxlx)
         {
             CompareConfiguration config = editorInput.getCompareConfiguration();
+            Action spreadsheetCompareAction = new Action(SpreadsheetMergeWindow.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    if (!pane.isDisposed())
+                        openSpreadsheetMerge(pane.getShell(), pane.getShell(), config, left, right, semanticLeft,
+                            semanticRight, null);
+                }
+            };
+            Object auto = pane.getShell().getData(SPREADSHEET_AUTO_KEY);
+            if (auto instanceof String savedXml)
+            {
+                // Ручное объединение уже настроено: сравнение текста не нужно — сразу табличное окно
+                Shell dialogShell = pane.getShell();
+                dialogShell.getDisplay().asyncExec(() -> {
+                    if (dialogShell.isDisposed())
+                        return;
+                    Shell owner = dialogShell.getParent() instanceof Shell parent ? parent : null;
+                    dialogShell.close();
+                    openSpreadsheetMerge(owner, null, config, left, right, semanticLeft, semanticRight, savedXml);
+                });
+            }
+            spreadsheetCompareAction.setToolTipText(TooltipText.wrap(pane,
+                SpreadsheetMergeWindow.TOOLTIP + Global.pluginSignForTooltip()));
+            toolBarManager.add(spreadsheetCompareAction);
+
             // Без зеркала: MAIN слева = Текущий (не новее), OTHER справа = Новый.
             final boolean semanticLeftIsNewer = false;
             final String semLeft = semanticLeft;
@@ -376,6 +467,42 @@ public final class CompareDialogCurrentLinesHook
         }
 
         toolBarManager.update(true);
+    }
+
+    /**
+     * При открытии окна фокус может достаться панели инструментов сравнения: Windows рисует её
+     * первую кнопку (теперь «Табличное объединение») выделенной, как нажатую (#1015). Если так —
+     * переводим фокус в левое поле текста. Только один раз при открытии; дальнейший обход
+     * клавиатурой до панели не трогаем.
+     */
+    private static void moveInitialFocusOffToolbar(CompareViewerPane pane, StyledText leftText)
+    {
+        Display display = pane.getDisplay();
+        display.asyncExec(() ->
+        {
+            if (pane.isDisposed())
+                return;
+            Control focus = display.getFocusControl();
+            boolean toolbarFocused = focus instanceof org.eclipse.swt.widgets.ToolBar && isDescendant(focus, pane);
+            // #region agent log — временный, #1015: кому достался фокус при открытии
+            Global.tempLog("spreadsheet-merge-1015", "focus at open: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (focus != null ? focus.getClass().getName() + " parent=" //$NON-NLS-1$
+                    + (focus.getParent() != null ? focus.getParent().getClass().getName() : null) : null)
+                + ", toolbarInPane=" + toolbarFocused); //$NON-NLS-1$
+            // #endregion
+            if (toolbarFocused && leftText != null && !leftText.isDisposed())
+                leftText.setFocus();
+        });
+    }
+
+    private static boolean isDescendant(Control control, Control ancestor)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            if (c == ancestor)
+                return true;
+        }
+        return false;
     }
 
     private static void runTabularCompare(ITypedElement left, ITypedElement right,

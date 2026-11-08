@@ -2,6 +2,7 @@ package tormozit;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.Consumer;
 
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
@@ -477,6 +478,18 @@ public final class TextMergeEditorHook
 
         if (isMxlxViewerInput(viewer))
         {
+            Action spreadsheetMergeAction = new Action(SpreadsheetMergeWindow.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    openSpreadsheetMerge(provider, viewer);
+                }
+            };
+            spreadsheetMergeAction.setToolTipText(TooltipText.wrap(viewer.getControl(),
+                SpreadsheetMergeWindow.TOOLTIP + Global.pluginSignForTooltip()));
+            toolBarManager.add(spreadsheetMergeAction);
+
             Action tabularAction = new Action(CompareTabularDocumentsInIr.MENU_LABEL)
             {
                 @Override
@@ -634,6 +647,33 @@ public final class TextMergeEditorHook
         Path pathAncestor = CompareTabularDocumentsInIr.resolveSideFile(mergeInput.getAncestor(), "ancestor"); //$NON-NLS-1$
         IDtProject dtProject = resolveDtProjectForMerge(provider, viewer);
         CompareTabularDocumentsInIr.runCompare(dtProject, pathMain, pathOther, pathAncestor, true);
+    }
+
+    /** «Табличное объединение» (#1015): стороны и результат диалога — в окне {@link SpreadsheetMergeWindow}. */
+    private static void openSpreadsheetMerge(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer)
+    {
+        if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+            return;
+        Control viewerControl = viewer.getControl();
+        if (viewerControl == null || viewerControl.isDisposed())
+            return;
+        String[] sideLabels = extractSideLabels(provider, viewer);
+        ITypedElement ancestor = mergeInput.getAncestor();
+        // «ОК» — результат в узел плана объединения (как у модуля) и в штатный просмотрщик результата
+        Consumer<String> planWriter = SpreadsheetMergePlan.writer(
+            Global.getField(provider, "node") instanceof IPartialModelNode node ? node : null, "result"); //$NON-NLS-1$ //$NON-NLS-2$
+        Consumer<String> viewerWriter = SpreadsheetMergeWindow.viewerWriter(
+            MergeViewerReflection.extractSourceViewer(viewer, "resultViewer"), "result"); //$NON-NLS-1$ //$NON-NLS-2$
+        Consumer<String> writer = planWriter == null ? viewerWriter
+            : viewerWriter == null ? planWriter : planWriter.andThen(viewerWriter);
+        SpreadsheetMergeWindow.open(viewerControl.getShell(), resolveDtProjectForMerge(provider, viewer),
+            new SpreadsheetMergeWindow.Side(labelOrDefault(sideLabels[0], DEFAULT_LEFT_LABEL), mergeInput.getLeft()),
+            new SpreadsheetMergeWindow.Side(labelOrDefault(sideLabels[1], DEFAULT_RIGHT_LABEL), mergeInput.getRight()),
+            ancestor != null ? new SpreadsheetMergeWindow.Side(ANCESTOR_SIDE_LABEL, ancestor) : null,
+            new SpreadsheetMergeWindow.Side(labelOrDefault(resolveResultSideLabel(viewer, mergeInput),
+                DEFAULT_RESULT_LABEL), mergeInput.getMergeResult()),
+            writer);
     }
 
     private static IDtProject resolveDtProjectForMerge(IThreeSideTextMergeViewerProvider provider,

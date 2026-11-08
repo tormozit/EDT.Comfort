@@ -3595,12 +3595,11 @@ public final class BslModuleSpellCheckHook implements IStartup
     }
 
     /**
-     * issue #176: единая таблица кандидатов - сначала точный {@link IScope} несвязавшейся
-     * cross-reference (если BSL резолвит имя в этой позиции именно так - например, общий модуль),
-     * затем {@link #candidateNameTable(XtextResource)} (переменные/методы модуля + платформенный
-     * API + объекты метаданных), и в последнюю очередь - тот же движок, что у штатного Ctrl+Space
-     * ({@link #matchFromContentAssist}), для случаев вроде членов конкретного типа объекта
-     * после точки, которых нет в плоской общей таблице.
+     * issue #176: сначала штатный список автодополнения в этой позиции
+     * ({@link #matchFromContentAssist}) - только он даёт "Слово найдено". Если в нём ничего
+     * похожего нет - запасной подбор замены: {@link IScope} несвязавшейся cross-reference, затем
+     * {@link #candidateNameTable(XtextResource)}; такой вариант помечается
+     * {@link #NOT_IN_STOCK_LIST_SUFFIX}. Для полей результата запроса - только их список.
      *
      * <p>{@link #matchFromContentAssist} вызывается только после выхода из
      * {@code document.readOnly}: он ждёт UI-поток через {@code syncExec}, а UI-поток сам берёт
@@ -3624,8 +3623,20 @@ public final class BslModuleSpellCheckHook implements IStartup
             return null;
         String typed = found.typed;
         NameMatch match = found.match;
-        if (match == null && !queryFields)
-            match = matchFromContentAssist(viewer, offset, typed);
+        String suffix = ""; //$NON-NLS-1$
+        if (!queryFields)
+        {
+            // Сначала штатный список автодополнения в этой позиции - точные члены. Область
+            // ссылки и общая таблица (имена разных родителей) - только запасной подбор замены:
+            // их точное совпадение ничего не доказывает, а вариант помечается.
+            NameMatch assist = matchFromContentAssist(viewer, offset, typed);
+            if (assist != null)
+                match = assist;
+            else if (match == null || match.exact)
+                return null;
+            else
+                suffix = NOT_IN_STOCK_LIST_SUFFIX;
+        }
         if (match == null)
             return null;
         if (match.exact)
@@ -3638,10 +3649,13 @@ public final class BslModuleSpellCheckHook implements IStartup
         if (match.name.equals(typed))
             return null;
         if (markerToClear != null)
-            return new MarkerClearingReplaceProposal(match.name, offset, length, icon, markerToClear);
+            return new MarkerClearingReplaceProposal(match.name, offset, length, icon, markerToClear, suffix);
         return new CompletionProposal(match.name, offset, length, match.name.length(), icon,
-            ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
+            ISSUE176_PROPOSAL_PREFIX + match.name + "'" + suffix, null, null); //$NON-NLS-1$
     }
+
+    /** Пометка варианта замены, найденного не в штатном списке автодополнения. */
+    private static final String NOT_IN_STOCK_LIST_SUFFIX = " (нет в штатном списке)"; //$NON-NLS-1$
 
     /** Результат части поиска, выполняемой под блокировкой документа. */
     private static final class LockedNameLookup
@@ -3701,11 +3715,11 @@ public final class BslModuleSpellCheckHook implements IStartup
         private final IMarker marker;
 
         MarkerClearingReplaceProposal(String replacement, int offset, int length, Image icon,
-            IMarker marker)
+            IMarker marker, String suffix)
         {
             super(replacement, offset, length, replacement.length());
             setImage(icon);
-            setDisplayString(ISSUE176_PROPOSAL_PREFIX + replacement + "'"); //$NON-NLS-1$
+            setDisplayString(ISSUE176_PROPOSAL_PREFIX + replacement + "'" + suffix); //$NON-NLS-1$
             setAutoInsertable(false);
             this.marker = marker;
         }

@@ -1630,6 +1630,7 @@ public class CompareConfigMenuHook implements IStartup
         MergePreflight.install();
         // До UI: сравнение может стартовать раньше, чем отработает asyncExec ниже.
         BslCompareParseErrorSuppressor.ensureInstalled();
+        SpreadsheetMergePlan.ensureInstalled("startup"); //$NON-NLS-1$
         Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
@@ -1719,6 +1720,7 @@ public class CompareConfigMenuHook implements IStartup
 
     private void hookEditor(IEditorPart editor)
     {
+        SpreadsheetMergePlan.ensureInstalled("editor"); //$NON-NLS-1$
         IContextService cs = editor.getSite().getService(IContextService.class);
         if (cs != null) cs.activateContext(CONTEXT_ID);
 
@@ -1874,7 +1876,7 @@ public class CompareConfigMenuHook implements IStartup
             == NavigatorDropSupport.RevealResult.OK;
     }
 
-    private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
+    static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
     {
         Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
         if (!(view instanceof DtComparisonView)) return null;
