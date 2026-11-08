@@ -4568,7 +4568,14 @@ return EMPTY;
                 return delegateStock;
             ICompletionProposal[] stock = comment ? delegateStock
                 : dropTemplateTypesInLiteral(viewer, caret, delegateStock);
-            if (hasNativeVariants(stock))
+            // ИР (#983): значения литерала из неполного набора не закрывают список — низковероятные слова
+            // добавляются рядом, значения выше по рейтингу (BslLiteralValues.raisedPremiumOf).
+            List<ICompletionProposal> partialValues = new ArrayList<>();
+            List<ICompletionProposal> otherStock = new ArrayList<>();
+            if (stock != null)
+                for (ICompletionProposal proposal : stock)
+                    (BslLiteralValues.isPartialValue(proposal) ? partialValues : otherStock).add(proposal);
+            if (stock == null || hasNativeVariants(otherStock.toArray(ICompletionProposal[]::new)))
                 return stock;
             try
             {
@@ -4671,6 +4678,12 @@ return EMPTY;
                             names.put(module.getName(), "Общий модуль"); //$NON-NLS-1$
                     List<ICompletionProposal> result = new ArrayList<>();
                     Set<String> existing = new HashSet<>();
+                    if (receiver != null)
+                        for (ICompletionProposal proposal : partialValues)
+                        {
+                            result.add(proposal);
+                            existing.add(filterMatchName(proposal).toLowerCase(java.util.Locale.ROOT));
+                        }
                     if (receiver == null && stock != null)
                         for (ICompletionProposal proposal : stock)
                         {

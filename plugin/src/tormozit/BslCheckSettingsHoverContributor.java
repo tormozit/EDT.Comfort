@@ -389,26 +389,19 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
                 return null;
             Marker byUri = null;
             Marker byText = null;
-            int total = 0;
-            int sameUri = 0;
             try (Stream<Marker> stream = manager.createReader(project).markers(
                 MarkerFilter.createProjectFilter(project).addValue(MarkerIndex.CHECK_ID, code)))
             {
                 for (Marker marker : stream.toList())
                 {
-                    total++;
                     boolean textEquals = text != null && text.equals(marker.getMessage());
                     boolean uriEquals = uri.equals(StandardExtraInfo.TEXT_URI_TO_PROBLEM.get(marker));
-                    if (uriEquals)
-                        sameUri++;
                     if (uriEquals && (byUri == null || textEquals))
                         byUri = marker;
                     if (textEquals && byText == null)
                         byText = marker;
                 }
             }
-            Global.tempLog("problem-find", "findMarker code=" + code + " uri=" + uri + " text=" + text //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                + " total=" + total + " sameUri=" + sameUri + " byUri=" + byUri + " byText=" + byText); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             return byUri != null ? byUri : byText;
         }
     }

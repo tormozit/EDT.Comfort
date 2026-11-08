@@ -495,11 +495,13 @@ final class BslExpectedTypePremiums
         Integer queryPremium = BslQueryLiteralSupport.premiumOf(proposal);
         if (queryPremium != null)
             return queryPremium.intValue();
+        // ИР: значения литерала при ручном вызове — повышенный рейтинг (ДобавитьПростыеСловаВТаблицу).
+        int literal = BslLiteralValues.raisedPremiumOf(proposal);
         Snapshot snapshot = active;
         if (snapshot == null || snapshot.premiums().values().isEmpty() || proposal == null)
-            return 0;
+            return literal;
         Integer premium = snapshot.premiums().values().get(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
-        return premium != null ? premium.intValue() : 0;
+        return literal + (premium != null ? premium.intValue() : 0);
     }
 
     /** Есть ли у текущего места строка ожидаемого типа для боковой подсказки (без слов ИР). */

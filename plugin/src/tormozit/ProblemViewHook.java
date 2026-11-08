@@ -95,6 +95,7 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+import com._1c.g5.v8.dt.md.IExternalPropertyManagerRegistry;
 import com._1c.g5.v8.dt.md.MdUtil;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -600,7 +601,6 @@ public final class ProblemViewHook implements IStartup
         }
         catch (PartInitException | RuntimeException e)
         {
-            Global.tempLog("problem-find", "revealMarker error: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("Найти в панели", "Не удалось показать проблему: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -3025,9 +3025,6 @@ public final class ProblemViewHook implements IStartup
             TreeViewer viewer = view.getAdapter(TreeViewer.class);
             Target target = targetOf(viewer);
             Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
-            Global.tempLog("problem-find", "reveal attempt=" + attempt + " viewer=" + (viewer != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " target=" + (target != null) + " input=" + (viewer != null ? viewer.getInput() : null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " provider=" + (provider != null) + " marker=" + marker); //$NON-NLS-1$ //$NON-NLS-2$
             if (viewer == null || viewer.getTree().isDisposed())
                 return;
             if (target == null || viewer.getInput() == null || provider == null)
@@ -3038,7 +3035,6 @@ public final class ProblemViewHook implements IStartup
             }
             tryReveal(view, viewer, target, marker, found ->
             {
-                Global.tempLog("problem-find", "reveal result found=" + found); //$NON-NLS-1$ //$NON-NLS-2$
                 if (!found)
                     offerResetFilters(view, viewer, target, marker);
             });
@@ -3070,7 +3066,6 @@ public final class ProblemViewHook implements IStartup
                     return;
                 tryReveal(view, viewer, target, marker, found ->
                 {
-                    Global.tempLog("problem-find", "retry left=" + left + " found=" + found); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     if (!found && left > 0)
                         retryReveal(view, marker, left - 1);
                 });
@@ -3088,7 +3083,6 @@ public final class ProblemViewHook implements IStartup
             boolean check = state != null && state.checkId != null;
             boolean text = Global.getField(view, "searchPattern") instanceof String pattern //$NON-NLS-1$
                 && !pattern.isBlank();
-            Global.tempLog("problem-find", "offerResetFilters check=" + check + " text=" + text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (!check && !text)
             {
                 ToastNotification.show("Найти в панели", //$NON-NLS-1$
@@ -3113,7 +3107,7 @@ public final class ProblemViewHook implements IStartup
                     }
                     catch (RuntimeException e)
                     {
-                        Global.tempLog("problem-find", "resetFilters error: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                        // Отбор не снялся — повтор поиска ниже всё равно покажет итог.
                     }
                     retryReveal(view, marker, 10);
                 }, "Снять отборы"); //$NON-NLS-1$
@@ -5242,7 +5236,70 @@ public final class ProblemViewHook implements IStartup
                 state.retriedEmpty = false;
                 return;
             }
-            display.asyncExec(() -> retryFromEditor(view, state));
+            display.asyncExec(() -> retryWhenModelsActive(view, state, display, 0));
+        }
+
+        private static final int MODEL_WAIT_MAX_ATTEMPTS = 60;
+
+        private static final int MODEL_WAIT_STEP_MS = 1000;
+
+        /**
+         * Повтор на старте EDT: пока модель проекта не активна, штатное обновление панели
+         * («Обновление ошибок конфигурации») падает на {@code ExternalPropertyManagerRegistry}
+         * («External property manager … is not active»). Ждём активации моделей, не дольше
+         * {@link #MODEL_WAIT_MAX_ATTEMPTS} шагов.
+         */
+        private static void retryWhenModelsActive(IViewPart view, State state, Display display, int attempt)
+        {
+            if (display.isDisposed() || view.getSite() == null)
+            {
+                state.retryingEmpty = false;
+                state.retriedEmpty = false;
+                return;
+            }
+            String inactive = firstInactiveModelProject();
+            if (inactive != null && attempt < MODEL_WAIT_MAX_ATTEMPTS)
+            {
+                display.timerExec(MODEL_WAIT_STEP_MS, () -> retryWhenModelsActive(view, state, display, attempt + 1));
+                return;
+            }
+            retryFromEditor(view, state);
+        }
+
+        /** Имя первого проекта, чья модель ещё не активна; {@code null} — все активны. */
+        private static String firstInactiveModelProject()
+        {
+            try
+            {
+                IBmModelManager models = Global.getOsgiService(IBmModelManager.class);
+                IExternalPropertyManagerRegistry registry =
+                    Global.getOsgiService(IExternalPropertyManagerRegistry.class);
+                if (models == null || registry == null)
+                    return null;
+                for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                {
+                    if (!project.isOpen() || !(project.hasNature("com._1c.g5.v8.dt.core.V8ConfigurationNature") //$NON-NLS-1$
+                        || project.hasNature("com._1c.g5.v8.dt.core.V8ExtensionNature") //$NON-NLS-1$
+                        || project.hasNature("com._1c.g5.v8.dt.core.V8ExternalObjectsNature"))) //$NON-NLS-1$
+                        continue;
+                    var model = models.getModel(project);
+                    if (model == null)
+                        return project.getName();
+                    try
+                    {
+                        registry.getExternalPropertyManager(model);
+                    }
+                    catch (IllegalStateException e)
+                    {
+                        return project.getName();
+                    }
+                }
+            }
+            catch (RuntimeException | CoreException e)
+            {
+                // проба не удалась — считаем модели готовыми, повтор идёт как раньше
+            }
+            return null;
         }
 
         private static void retryFromEditor(IViewPart view, State state)

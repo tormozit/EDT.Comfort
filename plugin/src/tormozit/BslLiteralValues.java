@@ -472,12 +472,49 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             this.manual = manual;
         }
 
+        /**
+         * Значения литерала с повышенным рейтингом, приведённые к ключу dedupeKey. ИР:
+         * {@code ДобавитьПростыеСловаВТаблицу(…, ДобавлятьНизкоВероятные)} — при ручном вызове.
+         */
+        final Set<String> raisedValues = new HashSet<>();
+
         void rememberFull(Analysis analysis, String prefix)
         {
             if (analysis.full && !analysis.values.isEmpty())
                 for (String name : analysis.values.values())
                     fullValues.add(lower((prefix + name).trim()));
+            if (manual)
+                for (String name : analysis.values.values())
+                    raisedValues.add(lower((prefix + name).trim()));
         }
+    }
+
+    /**
+     * Строки списка со значением литерала, получившим повышенный рейтинг ({@link Request#raisedValues}).
+     * Строки списка не переопределяют {@code equals}: слабые ключи по тождеству.
+     */
+    private static final Map<ICompletionProposal, Boolean> RAISED = Collections.synchronizedMap(new WeakHashMap<>());
+
+    /**
+     * Премия значения литерала: ИР {@code ДобавитьПростыеСловаВТаблицу} с {@code ЛиПовышенныйРейтинг} —
+     * один {@code ШагРейтингаСлова}.
+     */
+    /**
+     * Строка значения литерала из неполного набора ({@code ЛиНаборЗначенийПолный = Ложь}) текущего расчёта. ИР
+     * рядом с такими значениями добавляет низковероятные слова; полный набор их отсекает ({@link #merge}).
+     */
+    static boolean isPartialValue(ICompletionProposal proposal)
+    {
+        Request request = REQUEST.get();
+        if (request == null || !request.fullValues.isEmpty())
+            return false;
+        return SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable
+            && request.produced.contains(configurable.getReplacementString());
+    }
+
+    static int raisedPremiumOf(ICompletionProposal proposal)
+    {
+        return proposal != null && RAISED.containsKey(SmartContentAssistProcessor.unwrapProposal(proposal)) ? 1 : 0;
     }
 
     /** Начало штатного расчёта автодополнения в этом потоке; {@code manual} — Ctrl+Space. */
@@ -793,6 +830,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         if (quote < 0)
             return result.toArray(ICompletionProposal[]::new);
         result = new ArrayList<>(Arrays.asList(dedupe(result, request, doc, quote)));
+        // Из двух одинаковых строк остаётся строка EDT: рейтинг — по тексту значения, а не по источнику строки.
+        if (!request.raisedValues.isEmpty())
+            for (ICompletionProposal proposal : result)
+                if (request.raisedValues.contains(dedupeKey(proposal, doc, quote)))
+                    RAISED.put(SmartContentAssistProcessor.unwrapProposal(proposal), Boolean.TRUE);
         addAllProperties(result, doc, quote, offset);
         return result.toArray(ICompletionProposal[]::new);
     }
