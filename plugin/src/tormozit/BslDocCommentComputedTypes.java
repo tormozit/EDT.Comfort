@@ -2782,28 +2782,11 @@ public final class BslDocCommentComputedTypes
 
             for (EObject outer = directive.eContainer(); outer != null; outer = outer.eContainer())
                 if (outer instanceof Environmental environmental)
-                {
-                    // #region agent log #999
-                    Global.tempLog("type-hint-999", expression.eClass().getName() + " assignment=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + isInsideAssignment(expression) + " env=" + environmental.environments()); //$NON-NLS-1$
-                    // #endregion
                     return environmental.environments();
-                }
             return original;
         }
         return original;
     }
-
-    // #region agent log #999
-    private static boolean isInsideAssignment(EObject expression)
-    {
-        for (EObject owner = expression; owner != null && !(owner instanceof Block); owner = owner.eContainer())
-            if (owner instanceof SimpleStatement simple && simple.getLeft() instanceof StaticFeatureAccess
-                && simple.getRight() != null)
-                return true;
-        return false;
-    }
-    // #endregion
 
     private static boolean isServerTypeHint(PreprocessorExpression predicate)
     {
