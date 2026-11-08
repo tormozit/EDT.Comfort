@@ -8,6 +8,9 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import org.eclipse.core.runtime.FileLocator;
@@ -18,6 +21,7 @@ import org.eclipse.e4.ui.model.application.ui.MUIElement;
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.graphics.Image;
@@ -68,6 +72,14 @@ public final class EditorTabIconDiagHook implements IStartup
 
     private static final Map<IWorkbenchPart, IPropertyListener> TITLE_LISTENERS = new IdentityHashMap<>();
     private static final List<CTabFolder> WATCHED = new ArrayList<>();
+    private static final AtomicBoolean MARKER_PASS_PENDING = new AtomicBoolean();
+    private static final AtomicInteger MARKER_EVENTS = new AtomicInteger();
+    /**
+     * Редакторы, пропущенные проходом по маркерам: вкладка не показана (не уместилась в полосу
+     * вкладок, папка скрыта). Обновляются, когда вкладка снова видна — при изменении размера или показе
+     * папки, закрытии вкладки, выводе редактора наверх.
+     */
+    private static final Set<IEditorPart> STALE = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
     @Override
     public void earlyStartup()
@@ -86,16 +98,20 @@ public final class EditorTabIconDiagHook implements IStartup
         IMarkerManagerV2 markers = Global.getOsgiService(IMarkerManagerV2.class);
         if (markers != null)
         {
+            // События маркеров идут пачками (сотни при старте и проверке): один проход на пачку.
+            // Каждый проход читает BM в UI (getModel), а при ждущей служебной операции BM любое
+            // чтение ждёт её — лишние проходы замораживали UI.
             IMarkerUpdateListener listener = event ->
             {
-                if (!display.isDisposed())
+                MARKER_EVENTS.incrementAndGet();
+                if (!display.isDisposed() && MARKER_PASS_PENDING.compareAndSet(false, true))
                     display.asyncExec(() ->
                     {
+                        MARKER_PASS_PENDING.set(false);
+                        int events = MARKER_EVENTS.getAndSet(0);
                         if (display.isDisposed() || workbench.isClosing())
                             return;
-                        for (IWorkbenchPart part : new ArrayList<>(TITLE_LISTENERS.keySet()))
-                            if (part instanceof IEditorPart editor)
-                                applyTitleImage(editor, titleImageOf(editor));
+                        markerPass(events);
                     });
             };
             markers.addListener(listener);
@@ -111,6 +127,77 @@ public final class EditorTabIconDiagHook implements IStartup
             @Override public void windowClosed(IWorkbenchWindow w) {}
         });
         scanAll("install"); //$NON-NLS-1$
+    }
+
+    /** Обновление значков по маркерам — только у показанных вкладок, остальные помечаются. */
+    private static void markerPass(int events)
+    {
+        int applied = 0;
+        int skipped = 0;
+        for (IWorkbenchPart part : new ArrayList<>(TITLE_LISTENERS.keySet()))
+        {
+            if (!(part instanceof IEditorPart editor))
+                continue;
+            if (isTabShowing(editor))
+            {
+                STALE.remove(editor);
+                applyTitleImage(editor, titleImageOf(editor));
+                applied++;
+            }
+            else
+            {
+                STALE.add(editor);
+                skipped++;
+            }
+        }
+        // #region agent log
+        Global.tempLog("editor-tab-icon-pass", "markers events=" + events + " applied=" + applied //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " skipped=" + skipped + " stale=" + STALE.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static final AtomicBoolean STALE_PASS_PENDING = new AtomicBoolean();
+
+    /** Отложенное обновление пропущенных вкладок, которые теперь показаны. */
+    private static void scheduleStalePass(Display display, String reason)
+    {
+        if (STALE.isEmpty() || display == null || display.isDisposed()
+            || !STALE_PASS_PENDING.compareAndSet(false, true))
+            return;
+        display.asyncExec(() ->
+        {
+            STALE_PASS_PENDING.set(false);
+            if (display.isDisposed() || !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing())
+                return;
+            int applied = 0;
+            for (IEditorPart editor : new ArrayList<>(STALE))
+            {
+                if (!TITLE_LISTENERS.containsKey(editor))
+                {
+                    STALE.remove(editor);
+                    continue;
+                }
+                if (!isTabShowing(editor))
+                    continue;
+                STALE.remove(editor);
+                applyTitleImage(editor, titleImageOf(editor));
+                applied++;
+            }
+            // #region agent log
+            Global.tempLog("editor-tab-icon-pass", "stale reason=" + reason + " applied=" + applied //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " stale=" + STALE.size()); //$NON-NLS-1$
+            // #endregion
+        });
+    }
+
+    /** Вкладка редактора видна в полосе вкладок показанной папки (не ушла в список скрытых вкладок). */
+    private static boolean isTabShowing(IEditorPart editor)
+    {
+        CTabFolder folder = folderOf(editor);
+        if (folder == null || !folder.isVisible())
+            return false;
+        CTabItem item = itemOf(editor, folder);
+        return item != null && !item.isDisposed() && item.isShowing();
     }
 
     private static void hookWindow(IWorkbenchWindow window)
@@ -166,6 +253,8 @@ public final class EditorTabIconDiagHook implements IStartup
                 if (display == null || display.isDisposed())
                     return;
                 scanAll("closed"); //$NON-NLS-1$
+                // Освободилось место в полосе вкладок — скрытые вкладки могли показаться.
+                scheduleStalePass(display, "closed"); //$NON-NLS-1$
                 display.timerExec(CLOSE_SCAN_MS, () ->
                 {
                     if (!display.isDisposed())
@@ -214,6 +303,7 @@ public final class EditorTabIconDiagHook implements IStartup
                 TITLE_LISTENERS.put(editor, listener);
                 editor.addPropertyListener(listener);
             }
+            STALE.remove(editor);
             applyTitleImage(editor, titleImageOf(editor));
         }
         catch (RuntimeException ex)
@@ -226,6 +316,8 @@ public final class EditorTabIconDiagHook implements IStartup
     {
         if (part == null)
             return;
+        if (part instanceof IEditorPart editor)
+            STALE.remove(editor);
         IPropertyListener listener = TITLE_LISTENERS.remove(part);
         if (listener != null)
         {
@@ -282,6 +374,9 @@ public final class EditorTabIconDiagHook implements IStartup
             return;
         folder.setData(KEY_WATCHED, Boolean.TRUE);
         WATCHED.add(folder);
+        // Ширина полосы вкладок или видимость папки изменились — пропущенные вкладки могли показаться.
+        folder.addListener(SWT.Resize, e -> scheduleStalePass(folder.getDisplay(), "resize")); //$NON-NLS-1$
+        folder.addListener(SWT.Show, e -> scheduleStalePass(folder.getDisplay(), "show")); //$NON-NLS-1$
         Object renderer = folder.getRenderer();
         log("watch folder#" + Integer.toHexString(System.identityHashCode(folder)) //$NON-NLS-1$
             + " items=" + folder.getItemCount() //$NON-NLS-1$
@@ -392,10 +487,17 @@ public final class EditorTabIconDiagHook implements IStartup
 
     private static void applyTitleImage(IEditorPart editor, Image image)
     {
+        applyTitleImage(editor, image, null);
+    }
+
+    /** @param known уже прочитанный объект редактора или {@code null} — прочитать здесь */
+    private static void applyTitleImage(IEditorPart editor, Image image, TabModel known)
+    {
         if (editor == null || !usableImage(image))
             return;
-        image = currentProblemImage(editor, image);
-        Image extension = extensionWinsImage(editor, image);
+        TabModel tab = known != null ? known : TabModel.of(editor);
+        image = currentProblemImage(tab, image);
+        Image extension = extensionWinsImage(tab, image);
         if (extension != null)
             image = extension;
         CTabFolder folder = folderOf(editor);
@@ -428,19 +530,19 @@ public final class EditorTabIconDiagHook implements IStartup
      * @param decorated картинка редактора после декораторов ({@code getTitleImage})
      * @return картинка со значком расширения или {@code null}, если подмена не нужна
      */
-    private static Image extensionWinsImage(IEditorPart editor, Image decorated)
+    private static Image extensionWinsImage(TabModel tab, Image decorated)
     {
-        if (!(editor instanceof DtGranularEditor<?> granular) || !usableImage(decorated))
+        if (tab.model() == null || !usableImage(decorated))
             return null;
         try
         {
-            if (!(granular.getModel() instanceof MdObject mdObject)
-                || mdObject.getObjectBelonging() != ObjectBelonging.ADOPTED)
+            MdObject mdObject = tab.model();
+            if (mdObject.getObjectBelonging() != ObjectBelonging.ADOPTED)
                 return null;
-            Image base = (Image) SUPER_TITLE_IMAGE.invoke(granular);
+            Image base = (Image) SUPER_TITLE_IMAGE.invoke(tab.editor());
             if (!usableImage(base))
                 return null;
-            MarkerSeverity severity = maxSeverity(mdObject);
+            MarkerSeverity severity = tab.severity();
             Image withExtension = ADOPTED_DECORATOR.decorateImage(base, mdObject);
             boolean critical = severity == MarkerSeverity.ERRORS || severity == MarkerSeverity.BLOCKER
                 || severity == MarkerSeverity.CRITICAL;
@@ -455,19 +557,17 @@ public final class EditorTabIconDiagHook implements IStartup
     private static final AdoptedMdObjectDecorator ADOPTED_DECORATOR = new AdoptedMdObjectDecorator();
 
     /** Читаем маркеры по стабильному BM-id, не ждём асинхронного кэша разных экземпляров getModel(). */
-    private static Image currentProblemImage(IEditorPart editor, Image fallback)
+    private static Image currentProblemImage(TabModel tab, Image fallback)
     {
-        if (!(editor instanceof DtGranularEditor<?> granular) || SUPER_TITLE_IMAGE == null
-            || PlatformUI.getWorkbench().isClosing())
+        if (tab.model() == null)
             return fallback;
         try
         {
-            if (!(granular.getModel() instanceof MdObject model))
-                return fallback;
-            MarkerSeverity severity = maxSeverity(model);
+            MdObject model = tab.model();
+            MarkerSeverity severity = tab.severity();
             if (severity == null)
                 return fallback;
-            Image base = (Image) SUPER_TITLE_IMAGE.invoke(granular);
+            Image base = (Image) SUPER_TITLE_IMAGE.invoke(tab.editor());
             if (!usableImage(base))
                 return fallback;
             if (model.getObjectBelonging() == ObjectBelonging.ADOPTED)
@@ -482,6 +582,33 @@ public final class EditorTabIconDiagHook implements IStartup
         catch (Throwable ex)
         {
             return fallback;
+        }
+    }
+
+    /**
+     * Объект редактора и важность его маркеров, прочитанные один раз на обновление вкладки:
+     * {@code getModel()} у {@code DtGranularEditor} — транзакция BM в UI-потоке.
+     * {@code model == null} — не МД-редактор, закрытие среды или объект недоступен.
+     */
+    private record TabModel(DtGranularEditor<?> editor, MdObject model, MarkerSeverity severity)
+    {
+        private static final TabModel NONE = new TabModel(null, null, null);
+
+        static TabModel of(IEditorPart editor)
+        {
+            if (!(editor instanceof DtGranularEditor<?> granular) || SUPER_TITLE_IMAGE == null
+                || PlatformUI.getWorkbench().isClosing())
+                return NONE;
+            try
+            {
+                if (!(granular.getModel() instanceof MdObject model))
+                    return NONE;
+                return new TabModel(granular, model, maxSeverity(model));
+            }
+            catch (RuntimeException ex)
+            {
+                return NONE;
+            }
         }
     }
 
@@ -608,11 +735,12 @@ public final class EditorTabIconDiagHook implements IStartup
             return;
         Image live = titleImageOf(editor);
         Image current = safeImage(item::getImage);
-        Image extension = extensionWinsImage(editor, live);
+        TabModel tab = TabModel.of(editor);
+        Image extension = extensionWinsImage(tab, live);
         if (extension != null)
         {
             if (current != extension)
-                applyTitleImage(editor, live);
+                applyTitleImage(editor, live, tab);
             return;
         }
         boolean innerOverlay = MdEditorTabsHook.innerTabsShowProblemOverlay(editor);
