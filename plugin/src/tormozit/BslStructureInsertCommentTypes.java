@@ -897,31 +897,77 @@ public final class BslStructureInsertCommentTypes
      * (деактивация проекта при закрытии EDT), новые транзакции ждут её, а она ждёт нашу —
      * взаимоблокировка (issue 530). Непрерываемая операция платформы не даёт служебной
      * операции начаться и пропускает новые транзакции без ожидания; закрытие дождётся конца
-     * расчёта. Берём её, только если поток уже в транзакции: тогда служебная операция точно
-     * не идёт, и транзакции ForkJoin не попадут внутрь неё.
+     * расчёта. См. {@link #underNonInterruptableBm}.
      */
     static void installTypeSystemNonInterruptable(BslTreeTypeSystem tree, Module module)
     {
-        BmPlatform platform = null;
-        Object token = null;
+        underNonInterruptableBm(tree, module, () ->
+        {
+            tree.installTypeSystem(module, CancelIndicator.NullImpl);
+            return null;
+        });
+    }
+
+    /**
+     * Наш вызов штатного {@code installTypeSystem} (полного или частичного) под непрерываемой
+     * операцией BM — см. {@link #installTypeSystemNonInterruptable}. Непрерываемую операцию берём
+     * только внутри транзакции: вне её служебная операция может уже идти, и транзакции ForkJoin
+     * попали бы внутрь неё. Поэтому поток без транзакции (фоновый пересчёт для автодополнения)
+     * сначала открывает свою: она дожидается служебной операции штатно, а пока открыта —
+     * служебная операция не начнётся (зависание при запуске сравнения, issue 1015).
+     */
+    static <T> T underNonInterruptableBm(BslTreeTypeSystem tree, Module module, java.util.function.Supplier<T> work)
+    {
         IBmModelManager models = (IBmModelManager)service(tree, "bmModelManager"); //$NON-NLS-1$
         IProject project = projectOf(module);
         IBmModel model = models != null && project != null ? models.getModel(project) : null;
+        BmPlatform platform = models != null ? models.getBmPlatform() : null;
         Object engine = model != null ? Global.invoke(model, "getEngine") : null; //$NON-NLS-1$
-        if (engine != null && Global.invoke(engine, "getCurrentTransaction") instanceof IBmTransaction) //$NON-NLS-1$
+        boolean inTransaction = engine != null
+            && Global.invoke(engine, "getCurrentTransaction") instanceof IBmTransaction; //$NON-NLS-1$
+        // #region agent log
+        Global.tempLog("bm-install-guard", "thread=" + Thread.currentThread().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " project=" + (project != null ? project.getName() : null) //$NON-NLS-1$
+            + " model=" + (model != null) + " platform=" + (platform != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " engine=" + (engine != null) + " inTransaction=" + inTransaction); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (platform == null || model == null)
+            return work.get();
+        if (inTransaction)
+            return nonInterruptable(platform, work);
+        RuntimeException[] failure = { null };
+        T result = model.executeReadonlyTask(new AbstractBmTask<T>("comfort.typeRecompute") //$NON-NLS-1$
         {
-            platform = models.getBmPlatform();
-            if (platform != null)
-                token = platform.beginNonInterruptableOperation();
-        }
+            @Override
+            public T execute(IBmTransaction transaction, IProgressMonitor monitor)
+            {
+                try
+                {
+                    return nonInterruptable(platform, work);
+                }
+                catch (RuntimeException e)
+                {
+                    // Отмену и прочие исключения расчёта отдаём вызывающему как есть, без обёртки BM.
+                    failure[0] = e;
+                    return null;
+                }
+            }
+        }, true);
+        if (failure[0] != null)
+            throw failure[0];
+        return result;
+    }
+
+    private static <T> T nonInterruptable(BmPlatform platform, java.util.function.Supplier<T> work)
+    {
+        Object token = platform.beginNonInterruptableOperation();
         try
         {
-            tree.installTypeSystem(module, CancelIndicator.NullImpl);
+            return work.get();
         }
         finally
         {
-            if (token != null)
-                platform.finishNonInterruptableOperation(token);
+            platform.finishNonInterruptableOperation(token);
         }
     }
 
@@ -4406,7 +4452,11 @@ public final class BslStructureInsertCommentTypes
                     dropNormalStates(method);
                 for (Variable variable : EcoreUtil2.getAllContentsOfType(module, Variable.class))
                     dropNormal(variable.getTypeStateProvider());
-                installTypeSystemPass(module, cancelIndicator);
+                underNonInterruptableBm(this, module, () ->
+                {
+                    installTypeSystemPass(module, cancelIndicator);
+                    return null;
+                });
             }
             finally
             {
@@ -4434,7 +4484,11 @@ public final class BslStructureInsertCommentTypes
                 for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
                     if (caller instanceof Method callerMethod)
                         dropNormalStates(callerMethod);
-                stockInstall(module, cancelIndicator);
+                underNonInterruptableBm(this, module, () ->
+                {
+                    stockInstall(module, cancelIndicator);
+                    return null;
+                });
                 BslFormTypeContextEnrichment.enrichMethod(dependent);
                 enrich(this, module, dependent);
                 return true;
