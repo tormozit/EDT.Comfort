@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.List;
+
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.swt.widgets.Display;
@@ -13,6 +15,7 @@ import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslBreakpoint;
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslBreakpointListener;
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslBreakpointListenerManager;
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
+import com._1c.g5.v8.dt.debug.model.rte.info.ErrorViewInfoData;
 
 /**
  * Запросы отлаживаемого приложения к EDT. Команда «Открыть в конфигураторе» приходит колбэком
@@ -50,6 +53,25 @@ public final class DebugRequestsHook implements IStartup
         {
             Global.logError("DebugRequestsHook", "install", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    /**
+     * Кнопка «Конфигуратор» окна ошибки приложения присылает все ошибки компиляции одним запросом,
+     * а EDT на каждую открывает свой диалог. В каждом из них — одно и то же полное описание, поэтому
+     * оставляем только первую ошибку с модулем (те, что без модуля, штатный обработчик и так пропускает).
+     * Вызывается перед {@code handleShowErrorRequest} из перехватчика событий отладки
+     * ({@code DebugErrorSuffixHook.EventProcessorInterceptor}).
+     */
+    static Object firstShownError(Object list)
+    {
+        if (!(list instanceof List<?> errors) || errors.size() < 2)
+            return list;
+        for (Object item : errors)
+        {
+            if (item instanceof ErrorViewInfoData error && error.getModuleID() != null)
+                return List.of(error);
+        }
+        return list;
     }
 
     private static final class ShowMetadataListener implements IBslBreakpointListener

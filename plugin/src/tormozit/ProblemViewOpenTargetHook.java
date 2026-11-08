@@ -270,6 +270,12 @@ public final class ProblemViewOpenTargetHook implements IStartup
             // остальные события одного двойного клика не должны открывать файл повторно.
             return;
         }
+        // Проблема в наборе данных схемы компоновки — набор и фрагмент запроса в открытом макете.
+        if (DataCompositionSchemaEditorHook.revealProblem(marker))
+            return;
+        // Проблема в запросе динамического списка формы — окно настроек списка и фрагмент запроса.
+        if (FormEditorHook.revealDynamicListQueryProblem(page, marker))
+            return;
         String rightName = roleRightName(markerObject, marker);
         if (ConfigSearchResultsHook.revealRoleRightsRow(page, markerObject, rightName, marker.getMessage()))
             return;

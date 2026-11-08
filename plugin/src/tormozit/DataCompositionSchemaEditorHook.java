@@ -803,6 +803,38 @@ public class DataCompositionSchemaEditorHook implements IStartup
     }
 
     /**
+     * Двойной клик по проблеме схемы компоновки в панели «Проблемы»: после штатного открытия
+     * макета выбрать набор данных проблемы и выделить её фрагмент в тексте запроса. Положение —
+     * из доп. сведений маркера ({@code offset}/{@code length}, иначе {@code line}).
+     *
+     * @return {@code true}, если проблема относится к набору данных схемы
+     */
+    static boolean revealProblem(com._1c.g5.v8.dt.validation.marker.Marker marker)
+    {
+        String[] target = marker.provideObject((java.util.function.Function<EObject, String[]>)object ->
+        {
+            for (EObject current = object; current != null; current = current.eContainer())
+            {
+                if (current instanceof DataSet dataSet && dataSet.getName() != null)
+                    return new String[] { org.eclipse.emf.ecore.util.EcoreUtil.getURI(dataSet).toString(),
+                        dataSet.getName(), object.eClass().getName() };
+            }
+            return null;
+        });
+        var extra = marker.getExtraInfo();
+        int offset = extra == null ? -1
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_OFFSET, -1);
+        int length = extra == null ? 0
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_LENGTH, 0);
+        int line = extra == null ? 1
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_LINE, 1);
+        if (target == null)
+            return false;
+        DataSetPositionMemory.requestReveal(target[0], target[1], offset, length, line, marker.getMessage());
+        return true;
+    }
+
+    /**
      * Запоминает последний активный набор данных схемы и позицию каретки в тексте его запроса —
      * по аналогии с {@link BslModulePositionMemoryHook}. Хранение между сеансами EDT —
      * {@link EditorMemoryStore}, ключ — файл макета. Страница наборов данных заполняется и
@@ -818,6 +850,28 @@ public class DataCompositionSchemaEditorHook implements IStartup
 
         private static final EditorMemoryStore STORE =
             new EditorMemoryStore("dcsDataSetPosition.entries", 300); //$NON-NLS-1$
+
+        /** Живые сессии открытых схем — для перехода из панели «Проблемы». */
+        private static final java.util.Set<Session> SESSIONS =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+        /**
+         * Запрошенный переход к набору данных и фрагменту его запроса. Набор узнаётся по URI модели
+         * (одноимённые наборы других схем не подходят); {@code offset < 0} — по строке {@code line}.
+         */
+        private record Reveal(String uri, String name, int offset, int length, int line, String message, long until)
+        {
+        }
+
+        private static volatile Reveal pending;
+
+        /** Запрос перехода: применит уже открытая схема или схема, которая сейчас откроется. */
+        static void requestReveal(String uri, String name, int offset, int length, int line, String message)
+        {
+            pending = new Reveal(uri, name, offset, length, line, message, System.currentTimeMillis() + 10_000);
+            for (Session session : new ArrayList<>(SESSIONS))
+                session.display.asyncExec(() -> session.revealPending(0));
+        }
 
         static void install(DtGranularEditorEmbeddedEditorPage<?> hostPage, DataCompositionSchemaEditor dcsEditor)
         {
@@ -884,7 +938,15 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 });
                 dataSets.addListener(SWT.Dispose, event -> STORE.flush());
                 dataSets.getDataSetsViewer().getControl().addListener(SWT.FocusOut, event -> STORE.flush());
-                if (restoring)
+                SESSIONS.add(this);
+                Reveal request = pending;
+                if (request != null && System.currentTimeMillis() < request.until())
+                {
+                    // Схема открыта переходом из «Проблем»: запомненная позиция уступает переходу.
+                    restoring = true;
+                    display.asyncExec(() -> revealPending(0));
+                }
+                else if (restoring)
                     display.asyncExec(() -> restore(0));
                 else
                     hookEditor(0);
@@ -907,6 +969,131 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 if (dataSets.getCurrentDataSet() != target)
                     tree.setSelection(new StructuredSelection(target), true);
                 restoreCaret(target, attempt);
+            }
+
+            /** Переход из «Проблем»: свой ли набор (по URI) — выбрать его и выделить фрагмент запроса. */
+            private void revealPending(int attempt)
+            {
+                Reveal request = pending;
+                if (dataSets.isDisposed() || request == null || System.currentTimeMillis() > request.until())
+                    return;
+                TreeViewer tree = dataSets.getDataSetsViewer();
+                // Имена наборов не уникальны (вложенный в объединение может совпасть с верхним) — по URI.
+                boolean loaded = tree.getInput() != null && findDataSet(tree, request.name()) != null;
+                DataSet target = loaded ? findDataSetByUri(tree, request.uri()) : null;
+                if (!loaded)
+                {
+                    if (attempt < MAX_ATTEMPTS)
+                        display.timerExec(RETRY_MS, () -> revealPending(attempt + 1));
+                    return;
+                }
+                // Загруженная схема без такого набора — чужая.
+                if (target == null)
+                    return;
+                pending = null;
+                restoring = true;
+                if (dataSets.getCurrentDataSet() != target)
+                    tree.setSelection(new StructuredSelection(target), true);
+                revealCaret(target, request, 0);
+            }
+
+            private void revealCaret(DataSet target, Reveal request, int attempt)
+            {
+                if (dataSets.isDisposed())
+                    return;
+                EmbeddedEditor editor = dataSets.getQueryEditor();
+                XtextSourceViewer viewer = editor == null ? null : editor.getViewer();
+                IDocument document = viewer == null ? null : viewer.getDocument();
+                DataSet current = dataSets.getCurrentDataSet();
+                if (!(target instanceof DataCompositionSchemaDataSetQuery))
+                {
+                    restoring = false;
+                    return;
+                }
+                if (document == null || document.getLength() == 0 || current == null
+                    || !java.util.Objects.equals(current.getName(), target.getName()))
+                {
+                    if (attempt >= MAX_ATTEMPTS)
+                        restoring = false;
+                    else
+                        display.timerExec(RETRY_MS, () -> revealCaret(target, request, attempt + 1));
+                    return;
+                }
+                // Проверка набора положения не сохраняет: берём живую отметку редактора с тем же текстом.
+                // Отметки ставит фоновая проверка — ждём их появления.
+                org.eclipse.jface.text.Position live = request.offset() < 0
+                    ? findAnnotation(viewer.getAnnotationModel(), request.message()) : null;
+                if (request.offset() < 0 && live == null && attempt < 30)
+                {
+                    display.timerExec(RETRY_MS, () -> revealCaret(target, request, attempt + 1));
+                    return;
+                }
+                try
+                {
+                    int offset;
+                    int length = 0;
+                    if (live != null)
+                    {
+                        offset = Math.min(live.getOffset(), document.getLength());
+                        length = Math.max(0, Math.min(live.getLength(), document.getLength() - offset));
+                    }
+                    else if (request.offset() >= 0)
+                    {
+                        offset = Math.min(request.offset(), document.getLength());
+                        length = Math.max(0, Math.min(request.length(), document.getLength() - offset));
+                    }
+                    else
+                        offset = document.getLineOffset(Math.max(0, Math.min(request.line() - 1,
+                            document.getNumberOfLines() - 1)));
+                    viewer.setSelectedRange(offset, length);
+                    viewer.revealRange(offset, length);
+                    refocusAfterStockFocusReturn(viewer);
+                    display.timerExec(0, () -> focusQueryText(viewer));
+                }
+                catch (BadLocationException e)
+                {
+                    // Документ сменился за время ожидания — выделять нечего.
+                }
+                restoring = false;
+                hookEditor(0);
+            }
+
+            /** Положение неудалённой отметки редактора с текстом проблемы. */
+            private static org.eclipse.jface.text.Position findAnnotation(
+                org.eclipse.jface.text.source.IAnnotationModel model, String message)
+            {
+                if (model == null || message == null)
+                    return null;
+                for (var it = model.getAnnotationIterator(); it.hasNext();)
+                {
+                    org.eclipse.jface.text.source.Annotation annotation = it.next();
+                    if (!annotation.isMarkedDeleted() && message.equals(annotation.getText()))
+                        return model.getPosition(annotation);
+                }
+                return null;
+            }
+
+            private static DataSet findDataSetByUri(TreeViewer tree, String uri)
+            {
+                if (!(tree.getContentProvider() instanceof ITreeContentProvider provider))
+                    return null;
+                return findDataSetByUri(provider, provider.getElements(tree.getInput()), uri);
+            }
+
+            private static DataSet findDataSetByUri(ITreeContentProvider provider, Object[] elements, String uri)
+            {
+                if (elements == null)
+                    return null;
+                for (Object element : elements)
+                {
+                    if (element instanceof DataSet dataSet
+                        && uri.equals(org.eclipse.emf.ecore.util.EcoreUtil.getURI(dataSet).toString()))
+                        return dataSet;
+                    DataSet nested = findDataSetByUri(provider, provider.getChildren(element), uri);
+                    if (nested != null)
+                        return nested;
+                }
+                return null;
             }
 
             private void restoreCaret(DataSet target, int attempt)

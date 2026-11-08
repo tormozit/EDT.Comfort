@@ -7,8 +7,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.jface.action.Action;
@@ -26,6 +29,11 @@ import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.dt.bsl.ui.hover.IBslHoverContributor;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
+import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
+import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
+import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
 
 /**
@@ -72,6 +80,7 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         if (project == null)
             return;
         addToToolBar(manager, new OpenCheckSettingsAction(new ArrayList<>(codes), annotations, project));
+        addToToolBar(manager, new FindInProblemsAction(annotations, project));
         replaceDescriptionDropdown(manager, annotations);
         Debug.log("fillToolBar: " + codes); //$NON-NLS-1$
     }
@@ -305,6 +314,102 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
             String code = page.code() != null ? page.code() : codes.get(0);
             Shell shell = Display.getCurrent() != null ? Display.getCurrent().getActiveShell() : null;
             ProblemViewHook.openCheckSettings(shell, project, code);
+        }
+    }
+
+    /**
+     * «Найти в панели «Проблемы»» (issue 1013): находит маркер проблемы текущей страницы
+     * подсказки и выделяет его в панели. Маркер ищется по проверке проекта: сначала по
+     * ссылке на место проблемы и тексту, затем только по тексту.
+     */
+    private static final class FindInProblemsAction extends Action
+    {
+        private static final String TEXT = "Найти в панели «Проблемы»"; //$NON-NLS-1$
+
+        private final IProject project;
+        private final Collection<Annotation> annotations;
+
+        FindInProblemsAction(Collection<Annotation> annotations, IProject project)
+        {
+            super(TEXT, AS_PUSH_BUTTON);
+            this.annotations = new ArrayList<>(annotations);
+            this.project = project;
+            var descriptor = PlatformUI.getWorkbench().getViewRegistry().find(ProblemViewMarkers.PROBLEM_VIEW_ID);
+            if (descriptor != null && descriptor.getImageDescriptor() != null)
+                setImageDescriptor(descriptor.getImageDescriptor());
+            boolean enabled = CurrentPage.resolve(annotations).isCheck();
+            setEnabled(enabled);
+            setToolTipText(TooltipText.wrap(Display.getCurrent(), null, (enabled
+                ? "Найти эту проблему в панели «Проблемы» и выделить её" //$NON-NLS-1$
+                : "Найти в панели «Проблемы».\nНедоступно: на текущей странице подсказки не проверка конфигурации") //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+        }
+
+        @Override
+        public void run()
+        {
+            Annotation current = BslModuleSpellCheckHook.currentAnnotationHoverAnnotation(annotations);
+            if (current == null)
+            {
+                for (Annotation annotation : annotations)
+                {
+                    if (checkCode(annotation) != null)
+                    {
+                        current = annotation;
+                        break;
+                    }
+                }
+            }
+            String code = checkCode(current);
+            if (code == null)
+                return;
+            XtextAnnotation xtext = (XtextAnnotation)current;
+            String uri = xtext.getUriToProblem().toString();
+            String text = xtext.getText();
+            Display display = Display.getCurrent();
+            Job job = Job.create("Поиск проблемы в панели", monitor -> //$NON-NLS-1$
+            {
+                Marker found = findMarker(code, uri, text);
+                display.asyncExec(() ->
+                {
+                    if (found != null)
+                        ProblemViewHook.revealMarker(found);
+                    else
+                        ToastNotification.show("Найти в панели", //$NON-NLS-1$
+                            "Проблема не найдена среди маркеров проекта", 6_000); //$NON-NLS-1$
+                });
+            });
+            job.schedule();
+        }
+
+        private Marker findMarker(String code, String uri, String text)
+        {
+            IMarkerManagerV2 manager = Global.getOsgiService(IMarkerManagerV2.class);
+            if (manager == null)
+                return null;
+            Marker byUri = null;
+            Marker byText = null;
+            int total = 0;
+            int sameUri = 0;
+            try (Stream<Marker> stream = manager.createReader(project).markers(
+                MarkerFilter.createProjectFilter(project).addValue(MarkerIndex.CHECK_ID, code)))
+            {
+                for (Marker marker : stream.toList())
+                {
+                    total++;
+                    boolean textEquals = text != null && text.equals(marker.getMessage());
+                    boolean uriEquals = uri.equals(StandardExtraInfo.TEXT_URI_TO_PROBLEM.get(marker));
+                    if (uriEquals)
+                        sameUri++;
+                    if (uriEquals && (byUri == null || textEquals))
+                        byUri = marker;
+                    if (textEquals && byText == null)
+                        byText = marker;
+                }
+            }
+            Global.tempLog("problem-find", "findMarker code=" + code + " uri=" + uri + " text=" + text //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " total=" + total + " sameUri=" + sameUri + " byUri=" + byUri + " byText=" + byText); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            return byUri != null ? byUri : byText;
         }
     }
 

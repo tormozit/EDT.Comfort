@@ -54,6 +54,8 @@ public final class Activator
         StructureKeyWeaving.install(context);
         SystemEnumEnvironmentWeaving.install(context);
         UnknownMemberWeaving.install(context);
+        UnknownMemberMessageWeaving.install(context);
+        PreprocessorPartRangeWeaving.install(context);
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
@@ -69,6 +71,429 @@ public final class Activator
         SuppressionRangesWeaving.install(context);
         P2InstallOperationWeaving.install(context);
         DebugValueEditorDialogWeaving.install(context);
+        FullRebuildContainmentChecksWeaving.install(context);
+        MarkerCreationDateWeaving.install(context);
+    }
+
+    /**
+     * Дата создания маркера переносится со старой проблемы (функции основного бандла).
+     * <ul>
+     * <li>bm.xtext 17.0.600.v202605050943 (и 18.0.0.v202610211527) {@code BmAwareResourceValidatorListener.onComplete}:
+     * перед {@code IMarkerManager.setMarkers} — {@link #CALLBACK}(ресурс, маркеры).</li>
+     * <li>form.check 1.0.1000.v202605050943 (и 1.0.1001.v202610211527) {@code BaseQlDelegatingCheck}: хаб запросов
+     * СКД и динамических списков отбрасывает положение ошибки; перед {@code getMessage} ошибки разбора и проверки —
+     * {@link #QUERY}(ресурс запроса, ошибка).</li>
+     * <li>check 6.0.100.v202605050943 (и 6.0.102.v202610211527) {@code CheckExecutor}: вход {@code validateModel} —
+     * {@link #RESET}(объект), выход {@code createMarker} — {@link #MARKER}(маркер).</li>
+     * <li>validation 11.0.100.v202605050943 (и 12.0.0.v202610211527) {@code MarkerManagerV2}: вход
+     * {@code setMarkers(IProject, MarkerUpdateBatch)} — {@link #BATCH}(проект, пакет).</li>
+     * </ul>
+     */
+    private static final class MarkerCreationDateWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.markerCreatedAt.carry"; //$NON-NLS-1$
+        static final String QUERY = "tormozit.markerCreatedAt.query"; //$NON-NLS-1$
+        static final String RESET = "tormozit.markerCreatedAt.reset"; //$NON-NLS-1$
+        static final String MARKER = "tormozit.markerCreatedAt.marker"; //$NON-NLS-1$
+        static final String BATCH = "tormozit.markerCreatedAt.batch"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bm.xtext.validation.BmAwareResourceValidatorListener"; //$NON-NLS-1$
+        private static final String HUB = "com.e1c.g5.v8.dt.internal.form.check.ql.BaseQlDelegatingCheck"; //$NON-NLS-1$
+        private static final String EXECUTOR = "com.e1c.g5.v8.dt.internal.check.CheckExecutor"; //$NON-NLS-1$
+        private static final String MANAGER_V2 = "com._1c.g5.v8.dt.internal.validation.marker.MarkerManagerV2"; //$NON-NLS-1$
+        private static final String MANAGER = "com/_1c/g5/v8/dt/validation/marker/IMarkerManager"; //$NON-NLS-1$
+        private static final String SET_MARKERS = "(Lorg/eclipse/core/resources/IProject;Ljava/lang/Object;" //$NON-NLS-1$
+            + "[Lcom/_1c/g5/v8/dt/validation/marker/Marker;)V"; //$NON-NLS-1$
+        private static final String BI_CONSUMER = "java/util/function/BiConsumer"; //$NON-NLS-1$
+        private static final String CONSUMER = "java/util/function/Consumer"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (java.util.function.BiConsumer<Object, Object>) (resource, markers) -> {});
+            System.getProperties().put(QUERY, (java.util.function.BiConsumer<Object, Object>) (resource, problem) -> {});
+            System.getProperties().put(RESET, (Consumer<Object>) object -> {});
+            System.getProperties().put(MARKER, (Consumer<Object>) marker -> {});
+            System.getProperties().put(BATCH, (java.util.function.BiConsumer<Object, Object>) (project, batch) -> {});
+            context.registerService(WeavingHook.class, new MarkerCreationDateWeaving(), null);
+        }
+
+        /** Стек {@code …, x} → {@code callback.accept(x)} → {@code …, x}. */
+        private static void emitAcceptTop(MethodVisitor mv, String callback)
+        {
+            mv.visitInsn(Opcodes.DUP);
+            EarlyWeaving.emitGetProperty(mv, callback, CONSUMER);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, CONSUMER, "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Стек {@code …, x} → {@code callback.accept(local, x)} → {@code …, x}. */
+        private static void emitAcceptLocalAndTop(MethodVisitor mv, String callback, int local)
+        {
+            mv.visitInsn(Opcodes.DUP);
+            EarlyWeaving.emitGetProperty(mv, callback, BI_CONSUMER);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitVarInsn(Opcodes.ALOAD, local);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, BI_CONSUMER, "accept", //$NON-NLS-1$
+                "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+        }
+
+        /** Правка одного класса; {@code expected} — сколько вставок даёт известная форма класса. */
+        private static void patch(WovenClass woven, String status, int expected,
+            java.util.function.BiFunction<int[], MethodVisitor, java.util.function.Function<Object[], MethodVisitor>> factory)
+        {
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if ((access & Opcodes.ACC_STATIC) != 0)
+                            return mv;
+                        MethodVisitor patching = factory.apply(patched, mv).apply(new Object[] { name, descriptor });
+                        return patching != null ? patching : mv;
+                    }
+                }, 0);
+                boolean ok = patched[0] == expected;
+                if (ok)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(status, ok ? "woven " + patched[0] : "skipped: " + patched[0] + " of " + expected); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(status, "weave failed: " + failure); //$NON-NLS-1$
+            }
+        }
+
+        private static void weaveHub(WovenClass woven)
+        {
+            patch(woven, QUERY + ".status", 3, (patched, mv) -> signature -> { //$NON-NLS-1$
+                String name = (String)signature[0];
+                String descriptor = (String)signature[1];
+                // Номер параметра-ресурса: addResourceDiagnostics(acceptor, resource, feature), checkResourceValidator(resource, …).
+                int resource;
+                if ("addResourceDiagnostics".equals(name) && descriptor.startsWith( //$NON-NLS-1$
+                    "(Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;Lorg/eclipse/emf/ecore/resource/Resource;")) //$NON-NLS-1$
+                    resource = 2;
+                else if ("checkResourceValidator".equals(name) //$NON-NLS-1$
+                    && descriptor.startsWith("(Lorg/eclipse/xtext/resource/XtextResource;")) //$NON-NLS-1$
+                    resource = 1;
+                else
+                    return null;
+                return new MethodVisitor(Opcodes.ASM9, mv)
+                {
+                    @Override
+                    public void visitMethodInsn(int opcode, String owner, String called, String desc, boolean isInterface)
+                    {
+                        if (opcode == Opcodes.INVOKEINTERFACE && "getMessage".equals(called) //$NON-NLS-1$
+                            && ("org/eclipse/emf/ecore/resource/Resource$Diagnostic".equals(owner) //$NON-NLS-1$
+                                || "org/eclipse/xtext/validation/Issue".equals(owner))) //$NON-NLS-1$
+                        {
+                            emitAcceptLocalAndTop(mv, QUERY, resource);
+                            patched[0]++;
+                        }
+                        super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                    }
+                };
+            });
+        }
+
+        private static void weaveExecutor(WovenClass woven)
+        {
+            patch(woven, MARKER + ".status", 2, (patched, mv) -> signature -> { //$NON-NLS-1$
+                String name = (String)signature[0];
+                String descriptor = (String)signature[1];
+                if ("validateModel".equals(name) && descriptor.endsWith( //$NON-NLS-1$
+                    "Lcom/_1c/g5/v8/dt/validation/marker/MarkerUpdateBatch;Lorg/eclipse/core/runtime/IProgressMonitor;)V")) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            mv.visitVarInsn(Opcodes.ALOAD, 1);
+                            emitAcceptTop(mv, RESET);
+                            mv.visitInsn(Opcodes.POP);
+                            patched[0]++;
+                        }
+                    };
+                if ("createMarker".equals(name) && descriptor.endsWith(")Lcom/_1c/g5/v8/dt/validation/marker/Marker;")) //$NON-NLS-1$ //$NON-NLS-2$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        private boolean counted;
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                emitAcceptTop(mv, MARKER);
+                                if (!counted)
+                                    patched[0]++;
+                                counted = true;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                return null;
+            });
+        }
+
+        private static void weaveManager(WovenClass woven)
+        {
+            patch(woven, BATCH + ".status", 1, (patched, mv) -> signature -> { //$NON-NLS-1$
+                if (!"setMarkers".equals(signature[0]) //$NON-NLS-1$
+                    || !"(Lorg/eclipse/core/resources/IProject;Lcom/_1c/g5/v8/dt/validation/marker/MarkerUpdateBatch;)V" //$NON-NLS-1$
+                        .equals(signature[1]))
+                    return null;
+                return new MethodVisitor(Opcodes.ASM9, mv)
+                {
+                    @Override
+                    public void visitCode()
+                    {
+                        super.visitCode();
+                        mv.visitVarInsn(Opcodes.ALOAD, 2);
+                        emitAcceptLocalAndTop(mv, BATCH, 1);
+                        mv.visitInsn(Opcodes.POP);
+                        patched[0]++;
+                    }
+                };
+            });
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING)
+                return;
+            String className = woven.getClassName();
+            if (HUB.equals(className))
+            {
+                weaveHub(woven);
+                return;
+            }
+            if (EXECUTOR.equals(className))
+            {
+                weaveExecutor(woven);
+                return;
+            }
+            if (MANAGER_V2.equals(className))
+            {
+                weaveManager(woven);
+                return;
+            }
+            if (!TARGET.equals(className))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0, 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"onComplete".equals(name) //$NON-NLS-1$
+                            || !"(Lorg/eclipse/emf/ecore/resource/Resource;Ljava/util/List;)V".equals(descriptor) //$NON-NLS-1$
+                            || (access & Opcodes.ACC_STATIC) != 0)
+                            return mv;
+                        patched[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /** Стек {@code …, markers} → {@code callback.accept(resource, markers)} → {@code …, markers}; без ветвлений. */
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String called, String desc,
+                                boolean isInterface)
+                            {
+                                if (opcode == Opcodes.INVOKEINTERFACE && MANAGER.equals(owner)
+                                    && "setMarkers".equals(called) && SET_MARKERS.equals(desc)) //$NON-NLS-1$
+                                {
+                                    mv.visitInsn(Opcodes.DUP);
+                                    EarlyWeaving.emitGetProperty(mv, CALLBACK, BI_CONSUMER);
+                                    mv.visitInsn(Opcodes.SWAP);
+                                    mv.visitVarInsn(Opcodes.ALOAD, 1);
+                                    mv.visitInsn(Opcodes.SWAP);
+                                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, BI_CONSUMER, "accept", //$NON-NLS-1$
+                                        "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                    patched[1]++;
+                                }
+                                super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                            }
+                        };
+                    }
+                }, 0);
+                // Публикуем только правку известной формы класса.
+                boolean ok = patched[0] == 1 && patched[1] == 1;
+                if (ok)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", ok //$NON-NLS-1$
+                    ? "woven" : "skipped: method=" + patched[0] + " calls=" + patched[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", "weave failed: " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /**
+     * Обход бага EDT (check 6.0.100.v202605050943, 6.0.102.v202610211527): {@code ModelCheckObjectContext.setFullRebuild(true)}
+     * выбрасывает контексты контейнеров, а {@code mergeUpdates} ещё и проверки объекта; в отбор полного пересчёта они
+     * не попадают. Так при записи формы полный пересчёт {@code form-legacy-emf-check} вытесняет {@code form-ql-hub}
+     * запроса динамического списка (#870). На входе {@code setFullRebuild(true)} у ещё не полного контекста его
+     * проверки и проверки контейнеров запоминаются, на входе {@code ModelCheckDerivedDataComputer.doFullRebuild}
+     * добавляются в непустой отбор. Пустой отбор — «все проверки», его не трогаем; сразу в отбор класть нельзя:
+     * последующее слияние с пустым отбором сузило бы «все проверки».
+     */
+    private static final class FullRebuildContainmentChecksWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.checkFullRebuild.containment"; //$NON-NLS-1$
+        private static final String STASH_CALLBACK = CALLBACK + ".stash"; //$NON-NLS-1$
+        private static final String COMPUTER = "com.e1c.g5.v8.dt.internal.check.derived.ModelCheckDerivedDataComputer"; //$NON-NLS-1$
+        private static final String CONTEXT = "com.e1c.g5.v8.dt.internal.check.context.ModelCheckObjectContext"; //$NON-NLS-1$
+        private static final String DESCRIPTOR = "(Lcom/e1c/g5/v8/dt/internal/check/context/ModelCheckObjectContext;" //$NON-NLS-1$
+            + "Lcom/_1c/g5/v8/bm/integration/IBmModel;Lcom/_1c/g5/v8/bm/core/IBmTransaction;" //$NON-NLS-1$
+            + "Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String CONSUMER = "java/util/function/Consumer"; //$NON-NLS-1$
+        private static final String BI_CONSUMER = "java/util/function/BiConsumer"; //$NON-NLS-1$
+        /**
+         * {@code {объект, сегмент}} → проверки, выброшенные переходом в полный пересчёт. Ключ — не сам контекст:
+         * EDT сохраняет и заново загружает контексты очереди, полный пересчёт получает другой экземпляр.
+         */
+        private static final Map<Object, java.util.Set<Object>> STASH =
+            java.util.Collections.synchronizedMap(new java.util.HashMap<>());
+
+        private static Object key(Object context) throws ReflectiveOperationException
+        {
+            return List.of(String.valueOf(call(context, "getObjectId")), String.valueOf(call(context, "getSegmentId"))); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (Consumer<Object>) FullRebuildContainmentChecksWeaving::widen);
+            System.getProperties().put(STASH_CALLBACK,
+                (java.util.function.BiConsumer<Object, Object>) FullRebuildContainmentChecksWeaving::stash);
+            context.registerService(WeavingHook.class, new FullRebuildContainmentChecksWeaving(), null);
+        }
+
+        private static Object call(Object target, String method) throws ReflectiveOperationException
+        {
+            return target.getClass().getMethod(method).invoke(target);
+        }
+
+        /** Вход {@code setFullRebuild(full)}: проверки ещё не полного контекста — до их сброса. */
+        private static void stash(Object context, Object full)
+        {
+            try
+            {
+                if (!Boolean.TRUE.equals(full) || Boolean.TRUE.equals(call(context, "isFullRebuild"))) //$NON-NLS-1$
+                    return;
+                java.util.Set<Object> checks = new java.util.HashSet<>();
+                if (call(context, "getCheckIds") instanceof Collection<?> own) //$NON-NLS-1$
+                    checks.addAll(own);
+                if (call(context, "getContainmentContexts") instanceof Collection<?> list) //$NON-NLS-1$
+                    for (Object containment : list)
+                        if (call(containment, "getCheckIds") instanceof Collection<?> ids) //$NON-NLS-1$
+                            checks.addAll(ids);
+                if (!checks.isEmpty())
+                    STASH.computeIfAbsent(key(context), key -> java.util.Collections.synchronizedSet(new java.util.HashSet<>()))
+                        .addAll(checks);
+            }
+            catch (Throwable error)
+            {
+                // Отказ обхода не должен ломать штатный пересчёт.
+            }
+        }
+
+        /** Вход {@code doFullRebuild(context, …)}: запомненное — в непустой отбор. */
+        @SuppressWarnings("unchecked")
+        private static void widen(Object context)
+        {
+            try
+            {
+                java.util.Set<Object> stashed = STASH.remove(key(context));
+                if (!(call(context, "getFullRebuildCheckIdFilter") instanceof Collection<?> ids) || ids.isEmpty()) //$NON-NLS-1$
+                    return;
+                if (stashed != null)
+                    synchronized (stashed)
+                    {
+                        ((Collection<Object>) ids).addAll(stashed);
+                    }
+            }
+            catch (Throwable error)
+            {
+                // Отказ обхода не должен ломать штатный пересчёт.
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            boolean computer = COMPUTER.equals(woven.getClassName());
+            if (woven.getState() != WovenClass.TRANSFORMING || !computer && !CONTEXT.equals(woven.getClassName()))
+                return;
+            String status = CALLBACK + ".status." + (computer ? "computer" : "context"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        boolean target = computer
+                            ? "doFullRebuild".equals(name) && DESCRIPTOR.equals(descriptor) //$NON-NLS-1$
+                            : "setFullRebuild".equals(name) && "(Z)V".equals(descriptor); //$NON-NLS-1$ //$NON-NLS-2$
+                        if (!target || (access & Opcodes.ACC_STATIC) != 0)
+                            return mv;
+                        patched[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /** {@code widen(context)} / {@code stash(this, Boolean.valueOf(full))} — без ветвлений. */
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                if (computer)
+                                {
+                                    EarlyWeaving.emitGetProperty(mv, CALLBACK, CONSUMER);
+                                    mv.visitVarInsn(Opcodes.ALOAD, 1);
+                                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, CONSUMER, "accept", //$NON-NLS-1$
+                                        "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                                    return;
+                                }
+                                EarlyWeaving.emitGetProperty(mv, STASH_CALLBACK, BI_CONSUMER);
+                                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                                mv.visitVarInsn(Opcodes.ILOAD, 1);
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, BI_CONSUMER, "accept", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(status, patched[0] == 1 ? "woven" : "skipped: " + patched[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(status, "weave failed: " + failure); //$NON-NLS-1$
+            }
+        }
     }
 
     @Override
@@ -167,7 +592,7 @@ public final class Activator
 
     /**
      * bsl.check 4.0.300.v202605050943 (и 4.0.302.v202610211527) {@code BslQlDelegatingCheck}
-     * ({@code bsl-ql-hub}): параметр «Только открытые модули», как у тяжёлых проверок Комфорта (#870).
+     * ({@code bsl-ql-hub}): параметр «Только в редакторах», как у тяжёлых проверок Комфорта (#870).
      * {@code configureCheck} получает параметр {@code onlyOpenModules} (по умолчанию включён), {@code check}
      * пропускает литерал, если функция {@link #CALLBACK} основного бандла вернула {@code true}.
      */
@@ -176,7 +601,7 @@ public final class Activator
         static final String CALLBACK = "tormozit.qlHub.skip"; //$NON-NLS-1$
         private static final String TARGET = "com.e1c.g5.v8.dt.internal.bsl.check.BslQlDelegatingCheck"; //$NON-NLS-1$
         private static final String PARAMETER = "onlyOpenModules"; //$NON-NLS-1$
-        private static final String TITLE = "Только открытые модули";
+        private static final String TITLE = "Только в редакторах";
         private static final String BUILDER = "com/e1c/g5/v8/dt/check/components/BasicCheck$CheckParameterBuilder"; //$NON-NLS-1$
         private static final String PARAMETER_DESCRIPTOR =
             "(Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)L" + BUILDER + ";"; //$NON-NLS-1$ //$NON-NLS-2$
@@ -2187,6 +2612,126 @@ public final class Activator
     }
 
     /**
+     * {@code BslJavaValidator} (#1012): в текст «Свойство (метод) объекта не обнаружено» добавляется имя члена —
+     * «Свойство/метод 'Имя' объекта не обнаружено». В обоих местах ({@code checkDynamicFeatureAccess},
+     * {@code unknownLeftPart}) за {@code IMessages.unknown_feature_for_left_part_of_expression()} идут
+     * {@code appendEnvironmentText}, загрузка обращения и {@code GETSTATIC FEATURE_ACCESS__NAME}; перед последним
+     * стек {@code [текст, обращение]}, текст заменяется функцией {@code {текст, имя}}. Итог — в {@code STATUS}.
+     */
+    private static final class UnknownMemberMessageWeaving implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.bslValidator.unknownMemberMessage"; //$NON-NLS-1$
+        private static final String STATUS = "tormozit.bslValidator.unknownMemberMessagePatch"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.validation.BslJavaValidator"; //$NON-NLS-1$
+        private static final String TARGET_INTERNAL = TARGET.replace('.', '/');
+        private static final String FEATURE_ACCESS = "com/_1c/g5/v8/dt/bsl/model/FeatureAccess"; //$NON-NLS-1$
+        private static final String STOCK_RU = "Свойство (метод) объекта"; //$NON-NLS-1$
+        private static final int EXPECTED_SITES = 2;
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK, (Function<Object[], Object>) UnknownMemberMessageWeaving::format);
+            context.registerService(WeavingHook.class, new UnknownMemberMessageWeaving(), null);
+        }
+
+        private static Object format(Object[] args)
+        {
+            String text = (String) args[0];
+            String name = (String) args[1];
+            if (text == null || name == null || name.isEmpty())
+                return text;
+            if (text.startsWith(STOCK_RU))
+                return "Свойство/метод '" + name + "' объекта" + text.substring(STOCK_RU.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            return "'" + name + "': " + text; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] sites = new int[1];
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (mv == null)
+                            return null;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            private boolean pending;
+
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method, String desc,
+                                boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                                if ("unknown_feature_for_left_part_of_expression".equals(method)) //$NON-NLS-1$
+                                    pending = true;
+                                else if (!(TARGET_INTERNAL.equals(owner) && "appendEnvironmentText".equals(method))) //$NON-NLS-1$
+                                    pending = false;
+                            }
+
+                            @Override
+                            public void visitFieldInsn(int opcode, String owner, String field, String desc)
+                            {
+                                if (pending && opcode == Opcodes.GETSTATIC && "FEATURE_ACCESS__NAME".equals(field)) //$NON-NLS-1$
+                                {
+                                    pending = false;
+                                    emitRename(this);
+                                    sites[0]++;
+                                }
+                                super.visitFieldInsn(opcode, owner, field, desc);
+                            }
+                        };
+                    }
+                }, 0);
+                boolean complete = sites[0] == EXPECTED_SITES;
+                if (complete)
+                    woven.setBytes(writer.toByteArray());
+                System.getProperties().put(STATUS, complete ? "woven" : "skipped: sites=" + sites[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                System.getProperties().put(STATUS, "failed: " + error); //$NON-NLS-1$
+            }
+        }
+
+        /** Стек {@code [текст, обращение]} → {@code [функция({текст, имя}), обращение]}, без ветвлений. */
+        private static void emitRename(MethodVisitor mv)
+        {
+            mv.visitInsn(Opcodes.DUP_X1); // обращение, текст, обращение
+            mv.visitTypeInsn(Opcodes.CHECKCAST, FEATURE_ACCESS);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FEATURE_ACCESS, "getName", "()Ljava/lang/String;", true); //$NON-NLS-1$ //$NON-NLS-2$
+            mv.visitInsn(Opcodes.ICONST_2); // обращение, текст, имя, 2
+            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP_X1); // обращение, текст, массив, имя, массив
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.AASTORE); // обращение, текст, массив
+            mv.visitInsn(Opcodes.DUP_X1); // обращение, массив, текст, массив
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.AASTORE); // обращение, массив
+            EarlyWeaving.emitGetProperty(mv, CALLBACK, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.SWAP); // текст с именем, обращение
+        }
+    }
+
+    /**
      * {@code BslJavaValidator}: проверка «Свойство (метод) объекта не обнаружено» после точки
      * ({@code checkDynamicFeatureAccessForUnknownLeftPart}) выполняется только при статическом флаге
      * {@code exhaustiveValidation}, который класс читает из JVM-свойства при загрузке. То же свойство читают
@@ -2403,6 +2948,193 @@ public final class Activator
                 "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
             visitor.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
             visitor.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * {@code BslJavaValidator.checkIfPreprocessorPartEnvironments} (проверка
+     * {@code bsl-legacy-check-if-preprocessor-part-environments}): оба вызова
+     * {@code error(сообщение, объект, свойство, код, данные)} заменены функцией {@link #CALLBACK} основного бандла.
+     * Она получает {@code List.of(List.of(сообщение, объект, свойство, код, данные), приёмник)} и ставит ошибку на
+     * открывающую инструкцию ветки препроцессора вместо её тела. До основного бандла функция по умолчанию делает
+     * то же, что штатный {@code error}. Вплетение применяется, только если заменены оба вызова; итог — в {@link #STATUS}.
+     *
+     * <p>Диапазон диагностики {@code LegacyCheckAdapter} (com.e1c.g5.v8.dt.check 6.0.100.v202605050943) теряет: из
+     * {@code RangeBasedDiagnostic} он берёт только объект. Поэтому в начале его лямбды приёма диагностики
+     * {@code (ICheckResultAcceptor, Diagnostic)} вызывается {@link #ADAPTER_CALLBACK} ({@code BiPredicate}): вернула
+     * {@code true} — замечание уже добавлено с текстовым диапазоном, штатная обработка пропускается.
+     */
+    private static final class PreprocessorPartRangeWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.bslValidator.preprocessorPartError"; //$NON-NLS-1$
+        static final String ADAPTER_CALLBACK = "tormozit.legacyCheck.rangeIssue"; //$NON-NLS-1$
+        private static final String STATUS = CALLBACK + ".status"; //$NON-NLS-1$
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.validation.BslJavaValidator"; //$NON-NLS-1$
+        private static final String ADAPTER = "com.e1c.g5.v8.dt.internal.check.legacy.LegacyCheckAdapter"; //$NON-NLS-1$
+        private static final String ADAPTER_LAMBDA_DESC = "(Lcom/e1c/g5/v8/dt/check/ICheckResultAcceptor;" //$NON-NLS-1$
+            + "Lorg/eclipse/emf/common/util/Diagnostic;)V"; //$NON-NLS-1$
+        private static final String PREDICATE = "java/util/function/BiPredicate"; //$NON-NLS-1$
+        private static final String ERROR_DESC = "(Ljava/lang/String;Lorg/eclipse/emf/ecore/EObject;" //$NON-NLS-1$
+            + "Lorg/eclipse/emf/ecore/EStructuralFeature;Ljava/lang/String;[Ljava/lang/String;)V"; //$NON-NLS-1$
+        private static final String LIST = "java/util/List"; //$NON-NLS-1$
+        private static final String OBJ = "Ljava/lang/Object;"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (Function<Object, Object>) PreprocessorPartRangeWeaving::stockError);
+            context.registerService(WeavingHook.class, new PreprocessorPartRangeWeaving(), null);
+        }
+
+        /** Штатный {@code error}: {@code acceptError(сообщение, объект, свойство, INSIGNIFICANT_INDEX, код, данные)}. */
+        private static Object stockError(Object payload)
+        {
+            List<?> call = (List<?>)payload;
+            List<?> args = (List<?>)call.get(0);
+            Object acceptor = call.get(1);
+            for (java.lang.reflect.Method method : acceptor.getClass().getMethods())
+            {
+                Class<?>[] types = method.getParameterTypes();
+                if (!"acceptError".equals(method.getName()) || types.length != 6 || types[2] == int.class //$NON-NLS-1$
+                    || types[3] != int.class)
+                    continue;
+                try
+                {
+                    method.setAccessible(true);
+                    method.invoke(acceptor, args.get(0), args.get(1), args.get(2), Integer.valueOf(-1), args.get(3),
+                        args.get(4));
+                }
+                catch (ReflectiveOperationException | RuntimeException failure)
+                {
+                    System.getProperties().put(STATUS + ".failure", failure.toString()); //$NON-NLS-1$
+                }
+                return null;
+            }
+            return null;
+        }
+
+        /** {@code if (callback != null && callback.test(acceptor, diagnostic)) return;} в начале лямбды адаптера. */
+        private static void weaveAdapter(WovenClass woven)
+        {
+            String status = ADAPTER_CALLBACK + ".status"; //$NON-NLS-1$
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = new int[1];
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (mv == null || !name.startsWith("lambda$") || !ADAPTER_LAMBDA_DESC.equals(descriptor) //$NON-NLS-1$
+                            || (access & Opcodes.ACC_STATIC) == 0)
+                            return mv;
+                        patched[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                EarlyWeaving.emitGetProperty(mv, ADAPTER_CALLBACK, PREDICATE);
+                                mv.visitInsn(Opcodes.DUP);
+                                Label missing = new Label();
+                                Label original = new Label();
+                                mv.visitJumpInsn(Opcodes.IFNULL, missing);
+                                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                                mv.visitVarInsn(Opcodes.ALOAD, 1);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, PREDICATE, "test", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                                mv.visitJumpInsn(Opcodes.IFEQ, original);
+                                mv.visitInsn(Opcodes.RETURN);
+                                mv.visitLabel(missing);
+                                mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { PREDICATE });
+                                mv.visitInsn(Opcodes.POP);
+                                mv.visitLabel(original);
+                                mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                            }
+                        };
+                    }
+                }, 0);
+                // Лямбд с такой сигнатурой ровно одна; иначе форма класса незнакома — штатный код.
+                if (patched[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.getProperties().put(status, patched[0] == 1 ? "woven" : "skipped: lambdas=" + patched[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                System.getProperties().put(status, "failed: " + error); //$NON-NLS-1$
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() == WovenClass.TRANSFORMING && ADAPTER.equals(woven.getClassName()))
+            {
+                weaveAdapter(woven);
+                return;
+            }
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] replaced = new int[1];
+                String targetInternal = TARGET.replace('.', '/');
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (mv == null || !"checkIfPreprocessorPartEnvironments".equals(name)) //$NON-NLS-1$
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String called, String desc,
+                                boolean isInterface)
+                            {
+                                if (opcode != Opcodes.INVOKEVIRTUAL || !"error".equals(called) //$NON-NLS-1$
+                                    || !ERROR_DESC.equals(desc))
+                                {
+                                    super.visitMethodInsn(opcode, owner, called, desc, isInterface);
+                                    return;
+                                }
+                                // Стек: this, сообщение, объект, свойство, код, данные — без ветвлений и новых локальных.
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, LIST, "of", //$NON-NLS-1$
+                                    "(" + OBJ + OBJ + OBJ + OBJ + OBJ + ")L" + LIST + ";", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                super.visitInsn(Opcodes.SWAP);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, targetInternal, "getMessageAcceptor", //$NON-NLS-1$
+                                    "()Lorg/eclipse/xtext/validation/ValidationMessageAcceptor;", false); //$NON-NLS-1$
+                                EarlyWeaving.emitGetProperty(this, CALLBACK, "java/util/function/Function"); //$NON-NLS-1$
+                                super.visitInsn(Opcodes.DUP_X2);
+                                super.visitInsn(Opcodes.POP);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, LIST, "of", //$NON-NLS-1$
+                                    "(" + OBJ + OBJ + ")L" + LIST + ";", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(" + OBJ + ")" + OBJ, true); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitInsn(Opcodes.POP);
+                                replaced[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                boolean complete = replaced[0] == 2;
+                // Вплетённый код обращается только к java.* и к методу самого класса — динамический импорт не нужен.
+                if (complete)
+                    woven.setBytes(writer.toByteArray());
+                System.getProperties().put(STATUS, complete ? "woven" : "skipped: replaced=" + replaced[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                System.getProperties().put(STATUS, "failed: " + error); //$NON-NLS-1$
+            }
         }
     }
 

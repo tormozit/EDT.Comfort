@@ -45,7 +45,7 @@ import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
  * пересчитывается сразу ({@link DeferredCheckContexts#recomputeOpened}).
  *
  * <p>Окно ручного запуска открывают команда ЕДТ «Запустить проверку» и наша «Проверить»
- * ({@link ComfortCheckRecompute}); оно держится до конца расчёта. Параметр «Только открытые модули»
+ * ({@link ComfortCheckRecompute}); оно держится до конца расчёта. Параметр «Только в редакторах»
  * тяжёлых проверок смотрит только на открытость ({@link #isOpenOrManual}), ручной запуск его не отменяет;
  * исключение — «Запустить проверки» на странице проверок ({@link #openAllModulesWindow}).
  *
@@ -66,7 +66,7 @@ public class MassiveChecksExemptionHook
     /** Имя проекта → до какого момента разрешён любой его объект (ручной запуск). */
     private static final Map<String, Long> manualProjects = new ConcurrentHashMap<>();
 
-    /** Имя проекта → до какого момента флажок «Только открытые модули» не действует («Запустить проверки»). */
+    /** Имя проекта → до какого момента флажок «Только в редакторах» не действует («Запустить проверки»). */
     private static final Map<String, Long> allModulesProjects = new ConcurrentHashMap<>();
 
     /** Пути модулей, открытых в редакторах; обновляется в потоке UI. */
@@ -206,7 +206,11 @@ public class MassiveChecksExemptionHook
         }
     }
 
-    /** Идентификатор объекта редактора и его верхнего объекта: модельные проверки заводятся по BM-идентификатору. */
+    /**
+     * Идентификатор объекта редактора, его верхнего объекта и подчинённых верхних объектов (тела форм
+     * и макетов — {@code ISubordinateObjectsProvider}, как отбор «Текущий объект» панели «Проблемы»):
+     * модельные проверки заводятся по BM-идентификатору, а {@code form-ql-hub}/{@code dcs-ql-hub} — на тело.
+     */
     private static void addObjectIds(Collection<Long> target, EObject model)
     {
         if (!(model instanceof IBmObject bmObject))
@@ -217,6 +221,18 @@ public class MassiveChecksExemptionHook
             IBmObject top = bmObject.bmIsTop() ? null : bmObject.bmGetTopObject();
             if (top != null)
                 target.add(Long.valueOf(top.bmGetId()));
+            com._1c.g5.v8.dt.validation.ISubordinateObjectsProvider subordinates =
+                Global.getOsgiService(com._1c.g5.v8.dt.validation.ISubordinateObjectsProvider.class);
+            com._1c.g5.v8.dt.core.platform.IV8ProjectManager projects =
+                Global.getOsgiService(com._1c.g5.v8.dt.core.platform.IV8ProjectManager.class);
+            var v8Project = projects == null ? null : projects.getProject(model);
+            if (subordinates != null && v8Project != null)
+            {
+                for (Object id : subordinates.getSubordinateTopObjectIds(v8Project.getProject(),
+                    Long.valueOf(bmObject.bmGetId())))
+                    if (id instanceof Long subordinate && subordinate.longValue() != IBmObject.BM_NULL_ID)
+                        target.add(subordinate);
+            }
         }
         catch (RuntimeException e)
         {
@@ -234,8 +250,8 @@ public class MassiveChecksExemptionHook
     }
 
     /**
-     * Модуль открыт либо идёт «Запустить проверки» его проекта — для параметра «Только открытые
-     * модули» тяжёлых проверок. Прочий ручной запуск проверки флажок не отменяет: пользователь сам
+     * Модуль открыт либо идёт «Запустить проверки» его проекта — для параметра «Только в редакторах»
+     * тяжёлых проверок. Прочий ручной запуск проверки флажок не отменяет: пользователь сам
      * выбрал объём. Недавнее изменение файла не учитывается: после получения изменений из Git
      * изменёнными оказываются сотни модулей.
      *
@@ -250,7 +266,7 @@ public class MassiveChecksExemptionHook
     }
 
     /**
-     * Флажок «Только открытые модули» не действует для проекта на ближайшее окно — команда
+     * Флажок «Только в редакторах» не действует для проекта на ближайшее окно — команда
      * «Запустить проверки» страницы проверок; продлевать до конца расчёта.
      */
     public static void openAllModulesWindow(IProject project)
@@ -259,7 +275,7 @@ public class MassiveChecksExemptionHook
             allModulesProjects.put(project.getName(), Long.valueOf(deadline()));
     }
 
-    /** Конец «Запустить проверки»: флажок «Только открытые модули» снова действует. */
+    /** Конец «Запустить проверки»: флажок «Только в редакторах» снова действует. */
     public static void closeAllModulesWindow(IProject project)
     {
         if (project != null)

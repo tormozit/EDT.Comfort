@@ -105,6 +105,7 @@ import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.StandardExtraInfo;
 import com._1c.g5.v8.dt.validation.marker.MarkerFilter;
 import com._1c.g5.v8.dt.validation.marker.MarkerIndex;
 import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
@@ -578,6 +579,29 @@ public final class ProblemViewHook implements IStartup
         catch (PartInitException | RuntimeException e)
         {
             ToastNotification.show("Найти проблемы", "Не удалось установить отбор: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Показывает панель и выделяет в ней проблему (кнопка подсказки маркера в модуле, issue 1013).
+     * Строку ищет то же восстановление текущей строки, что и после перестроения списка.
+     */
+    static void revealMarker(Marker marker)
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null || marker == null)
+            return;
+        try
+        {
+            IViewPart view = page.showView(ProblemViewMarkers.PROBLEM_VIEW_ID);
+            SelectionKeeper.install(view);
+            SelectionKeeper.reveal(view, marker, 0);
+        }
+        catch (PartInitException | RuntimeException e)
+        {
+            Global.tempLog("problem-find", "revealMarker error: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            ToastNotification.show("Найти в панели", "Не удалось показать проблему: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1950,7 +1974,8 @@ public final class ProblemViewHook implements IStartup
             // LazyProblemView.initColumns кладёт в данные колонки её MarkerField.
             Object field = column.getColumn().getData();
             boolean creationDate = field != null && CreationDateSorting.FIELD_CLASS.equals(field.getClass().getName());
-            TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader, viewer, creationDate);
+            TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader, viewer, creationDate,
+                field != null && AnchorLocation.FIELD_CLASS.equals(field.getClass().getName()));
             if (!Global.invokeVoid(column, "setLabelProvider", wrapper, Boolean.FALSE)) //$NON-NLS-1$
             {
                 Debug.log("installTypeRename: 2-arg setLabelProvider not found"); //$NON-NLS-1$
@@ -2009,6 +2034,91 @@ public final class ProblemViewHook implements IStartup
         return null;
     }
 
+    /** Маркер строки проблемы или {@code null} для группы. */
+    private static Marker markerOf(Object element, ClassLoader loader)
+    {
+        if (element instanceof Marker marker)
+            return marker;
+        if (element == null || loader == null)
+            return null;
+        try
+        {
+            Class<?> lazy = loader.loadClass(
+                "com._1c.g5.v8.dt.internal.ui.validation.lazytree.LazyTreeNode"); //$NON-NLS-1$
+            Object node = lazy.isInstance(element) ? element : Adapters.adapt(element, lazy);
+            return node != null && Global.invoke(node, "getMarker") instanceof Marker marker ? marker : null; //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * «Положение» маркера модуля и запроса СКД/динамического списка: «ИмяМетодаИлиТаблицы: НомерСтроки» по
+     * якорю, который {@code Activator.MarkerCreationDates} пишет в маркер при проверке. Маркер без якоря —
+     * штатная подпись. Сортировку колонки не меняет: штатный {@code LocationField} сравнивает номер строки.
+     */
+    private static final class AnchorLocation
+    {
+        static final String FIELD_CLASS = "com._1c.g5.v8.dt.internal.ui.validation.LocationField"; //$NON-NLS-1$
+
+        private AnchorLocation() {}
+
+        /** Текст ячейки или {@code null} — оставить штатный. */
+        static String text(Marker marker)
+        {
+            if (marker == null || marker.getExtraInfo() == null)
+                return null;
+            String anchor = marker.getExtraInfo().get(Activator.MARKER_ANCHOR);
+            int colon = anchor != null ? anchor.indexOf(':') : -1;
+            if (colon < 0)
+                return null;
+            String kind = anchor.substring(0, colon);
+            String name;
+            String line;
+            switch (kind)
+            {
+                case "m" -> { //$NON-NLS-1$
+                    int last = anchor.lastIndexOf(':');
+                    name = last > colon ? anchor.substring(colon + 1, last) : null;
+                    line = textLine(marker);
+                }
+                case "head", "gap", "tail" -> { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    name = "<вне метода>"; //$NON-NLS-1$
+                    line = textLine(marker);
+                }
+                case "t" -> { //$NON-NLS-1$
+                    int last = anchor.lastIndexOf(':');
+                    name = last > colon ? anchor.substring(colon + 1, last) : null;
+                    // Повторное создание таблицы с тем же именем — суффикс «#n» только для ключа.
+                    int hash = name != null ? name.lastIndexOf('#') : -1;
+                    if (hash > 0)
+                        name = name.substring(0, hash);
+                    line = marker.getExtraInfo().get(Activator.MARKER_QUERY_LINE);
+                }
+                default -> {
+                    return null;
+                }
+            }
+            // Маркер хаба без ПОМЕСТИТЬ выше ошибки — якорь «head:» без строки модуля.
+            if ("head".equals(kind) && line == null) //$NON-NLS-1$
+            {
+                name = "<до временных таблиц>"; //$NON-NLS-1$
+                line = marker.getExtraInfo().get(Activator.MARKER_QUERY_LINE);
+            }
+            if (name == null || name.isEmpty() || line == null || line.isEmpty())
+                return null;
+            return name + ": " + line; //$NON-NLS-1$
+        }
+
+        private static String textLine(Marker marker)
+        {
+            int line = marker.getExtraInfo().getIntOrDefault(StandardExtraInfo.TEXT_LINE, -1);
+            return line > 0 ? String.valueOf(line) : null;
+        }
+    }
+
     private static IssueType issueTypeOfMarker(Marker marker, ClassLoader loader)
     {
         if (marker.getSeverity() == MarkerSeverity.ERRORS)
@@ -2041,13 +2151,17 @@ public final class ProblemViewHook implements IStartup
         /** Колонка «Создано» ({@code CreationDateField}). */
         final boolean creationDate;
 
+        /** Колонка «Положение» ({@code LocationField}). */
+        private final boolean location;
+
         private TypeRenameLabelProvider(CellLabelProvider delegate, ClassLoader loader, TreeViewer viewer,
-            boolean creationDate)
+            boolean creationDate, boolean location)
         {
             this.delegate = delegate;
             this.loader = loader;
             this.viewer = viewer;
             this.creationDate = creationDate;
+            this.location = location;
         }
 
         @Override
@@ -2059,6 +2173,13 @@ public final class ProblemViewHook implements IStartup
                 String max = GroupCreationDate.text(viewer, loader, cell.getElement());
                 if (max != null)
                     cell.setText(max);
+                return;
+            }
+            if (location)
+            {
+                String text = AnchorLocation.text(markerOf(cell.getElement(), loader));
+                if (text != null)
+                    cell.setText(text);
                 return;
             }
             String rewritten = rewrite(cell.getElement(), cell.getText());
@@ -2894,6 +3015,110 @@ public final class ProblemViewHook implements IStartup
             target.root = viewer.getInput();
         }
 
+        /**
+         * Явная просьба выделить проблему: делаем её целью и ищем в дереве. Если список ещё
+         * строится (панель только открыта), ждём корень; если корень сменится — цель вернёт
+         * {@link #afterUpdate}.
+         */
+        static void reveal(IViewPart view, Marker marker, int attempt)
+        {
+            TreeViewer viewer = view.getAdapter(TreeViewer.class);
+            Target target = targetOf(viewer);
+            Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
+            Global.tempLog("problem-find", "reveal attempt=" + attempt + " viewer=" + (viewer != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " target=" + (target != null) + " input=" + (viewer != null ? viewer.getInput() : null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " provider=" + (provider != null) + " marker=" + marker); //$NON-NLS-1$ //$NON-NLS-2$
+            if (viewer == null || viewer.getTree().isDisposed())
+                return;
+            if (target == null || viewer.getInput() == null || provider == null)
+            {
+                if (attempt < 30)
+                    Display.getDefault().timerExec(100, () -> reveal(view, marker, attempt + 1));
+                return;
+            }
+            tryReveal(view, viewer, target, marker, found ->
+            {
+                Global.tempLog("problem-find", "reveal result found=" + found); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!found)
+                    offerResetFilters(view, viewer, target, marker);
+            });
+            viewer.getTree().setFocus();
+        }
+
+        private static void tryReveal(IViewPart view, TreeViewer viewer, Target target, Object marker,
+            java.util.function.Consumer<Boolean> result)
+        {
+            target.markers = List.of(marker);
+            target.paths = List.of();
+            target.substitute = List.copyOf(viewer.getStructuredSelection().toList());
+            target.root = viewer.getInput();
+            restoreMarkers(view, viewer, target, result);
+        }
+
+        /**
+         * После снятия отборов список перестраивается заданием, окончание которого мы не
+         * видим, а пустое выделение нового корня стирает цель ({@link #remember}) — поэтому
+         * повторяем поиск, пока строка не найдётся.
+         */
+        private static void retryReveal(IViewPart view, Object marker, int left)
+        {
+            Display.getDefault().timerExec(400, () ->
+            {
+                TreeViewer viewer = view.getAdapter(TreeViewer.class);
+                Target target = targetOf(viewer);
+                if (target == null || viewer.getInput() == null)
+                    return;
+                tryReveal(view, viewer, target, marker, found ->
+                {
+                    Global.tempLog("problem-find", "retry left=" + left + " found=" + found); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    if (!found && left > 0)
+                        retryReveal(view, marker, left - 1);
+                });
+            });
+        }
+
+        /**
+         * Строка не нашлась в дереве: если панель отобрана подстрокой поиска или проверкой,
+         * предлагаем снять эти отборы. Цель остаётся прежней, поэтому после перестроения
+         * списка {@link #afterUpdate} сама выделит строку.
+         */
+        private static void offerResetFilters(IViewPart view, TreeViewer viewer, Target target, Object marker)
+        {
+            UpdateWaitIndicator.State state = UpdateWaitIndicator.stateOf(view);
+            boolean check = state != null && state.checkId != null;
+            boolean text = Global.getField(view, "searchPattern") instanceof String pattern //$NON-NLS-1$
+                && !pattern.isBlank();
+            Global.tempLog("problem-find", "offerResetFilters check=" + check + " text=" + text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (!check && !text)
+            {
+                ToastNotification.show("Найти в панели", //$NON-NLS-1$
+                    "Проблема скрыта другими отборами панели «Проблемы»", 8_000); //$NON-NLS-1$
+                return;
+            }
+            ToastNotification.show("Найти в панели", //$NON-NLS-1$
+                "Проблема скрыта отбором панели «Проблемы»", 10_000, //$NON-NLS-1$
+                () ->
+                {
+                    try
+                    {
+                        if (text)
+                        {
+                            SearchBox search = UpdateWaitIndicator.findProblemSearchBox(viewer.getTree().getParent());
+                            if (search != null && !search.isDisposed())
+                                search.setText(""); //$NON-NLS-1$
+                            Global.invokeVoid(view, "search", ""); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                        if (check)
+                            UpdateWaitIndicator.setCheckCode(view, null);
+                    }
+                    catch (RuntimeException e)
+                    {
+                        Global.tempLog("problem-find", "resetFilters error: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    retryReveal(view, marker, 10);
+                }, "Снять отборы"); //$NON-NLS-1$
+        }
+
         private static void forget(Target target)
         {
             target.markers = List.of();
@@ -2962,6 +3187,13 @@ public final class ProblemViewHook implements IStartup
          */
         private static void restoreMarkers(IViewPart view, TreeViewer viewer, Target target)
         {
+            restoreMarkers(view, viewer, target, null);
+        }
+
+        /** {@code result} получает {@code true}, если все проблемы найдены в дереве, а не заменены группой. */
+        private static void restoreMarkers(IViewPart view, TreeViewer viewer, Target target,
+            java.util.function.Consumer<Boolean> result)
+        {
             Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
             Object root = viewer.getInput();
             ClassLoader loader = view.getClass().getClassLoader();
@@ -2993,6 +3225,8 @@ public final class ProblemViewHook implements IStartup
                             nodes.add(item);
                     }
                     selectNodes(viewer, target, nodes, hidden[0]);
+                    if (result != null)
+                        result.accept(!hidden[0]);
                 });
             }
         }

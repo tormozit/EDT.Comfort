@@ -87,6 +87,7 @@ public class Activator extends AbstractUIPlugin
         BuiltinCheckReplacements.start(context);
         QlHubOpenModules.start();
         SuppressionRanges.start();
+        MarkerCreationDates.start();
         EmptyExceptStatementFix.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
@@ -263,6 +264,7 @@ public class Activator extends AbstractUIPlugin
         BuiltinCheckReplacements.stop();
         QlHubOpenModules.stop();
         SuppressionRanges.stop();
+        MarkerCreationDates.stop();
         EmptyExceptStatementFix.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
@@ -757,7 +759,7 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
-     * Флажок «Только открытые модули» штатной {@code bsl-ql-hub} (#870): параметр и вызов этой функции
+     * Флажок «Только в редакторах» штатной {@code bsl-ql-hub} (#870): параметр и вызов этой функции
      * в начале её {@code check} вплетает ранний бандл ({@code QlHubOpenModulesWeaving}). Правило — как у
      * {@code OpenModulesOnly} проверок Комфорта.
      */
@@ -765,13 +767,9 @@ public class Activator extends AbstractUIPlugin
     {
         private static final String CALLBACK = "tormozit.qlHub.skip"; //$NON-NLS-1$
         private static final String PARAMETER = "onlyOpenModules"; //$NON-NLS-1$
-        /** Временный лог #870: одна строка на модуль и вариант решения. */
-        private static final java.util.Set<String> LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
         static void start()
         {
-            Global.tempLog("ql-hub-open-modules", "weave status=" //$NON-NLS-1$ //$NON-NLS-2$
-                + System.getProperty(CALLBACK + ".status")); //$NON-NLS-1$
             System.getProperties().put(CALLBACK, (java.util.function.BiPredicate<Object, Object>)QlHubOpenModules::skip);
         }
 
@@ -786,25 +784,424 @@ public class Activator extends AbstractUIPlugin
             if (!(object instanceof org.eclipse.emf.ecore.EObject literal) || literal.eResource() == null)
                 return false;
             boolean only;
-            String parameter;
             try
             {
                 only = !(parameters instanceof com.e1c.g5.v8.dt.check.ICheckParameters checkParameters)
                     || checkParameters.getBoolean(PARAMETER);
-                parameter = String.valueOf(only);
             }
             catch (Exception e)
             {
                 // Нет параметра в описании проверки — как OpenModulesOnly: флажок считается включённым.
                 only = true;
-                parameter = "missing: " + e; //$NON-NLS-1$
             }
-            org.eclipse.emf.common.util.URI uri = literal.eResource().getURI();
-            boolean skip = only && !MassiveChecksExemptionHook.isOpenOrManual(uri);
-            if (LOGGED.add(uri + "|" + parameter + "|" + skip)) //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog("ql-hub-open-modules", "module=" + org.eclipse.emf.common.util.URI.decode(uri.toString()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " onlyOpenModules=" + parameter + " skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$
-            return skip;
+            return only && !MassiveChecksExemptionHook.isOpenOrManual(literal.eResource().getURI());
+        }
+    }
+
+    /**
+     * Дата «Создано» у маркеров модуля переживает перепроверку. EDT при каждой проверке строит маркеры заново
+     * с текущим временем ({@code BmAwareResourceValidatorListener.createMarker}) и целиком заменяет ими старые.
+     * Ранний бандл ({@code MarkerCreationDateWeaving}) перед записью отдаёт сюда проверенный ресурс и новые
+     * маркеры; новая проблема, совпавшая со старой по ключу «код проверки + текст + якорь строки», получает её
+     * дату. Якорь — строка относительно строки объявления метода (директивы и комментарии над ним встык —
+     * отрицательное смещение), поэтому правка в одном методе не сбивает даты в остальных. Якорь пишется в маркер
+     * ({@link #ANCHOR}): индекс маркеров хранит extra info целиком, а текст, по которому считался старый якорь,
+     * к следующей проверке уже другой. Старые маркеры без якоря сопоставляются по абсолютной строке.
+     */
+    /**
+     * Ключ extra info маркера: якорь строки — {@code m:Метод:смещение}, {@code t:ВремТаблица[#n]:смещение},
+     * {@code head:}/{@code gap:}/{@code tail:} (см. {@code MarkerCreationDates}). Читает колонка «Положение».
+     */
+    static final String MARKER_ANCHOR = "comfort.anchor"; //$NON-NLS-1$
+
+    /** Ключ extra info маркера хаба запросов: номер строки ошибки в тексте запроса. */
+    static final String MARKER_QUERY_LINE = "comfort.queryLine"; //$NON-NLS-1$
+
+    private static final class MarkerCreationDates
+    {
+        private static final String CALLBACK = "tormozit.markerCreatedAt.carry"; //$NON-NLS-1$
+        private static final String ANCHOR = MARKER_ANCHOR;
+
+        private static final String QUERY = "tormozit.markerCreatedAt.query"; //$NON-NLS-1$
+        private static final String RESET = "tormozit.markerCreatedAt.reset"; //$NON-NLS-1$
+        private static final String MARKER = "tormozit.markerCreatedAt.marker"; //$NON-NLS-1$
+        private static final String BATCH = "tormozit.markerCreatedAt.batch"; //$NON-NLS-1$
+        /**
+         * Якоря ошибок хаба запросов (текст → якоря по порядку): хаб отдаёт в задачу только текст, маркер строит
+         * {@code CheckExecutor.createMarker}. Сбрасывается на входе {@code validateModel} — проверка объекта.
+         */
+        private static final ThreadLocal<java.util.Map<String, java.util.ArrayDeque<String[]>>> PENDING =
+            ThreadLocal.withInitial(java.util.HashMap::new);
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK,
+                (java.util.function.BiConsumer<Object, Object>)MarkerCreationDates::carry);
+            System.getProperties().put(QUERY, (java.util.function.BiConsumer<Object, Object>)MarkerCreationDates::query);
+            System.getProperties().put(RESET, (Consumer<Object>)MarkerCreationDates::reset);
+            System.getProperties().put(MARKER, (Consumer<Object>)MarkerCreationDates::marker);
+            System.getProperties().put(BATCH, (java.util.function.BiConsumer<Object, Object>)MarkerCreationDates::batch);
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный класс продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK, (java.util.function.BiConsumer<Object, Object>)(resource, markers) -> {});
+            System.getProperties().put(QUERY, (java.util.function.BiConsumer<Object, Object>)(resource, problem) -> {});
+            System.getProperties().put(RESET, (Consumer<Object>)object -> {});
+            System.getProperties().put(MARKER, (Consumer<Object>)marker -> {});
+            System.getProperties().put(BATCH, (java.util.function.BiConsumer<Object, Object>)(project, batch) -> {});
+        }
+
+        /**
+         * Якорь строки запроса: ближайшее сверху начало запроса, создающего временную таблицу ({@code ПОМЕСТИТЬ}),
+         * — имя таблицы и смещение от строки начала; повторное имя (после {@code УНИЧТОЖИТЬ}) — с номером.
+         */
+        private static String queryAnchor(org.eclipse.emf.ecore.resource.Resource resource, int line)
+        {
+            if (line <= 0 || resource.getContents().isEmpty()
+                || !(resource.getContents().get(0) instanceof com._1c.g5.v8.dt.ql.model.QuerySchema schema))
+                return null;
+            String anchor = "head:" + line; //$NON-NLS-1$
+            java.util.Map<String, Integer> seen = new java.util.HashMap<>();
+            for (var query : schema.getQueries())
+            {
+                if (!(query instanceof com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery select)
+                    || select.getPlacementTable() == null || select.getPlacementTable().getTableName() == null)
+                    continue;
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(select);
+                if (node == null)
+                    continue;
+                int start = node.getStartLine();
+                if (start > line)
+                    break;
+                String name = select.getPlacementTable().getTableName();
+                int occurrence = seen.merge(name.toLowerCase(), 1, Integer::sum) - 1;
+                anchor = "t:" + name + (occurrence > 0 ? "#" + occurrence : "") + ':' + (line - start); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            return anchor;
+        }
+
+        /** Хаб запросов перед {@code getMessage} ошибки: якорь — в очередь по тексту ошибки. */
+        private static void query(Object resourceObject, Object problem)
+        {
+            try
+            {
+                if (!(resourceObject instanceof org.eclipse.emf.ecore.resource.Resource resource))
+                    return;
+                String message;
+                int line;
+                if (problem instanceof org.eclipse.xtext.validation.Issue issue)
+                {
+                    message = issue.getMessage();
+                    line = issue.getLineNumber() != null ? issue.getLineNumber() : -1;
+                }
+                else if (problem instanceof org.eclipse.emf.ecore.resource.Resource.Diagnostic diagnostic)
+                {
+                    message = diagnostic.getMessage();
+                    line = diagnostic.getLine();
+                }
+                else
+                    return;
+                String anchor = queryAnchor(resource, line);
+                if (message != null && anchor != null)
+                    PENDING.get().computeIfAbsent(message, k -> new java.util.ArrayDeque<>())
+                        .add(new String[] { anchor, String.valueOf(line) });
+            }
+            catch (RuntimeException e)
+            {
+                // Отказ якоря не должен мешать проверке.
+            }
+        }
+
+        /** Вход {@code CheckExecutor.validateModel}: якоря прошлого объекта, не ставшие маркерами, не нужны. */
+        private static void reset(Object object)
+        {
+            var pending = PENDING.get();
+            if (!pending.isEmpty())
+                pending.clear();
+        }
+
+        /** Выход {@code CheckExecutor.createMarker}: якорь ошибки хаба с тем же текстом — в маркер. */
+        private static void marker(Object markerObject)
+        {
+            var pending = PENDING.get();
+            if (pending.isEmpty() || !(markerObject instanceof com._1c.g5.v8.dt.validation.marker.Marker marker))
+                return;
+            var anchors = pending.get(marker.getMessage());
+            String[] entry = anchors != null ? anchors.poll() : null;
+            if (entry != null)
+            {
+                marker.getExtraInfo().put(ANCHOR, entry[0]);
+                marker.getExtraInfo().put(MARKER_QUERY_LINE, entry[1]);
+            }
+        }
+
+        /** Вход {@code MarkerManagerV2.setMarkers(project, batch)}: задачи с якорями получают старые даты. */
+        private static void batch(Object projectObject, Object batchObject)
+        {
+            try
+            {
+                if (!(projectObject instanceof org.eclipse.core.resources.IProject project)
+                    || !(batchObject instanceof com._1c.g5.v8.dt.validation.marker.MarkerUpdateBatch batch))
+                    return;
+                com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2 manager = null;
+                for (var task : batch.getAddTasks())
+                {
+                    var markers = task.getMarkers();
+                    if (markers == null || java.util.Arrays.stream(markers)
+                        .noneMatch(marker -> marker.getExtraInfo().get(ANCHOR) != null))
+                        continue;
+                    if (manager == null)
+                        manager = Global.getOsgiService(com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2.class);
+                    if (manager == null)
+                        return;
+                    java.util.List<com._1c.g5.v8.dt.validation.marker.Marker> old;
+                    try (java.util.stream.Stream<com._1c.g5.v8.dt.validation.marker.Marker> stream = manager.createReader(project)
+                        .markers(com._1c.g5.v8.dt.validation.marker.MarkerFilter.createProjectFilter(project)
+                            .addValue(com._1c.g5.v8.dt.validation.marker.MarkerIndex.OBJECT_ID, task.getObjectId())
+                            .addValue(com._1c.g5.v8.dt.validation.marker.MarkerIndex.CHECK_ID, task.getCheckId())))
+                    {
+                        old = new java.util.ArrayList<>(stream.toList());
+                    }
+                    restore(java.util.List.of(task.getObjectId(), task.getCheckId()), markers, old);
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // Отказ переноса даты не должен мешать записи маркеров.
+            }
+        }
+
+        /** Строки методов модуля по модели проверенного ресурса. */
+        private static final class MethodLines
+        {
+            private final String[] names;
+            /** Первая строка шапки: директивы и комментарии над объявлением встык. */
+            private final int[] headers;
+            private final int[] declarations;
+            private final int[] ends;
+
+            private MethodLines(java.util.List<Object[]> rows)
+            {
+                int n = rows.size();
+                names = new String[n];
+                headers = new int[n];
+                declarations = new int[n];
+                ends = new int[n];
+                for (int i = 0; i < n; i++)
+                {
+                    Object[] row = rows.get(i);
+                    names[i] = (String)row[0];
+                    headers[i] = (Integer)row[1];
+                    declarations[i] = (Integer)row[2];
+                    ends[i] = (Integer)row[3];
+                }
+            }
+
+            static MethodLines of(org.eclipse.emf.ecore.resource.Resource resource)
+            {
+                if (resource.getContents().isEmpty()
+                    || !(resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                    return null;
+                ICompositeNode moduleNode = NodeModelUtils.getNode(module);
+                if (moduleNode == null)
+                    return null;
+                boolean[] blank = blankLines(moduleNode.getRootNode().getText());
+                java.util.List<Object[]> rows = new java.util.ArrayList<>();
+                for (com._1c.g5.v8.dt.bsl.model.Method method : module.allMethods())
+                {
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+                    if (node == null)
+                        continue;
+                    // Строка объявления — строка имени: директивы компиляции входят в узел метода и стоят выше.
+                    int declaration = node.getStartLine();
+                    org.eclipse.emf.ecore.EStructuralFeature nameFeature = method.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
+                    if (nameFeature != null)
+                    {
+                        java.util.List<INode> nameNodes = NodeModelUtils.findNodesForFeature(method, nameFeature);
+                        if (!nameNodes.isEmpty())
+                            declaration = nameNodes.get(0).getStartLine();
+                    }
+                    rows.add(new Object[] { String.valueOf(method.getName()), Math.min(node.getStartLine(), declaration),
+                        declaration, Math.max(node.getEndLine(), declaration) });
+                }
+                rows.sort(java.util.Comparator.comparingInt(row -> (Integer)row[2]));
+                int previousEnd = 0;
+                for (Object[] row : rows)
+                {
+                    int header = (Integer)row[1];
+                    while (header - 1 > previousEnd && header - 1 < blank.length && !blank[header - 1])
+                        header--;
+                    row[1] = header;
+                    previousEnd = (Integer)row[3];
+                }
+                return new MethodLines(rows);
+            }
+
+            /** {@code blank[line]} для строк с 1; разбивка текста на строки, не разбор BSL. */
+            private static boolean[] blankLines(String text)
+            {
+                java.util.List<Boolean> lines = new java.util.ArrayList<>();
+                lines.add(Boolean.FALSE);
+                boolean blank = true;
+                for (int i = 0; i < text.length(); i++)
+                {
+                    char c = text.charAt(i);
+                    if (c == '\n')
+                    {
+                        lines.add(blank);
+                        blank = true;
+                    }
+                    else if (!Character.isWhitespace(c))
+                        blank = false;
+                }
+                lines.add(blank);
+                boolean[] result = new boolean[lines.size()];
+                for (int i = 0; i < result.length; i++)
+                    result[i] = lines.get(i);
+                return result;
+            }
+
+            String anchor(int line)
+            {
+                int n = declarations.length;
+                // Последний метод, чья шапка начинается не ниже строки.
+                int low = 0;
+                int high = n - 1;
+                int found = -1;
+                while (low <= high)
+                {
+                    int middle = (low + high) >>> 1;
+                    if (headers[middle] <= line)
+                    {
+                        found = middle;
+                        low = middle + 1;
+                    }
+                    else
+                        high = middle - 1;
+                }
+                if (found < 0)
+                    return "head:" + line; //$NON-NLS-1$
+                if (line <= ends[found])
+                    return "m:" + names[found] + ':' + (line - declarations[found]); //$NON-NLS-1$
+                if (found == n - 1)
+                    return "tail:" + (line - ends[found]); //$NON-NLS-1$
+                return "gap:" + names[found + 1] + ':' + (line - declarations[found + 1]); //$NON-NLS-1$
+            }
+        }
+
+        private static int line(com._1c.g5.v8.dt.validation.marker.Marker marker)
+        {
+            return marker.getExtraInfo().getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_LINE, -1);
+        }
+
+        private static String key(com._1c.g5.v8.dt.validation.marker.Marker marker, String anchor)
+        {
+            return marker.getCheckId() + '\u0001' + marker.getFeatureId() + '\u0001' + marker.getMessage() + '\u0001' + anchor;
+        }
+
+        /** Сколько помнить даты старых маркеров, не нашедших пары. */
+        private static final long KEEP_MS = 10 * 60_000L;
+        /**
+         * Объект → ключ → {дата создания, когда отложена}: старые маркеры, не нашедшие пары при записи. При записи
+         * модуля EDT пишет его маркеры дважды: сборка оставляет только ошибки Xtext и стирает остальные, через
+         * несколько секунд производные данные пишут все проверки — даты стёртых берутся отсюда.
+         */
+        private static final java.util.Map<Object, java.util.Map<String, java.util.ArrayDeque<long[]>>> DROPPED =
+            java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>(16, 0.75f, true)
+            {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(
+                    java.util.Map.Entry<Object, java.util.Map<String, java.util.ArrayDeque<long[]>>> eldest)
+                {
+                    return size() > 2000;
+                }
+            });
+
+        /**
+         * Новым маркерам — даты совпавших старых (и отложенных прошлыми записями того же {@code scope}): сперва по
+         * якорю, старые без якоря — по абсолютной строке; среди одинаковых ключей — по порядку строк. Не нашедшие
+         * пары откладываются.
+         */
+        private static void restore(Object scope, com._1c.g5.v8.dt.validation.marker.Marker[] markers,
+            java.util.List<com._1c.g5.v8.dt.validation.marker.Marker> old)
+        {
+            long now = System.currentTimeMillis();
+            java.util.Map<String, java.util.ArrayDeque<long[]>> dates = new java.util.HashMap<>();
+            var kept = DROPPED.remove(scope);
+            if (kept != null)
+                kept.forEach((key, queue) -> queue.stream().filter(entry -> now - entry[1] <= KEEP_MS)
+                    .forEach(entry -> dates.computeIfAbsent(key, k -> new java.util.ArrayDeque<>()).add(entry)));
+            old.sort(java.util.Comparator.comparingInt(MarkerCreationDates::line));
+            for (var marker : old)
+            {
+                String anchor = marker.getExtraInfo().get(ANCHOR);
+                dates.computeIfAbsent(key(marker, anchor != null ? anchor : "abs:" + line(marker)), //$NON-NLS-1$
+                    k -> new java.util.ArrayDeque<>()).add(new long[] { marker.getCreatedAt(), now });
+            }
+            com._1c.g5.v8.dt.validation.marker.Marker[] ordered = markers.clone();
+            java.util.Arrays.sort(ordered, java.util.Comparator.comparingInt(MarkerCreationDates::line));
+            for (var marker : ordered)
+            {
+                String anchor = marker.getExtraInfo().get(ANCHOR);
+                long[] date = null;
+                if (anchor != null)
+                {
+                    var queue = dates.get(key(marker, anchor));
+                    date = queue != null ? queue.poll() : null;
+                }
+                if (date == null)
+                {
+                    var queue = dates.get(key(marker, "abs:" + line(marker))); //$NON-NLS-1$
+                    date = queue != null ? queue.poll() : null;
+                }
+                if (date != null && date[0] > 0 && date[0] < marker.getCreatedAt())
+                    marker.setCreatedAt(date[0]);
+            }
+            dates.values().removeIf(java.util.ArrayDeque::isEmpty);
+            if (!dates.isEmpty())
+                DROPPED.put(scope, dates);
+        }
+
+        private static void carry(Object resourceObject, Object markersObject)
+        {
+            try
+            {
+                if (!(resourceObject instanceof org.eclipse.emf.ecore.resource.Resource resource)
+                    || !(markersObject instanceof com._1c.g5.v8.dt.validation.marker.Marker[] markers)
+                    || markers.length == 0 || resource.getURI() == null || !resource.getURI().isPlatformResource())
+                    return;
+                String object = resource.getURI().toPlatformString(true);
+                org.eclipse.core.resources.IProject project = org.eclipse.core.resources.ResourcesPlugin.getWorkspace()
+                    .getRoot().getProject(resource.getURI().segment(1));
+                com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2 manager =
+                    Global.getOsgiService(com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2.class);
+                if (manager == null || !project.isAccessible())
+                    return;
+                MethodLines methods = MethodLines.of(resource);
+                for (var marker : markers)
+                {
+                    int line = line(marker);
+                    if (methods != null && line > 0)
+                        marker.getExtraInfo().put(ANCHOR, methods.anchor(line));
+                }
+                // Старые даты по ключу; среди одинаковых ключей — по порядку строк.
+                java.util.List<com._1c.g5.v8.dt.validation.marker.Marker> old;
+                try (java.util.stream.Stream<com._1c.g5.v8.dt.validation.marker.Marker> stream = manager.createReader(project)
+                    .markers(com._1c.g5.v8.dt.validation.marker.MarkerFilter.createProjectFilter(project)
+                        .addValue(com._1c.g5.v8.dt.validation.marker.MarkerIndex.OBJECT_ID, object)))
+                {
+                    old = new java.util.ArrayList<>(stream.toList());
+                }
+                restore(object, markers, old);
+            }
+            catch (RuntimeException e)
+            {
+                // Отказ переноса даты не должен мешать записи маркеров.
+            }
         }
     }
 
@@ -820,11 +1217,9 @@ public class Activator extends AbstractUIPlugin
     private static final class SuppressionRanges
     {
         private static final String CALLBACK = "tormozit.bslSuppression.ranges"; //$NON-NLS-1$
-        private static final String LOG = "suppression-ranges"; //$NON-NLS-1$
 
         static void start()
         {
-            Global.tempLog(LOG, "weave status=" + System.getProperty(CALLBACK + ".status")); //$NON-NLS-1$ //$NON-NLS-2$
             System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)SuppressionRanges::apply);
         }
 
@@ -842,7 +1237,6 @@ public class Activator extends AbstractUIPlugin
             }
             catch (RuntimeException e)
             {
-                Global.tempLog(LOG, "failed: " + e); //$NON-NLS-1$
                 return ranges;
             }
         }
@@ -887,11 +1281,6 @@ public class Activator extends AbstractUIPlugin
                 if (end > line)
                     extendTo.put(line, end);
             }
-            // Временный лог: каждый вызов, с итогом.
-            org.eclipse.emf.ecore.resource.Resource resource = module.eResource();
-            Global.tempLog(LOG, "module=" //$NON-NLS-1$
-                + (resource == null ? null : org.eclipse.emf.common.util.URI.decode(resource.getURI().toString()))
-                + " candidates=" + lines + " extended=" + extendTo); //$NON-NLS-1$ //$NON-NLS-2$
             if (extendTo.isEmpty())
                 return rangesObject;
             // Один штатный диапазон может лежать в нескольких наборах — заменяем одним новым.

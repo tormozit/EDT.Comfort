@@ -3564,17 +3564,13 @@ final class BslQueryLiteralSupport
                     issue.setOffset(offset);
                     issue.setLength(position.getLength());
                     issue.setUriToProblem(EcoreUtil.getURI(object));
-                    org.eclipse.text.edits.TextEdit result = suppressor.suppressIssue(issue, object);
-                    Global.tempLog("query-skip-check", "suppress offset=" + offset + " object=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + object.eClass().getName() + " uri=" + issue.getUriToProblem() + " edit=" + result); //$NON-NLS-1$ //$NON-NLS-2$
-                    return result;
+                    return suppressor.suppressIssue(issue, object);
                 });
                 if (edit != null)
                     edit.apply(document);
             }
             catch (Exception | LinkageError e)
             {
-                Global.tempLog("query-skip-check", "suppress failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 ToastNotification.show("Подавить ошибку", "Не удалось подавить: " + e.getMessage(), 8_000); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
@@ -3620,13 +3616,10 @@ final class BslQueryLiteralSupport
         try
         {
             com.google.inject.Injector injector = BslOccurrenceMarkerHook.bslUiInjector();
-            // Временный лог issue 870: прежний путь через BslUiPlugin молча давал null.
-            Global.tempLog("query-skip-check", "injector=" + injector); //$NON-NLS-1$ //$NON-NLS-2$
             return injector == null ? null : injector.getInstance(type);
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLog("query-skip-check", "injector failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -3972,11 +3965,6 @@ final class BslQueryLiteralSupport
                         matched.add(coverage);
                     continue;
                 }
-                // Временный лог issue 870: текст схемы отличается от нашего только переводами строк.
-                if (!skipValidation)
-                    Global.tempLog("query-live-background", "apply openQuote=" + start + " textEqual=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + validation.query().replace("\r\n", "\n").equals(query) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " issues=" + validation.issues().size()); //$NON-NLS-1$
                 if (coverage == null)
                 {
                     Position range = track(start, end - start);
@@ -3996,12 +3984,6 @@ final class BslQueryLiteralSupport
                 {
                     // Важность самой ошибки запроса решает лишь, показывать ли её (IGNORE — нет).
                     String type = annotationType(issue.getSeverity()) == null ? null : annotationType(hubSeverity);
-                    // #region agent log — временный лог issue 870: почему живая отметка не ставится
-                    Global.tempLog("query-live-apply", "issue openQuote=" + start + " sev=" + issue.getSeverity() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " hubSev=" + hubSeverity + " type=" + type + " offset=" + issue.getOffset() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " length=" + issue.getLength() + " schemaLen=" + validation.query().length() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " litLen=" + query.length() + " msg=" + issue.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
                     if (type == null || issue.getOffset() == null || issue.getMessage() == null)
                         continue;
                     // Смещения ошибки — в тексте схемы (строки через \r\n), литерал — через \n.
@@ -4013,13 +3995,7 @@ final class BslQueryLiteralSupport
                         Math.min(schemaOffset + length, schemaText.length()), query);
                     int problemStart = lit.docOffset(offset);
                     int problemEnd = Math.max(problemStart + 1, lit.docOffset(Math.max(offsetEnd, offset + 1)));
-                    boolean baselineHidden = hiddenByBaseline(problemStart);
-                    // #region agent log — временный лог issue 870
-                    Global.tempLog("query-live-apply", "place openQuote=" + start + " litOffset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                        + " litEnd=" + offsetEnd + " doc=" + problemStart + ".." + problemEnd //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " baselineHidden=" + baselineHidden); //$NON-NLS-1$
-                    // #endregion
-                    if (baselineHidden)
+                    if (hiddenByBaseline(problemStart))
                         continue;
                     // Модель аннотаций сдвигает этот же экземпляр позиции вместе с текстом.
                     Position position = new Position(problemStart, problemEnd - problemStart);
@@ -4052,22 +4028,6 @@ final class BslQueryLiteralSupport
                 }
             }
             hideHubUnderCoverage(model, allAnnotations(model));
-            // #region agent log — временный лог issue 870: сколько живых отметок осталось в модели
-            int present = 0;
-            int ours = 0;
-            for (Coverage coverage : coverages)
-            {
-                for (QueryProblemAnnotation annotation : coverage.ours)
-                {
-                    ours++;
-                    if (model.getPosition(annotation) != null)
-                        present++;
-                }
-            }
-            Global.tempLog("query-live-apply", "run literals=" + literals.size() + " coverages=" + coverages.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " added=" + add.size() + " removed=" + remove.size() + " ours=" + ours + " inModel=" + present //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                + " model=" + model.getClass().getName()); //$NON-NLS-1$
-            // #endregion
         }
 
         /**
@@ -4138,11 +4098,6 @@ final class BslQueryLiteralSupport
                 if (coverage == null)
                     continue;
                 boolean inOwner = owner != null && owner.getPosition(annotation) != null;
-                // #region agent log — временный лог issue 870: какие отметки хаба убраны
-                Global.tempLog("query-live-apply", "hideHub at=" + position.getOffset() + "+" + position.getLength() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " cover=" + coverage.range.getOffset() + "+" + coverage.range.getLength() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ours=" + coverage.ours.size() + " type=" + annotation.getType() + " text=" + annotation.getText()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
                 (inOwner ? owner : visual).removeAnnotation(annotation);
                 if (visual.getPosition(annotation) == null)
                     coverage.hubHidden++;
@@ -4243,7 +4198,7 @@ final class BslQueryLiteralSupport
         }
         catch (RuntimeException e)
         {
-            Global.tempLog("query-skip-check", "hub severity failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            // Нет настроек проекта — критичность по умолчанию.
         }
         return Severity.WARNING;
     }
@@ -4362,7 +4317,6 @@ final class BslQueryLiteralSupport
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog("query-live-background", "validate failed openQuote=" + pending.openQuote() + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -4399,7 +4353,6 @@ final class BslQueryLiteralSupport
         }
         catch (RuntimeException | LinkageError e)
         {
-            Global.tempLog("query-skip-check", "ranges failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -4419,19 +4372,12 @@ final class BslQueryLiteralSupport
         var region = node.getTextRegionWithLineInformation();
         int first = region.getLineNumber();
         int last = region.getEndLineNumber();
-        boolean suppressed = false;
-        StringBuilder log = new StringBuilder();
         for (var range : ranges)
         {
-            boolean covers = range.getStartLine() <= first && range.getEndLine() >= last;
-            suppressed |= covers;
-            log.append(" [").append(range.getStartLine()).append("..").append(range.getEndLine()) //$NON-NLS-1$ //$NON-NLS-2$
-                .append(' ').append(range.getCheckIds()).append(covers ? " covers]" : "]"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (range.getStartLine() <= first && range.getEndLine() >= last)
+                return true;
         }
-        // Временный лог issue 870: сопоставление строк узла с диапазонами подавления не проверено.
-        Global.tempLog("query-skip-check", "literal lines=" + first + ".." + last + " startLine=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + node.getStartLine() + " suppressed=" + suppressed + log); //$NON-NLS-1$
-        return suppressed;
+        return false;
     }
 
     /**
@@ -4449,7 +4395,6 @@ final class BslQueryLiteralSupport
         // Проверка схем — после, вне блокировки: ввод не ждёт её.
         // Проверка литералов не меняет текст модели. Обычный tryReadOnly побочно
         // вызывает modelChanged и держит документ на подсветке/проверке всего модуля.
-        long lockStart = System.nanoTime();
         LiteralFlags flags = ContentAssistSessionReloader.readOnlyPeekAst(xtext, resource -> BslNodeLookup.read(state ->
         {
             if (resource == null)
@@ -4499,11 +4444,8 @@ final class BslQueryLiteralSupport
             BslTempTableSessions.refreshDocument(document, resource, -1);
             return new LiteralFlags(result, suppressed, Map.of(), false);
         }, resource));
-        long lockMs = (System.nanoTime() - lockStart) / 1_000_000;
         if (flags == null)
             return null;
-        long validateStart = System.nanoTime();
-        int cachedCount = validations.size();
         for (PendingValidation item : pending)
         {
             QueryValidation validation = validateSchema(item);
@@ -4512,11 +4454,6 @@ final class BslQueryLiteralSupport
             ISSUES_CACHE.put(validationKey(project, item.session(), item.text()), validation);
             validations.put(item.openQuote(), validation);
         }
-        // Временный лог issue 870: время под чтением модуля и вне его.
-        Global.tempLog("query-live-background", "literals=" + bounds.length + " cached=" //$NON-NLS-1$ //$NON-NLS-2$
-            + cachedCount + " validated=" + pending.size() + " failed=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (cachedCount + pending.size() - validations.size()) + " lockMs=" + lockMs //$NON-NLS-1$
-            + " validateMs=" + (System.nanoTime() - validateStart) / 1_000_000); //$NON-NLS-1$
         return new LiteralFlags(flags.concatenated(), flags.suppressed(), Map.copyOf(validations), !pending.isEmpty());
     }
 

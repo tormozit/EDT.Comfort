@@ -167,12 +167,20 @@ public final class DynamicListSettingsDialogHook implements IStartup
         /** Возвращает палитре прежнее содержимое, когда ссылка уже не нужна. */
         final Runnable restoreSelection;
 
-        FieldReveal(String[] names, boolean title, Runnable showListInPalette, Runnable restoreSelection)
+        /** Фрагмент текста запроса вместо поля набора данных; {@code null} — поле. */
+        final QueryMark query;
+
+        /** Попытки дождаться живой отметки проверки в тексте запроса. */
+        int queryAttempts;
+
+        FieldReveal(String[] names, boolean title, Runnable showListInPalette, Runnable restoreSelection,
+            QueryMark query)
         {
             this.names = names;
             this.title = title;
             this.showListInPalette = showListInPalette;
             this.restoreSelection = restoreSelection;
+            this.query = query;
         }
 
         void showList()
@@ -209,7 +217,31 @@ public final class DynamicListSettingsDialogHook implements IStartup
     static void openFieldSettings(IWorkbenchPage workbenchPage, EObject attr, boolean title,
         Runnable showListInPalette, Runnable restoreSelection, String... names)
     {
-        FieldReveal request = new FieldReveal(names, title, showListInPalette, restoreSelection);
+        openSettings(workbenchPage, attr,
+            new FieldReveal(names, title, showListInPalette, restoreSelection, null));
+    }
+
+    /**
+     * Проблема в тексте запроса (панель «Проблемы»): положение из доп. сведений маркера
+     * ({@code offset < 0} — нет), иначе строка {@code line}; текст сообщения — для поиска живой
+     * отметки редактора запроса.
+     */
+    record QueryMark(int offset, int length, int line, String message)
+    {
+    }
+
+    /** Открывает окно настроек списка и выделяет фрагмент проблемы в тексте его запроса. */
+    static void openQuerySettings(IWorkbenchPage workbenchPage, EObject attr, Runnable showListInPalette,
+        Runnable restoreSelection, QueryMark query)
+    {
+        openSettings(workbenchPage, attr,
+            new FieldReveal(new String[0], false, showListInPalette, restoreSelection, query));
+    }
+
+    private static void openSettings(IWorkbenchPage workbenchPage, EObject attr, FieldReveal request)
+    {
+        String[] names = request.names;
+        boolean title = request.title;
         Shell existing = attr == null ? null : OPEN_BY_LIST.get(EcoreUtil.getURI(attr).toString());
         Global.tempLog(TEMP_TOPIC, "[v10] openFieldSettings names=" + java.util.Arrays.toString(names) //$NON-NLS-1$
             + " title=" + title + " existing=" + (existing != null && !existing.isDisposed())); //$NON-NLS-1$ //$NON-NLS-2$
@@ -473,6 +505,8 @@ public final class DynamicListSettingsDialogHook implements IStartup
     private static boolean revealField(Shell shell, FieldReveal request)
     {
         Object dialog = resolveDialog(shell);
+        if (dialog != null && request.query != null)
+            return revealQuery(dialog, request);
         if (dialog == null
             || !(Global.getField(dialog, "context") instanceof DataCompositionSchemaControlContext context)) //$NON-NLS-1$
         {
@@ -574,6 +608,93 @@ public final class DynamicListSettingsDialogHook implements IStartup
             Global.tempLogException(TEMP_TOPIC, "revealField", e); //$NON-NLS-1$
             return true;
         }
+    }
+
+    /** Попытки дождаться отметки проверки в тексте запроса (по 150 мс), дальше — по положению маркера. */
+    private static final int QUERY_MARK_ATTEMPTS = 15;
+
+    /**
+     * Выделяет фрагмент проблемы в тексте запроса окна: вкладка запроса, затем живая отметка
+     * редактора с тем же текстом (проверка запроса положения в маркере не сохраняет), иначе
+     * положение или строка из маркера.
+     *
+     * @return {@code true} — выделено (или искать больше нечего)
+     */
+    private static boolean revealQuery(Object dialog, FieldReveal request)
+    {
+        QueryMark query = request.query;
+        Object editorObject = Global.getField(dialog, "embeddedTemplateEditor"); //$NON-NLS-1$
+        org.eclipse.xtext.ui.editor.XtextSourceViewer viewer =
+            editorObject instanceof org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor editor ? editor.getViewer() : null;
+        org.eclipse.jface.text.IDocument document = viewer == null ? null : viewer.getDocument();
+        org.eclipse.swt.custom.StyledText text = viewer == null ? null : viewer.getTextWidget();
+        if (document == null || document.getLength() == 0 || text == null || text.isDisposed())
+            return false;
+        selectTabOf(dialog, text);
+        org.eclipse.jface.text.Position live = findAnnotation(viewer.getAnnotationModel(), query.message());
+        if (live == null && request.queryAttempts++ < QUERY_MARK_ATTEMPTS)
+            return false;
+        try
+        {
+            int offset;
+            int length = 0;
+            if (live != null)
+            {
+                offset = Math.min(live.getOffset(), document.getLength());
+                length = Math.max(0, Math.min(live.getLength(), document.getLength() - offset));
+            }
+            else if (query.offset() >= 0)
+            {
+                offset = Math.min(query.offset(), document.getLength());
+                length = Math.max(0, Math.min(query.length(), document.getLength() - offset));
+            }
+            else
+                offset = document.getLineOffset(Math.max(0, Math.min(query.line() - 1,
+                    document.getNumberOfLines() - 1)));
+            viewer.setSelectedRange(offset, length);
+            viewer.revealRange(offset, length);
+            text.setFocus();
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            // Документ сменился за время ожидания — выделять нечего.
+        }
+        return true;
+    }
+
+    /** Показывает вкладку окна, на которой лежит текст запроса. */
+    private static void selectTabOf(Object dialog, org.eclipse.swt.widgets.Control control)
+    {
+        if (!(Global.getField(dialog, "folder") instanceof org.eclipse.swt.custom.CTabFolder folder) //$NON-NLS-1$
+            || folder.isDisposed())
+            return;
+        for (org.eclipse.swt.custom.CTabItem item : folder.getItems())
+        {
+            org.eclipse.swt.widgets.Control page = item.getControl();
+            for (org.eclipse.swt.widgets.Control c = control; c != null && page != null; c = c.getParent())
+            {
+                if (c != page)
+                    continue;
+                if (folder.getSelection() != item)
+                    folder.setSelection(item);
+                return;
+            }
+        }
+    }
+
+    /** Положение неудалённой отметки редактора с текстом проблемы. */
+    private static org.eclipse.jface.text.Position findAnnotation(
+        org.eclipse.jface.text.source.IAnnotationModel model, String message)
+    {
+        if (model == null || message == null)
+            return null;
+        for (var it = model.getAnnotationIterator(); it.hasNext();)
+        {
+            org.eclipse.jface.text.source.Annotation annotation = it.next();
+            if (!annotation.isMarkedDeleted() && message.equals(annotation.getText()))
+                return model.getPosition(annotation);
+        }
+        return null;
     }
 
     private static com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetField findField(

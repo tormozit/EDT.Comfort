@@ -2995,11 +2995,152 @@ public final class BslStructureInsertCommentTypes
         }
     }
 
+    /**
+     * Сужение типа выражения с точкой условием {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000).
+     * EDT сужает так только переменную ({@code CreatorTreeState.createTypesByPredicates}: тип из
+     * {@code typeScope} по имени, разделённому точками); для {@code А.Б} внутри ветки берём тот же тип вместо
+     * вычисленных. Сравнение связано с корнем условия только через «И»; присваивание пути, его начала
+     * или корневой переменной в ветке до обращения сужение отменяет.
+     */
+    private static final class TypeOfBranchNarrowing
+    {
+        static List<TypeItem> narrow(List<TypeItem> types, DynamicFeatureAccess access)
+        {
+            try
+            {
+                EObject child = access;
+                for (EObject container = access.eContainer(); container != null; container = container.eContainer())
+                {
+                    if (container instanceof com._1c.g5.v8.dt.bsl.model.Conditional branch
+                        && branch.getPredicate() != child)
+                    {
+                        String typeName = typeNameFor(branch.getPredicate(), access);
+                        if (typeName != null)
+                            return narrowed(types, access, branch, typeName);
+                    }
+                    child = container;
+                }
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+            }
+            return types;
+        }
+
+        private static List<TypeItem> narrowed(List<TypeItem> types, DynamicFeatureAccess access,
+            com._1c.g5.v8.dt.bsl.model.Conditional branch, String typeName)
+        {
+            if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(access) || reassigned(branch, access))
+                return types;
+            TypeItem type = typeByName(access, typeName);
+            return type == null ? types : List.of(type);
+        }
+
+        /** Имя типа из сравнения {@code ТипЗнч(путь) = Тип("…")} в условии, связанного с корнем только через «И». */
+        private static String typeNameFor(Expression predicate, DynamicFeatureAccess access)
+        {
+            if (!(predicate instanceof BinaryExpression binary))
+                return null;
+            if (binary.getOperation() == BinaryOperation.AND)
+            {
+                String left = typeNameFor(binary.getLeft(), access);
+                return left != null ? left : typeNameFor(binary.getRight(), access);
+            }
+            if (binary.getOperation() != BinaryOperation.EQ)
+                return null;
+            String name = typeLiteral(binary.getRight());
+            if (name != null && samePath(typeOfArgument(binary.getLeft()), access))
+                return name;
+            name = typeLiteral(binary.getLeft());
+            return name != null && samePath(typeOfArgument(binary.getRight()), access) ? name : null;
+        }
+
+        /** Присваивание в ветке до обращения: самому пути, его началу или корневой переменной. */
+        private static boolean reassigned(com._1c.g5.v8.dt.bsl.model.Conditional branch, DynamicFeatureAccess access)
+        {
+            ICompositeNode accessNode = NodeModelUtils.findActualNodeFor(access);
+            if (accessNode == null)
+                return true;
+            for (Statement statement : branch.getStatements())
+            {
+                List<SimpleStatement> assignments = new ArrayList<>();
+                if (statement instanceof SimpleStatement simple)
+                    assignments.add(simple);
+                assignments.addAll(EcoreUtil2.getAllContentsOfType(statement, SimpleStatement.class));
+                for (SimpleStatement assignment : assignments)
+                {
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(assignment);
+                    if (assignment.getRight() == null || node == null || node.getOffset() >= accessNode.getOffset())
+                        continue;
+                    for (Expression prefix = access; prefix != null;
+                        prefix = prefix instanceof DynamicFeatureAccess dynamic ? dynamic.getSource() : null)
+                        if (samePath(assignment.getLeft(), prefix))
+                            return true;
+                }
+            }
+            return false;
+        }
+
+        /** Один и тот же путь {@code А.Б.В}: та же переменная в корне и те же имена свойств. */
+        private static boolean samePath(Expression left, Expression right)
+        {
+            if (left instanceof DynamicFeatureAccess first && right instanceof DynamicFeatureAccess second)
+                return first.getName() != null && first.getName().equalsIgnoreCase(second.getName())
+                    && samePath(first.getSource(), second.getSource());
+            if (!(left instanceof StaticFeatureAccess first) || !(right instanceof StaticFeatureAccess second))
+                return false;
+            Variable variable = sourceVariable(first);
+            return variable != null ? variable == sourceVariable(second)
+                : first.getName() != null && first.getName().equalsIgnoreCase(second.getName())
+                    && sourceVariable(second) == null;
+        }
+
+        private static Expression typeOfArgument(Expression expression)
+        {
+            return namedCall(expression, "ТипЗнч", "TypeOf") ? ((Invocation)expression).getParams().get(0) : null; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static String typeLiteral(Expression expression)
+        {
+            if (!namedCall(expression, "Тип", "Type") //$NON-NLS-1$ //$NON-NLS-2$
+                || !(((Invocation)expression).getParams().get(0) instanceof StringLiteral literal)
+                || literal.getLines().size() != 1)
+                return null;
+            String line = literal.getLines().get(0).trim();
+            if (line.length() < 2 || !line.startsWith("\"") || !line.endsWith("\"")) //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            String name = line.substring(1, line.length() - 1).trim();
+            return name.isEmpty() || name.contains("\"") ? null : name; //$NON-NLS-1$
+        }
+
+        private static boolean namedCall(Expression expression, String russian, String english)
+        {
+            return expression instanceof Invocation invocation && invocation.getParams().size() == 1
+                && invocation.getMethodAccess() instanceof StaticFeatureAccess method
+                && (russian.equalsIgnoreCase(method.getName()) || english.equalsIgnoreCase(method.getName()));
+        }
+
+        /** Как EDT: {@code typeScope.getSingleElement(QualifiedName.create(имя.split("\\.")))}. */
+        private static TypeItem typeByName(EObject context, String typeName)
+        {
+            if (!(context.eResource() instanceof XtextResource resource))
+                return null;
+            IScopeProvider scopes = resource.getResourceServiceProvider().get(IScopeProvider.class);
+            IScope scope = scopes == null ? null : scopes.getScope(context, McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+            var element = scope == null ? null
+                : scope.getSingleElement(org.eclipse.xtext.naming.QualifiedName.create(typeName.split("\\."))); //$NON-NLS-1$
+            EObject resolved = element == null ? null : EcoreUtil.resolve(element.getEObjectOrProxy(), context);
+            return resolved instanceof TypeItem type && !type.eIsProxy() ? type : null;
+        }
+    }
+
     /** Позиция обращения, переданная штатному вычислителю; используется и проверками закрытых модулей. */
     public static List<TypeItem> arrayExpressionTypes(List<TypeItem> types, EObject object, Environments environments)
     {
         if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
             return ColumnRenames.inferReturn(types, function, environments);
+        if (object instanceof DynamicFeatureAccess dynamic)
+            return TypeOfBranchNarrowing.narrow(types, dynamic);
         if (!(object instanceof StaticFeatureAccess access))
             return types;
         Variable variable = sourceVariable(access);

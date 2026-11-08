@@ -1270,6 +1270,106 @@ public class FormEditorHook implements IStartup
             formEditor.setActivePage(page.getId());
     }
 
+    /**
+     * Двойной клик по проблеме в запросе динамического списка (панель «Проблемы»): открывает
+     * форму, окно настроек списка и выделяет фрагмент проблемы в тексте запроса.
+     *
+     * @return {@code true}, если проблема относится к динамическому списку формы
+     */
+    static boolean revealDynamicListQueryProblem(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.validation.marker.Marker marker)
+    {
+        Object[] target = marker.provideObject((Function<EObject, Object[]>)object ->
+        {
+            boolean inExtInfo = false;
+            for (EObject current = object; current != null; current = current.eContainer())
+            {
+                if (current instanceof DynamicListExtInfo)
+                    inExtInfo = true;
+                else if (current instanceof FormAttribute attribute)
+                {
+                    if (!inExtInfo || attribute.getName() == null)
+                        return null;
+                    for (EObject top = attribute.eContainer(); top != null; top = top.eContainer())
+                        if (top instanceof Form form)
+                            return new Object[] { EcoreUtil.getURI(form).toString(), attribute.getName(),
+                                form.getMdForm() };
+                    return null;
+                }
+            }
+            return null;
+        });
+        var extra = marker.getExtraInfo();
+        int offset = extra == null ? -1
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_OFFSET, -1);
+        int length = extra == null ? 0
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_LENGTH, 0);
+        int line = extra == null ? 1
+            : extra.getIntOrDefault(com._1c.g5.v8.dt.validation.marker.StandardExtraInfo.TEXT_LINE, 1);
+        if (target == null || workbenchPage == null)
+            return false;
+        int generation = ++externalGoToGeneration;
+        if (target[2] instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm)
+        {
+            try
+            {
+                new OpenHelper(workbenchPage).openEditor(basicForm);
+            }
+            catch (RuntimeException e)
+            {
+                // Форму откроет штатная обработка двойного клика — дождёмся её ниже.
+            }
+        }
+        DynamicListSettingsDialogHook.QueryMark query =
+            new DynamicListSettingsDialogHook.QueryMark(offset, length, line, marker.getMessage());
+        String formUri = (String)target[0];
+        String attributeName = (String)target[1];
+        // Окно открываем после штатной обработки двойного клика, которая тоже открывает форму.
+        Display.getDefault().asyncExec(() -> awaitDynamicListQueryProblem(workbenchPage, formUri,
+            attributeName, query, generation, 0));
+        return true;
+    }
+
+    /** Редактор формы и ленивое дерево реквизитов создаются после открытия формы; ждём их. */
+    private static void awaitDynamicListQueryProblem(IWorkbenchPage workbenchPage, String formUri,
+        String attributeName, DynamicListSettingsDialogHook.QueryMark query, int generation, int attempt)
+    {
+        if (generation != externalGoToGeneration)
+            return;
+        IEditorPart activeEditor = workbenchPage.getActiveEditor();
+        FormEditorPage page = activeEditor instanceof FormEditor editor ? findFormPage(editor) : null;
+        Form model = page != null ? page.getModel() : null;
+        boolean requested = model != null && formUri.equals(EcoreUtil.getURI(model).toString());
+        if (requested)
+            activateFormPage(activeEditor, page);
+        Tree tree = requested ? getAttributesTree(page) : null;
+        boolean ready = tree != null && !tree.isDisposed() && tree.getItemCount() > 0;
+        FormAttribute attribute = null;
+        if (ready)
+        {
+            for (AbstractFormAttribute candidate : model.getAttributes())
+            {
+                if (candidate instanceof FormAttribute formAttribute
+                    && attributeName.equalsIgnoreCase(formAttribute.getName()))
+                {
+                    attribute = formAttribute;
+                    break;
+                }
+            }
+        }
+        if (attribute != null)
+        {
+            FormAttribute found = attribute;
+            Display display = page.getSite() != null ? page.getSite().getShell().getDisplay() : Display.getDefault();
+            display.asyncExec(() -> ItemsTree.openDynamicListSettings(page, found, false, query));
+            return;
+        }
+        if (attempt >= EXTERNAL_GO_TO_MAX_ATTEMPTS)
+            return;
+        Display.getDefault().timerExec(EXTERNAL_GO_TO_RETRY_MS, () -> awaitDynamicListQueryProblem(workbenchPage,
+            formUri, attributeName, query, generation, attempt + 1));
+    }
+
     /** Общий переход к полю панели «Свойства» для колонок редакторов формы и метаданных. */
     static void focusPropertyField(IWorkbenchPage workbenchPage, List<String> labels)
     {
@@ -10557,6 +10657,13 @@ public class FormEditorHook implements IStartup
         private static void openDynamicListFieldSettings(FormEditorPage page, EObject dynamicList,
             boolean title, String... fieldNames)
         {
+            openDynamicListSettings(page, dynamicList, title, null, fieldNames);
+        }
+
+        /** @param query фрагмент текста запроса вместо поля; {@code null} — поле {@code fieldNames} */
+        private static void openDynamicListSettings(FormEditorPage page, EObject dynamicList,
+            boolean title, DynamicListSettingsDialogHook.QueryMark query, String... fieldNames)
+        {
             TreeViewer viewer = attributesViewer(page);
             if (viewer == null || page.getSite() == null
                 || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
@@ -10615,8 +10722,12 @@ public class FormEditorHook implements IStartup
                     + (shownBefore == null ? "null" : shownBefore.getClass().getSimpleName())); //$NON-NLS-1$
             };
             showList.run();
-            DynamicListSettingsDialogHook.openFieldSettings(workbenchPage, listObject, title,
-                showList, restorePalette, fieldNames);
+            if (query != null)
+                DynamicListSettingsDialogHook.openQuerySettings(workbenchPage, listObject, showList,
+                    restorePalette, query);
+            else
+                DynamicListSettingsDialogHook.openFieldSettings(workbenchPage, listObject, title,
+                    showList, restorePalette, fieldNames);
         }
 
         /**

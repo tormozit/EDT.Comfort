@@ -36,6 +36,7 @@ import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
@@ -157,6 +158,8 @@ final class BslExpectedTypePremiums
     /** {@code ИмяПеременнойВозвращаемогоЗначения}: «Возврат» ИР читает как присваивание этой переменной. */
     private static final String RETURN_VARIABLE = "Воз073"; //$NON-NLS-1$
     private static final String GLOBAL_CONTEXT = "Глобальный"; //$NON-NLS-1$
+    /** ИР {@code ТипКонтекстаСтатистики}: место имени типа без родителя («Новый …», «Тип("…")», тип в комментарии). */
+    private static final String TYPE_NAME_CONTEXT = "<ИмяТипа>"; //$NON-NLS-1$
     /** {@code ЯзыкПрограммы} ИР в статистике выбора: модуль и язык запросов. */
     private static final int MODULE_LANGUAGE = 0;
     private static final int QUERY_LANGUAGE = 1;
@@ -1121,7 +1124,8 @@ final class BslExpectedTypePremiums
             }
             // Здесь строки списка — имена типов, а не значения/конструкции встроенного языка.
             // ИменаВложенныхТипов не проходят фильтр Expectation: «Неопределено» тоже имя типа.
-            return new Scene(null, null, true, Collections.emptyMap(), null, String.join(", ", names), //$NON-NLS-1$
+            return new Scene(null, literalStatisticsContext(literal.group(2)), true, Collections.emptyMap(), null,
+                String.join(", ", names), //$NON-NLS-1$
                 Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of(), null, null);
         }
         ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
@@ -1140,6 +1144,9 @@ final class BslExpectedTypePremiums
         int partitionOffset = context.parent().isEmpty() ? context.caret() : context.anchor() - 1;
         boolean comment = SmartContentAssistProcessor.isCommentAssistContext(context.document(), partitionOffset);
         boolean typeName = endsWithWord(stripEnd(context.preceding()), "Новый"); //$NON-NLS-1$
+        // ИР: ТипЯзыка = "ИмяТипа" (после «Новый») и ЛиИмяТипаВнутриКомментария → «<ИмяТипа>»
+        if (context.parent().isEmpty() && (typeName || comment && isTypeNameInComment(context)))
+            statisticsContext = TYPE_NAME_CONTEXT;
         Map<String, String> memberNames = new LinkedHashMap<>();
         Map<String, Integer> frequencies = comment || typeName || context.parent().isEmpty()
             ? Collections.emptyMap() : memberFrequencies(resource, context, memberNames);
@@ -2664,6 +2671,40 @@ final class BslExpectedTypePremiums
         return name.indexOf('.') >= 0 || name.indexOf('[') >= 0 ? name : firstFragment(name, ' ');
     }
 
+    /**
+     * ИР {@code ТипКонтекстаСтатистики} при {@code ТипЯзыка = "ИмяТипа"} в «Тип("…")»: родитель
+     * ({@code мРодительскийКонтекст}), без него — {@value #TYPE_NAME_CONTEXT}.
+     */
+    private static String literalStatisticsContext(String prefix)
+    {
+        String parent = prefix.endsWith(".") ? prefix.substring(0, prefix.length() - 1) : prefix; //$NON-NLS-1$
+        return parent.isEmpty() ? TYPE_NAME_CONTEXT : parent;
+    }
+
+    /**
+     * ИР {@code ЛиИмяТипаВнутриКомментария}: строка до слова делится по «//» ровно на две части — код и пустой
+     * комментарий за ним либо комментарий без кода с одним «-» (строка параметра в описании).
+     */
+    private static boolean isTypeNameInComment(Context context)
+    {
+        try
+        {
+            IDocument document = context.document();
+            int lineStart = document.getLineOffset(document.getLineOfOffset(context.start()));
+            String[] fragments = document.get(lineStart, context.start() - lineStart).split("//", -1); //$NON-NLS-1$
+            if (fragments.length != 2)
+                return false;
+            if (!fragments[0].isBlank() && fragments[1].isBlank())
+                return true;
+            return fragments[0].isBlank() && fragments[1].indexOf('-') >= 0
+                && fragments[1].indexOf('-') == fragments[1].lastIndexOf('-');
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
     /** DerivedProperty элемента хранит ссылку на FormVisualEntity — это связь модели EDT, не имя в тексте. */
     private static String formItemStatisticsContext(Expression expression)
     {
@@ -2925,6 +2966,10 @@ final class BslExpectedTypePremiums
                     result.autoOpen().add(key);
                 }
             }
+            // ИР: ТипЯзыка = "ИмяТипа" — статистика родителя или «<ИмяТипа>», с автооткрытием
+            Map<String, Word> literalWords = words(list, variableTypes, scene.predefinedTypes());
+            weightPremiums(result, literalWords, ChoiceStatistics.weights(project, scene.statisticsContext(),
+                scene.insideExpression(), MODULE_LANGUAGE), literalWords.size(), true);
             return result;
         }
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
@@ -2947,6 +2992,9 @@ final class BslExpectedTypePremiums
         {
             if (adder != null)
                 adder.queryTemplate();
+            // ИР: контекст не локальный — только «<ИмяТипа>», без «Глобальный»
+            weightPremiums(result, words, ChoiceStatistics.weights(project, TYPE_NAME_CONTEXT, scene.insideExpression(),
+                MODULE_LANGUAGE), words.size(), true);
             return result;
         }
         if (adder != null)
@@ -5273,6 +5321,13 @@ final class BslExpectedTypePremiums
                 Snapshot snapshot = active;
                 if (snapshot == null || snapshot.scene().statisticsContext() == null || proposal == null)
                     return;
+                // ИР ОбновитьСтатистикуВыбораВСтрокеСлова: выбор внутри комментария не учитывается
+                if (SmartContentAssistProcessor.isCommentAssistContext(snapshot.context().document(),
+                    snapshot.context().caret()))
+                {
+                    Global.tempLog("choice-context", "skip comment scene=" + snapshot.scene().statisticsContext()); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
                 // Новые слова: копии строк и <СоздатьПеременную> в статистику не идут, прочие — конструкции
                 // глобального контекста
                 if (proposal instanceof BslAddedWordProposal word)
@@ -5304,6 +5359,11 @@ final class BslExpectedTypePremiums
                 boolean projectWord = isProjectChoice(context, word, method, members,
                     isKnownPlatformChoice(context, word, method)
                         || isPlatformWord(proposal, statisticsFeature(info), snapshot.scene().predefinedTypes()));
+                // #region agent log — контекст статистики <ИмяТипа>
+                Global.tempLog("choice-context", "scene=" + snapshot.scene().statisticsContext() + " context=" + context //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " word=" + word + " method=" + method + " dynamic=" + dynamic + " project=" + projectWord //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    + " noValue=" + types.isEmpty()); //$NON-NLS-1$
+                // #endregion
                 if (dynamic)
                     return;
                 // Без проекта слову проекта места нет: в таблицу рабочей области оно не пишется
@@ -5382,7 +5442,8 @@ final class BslExpectedTypePremiums
 
     private static synchronized PlatformChoiceMembers platformChoiceMembers(String context)
     {
-        if (context == null || context.indexOf('.') >= 0 || GLOBAL_CONTEXT.equals(context))
+        if (context == null || context.indexOf('.') >= 0 || GLOBAL_CONTEXT.equals(context)
+            || TYPE_NAME_CONTEXT.equals(context))
             return null;
         String name = firstFragment(firstFragment(context, ' '), '[');
         String key = lower(name);
@@ -5439,6 +5500,8 @@ final class BslExpectedTypePremiums
     /** Проверяется и для новых выборов, и для ранее сохранённых строк без объекта предложения EDT. */
     private static boolean isKnownPlatformChoice(String context, String word, boolean method)
     {
+        if (TYPE_NAME_CONTEXT.equals(context))
+            return !method && (platformTypeName(word) != null || MdTypeMapping.isKnownMdRootType(word));
         if (GLOBAL_CONTEXT.equals(context))
         {
             // Имена типов (в том числе шаблонных и наборов типов) EDT предлагает без типа значения.

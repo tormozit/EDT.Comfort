@@ -2189,4 +2189,12 @@
   <extension point="org.eclipse.ui.propertiesView">
     <excludeSources id="org.eclipse.search.ui.views.SearchView"/>
   </extension>
+
+  <!--
+  Отбор «Текущий объект» панели «Проблемы конфигурации»: подчинённые верхние объекты (содержимое макетов
+  и т.п.), которых нет в таблице штатного провайдера; без этого их задачи в отбор не попадают.
+  -->
+  <extension point="com._1c.g5.v8.dt.validation.markerManagerProvider">
+    <provider class="tormozit.SubordinateTopObjectsMarkerProvider"/>
+  </extension>
 </plugin>

@@ -7,11 +7,11 @@ import com.e1c.g5.v8.dt.check.WrongParameterException;
 
 import tormozit.MassiveChecksExemptionHook;
 
-/** Общий отбор открытых модулей для массовых проверок; ручной запуск сохраняет выбранный объём. */
+/** Параметр «Только в редакторах»: общий отбор модулей, открытых в редакторах, для массовых проверок; ручной запуск сохраняет выбранный объём. */
 final class OpenModulesOnly
 {
     static final String PARAMETER = "onlyOpenModules"; //$NON-NLS-1$
-    static final String TITLE = "Только открытые модули";
+    static final String TITLE = "Только в редакторах";
 
     private OpenModulesOnly() {}
 

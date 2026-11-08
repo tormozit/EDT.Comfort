@@ -12,6 +12,17 @@ import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.ui.IStartup;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.validation.RangeBasedDiagnostic;
+import org.eclipse.xtext.validation.ValidationMessageAcceptor;
+import com.e1c.g5.v8.dt.check.BslDirectLocationIssue;
+import com.e1c.g5.v8.dt.check.DirectLocation;
+import com.e1c.g5.v8.dt.check.ICheckResultAcceptor;
+import com._1c.g5.v8.dt.bsl.model.IfPreprocessor;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorConditional;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -133,6 +144,10 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) args -> AbstractTypeMembers.validatorOpenType(args[0], args[1], args[2], args[3], args[4]));
         System.getProperties().put("tormozit.bslValidator.dynamicAllowed", //$NON-NLS-1$
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::dynamicAllowed);
+        System.getProperties().put("tormozit.bslValidator.preprocessorPartError", //$NON-NLS-1$
+            (Function<Object, Object>) DynamicFeatureAccessComputerHook::preprocessorPartError);
+        System.getProperties().put("tormozit.legacyCheck.rangeIssue", //$NON-NLS-1$
+            (java.util.function.BiPredicate<Object, Object>) DynamicFeatureAccessComputerHook::preprocessorPartIssue);
         System.getProperties().put("tormozit.dynamicFeatureAccess.namingCollections", //$NON-NLS-1$
             (Function<Object[], Object>) SpecialMemberTemplates::namingCollections);
         Bundle bundle = FrameworkUtil.getBundle(DynamicFeatureAccessComputerHook.class);
@@ -141,6 +156,87 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             context.registerService(WeavingHook.class, new ProviderWeavingHook(), null);
     }
 
+
+    /**
+     * Ошибка проверки {@code bsl-legacy-check-if-preprocessor-part-environments} — на открывающей инструкции ветки
+     * ({@code #Если … Тогда}, {@code #ИначеЕсли … Тогда}, {@code #Иначе}), а не на её теле. Аргумент —
+     * {@code List.of(List.of(сообщение, объект, свойство, код, данные), приёмник)} из вплетения раннего бандла.
+     */
+    private static Object preprocessorPartError(Object payload)
+    {
+        java.util.List<?> call = (java.util.List<?>)payload;
+        java.util.List<?> args = (java.util.List<?>)call.get(0);
+        ValidationMessageAcceptor acceptor = (ValidationMessageAcceptor)call.get(1);
+        String message = (String)args.get(0);
+        EObject object = (EObject)args.get(1);
+        EStructuralFeature feature = (EStructuralFeature)args.get(2);
+        String code = (String)args.get(3);
+        String[] data = (String[])args.get(4);
+        int[] region = object instanceof PreprocessorConditional conditional ? openingDirectiveRegion(conditional) : null;
+        if (region != null)
+            acceptor.acceptError(message, object, region[0], region[1], code, data);
+        else
+            acceptor.acceptError(message, object, feature, ValidationMessageAcceptor.INSIGNIFICANT_INDEX, code, data);
+        return null;
+    }
+
+    /**
+     * Диагностика проверки ветки препроцессора с текстовым диапазоном → замечание {@link BslDirectLocationIssue}:
+     * штатный {@code LegacyCheckAdapter} диапазон отбрасывает и ставит замечание на весь объект.
+     *
+     * @return {@code true} — замечание добавлено, штатная обработка не нужна
+     */
+    private static boolean preprocessorPartIssue(Object acceptor, Object diagnostic)
+    {
+        if (!(diagnostic instanceof RangeBasedDiagnostic range) || !(acceptor instanceof ICheckResultAcceptor results))
+            return false;
+        String code = range.getIssueCode();
+        if (!"code-never-compiled".equals(code) && !"unreachable-code".equals(code)) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        EObject source = range.getSourceEObject();
+        if (source == null)
+            return false;
+        ICompositeNode root = NodeModelUtils.getNode(EcoreUtil.getRootContainer(source));
+        Integer line = root != null
+            ? Integer.valueOf(NodeModelUtils.getLineAndColumn(root, range.getOffset()).getLine()) : null;
+        DirectLocation location = new DirectLocation(Integer.valueOf(range.getOffset()),
+            Integer.valueOf(range.getLength()), line, source);
+        results.addIssue(source, new BslDirectLocationIssue(range.getMessage(), location, range.getIssueData()));
+        return true;
+    }
+
+    /**
+     * Диапазон открывающей инструкции: от её первого токена ({@code #Если} — у директивы, {@code #ИначеЕсли} и
+     * {@code #Иначе} — у самой ветки) до последнего значимого токена перед телом ветки.
+     *
+     * @return {смещение, длина} либо {@code null}
+     */
+    private static int[] openingDirectiveRegion(PreprocessorConditional conditional)
+    {
+        ICompositeNode node = NodeModelUtils.getNode(conditional);
+        if (node == null)
+            return null;
+        ICompositeNode startNode = node;
+        if (conditional.eContainer() instanceof IfPreprocessor directive && directive.getIfPart() == conditional)
+            startNode = NodeModelUtils.getNode(directive);
+        if (startNode == null)
+            return null;
+        ICompositeNode itemNode = conditional.getItem() != null ? NodeModelUtils.getNode(conditional.getItem()) : null;
+        int itemStart = itemNode != null ? itemNode.getTotalOffset() : Integer.MAX_VALUE;
+        int start = -1;
+        int end = -1;
+        for (ILeafNode leaf : startNode.getLeafNodes())
+        {
+            if (leaf.isHidden() || leaf.getTotalLength() == 0)
+                continue;
+            if (leaf.getTotalOffset() >= itemStart)
+                break;
+            if (start < 0)
+                start = leaf.getTotalOffset();
+            end = leaf.getTotalEndOffset();
+        }
+        return start >= 0 && end > start ? new int[] { start, end - start } : null;
+    }
 
     /** Типы-менеджеры метаданных: именованные члены такого типа EDT получает из произведённых типов. */
     private static final java.util.Set<String> METADATA_MANAGERS = java.util.Set.of(

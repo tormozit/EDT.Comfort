@@ -69,6 +69,7 @@ static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
 private static final String PROCESSOR_IFACE =
             "com._1c.g5.v8.dt.debug.core.model.IRuntimeEventProcessor"; //$NON-NLS-1$
     private static final String SUSPENSION_METHOD = "handleSuspensionByException"; //$NON-NLS-1$
+    private static final String SHOW_ERROR_METHOD = "handleShowErrorRequest"; //$NON-NLS-1$
     private static final String REASON_SEPARATOR = "по причине:"; //$NON-NLS-1$
     private static final int INNER_LIMIT = 16;
 
@@ -396,6 +397,9 @@ private static final String PROCESSOR_IFACE =
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable
         {
+            // Все ошибки компиляции приходят одним запросом, а EDT на каждую открывает диалог (#1001).
+            if (SHOW_ERROR_METHOD.equals(method.getName()) && args != null && args.length == 3)
+                args[2] = DebugRequestsHook.firstShownError(args[2]);
             Object result;
             try
             {

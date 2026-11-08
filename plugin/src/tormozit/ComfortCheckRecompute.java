@@ -39,6 +39,7 @@ import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.validation.ISubordinateObjectsProvider;
 import com._1c.g5.v8.dt.validation.marker.IMarkerInfo;
@@ -1049,11 +1050,11 @@ public final class ComfortCheckRecompute
     /**
      * Что помечать проверками для выбранного узла.
      * <p>
-     * Сам объект всегда. Если это не форма, а объект МД (документ, справочник…) — ещё все
-     * вложенные {@link BasicForm}: у форм свой BM ({@code form.model.Form}), и fullRebuild
-     * родителя их не пересчитывает.
+     * Сам объект всегда. Если это не форма или макет, а объект МД (документ, справочник…) — ещё все
+     * вложенные {@link BasicForm} и {@link BasicTemplate}: у их тел свой BM ({@code form.model.Form},
+     * схема компоновки и т.п.), и fullRebuild родителя их не пересчитывает.
      * <p>
-     * Только перечисление {@code BasicForm} из containment (без {@code getForm()}): сам Form
+     * Только перечисление из containment (без {@code getForm()}/{@code getTemplate()}): тело
      * резолвится в {@link #toCheckTarget} уже в сессии DD.
      */
     private static List<EObject> expandToCheckItems(EObject source)
@@ -1062,7 +1063,7 @@ public final class ComfortCheckRecompute
         if (source == null)
             return items;
         items.add(source);
-        if (source instanceof BasicForm)
+        if (source instanceof BasicForm || source instanceof BasicTemplate)
             return items;
         try
         {
@@ -1070,7 +1071,7 @@ public final class ComfortCheckRecompute
             while (it.hasNext())
             {
                 EObject next = it.next();
-                if (next instanceof BasicForm)
+                if (next instanceof BasicForm || next instanceof BasicTemplate)
                     items.add(next);
             }
         }
@@ -1097,6 +1098,14 @@ public final class ComfortCheckRecompute
             AbstractForm form = basicForm.getForm();
             if (form != null)
                 return form;
+        }
+        // Проверки макета (запрос схемы компоновки и т.п.) зарегистрированы на его теле — своём top-объекте.
+        if (object instanceof BasicTemplate basicTemplate)
+        {
+            EObject body = basicTemplate.getTemplate();
+            if (body instanceof IBmObject bm && !body.eIsProxy() && bm.bmIsTop() && bm.bmGetId() != IBmObject.BM_NULL_ID)
+                return body;
+            return null;
         }
         return object;
     }

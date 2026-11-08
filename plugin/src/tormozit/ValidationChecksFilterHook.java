@@ -311,27 +311,47 @@ public final class ValidationChecksFilterHook implements IStartup
 
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
-        display.addFilter(SWT.MouseEnter, ValidationChecksFilterHook::patchOpenModulesOnlyTooltip);
+        display.addFilter(SWT.MouseEnter, ValidationChecksFilterHook::patchParameterTooltip);
         Debug.log("install: installed"); //$NON-NLS-1$
     }
 
     /** Подпись параметра {@code onlyOpenModules} проверок Комфорта ({@code OpenModulesOnly.TITLE} бандла проверок). */
-    private static final String OPEN_MODULES_ONLY_TITLE = "Только открытые модули"; //$NON-NLS-1$
+    private static final String OPEN_MODULES_ONLY_TITLE = "Только в редакторах"; //$NON-NLS-1$
 
     private static final String OPEN_MODULES_ONLY_TOOLTIP =
-        "Проверять только модули, принадлежащие объектам, открытым в редакторах. "
+        "Проверять только модули и объекты, открытые в редакторах. "
             + "Не действует в команде «Запустить проверки» на странице проверок.";
+
+    /**
+     * Подписи параметров {@code checkOnSyntaxErrors} и {@code showInternalCheckResults} делегирующих
+     * проверок языка запросов ({@code BaseQlDelegatingCheck}: {@code bsl-ql-hub}, {@code dcs-ql-hub},
+     * {@code form-ql-hub}) — штатные, без своей подсказки.
+     */
+    private static final Map<String, String> PARAMETER_TOOLTIPS = Map.of(
+        "Проверять запрос если в нем синтаксические ошибки", //$NON-NLS-1$
+        "Проверять запрос внутренними проверками языка запросов, даже если в нём есть синтаксические ошибки. "
+            + "Если флажок снят, у запроса с синтаксическими ошибками выводятся только они. "
+            + "Вместе с флажком «Показывать результаты внутренних проверок» синтаксические ошибки "
+            + "попадают в список проблем дважды.",
+        "Показывать результаты внутренних проверок", //$NON-NLS-1$
+        "Выводить в список проблем ошибки и предупреждения внутренних проверок языка запросов — "
+            + "те же, что отмечаются в редакторе запроса. Если флажок снят, выводятся только ошибки "
+            + "разбора текста запроса.",
+        OPEN_MODULES_ONLY_TITLE, OPEN_MODULES_ONLY_TOOLTIP);
 
     /**
      * Флажок параметра проверки штатно получает подсказкой своё значение («true»), а пересоздаётся при
      * каждой смене выбранной проверки — подсказку ставим при наведении.
      */
-    private static void patchOpenModulesOnlyTooltip(Event event)
+    private static void patchParameterTooltip(Event event)
     {
         if (openPages <= 0 || !(event.widget instanceof Button button) || button.isDisposed()
-            || (button.getStyle() & SWT.CHECK) == 0 || !OPEN_MODULES_ONLY_TITLE.equals(button.getText()))
+            || (button.getStyle() & SWT.CHECK) == 0)
             return;
-        String tooltip = TooltipText.wrap(button, OPEN_MODULES_ONLY_TOOLTIP + Global.pluginSignForTooltip());
+        String text = PARAMETER_TOOLTIPS.get(button.getText());
+        if (text == null)
+            return;
+        String tooltip = TooltipText.wrap(button, text + Global.pluginSignForTooltip());
         if (!tooltip.equals(button.getToolTipText()))
             button.setToolTipText(tooltip);
     }
@@ -3110,7 +3130,7 @@ public final class ValidationChecksFilterHook implements IStartup
             recomputeItem.setImage(ComfortCheckRecompute.icon());
             recomputeItem.setToolTipText(TooltipText.wrap(bar,
                 "Запустить проверки всего проекта только выбранными проверками. "
-                    + "Флажок «Только открытые модули» не действует" + Global.pluginSignForTooltip()));
+                    + "Флажок «Только в редакторах» не действует" + Global.pluginSignForTooltip()));
             recomputeItem.addListener(SWT.Selection, event -> recomputeSelection());
             installRecomputeMenu(table);
             installRecomputeMenu(treeViewer.getTree());
@@ -3158,7 +3178,7 @@ public final class ValidationChecksFilterHook implements IStartup
                 item.setImage(ComfortCheckRecompute.icon());
                 ComfortSubmenuHelper.setMenuItemTooltip(item,
                     "Запустить проверки всего проекта только выбранными проверками. "
-                        + "Флажок «Только открытые модули» не действует");
+                        + "Флажок «Только в редакторах» не действует");
                 item.addListener(SWT.Selection, event -> recomputeSelection());
             }
             Set<CheckUid> selected = selectedChecks();

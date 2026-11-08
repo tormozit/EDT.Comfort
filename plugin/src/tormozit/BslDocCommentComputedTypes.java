@@ -2761,21 +2761,20 @@ public final class BslDocCommentComputedTypes
         return -1;
     }
 
-    /** Окружение только для привязки имён и вывода типа присвоений в ветке-подсказке. */
+    /**
+     * Окружение для привязки имён и расчёта типов любых выражений в некомпилируемой ветке-подсказке
+     * {@code #Если Сервер И Не Сервер Тогда} (#999): берётся окружение кода вокруг директивы.
+     */
     public static Environments typeHintEnvironments(EObject expression, Environments original)
     {
         if (original == null || !original.isEmpty())
             return original;
 
-        boolean assignment = false;
         for (EObject owner = expression; owner != null && !(owner instanceof Block); owner = owner.eContainer())
         {
-            if (owner instanceof SimpleStatement simple && simple.getLeft() instanceof StaticFeatureAccess
-                && simple.getRight() != null)
-                assignment = true;
             if (!(owner instanceof PreprocessorConditional))
                 continue;
-            if (!assignment || !(owner instanceof PreprocessorIfConditional branch)
+            if (!(owner instanceof PreprocessorIfConditional branch)
                 || !(branch.eContainer() instanceof IfPreprocessor directive) || directive.getIfPart() != branch
                 || !directive.getElsIfParts().isEmpty() || directive.getElseElement() != null
                 || !isServerTypeHint(branch.getPredicate()))
@@ -2783,11 +2782,28 @@ public final class BslDocCommentComputedTypes
 
             for (EObject outer = directive.eContainer(); outer != null; outer = outer.eContainer())
                 if (outer instanceof Environmental environmental)
+                {
+                    // #region agent log #999
+                    Global.tempLog("type-hint-999", expression.eClass().getName() + " assignment=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + isInsideAssignment(expression) + " env=" + environmental.environments()); //$NON-NLS-1$
+                    // #endregion
                     return environmental.environments();
+                }
             return original;
         }
         return original;
     }
+
+    // #region agent log #999
+    private static boolean isInsideAssignment(EObject expression)
+    {
+        for (EObject owner = expression; owner != null && !(owner instanceof Block); owner = owner.eContainer())
+            if (owner instanceof SimpleStatement simple && simple.getLeft() instanceof StaticFeatureAccess
+                && simple.getRight() != null)
+                return true;
+        return false;
+    }
+    // #endregion
 
     private static boolean isServerTypeHint(PreprocessorExpression predicate)
     {
