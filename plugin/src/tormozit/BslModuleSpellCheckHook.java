@@ -4097,7 +4097,9 @@ public final class BslModuleSpellCheckHook implements IStartup
                     ? annotationHoverNav.nonSpellingProposals : new ICompletionProposal[0],
                 pageIndex);
         }
-        int offset = resolveAnnotationOffset(viewer, list);
+        int offset = resolveHoverPointerOffset(viewer);
+        if (offset < 0)
+            offset = resolveAnnotationOffset(viewer, list);
         boolean hasSyntax = viewer != null && offset >= 0
             && hasIdentifierDocumentation(viewer, offset);
         addAnnotationToolbarActions(manager, list, viewer, pageIndex, offset, hasSyntax);
@@ -4355,9 +4357,38 @@ public final class BslModuleSpellCheckHook implements IStartup
         display.asyncExec(() -> showPreparedIdentifierDocHover(viewer, prepared));
     }
 
-    /** Offset из AnnotationInfo исходного popup, иначе из кнопки toolbar. */
+    /**
+     * Модельный offset символа под указателем в момент срабатывания подсказки (issue 952):
+     * последнее {@code fHoverEvent} штатного менеджера подсказок редактора. -1 — не определён.
+     */
+    private static int resolveHoverPointerOffset(ISourceViewer viewer)
+    {
+        try
+        {
+            StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+            if (widget == null || widget.isDisposed())
+                return -1;
+            Object manager = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
+            Object event = manager != null ? Global.getField(manager, "fHoverEvent") : null; //$NON-NLS-1$
+            if (!(event instanceof org.eclipse.swt.events.MouseEvent mouse))
+                return -1;
+            int widgetOffset = widget.getOffsetAtPoint(new Point(mouse.x, mouse.y));
+            if (widgetOffset >= 0 && viewer instanceof ITextViewerExtension5 ext5)
+                return ext5.widgetOffset2ModelOffset(widgetOffset);
+            return widgetOffset;
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    /** Offset под указателем, иначе из AnnotationInfo исходного popup, иначе из кнопки toolbar. */
     private static int resolveDocHoverOffset(ISourceViewer viewer, int fallbackOffset)
     {
+        int pointer = resolveHoverPointerOffset(viewer);
+        if (pointer >= 0 && prepareIdentifierDocHover(viewer, pointer) != null)
+            return pointer;
         try
         {
             HoverControlRef hover = findHoverControlRef(viewer, false);

@@ -74,14 +74,17 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
         if (manager == null || annotations == null || annotations.isEmpty())
             return;
         Set<String> codes = collectCheckCodes(annotations);
-        if (codes.isEmpty())
-            return;
         IProject project = resolveProject(annotations);
+        if (project == null && annotations.stream().anyMatch(XtextAnnotation.class::isInstance))
+            project = Global.getActiveProject(Global.getActivePage(), false);
         if (project == null)
             return;
-        addToToolBar(manager, new OpenCheckSettingsAction(new ArrayList<>(codes), annotations, project));
+        // Ошибка без кода проверки (например, синтаксическая) тоже есть в панели «Проблемы».
+        if (!codes.isEmpty())
+            addToToolBar(manager, new OpenCheckSettingsAction(new ArrayList<>(codes), annotations, project));
         addToToolBar(manager, new FindInProblemsAction(annotations, project));
-        replaceDescriptionDropdown(manager, annotations);
+        if (!codes.isEmpty())
+            replaceDescriptionDropdown(manager, annotations);
         Debug.log("fillToolBar: " + codes); //$NON-NLS-1$
     }
 
@@ -337,34 +340,40 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
             var descriptor = PlatformUI.getWorkbench().getViewRegistry().find(ProblemViewMarkers.PROBLEM_VIEW_ID);
             if (descriptor != null && descriptor.getImageDescriptor() != null)
                 setImageDescriptor(descriptor.getImageDescriptor());
-            boolean enabled = CurrentPage.resolve(annotations).isCheck();
+            boolean enabled = currentProblem() != null;
             setEnabled(enabled);
             setToolTipText(TooltipText.wrap(Display.getCurrent(), null, (enabled
                 ? "Найти эту проблему в панели «Проблемы» и выделить её" //$NON-NLS-1$
-                : "Найти в панели «Проблемы».\nНедоступно: на текущей странице подсказки не проверка конфигурации") //$NON-NLS-1$
+                : "Найти в панели «Проблемы».\nНедоступно: на текущей странице подсказки нет проблемы") //$NON-NLS-1$
                 + Global.pluginSignForTooltip()));
         }
 
-        @Override
-        public void run()
+        /** Проблема текущей страницы подсказки; без определённой страницы — первая. */
+        private XtextAnnotation currentProblem()
         {
             Annotation current = BslModuleSpellCheckHook.currentAnnotationHoverAnnotation(annotations);
             if (current == null)
             {
                 for (Annotation annotation : annotations)
                 {
-                    if (checkCode(annotation) != null)
+                    if (annotation instanceof XtextAnnotation)
                     {
                         current = annotation;
                         break;
                     }
                 }
             }
-            String code = checkCode(current);
-            if (code == null)
+            return current instanceof XtextAnnotation xtext ? xtext : null;
+        }
+
+        @Override
+        public void run()
+        {
+            XtextAnnotation xtext = currentProblem();
+            if (xtext == null)
                 return;
-            XtextAnnotation xtext = (XtextAnnotation)current;
-            String uri = xtext.getUriToProblem().toString();
+            String code = checkCode(xtext);
+            String uri = xtext.getUriToProblem() != null ? xtext.getUriToProblem().toString() : ""; //$NON-NLS-1$
             String text = xtext.getText();
             Display display = Display.getCurrent();
             Job job = Job.create("Поиск проблемы в панели", monitor -> //$NON-NLS-1$
@@ -389,10 +398,12 @@ public final class BslCheckSettingsHoverContributor implements IBslHoverContribu
                 return null;
             Marker byUri = null;
             Marker byText = null;
-            try (Stream<Marker> stream = manager.createReader(project).markers(
-                MarkerFilter.createProjectFilter(project).addValue(MarkerIndex.CHECK_ID, code)))
+            MarkerFilter filter = MarkerFilter.createProjectFilter(project);
+            if (code != null)
+                filter.addValue(MarkerIndex.CHECK_ID, code);
+            try (Stream<Marker> stream = manager.createReader(project).markers(filter))
             {
-                for (Marker marker : stream.toList())
+                for (Marker marker : (Iterable<Marker>)stream::iterator)
                 {
                     boolean textEquals = text != null && text.equals(marker.getMessage());
                     boolean uriEquals = uri.equals(StandardExtraInfo.TEXT_URI_TO_PROBLEM.get(marker));
