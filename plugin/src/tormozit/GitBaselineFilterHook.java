@@ -570,9 +570,7 @@ public class GitBaselineFilterHook
             protected IStatus run(IProgressMonitor monitor)
             {
                 purgeBrokenTruncationMarkers();
-                boolean installed = ensureInstalled();
-                Global.tempLog("baseline-filter", "install attemptsLeft=" + attemptsLeft + " installed=" + installed); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
-                if (!installed && attemptsLeft > 1)
+                if (!ensureInstalled() && attemptsLeft > 1)
                     scheduleInstall(attemptsLeft - 1);
                 return Status.OK_STATUS;
             }
@@ -672,14 +670,11 @@ public class GitBaselineFilterHook
                     .computeIfAbsent(project.getName() + '/' + objectId,
                         key -> Optional.ofNullable(schemaFile(project, objectId)))
                     .orElse(null);
-                boolean unchanged = file != null && unchanged(file, baseline);
-                Global.tempLog("baseline-filter", "dcs objectId=" + objectId + " file=" + file //$NON-NLS-1$ //$NON-NLS-2$
-                    + " baseline=" + baseline + " unchanged=" + unchanged); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
-                return unchanged;
+                return file != null && unchanged(file, baseline);
             }
             catch (RuntimeException e)
             {
-                Global.tempLog("baseline-filter", "dcs failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
+                // Модель или репозиторий недоступны — решение остаётся штатным.
                 return false;
             }
         }
@@ -810,45 +805,11 @@ public class GitBaselineFilterHook
                     && origin.isFiltrationEnabledForProject(project)
                     && UnchangedSchemaFiles.contains(marker, project, origin.getBaselineName(project)))
                     result = Boolean.TRUE;
-                tempLogDecision(name, args, result, null); // #region agent log
                 return result;
             }
             catch (InvocationTargetException e)
             {
-                tempLogDecision(name, args, null, e.getCause()); // #region agent log
                 throw e.getCause() != null ? e.getCause() : e;
-            }
-        }
-
-        /** Временный лог: каждое решение об исключении по базовой ветке (скрытие проблем СКД). */
-        private static void tempLogDecision(String name, Object[] args, Object result, Throwable failure)
-        {
-            if (!SHOULD_SKIP_ISSUE.equals(name) && !SHOULD_SKIP_MARKER.equals(name))
-                return;
-            try
-            {
-                StringBuilder line = new StringBuilder(name).append(" result=").append(result);
-                if (failure != null)
-                    line.append(" failure=").append(failure);
-                if (args != null && args.length > 0 && args[0] instanceof Marker marker)
-                {
-                    line.append(" class=").append(marker.getClass().getSimpleName())
-                        .append(" check=").append(marker.getCheckId())
-                        .append(" feature=").append(marker.getFeatureId())
-                        .append(" msg=").append(marker.getMessage())
-                        .append(" extra=").append(marker.getExtraInfo());
-                    if (marker instanceof com._1c.g5.v8.dt.validation.marker.PlainEObjectMarker plain)
-                        line.append(" uri=").append(plain.getURI());
-                    if (marker instanceof com._1c.g5.v8.dt.validation.marker.BmObjectMarker bm)
-                        line.append(" objectId=").append(bm.getObjectId());
-                }
-                else if (args != null)
-                    line.append(" args=").append(java.util.Arrays.toString(args));
-                Global.tempLog("baseline-filter", line.toString()); //$NON-NLS-1$
-            }
-            catch (RuntimeException e)
-            {
-                Global.tempLog("baseline-filter", name + " log failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 

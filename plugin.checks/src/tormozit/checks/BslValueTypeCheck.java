@@ -57,6 +57,7 @@ import tormozit.BslLiteralValues;
 import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
+import tormozit.FormItemTypes;
 import tormozit.TypeDescriptionPresentationHook;
 
 /**
@@ -83,7 +84,10 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 + "Единственный ожидаемый тип Неопределено допускает любое значение; "
                 + "вместе с конкретными типами он разрешает также значение Неопределено. "
                 + "Ожидаемый тип Строка допускает значение любого типа. "
-                + "Значение Неопределено можно присваивать и передавать параметрам любого типа."
+                + "Значение Неопределено можно присваивать и передавать параметрам любого типа. "
+                + "Значение типа-расширения (например, РасширениеТаблицыФормыДляДинамическогоСписка) "
+                + "совместимо с его базовым типом (ТаблицаФормы), значение типа-наследника "
+                + "(ОбъектМетаданныхСправочник) — с типом-предком (ОбъектМетаданных)."
                 + "<br><br>Динамически замещает штатную проверку bsl-legacy-check-expression-type.")
             .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
             .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
@@ -533,6 +537,10 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         private static boolean compatibleTypes(List<TypeItem> expected, List<TypeItem> actual, EObject context,
             Map<TypeItem, Set<TypeItem>> comparing)
         {
+            for (TypeItem target : expected)
+                for (TypeItem value : actual)
+                    if (FormItemTypes.isExtensionOfBase(value, target) || descends(value, target, context))
+                        return true;
             boolean dateConversion = hasType(expected, "Date") //$NON-NLS-1$
                 && (hasType(actual, "Number") || hasType(actual, "Boolean")) //$NON-NLS-1$ //$NON-NLS-2$
                 || hasType(actual, "Date") //$NON-NLS-1$
@@ -568,6 +576,24 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     if (BslUtil.intersectTypeItem(List.of(target), List.of(value), context))
                         return true;
                 }
+            return false;
+        }
+
+        /** Наследник по цепочке getParentType: ОбъектМетаданныхСправочник передаётся туда, где ждут ОбъектМетаданных. */
+        private static boolean descends(TypeItem value, TypeItem target, EObject context)
+        {
+            String targetName = McoreUtil.getTypeName(target);
+            if (targetName == null || !(value instanceof Type type))
+                return false;
+            TypeItem current = type.getParentType();
+            for (int depth = 0; current != null && depth < 32; depth++)
+            {
+                if (!(EcoreUtil.resolve(current, context) instanceof Type parent) || parent.eIsProxy())
+                    return false;
+                if (targetName.equals(McoreUtil.getTypeName(parent)))
+                    return true;
+                current = parent.getParentType();
+            }
             return false;
         }
 

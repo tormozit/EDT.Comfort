@@ -2725,6 +2725,10 @@ boolean inLiteral = endCaret >= 0
                 boolean changed = stamp == -1 || modificationStamp(doc) != stamp;
                 DeferTrace.log("low.restart", doc, null, 0, //$NON-NLS-1$
                     "restartNeeded=" + restartNeeded + " changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
+                Object validation = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+                traceValidationRun("low.restart", VALIDATION_WATCHES.get(doc), //$NON-NLS-1$
+                    validation instanceof org.eclipse.core.runtime.jobs.Job job ? job : null,
+                    "call=" + (restartNeeded || changed)); //$NON-NLS-1$
                 if (restartNeeded || changed)
                     Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
             }
@@ -3572,6 +3576,9 @@ boolean inLiteral = endCaret >= 0
     {
         volatile long changedAt;
         volatile long validatedAt;
+        /** Версия текста и признак пропуска в начале текущего прогона проверки. */
+        volatile long runStamp = -1;
+        volatile boolean runSkip;
         org.eclipse.core.runtime.jobs.Job job;
         /** Слабая ссылка: сам объект — значение слабой карты с этим документом в ключе. */
         java.lang.ref.WeakReference<IDocument> document;
@@ -3867,6 +3874,7 @@ boolean inLiteral = endCaret >= 0
             && cancel.isCanceled();
         boolean restart = !skip && !outdated
             && watch.guardRestarts.get() < VALIDATION_GUARD_MAX_RESTARTS;
+        traceValidationRun("guard", watch, job, "outdated=" + outdated + " restart=" + restart); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (restart)
         {
             watch.guardRestarts.incrementAndGet();
@@ -3929,19 +3937,64 @@ boolean inLiteral = endCaret >= 0
             watch.job = job;
             watch.document = new java.lang.ref.WeakReference<>(doc);
         }
+        traceValidationRun("attach", watch, job, ""); //$NON-NLS-1$ //$NON-NLS-2$
         job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
         {
             @Override
+            public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+            {
+                traceValidationRun("scheduled", watch, event.getJob(), //$NON-NLS-1$
+                    "delay=" + event.getDelay()); //$NON-NLS-1$
+            }
+
+            @Override
+            public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+            {
+                IDocument watched = watch.document == null ? null : watch.document.get();
+                watch.runStamp = watched == null ? -1 : modificationStamp(watched);
+                watch.runSkip = Boolean.TRUE.equals(Global.invoke(event.getJob(), "isSkip")); //$NON-NLS-1$
+                traceValidationRun("running", watch, event.getJob(), ""); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
             public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent done)
             {
-                // Отменённый и пропущенный запуски аннотаций не обновляют
-                if (done.getResult() != null && done.getResult().isOK()
-                    && !Boolean.TRUE.equals(Global.invoke(done.getJob(), "isSkip"))) //$NON-NLS-1$
+                // Прогон с признаком пропуска не проверяет, а возвращает старые аннотации
+                // (BslValidationJob.createIssues смотрит признак в начале). Прогон, за время
+                // которого текст правили, проверил прошлую версию. Ни тот, ни другой
+                // проверкой текущего текста не считаем.
+                IDocument watched = watch.document == null ? null : watch.document.get();
+                long stampNow = watched == null ? -1 : modificationStamp(watched);
+                boolean ok = done.getResult() != null && done.getResult().isOK();
+                boolean skipNow = Boolean.TRUE.equals(Global.invoke(done.getJob(), "isSkip")); //$NON-NLS-1$
+                boolean sameText = watch.runStamp != -1 && watch.runStamp == stampNow;
+                boolean counted = ok && !watch.runSkip && !skipNow && sameText;
+                traceValidationRun("done", watch, done.getJob(), "ok=" + ok + " skipNow=" + skipNow //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " stampNow=" + stampNow + " counted=" + counted); //$NON-NLS-1$ //$NON-NLS-2$
+                if (counted)
                     watch.validatedAt = System.nanoTime();
                 else
                     armValidationGuard(watch);
             }
         });
+    }
+
+    /** Временный лог прогонов проверки модуля: {@code .tmp/temp-logs/validation-run.log}. */
+    private static void traceValidationRun(String phase, ValidationWatch watch,
+                                           org.eclipse.core.runtime.jobs.Job job, String detail)
+    {
+        IDocument doc = watch == null || watch.document == null ? null : watch.document.get();
+        Global.tempLog("validation-run", phase //$NON-NLS-1$
+            + " job=" + (job == null ? "null" : Integer.toHexString(System.identityHashCode(job))) //$NON-NLS-1$ //$NON-NLS-2$
+            + " state=" + (job == null ? -1 : job.getState()) //$NON-NLS-1$
+            + " skip=" + (job != null && Boolean.TRUE.equals(Global.invoke(job, "isSkip"))) //$NON-NLS-1$ //$NON-NLS-2$
+            + " len=" + (doc == null ? -1 : doc.getLength()) //$NON-NLS-1$
+            + " stamp=" + (doc == null ? -1 : modificationStamp(doc)) //$NON-NLS-1$
+            + (watch == null ? "" : " runStamp=" + watch.runStamp + " runSkip=" + watch.runSkip //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " validated=" + (watch.validatedAt >= watch.changedAt) //$NON-NLS-1$
+                + " checks=" + watch.guardChecks.get() + " restarts=" + watch.guardRestarts.get()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " " + detail //$NON-NLS-1$
+            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
     }
 
     private static void restartMissedValidations()
@@ -3962,6 +4015,7 @@ boolean inLiteral = endCaret >= 0
                 continue;
             boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
+            traceValidationRun("assistSync.done", watch, job, "restart=" + (idle && !skip)); //$NON-NLS-1$ //$NON-NLS-2$
             // Задание уже запланировано или идёт — оно отработает само
             if (idle && !skip)
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$

@@ -1123,7 +1123,12 @@ public final class MdReferenceSupport
         EObject object, Set<String> changedFiles)
     {
         EObject root = EcoreUtil.getRootContainer(object);
-        if (root instanceof IBmObject bm && "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())
+        if (root instanceof IBmObject transientRoot && transientRoot.bmIsTransient())
+            Global.tempLog("broken-links-commit", "transient root proxy=" + root.eIsProxy()
+                + " class=" + root.eClass().getName() + " uri=" + EcoreUtil.getURI(root));
+        // Заглушка (например, тело неизменённой формы) не привязана к модели: bmGetTopObject у неё недопустим.
+        if (root instanceof IBmObject bm && !bm.bmIsTransient()
+            && "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())
             || !scopes().containsKey(root.eClass()) && !isMetadataReferenceTarget(root))
             return false;
         String fqn = EcoreUtil.getURI(root).lastSegment();
@@ -1163,7 +1168,7 @@ public final class MdReferenceSupport
                 continue;
             if (!visitedObjects.add(object)
                 || object instanceof IBmObject bm && (!ids.add(bm.bmGetId())
-                    || "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())))
+                    || !bm.bmIsTransient() && "command_interface_root".equals(bm.bmGetTopObject().bmGetFqn())))
                 continue;
             // Тело формы — внешний самостоятельный BM-объект, а не сохранённый containment.
             if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)

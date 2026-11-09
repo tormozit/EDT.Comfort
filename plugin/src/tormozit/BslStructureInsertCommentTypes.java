@@ -503,32 +503,86 @@ public final class BslStructureInsertCommentTypes
     {
         if (cancellation.isCanceled())
             throw new org.eclipse.core.runtime.OperationCanceledException();
+        // #region agent log — временно: фазы обвязки досчёта типов запроса
+        long tempStart = System.nanoTime();
+        // #endregion
         if (resource == null || org.eclipse.swt.widgets.Display.getCurrent() != null
             || !BslDocCommentComputedTypes.isExtendedTypesEnabled(BslNodeLookup.rootAst(resource))
             || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree))
             return;
+        long tempEnabled = System.nanoTime();
         refreshExternalFunctionTypes(resource, offset, cancellation);
+        long tempExternal = System.nanoTime();
         if (cancellation.isCanceled())
             throw new org.eclipse.core.runtime.OperationCanceledException();
         Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        long[] tempLocked = { 0 };
         if (queryLock != null)
             ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
             {
+                tempLocked[0] = System.nanoTime();
                 if (onLocked != null)
                     onLocked.run();
                 BslQueryResultTypes.refresh(resource, offset, onRecompute,
-                    method ->
-                    {
-                        Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-                        if (!queryTree.recomputeDependent(module, method, cancellation))
-                            return false;
-                        java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
-                        if (!changed.isEmpty())
-                            ComfortTreeTypeSystem.StaleTypes.add(resource, changed);
-                        return true;
-                    });
+                    queryRecompute(queryTree, resource, cancellation));
                 return true;
             });
+        long tempEnd = System.nanoTime();
+        Global.tempLog("query-types-open", "assistRefresh offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+            + " enabledMs=" + (tempEnabled - tempStart) / 1_000_000 //$NON-NLS-1$
+            + " externalMs=" + (tempExternal - tempEnabled) / 1_000_000 //$NON-NLS-1$
+            + " lockWaitMs=" + (tempLocked[0] == 0 ? -1 : (tempLocked[0] - tempExternal) / 1_000_000) //$NON-NLS-1$
+            + " refreshMs=" + (tempLocked[0] == 0 ? -1 : (tempEnd - tempLocked[0]) / 1_000_000)); //$NON-NLS-1$
+    }
+
+    /** Пересчёт метода с изменившимся планом запросов и его вызывающих; под блокировкой перевязки ресурса. */
+    private static java.util.function.Predicate<Method> queryRecompute(ComfortTreeTypeSystem queryTree,
+        Resource resource, CancelIndicator cancellation)
+    {
+        return method ->
+        {
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            if (!queryTree.recomputeDependent(module, method, cancellation))
+                return false;
+            java.util.Set<String> changed = BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            if (!changed.isEmpty())
+                ComfortTreeTypeSystem.StaleTypes.add(resource, changed);
+            return true;
+        };
+    }
+
+    /**
+     * Типы результатов запросов всех методов модуля — первый досчёт после открытия: тип в одном методе может
+     * зависеть от запроса в другом (параметр по вызову). Проверки и поиск — один раз на модуль, без внешних
+     * возвратов и поиска метода по смещению ({@link #refreshQueryTypesForAssist} на каждый метод — 25 с на
+     * модуле БСП из 882 методов). Блокировка перевязки — на каждый метод отдельно. Фоновый поток под
+     * {@code readOnly} документа.
+     */
+    static void refreshQueryTypesForModule(Resource resource, CancelIndicator cancellation)
+    {
+        if (resource == null || org.eclipse.swt.widgets.Display.getCurrent() != null
+            || !(BslNodeLookup.rootAst(resource) instanceof Module module)
+            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(module)
+            || !(peekTreeTypeSystem() instanceof ComfortTreeTypeSystem queryTree))
+            return;
+        Object queryLock = Global.invoke(resource, "getLock"); //$NON-NLS-1$
+        if (queryLock == null)
+            return;
+        var recompute = queryRecompute(queryTree, resource, cancellation);
+        long tempStart = System.nanoTime();
+        List<Method> methods = new ArrayList<>(module.allMethods());
+        for (Method method : methods)
+        {
+            if (cancellation.isCanceled())
+                throw new org.eclipse.core.runtime.OperationCanceledException();
+            ComfortTreeTypeSystem.underLinkLock(resource, queryLock, () ->
+            {
+                BslQueryResultTypes.refresh(resource, method, status -> {}, recompute);
+                return true;
+            });
+        }
+        Global.tempLog("query-types-open", "moduleRefresh methods=" + methods.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " ms=" + (System.nanoTime() - tempStart) / 1_000_000); //$NON-NLS-1$
     }
 
     private static final java.util.Map<Method, Long> EXTERNAL_RETURN_REVISIONS =
@@ -4475,9 +4529,17 @@ public final class BslStructureInsertCommentTypes
             try
             {
                 dropNormalStates(dependent);
+                // #region agent log — временно: типы запроса при открытии модуля
+                StringBuilder tempDepend = new StringBuilder();
+                // #endregion
                 for (Object caller : com._1c.g5.v8.dt.bsl.util.BslUtil.getDependMethodsTree(dependent))
+                {
                     if (caller instanceof Method callerMethod)
                         dropNormalStates(callerMethod);
+                    tempDepend.append(caller instanceof Method m ? m.getName() : String.valueOf(caller)).append(' ');
+                }
+                Global.tempLog("query-types-open", "recomputeDependent " + dependent.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " partial=" + (partial != null) + " dependTree=[" + tempDepend.toString().trim() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 underNonInterruptableBm(this, module, () ->
                 {
                     stockInstall(module, cancelIndicator);

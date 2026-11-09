@@ -138,6 +138,9 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) FormItemTypes::expand);
         System.getProperties().put("tormozit.dynamicFeatureAccess.methodTypes", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.withChildren(FormItemTypes.expand(args), args[1], args[2]));
+        System.getProperties().put("tormozit.dynamicFeatureAccess.propertyTypes", //$NON-NLS-1$
+            (Function<Object[], Object>) args -> AbstractTypeMembers.withPropertyOwners(FormItemTypes.expand(args), args[1],
+                args[2]));
         System.getProperties().put("tormozit.dynamicFeatureAccess.partTypes", //$NON-NLS-1$
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::partTypes);
         System.getProperties().put("tormozit.bslValidator.checkLastMember",
@@ -699,6 +702,53 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             {
                 return types;
             }
+        }
+
+        /**
+         * Список типов поиска свойства: к абстрактному типу добавляются наследники, объявляющие свойство с этим
+         * именем. Поиск свойства берёт у типа только собственные свойства ({@code getProperties}), а не
+         * {@code allProperties}, где объединение уже сделано.
+         */
+        static Object withPropertyOwners(Object types, Object resource, Object memberName)
+        {
+            if (!(memberName instanceof String name) || !(types instanceof java.util.Collection<?> list) || list.isEmpty()
+                || list.size() > 32)
+                return types;
+            try
+            {
+                Type abstractType = abstractTypeIn(list, resource);
+                if (abstractType == null)
+                    return types;
+                java.util.List<Object> result = null;
+                for (Type child : children(abstractType))
+                {
+                    if (child.getContextDef() == null || list.contains(child))
+                        continue;
+                    for (Property property : child.getContextDef().getProperties())
+                        if (name.equalsIgnoreCase(property.getName()) || name.equalsIgnoreCase(property.getNameRu()))
+                        {
+                            if (result == null)
+                                result = new java.util.ArrayList<>(list);
+                            result.add(child);
+                            break;
+                        }
+                }
+                return result != null ? result : types;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                return types;
+            }
+        }
+
+        private static Type abstractTypeIn(java.util.Collection<?> list, Object resource)
+        {
+            for (Object candidate : list)
+                if (candidate instanceof TypeItem item
+                    && EcoreUtil.resolve(item, (org.eclipse.emf.ecore.resource.Resource)resource) instanceof Type type
+                    && ABSTRACT_TYPE.equals(type.getName()))
+                    return type;
+            return null;
         }
 
         private static Method methodNamed(Type type, Object memberName)

@@ -3,12 +3,17 @@ package tormozit;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.ICoreRunnable;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com._1c.g5.v8.dt.validation.marker.IMarkerUpdateListener;
 import com._1c.g5.v8.dt.validation.marker.v2.IMarkerManagerV2;
 import org.eclipse.jface.dialogs.InputDialog;
@@ -62,7 +67,9 @@ import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.PartInitException;
 
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
@@ -128,6 +135,10 @@ public final class RecentPlacesView extends ViewPart
     private TableViewer listViewer;
     private NameLabelProvider nameLabelProvider;
     private EntryIconResolver entryIconResolver;
+    private static final int MARKER_REFRESH_DELAY_MS = 500;
+    /** UI-поток: пересчёт критичности по событиям маркеров уже запланирован. */
+    private boolean markerRefreshScheduled;
+    private IPartListener2 visibilityListener;
     private TableColumn iconColumn;
     private TableColumn placeColumn;
     private TableColumn nameColumn;
@@ -338,21 +349,45 @@ public final class RecentPlacesView extends ViewPart
         if (markers != null)
         {
             Display display = listViewer.getControl().getDisplay();
+            // Во время сборки события маркеров идут потоком: собираем их в один пересчёт критичности.
             IMarkerUpdateListener listener = event ->
             {
                 if (!display.isDisposed())
                     display.asyncExec(() ->
                     {
-                        if (listViewer.getControl().isDisposed())
+                        if (markerRefreshScheduled || listViewer.getControl().isDisposed()
+                            || entryIconResolver.markStaleIfSuspended())
                             return;
-                        entryIconResolver.clearCache();
-                        listViewer.update(java.util.Arrays.stream(listViewer.getTable().getItems())
-                            .map(TableItem::getData).toArray(), null);
+                        markerRefreshScheduled = true;
+                        display.timerExec(MARKER_REFRESH_DELAY_MS, () ->
+                        {
+                            markerRefreshScheduled = false;
+                            if (!listViewer.getControl().isDisposed())
+                                entryIconResolver.refreshSeverities();
+                        });
                     });
             };
             markers.addListener(listener);
             listViewer.getControl().addDisposeListener(event -> markers.removeListener(listener));
         }
+        // Скрытая панель критичность не считает; пропущенное пересчитывается при показе.
+        visibilityListener = new IPartListener2()
+        {
+            @Override
+            public void partVisible(IWorkbenchPartReference reference)
+            {
+                if (reference.getPart(false) == RecentPlacesView.this)
+                    entryIconResolver.setSuspended(false);
+            }
+
+            @Override
+            public void partHidden(IWorkbenchPartReference reference)
+            {
+                if (reference.getPart(false) == RecentPlacesView.this)
+                    entryIconResolver.setSuspended(true);
+            }
+        };
+        getSite().getPage().addPartListener(visibilityListener);
         refreshFromStore();
         Global.hideEmptyViewToolbar(getSite(), root);
     }
@@ -422,8 +457,13 @@ public final class RecentPlacesView extends ViewPart
         if (page != null && contextProjectListener != null)
             ActiveProjectTracker.removeListener(page, contextProjectListener);
         contextProjectListener = null;
+        if (page != null && visibilityListener != null)
+            page.removePartListener(visibilityListener);
+        visibilityListener = null;
         RecentPlaces.getInstance().removeChangeListener(storeChangeListener);
         deactivateKeyContext();
+        if (entryIconResolver != null)
+            entryIconResolver.dispose();
         if (activeInstance == this)
             activeInstance = null;
         super.dispose();
@@ -1430,12 +1470,162 @@ public final class RecentPlacesView extends ViewPart
     {
         private static Image methodImage;
         private final Map<String, Image> cache = new HashMap<>();
-        private int generation;
+        /** UI-поток: запросы показанных строк — по ним пересчитывается критичность. */
+        private final Map<String, SeverityRequest> known = new LinkedHashMap<>();
+        /** Очередь одного задания; доступ под {@code synchronized (pending)}. */
+        private final Map<String, SeverityRequest> pending = new LinkedHashMap<>();
+        private final Display display = Display.getCurrent();
+        private final Job severityJob = Job.create("Комфорт: проблемы последнего места", //$NON-NLS-1$
+            (ICoreRunnable)this::runSeverities);
+        private volatile int generation;
+        /** UI-поток: панель скрыта — критичность не считается. */
+        private boolean suspended;
+        /** UI-поток: пока панель была скрыта, критичность устарела. */
+        private boolean stale;
+
+        EntryIconResolver()
+        {
+            severityJob.setSystem(true);
+        }
+
+        void setSuspended(boolean value)
+        {
+            Global.tempLog("recent-places-severity", "suspended=" + value + " stale=" + stale //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " known=" + known.size()); //$NON-NLS-1$
+            if (suspended == value)
+                return;
+            suspended = value;
+            if (value)
+            {
+                // Начатый расчёт отменяется — его результат будет пересчитан при показе.
+                restartQueue();
+                stale = true;
+            }
+            else if (stale)
+                refreshSeverities();
+        }
+
+        /** Скрытая панель: только запомнить, что критичность устарела. */
+        boolean markStaleIfSuspended()
+        {
+            if (suspended)
+                stale = true;
+            return suspended;
+        }
 
         void clearCache()
         {
             cache.clear();
-            generation++;
+            known.clear();
+            restartQueue();
+        }
+
+        /** Маркеры изменились: значки остаются, критичность считается заново одним заданием. */
+        void refreshSeverities()
+        {
+            restartQueue();
+            if (markStaleIfSuspended())
+                return;
+            stale = false;
+            for (SeverityRequest request : known.values())
+                enqueue(request);
+            severityJob.schedule();
+        }
+
+        void dispose()
+        {
+            restartQueue();
+        }
+
+        private void restartQueue()
+        {
+            synchronized (pending)
+            {
+                pending.clear();
+                generation++;
+            }
+            severityJob.cancel();
+        }
+
+        /** UI-поток: документ открытого редактора берётся здесь — его модель уже построена. */
+        private void enqueue(SeverityRequest request)
+        {
+            IXtextDocument document = request.file() != null ? ForeignModuleModel.openDocument(request.file()) : null;
+            synchronized (pending)
+            {
+                pending.put(request.cacheKey(), request.withDocument(document));
+            }
+        }
+
+        private void runSeverities(IProgressMonitor monitor)
+        {
+            long started = System.nanoTime();
+            int done = 0;
+            int peeked = 0;
+            int startGeneration = generation;
+            while (!monitor.isCanceled())
+            {
+                SeverityRequest request;
+                int requestGeneration;
+                synchronized (pending)
+                {
+                    var iterator = pending.values().iterator();
+                    if (!iterator.hasNext())
+                        break;
+                    request = iterator.next();
+                    iterator.remove();
+                    requestGeneration = generation;
+                }
+                MarkerSeverity severity;
+                try
+                {
+                    severity = request.compute();
+                }
+                catch (RuntimeException ex)
+                {
+                    continue;
+                }
+                done++;
+                if (request.document() != null)
+                    peeked++;
+                if (display.isDisposed())
+                    break;
+                display.asyncExec(() ->
+                {
+                    if (requestGeneration != generation || activeInstance == null
+                        || activeInstance.entryIconResolver != this
+                        || activeInstance.listViewer.getControl().isDisposed())
+                        return;
+                    cache.put(request.cacheKey(), ProblemIndicatorSupport.decorate(request.base(), severity));
+                    activeInstance.listViewer.update(request.entry(), null);
+                });
+            }
+            int left;
+            synchronized (pending)
+            {
+                left = pending.size();
+            }
+            Global.tempLog("recent-places-severity", "round gen=" + startGeneration + " done=" + done //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " openEditor=" + peeked + " left=" + left + " canceled=" + monitor.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " ms=" + (System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
+        }
+
+        /** Строка списка: метод модуля ({@code methodName != null}) или объект метаданных. */
+        private record SeverityRequest(String cacheKey, RecentPlaces.Entry entry, IWorkbenchPage page,
+            IProject project, Image base, IFile file, String methodName, IXtextDocument document)
+        {
+            SeverityRequest withDocument(IXtextDocument value)
+            {
+                return new SeverityRequest(cacheKey, entry, page, project, base, file, methodName, value);
+            }
+
+            MarkerSeverity compute()
+            {
+                EObject owner = GoToDefinition.resolveEObjectForFullName(
+                    RecentPlacesKeys.mdObjectRef(entry), page, project, false);
+                return methodName == null ? ProblemIndicatorSupport.severity(owner)
+                    : ProblemIndicatorSupport.methodSeverity(file, methodName, owner, document);
+            }
         }
 
         Image imageFor(RecentPlaces.Entry entry, IWorkbenchPage page)
@@ -1454,36 +1644,17 @@ public final class RecentPlacesView extends ViewPart
                 IProject project = RecentPlacesHandler.resolveProject(entry, page);
                 if (project != null && project.isAccessible())
                 {
-                    Image base = image;
-                    int requestedGeneration = generation;
-                    Display display = Display.getCurrent();
-                    Job job = Job.create("Комфорт: проблемы последнего места", (ICoreRunnable)monitor ->
+                    int separator = entry.key.indexOf(": "); //$NON-NLS-1$
+                    SeverityRequest request = separator < 0
+                        ? new SeverityRequest(cacheKey, entry, page, project, image, null, null, null)
+                        : new SeverityRequest(cacheKey, entry, page, project, image, moduleFile(entry, project),
+                            entry.key.substring(separator + 2).trim(), null);
+                    known.put(cacheKey, request);
+                    if (!markStaleIfSuspended())
                     {
-                        try
-                        {
-                            EObject owner = GoToDefinition.resolveEObjectForFullName(
-                                RecentPlacesKeys.mdObjectRef(entry), page, project, false);
-                            int separator = entry.key.indexOf(": ");
-                            var severity = separator < 0 ? ProblemIndicatorSupport.severity(owner)
-                                : ProblemIndicatorSupport.methodSeverity(moduleFile(entry, project),
-                                    entry.key.substring(separator + 2).trim(), owner);
-                            if (!display.isDisposed())
-                                display.asyncExec(() ->
-                                {
-                                    if (requestedGeneration != generation || activeInstance == null
-                                        || activeInstance.entryIconResolver != this
-                                        || activeInstance.listViewer.getControl().isDisposed())
-                                        return;
-                                    cache.put(cacheKey, ProblemIndicatorSupport.decorate(base, severity));
-                                    activeInstance.listViewer.update(entry, null);
-                                });
-                        }
-                        catch (RuntimeException ex)
-                        {
-                        }
-                    });
-                    job.setSystem(true);
-                    job.schedule();
+                        enqueue(request);
+                        severityJob.schedule();
+                    }
                 }
             }
             return image;

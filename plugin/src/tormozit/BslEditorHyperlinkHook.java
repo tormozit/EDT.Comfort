@@ -89,6 +89,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.IEditorPagesRegistry;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.DefinedType;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
@@ -475,6 +476,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         if (link == null)
             link = fullNameLink(editor, page, viewer, offset, true, false);
         if (link == null)
+            link = commonModuleMethodLink(editor, page, viewer, offset);
+        if (link == null)
             link = tempTableLink(editor, page, viewer, offset);
         if (link == null)
         {
@@ -633,6 +636,93 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
         catch (RuntimeException | LinkageError e)
         {
+            return null;
+        }
+    }
+
+    /**
+     * Ссылка на метод общего модуля в литерале «ОбщийМодуль.Метод» (обработчик команды,
+     * описание оповещения и т.п.) — как в обычном вызове: на имени модуля — меню объекта
+     * метаданных, на имени метода — переход к методу.
+     */
+    private static IHyperlink commonModuleMethodLink(BslXtextEditor editor, IWorkbenchPage page, ITextViewer viewer,
+        int offset)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document) || document.getResourceURI() == null)
+            return null;
+        try
+        {
+            int[] found = readModel(document, false, resource ->
+            {
+                if (resource == null || resource.getParseResult() == null)
+                    return null;
+                ILeafNode leaf = literalLeaf(resource, offset);
+                if (leaf == null && offset > 0)
+                    leaf = literalLeaf(resource, offset - 1);
+                if (leaf == null)
+                    return null;
+                String text = leaf.getText();
+                int position = Math.max(0, Math.min(text.length(), offset - leaf.getOffset()));
+                int start = position;
+                while (start > 0 && isTypeNameChar(text.charAt(start - 1)))
+                    start--;
+                int end = position;
+                while (end < text.length() && isTypeNameChar(text.charAt(end)))
+                    end++;
+                int dot = text.indexOf('.', start);
+                int secondDot = dot < 0 ? -1 : text.indexOf('.', dot + 1);
+                // Ровно «Модуль.Метод»: оба имени непустые, вторая точка не допускается.
+                if (dot <= start || dot >= end - 1 || secondDot >= 0 && secondDot < end)
+                    return null;
+                return new int[] { leaf.getOffset() + start, dot - start, end - dot - 1 };
+            });
+            // #region agent log
+            Global.tempLog("literal-common-module", "cm offset=" + offset + " found=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (found == null ? "null" : java.util.Arrays.toString(found))); //$NON-NLS-1$
+            // #endregion
+            if (found == null)
+                return null;
+            String name = document.get(found[0], found[1] + 1 + found[2]);
+            String moduleName = name.substring(0, found[1]);
+            String methodName = name.substring(found[1] + 1);
+            IV8ProjectManager manager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+            IV8Project project = manager == null ? null : manager.getProject(document.getResourceURI());
+            // #region agent log
+            EObject resolvedLog = project == null ? null
+                : GoToDefinition.resolveEObjectByQualifiedName("ОбщийМодуль." + moduleName, project); //$NON-NLS-1$
+            Global.tempLog("literal-common-module", "cm name=" + name + " project=" + project //$NON-NLS-1$ //$NON-NLS-2$
+                + " resolved=" + (resolvedLog == null ? "null" : resolvedLog.eClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (project == null
+                || !(GoToDefinition.resolveEObjectByQualifiedName("ОбщийМодуль." + moduleName, project) //$NON-NLS-1$
+                    instanceof CommonModule module))
+                return null;
+            if (offset <= found[0] + found[1])
+                return new TypeHyperlink(new Region(found[0], found[1]), moduleName, module, editor, page);
+            // Метода в модуле нет — ссылки нет (как у обычного вызова).
+            IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+            IFile file = lookup == null || module.getModule() == null ? null
+                : lookup.getPlatformResource(module.getModule());
+            String moduleText = file == null ? null : BslModuleMethodResolver.moduleText(file);
+            // #region agent log
+            Global.tempLog("literal-common-module", "cm lookup=" + (lookup != null) + " moduleRef=" //$NON-NLS-1$ //$NON-NLS-2$
+                + module.getModule() + " file=" + (file == null ? "null" : file.getFullPath()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " textLength=" + (moduleText == null ? -1 : moduleText.length()) //$NON-NLS-1$
+                + " declLine=" + (moduleText == null ? -2 //$NON-NLS-1$
+                    : GetRef.findMethodDeclarationLine(new org.eclipse.jface.text.Document(moduleText), methodName)));
+            // #endregion
+            if (moduleText == null
+                || GetRef.findMethodDeclarationLine(new org.eclipse.jface.text.Document(moduleText), methodName) < 0)
+                return null;
+            // Полное имя метода — «Модуль.Метод»: подчёркиваем его целиком, как полное имя метаданного.
+            return new ManagerMethodHyperlink(new Region(found[0], name.length()), name,
+                project.getProject(), editor, page);
+        }
+        catch (RuntimeException | LinkageError | org.eclipse.jface.text.BadLocationException e)
+        {
+            // #region agent log
+            Global.tempLog("literal-common-module", "cm failure " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return null;
         }
     }
@@ -1076,7 +1166,10 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
     }
 
-    /** Метод модуля менеджера по тексту «Справочники.Имя.Метод» — тот же переход, что Ctrl+F12. */
+    /**
+     * Метод модуля менеджера по тексту «Справочники.Имя.Метод» или общего модуля «Модуль.Метод» —
+     * тот же переход, что Ctrl+F12.
+     */
     private static final class ManagerMethodHyperlink implements IHyperlink
     {
         private final IRegion region;
@@ -1360,6 +1453,16 @@ public final class BslEditorHyperlinkHook implements IStartup
             // в имени формы предложили бы форму.
             IHyperlink segment = region == null ? null : segmentLink(source, page, viewer, region.getOffset());
             IHyperlink[] links = segment != null ? new IHyperlink[] { segment } : stock.get();
+            // #region agent log
+            StringBuilder linksLog = new StringBuilder();
+            if (links != null)
+                for (IHyperlink link : links)
+                    linksLog.append(link == null ? "null" : link.getClass().getName() + "'" + link.getHyperlinkText() //$NON-NLS-1$ //$NON-NLS-2$
+                        + "'@" + link.getHyperlinkRegion()).append(' '); //$NON-NLS-1$
+            Global.tempLog("literal-common-module", "detect offset=" + (region == null ? -1 : region.getOffset()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " multiple=" + multiple + " segment=" + (segment != null) + " links=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (links == null ? "null" : "[" + linksLog + "]")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             BslNodeLookup.checkCanceled();
             if (links == null || links.length == 0)
             {

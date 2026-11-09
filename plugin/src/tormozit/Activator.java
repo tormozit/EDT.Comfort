@@ -79,6 +79,7 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         Global.clearTempLogs();
+        Global.tempLog("validation-run", "plugin start"); //$NON-NLS-1$ //$NON-NLS-2$
         Global.cleanOrphanedFormNativeTempDirs();
 
         super.start(context);
@@ -94,6 +95,7 @@ public class Activator extends AbstractUIPlugin
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
         CheckThreadPriority.start();
+        DeepCheckTrace.start(); // #region agent log — временно: долгая расширенная проверка
         FunctionReturnTypes.installLocalContextInvalidation();
         TypeDescriptionPresentationHook.install(context);
         PropertySheetUiContext.installSelectionCallbacks();
@@ -1531,4 +1533,203 @@ public class Activator extends AbstractUIPlugin
             }
         }
     }
+
+    // #region agent log — временно: почему расширенная проверка одного модуля долго стоит на 0%
+    /**
+     * Временная диагностика, тема {@code deep-check}. События заданий проверки и сборки и раз в
+     * {@link #PERIOD_MS} снимок потоков производных данных и сборки: состояние, прирост процессорного
+     * времени, что считают, кого ждут; плюс куча и прирост времени GC. Пишет всегда, без флажка.
+     */
+    private static final class DeepCheckTrace
+    {
+        private static final String TOPIC = "deep-check"; //$NON-NLS-1$
+        private static final long PERIOD_MS = 5_000L;
+        private static final java.util.Map<Long, Long> CPU = new java.util.HashMap<>();
+        private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> RUNNING =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private static long gcMs = -1;
+
+        static void start()
+        {
+            try
+            {
+                org.eclipse.core.runtime.jobs.Job.getJobManager().addJobChangeListener(
+                    new org.eclipse.core.runtime.jobs.JobChangeAdapter()
+                    {
+                        @Override
+                        public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                        {
+                            jobEvent("scheduled", event); //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                        {
+                            if (tracked(event.getJob()))
+                                RUNNING.add(event.getJob());
+                            jobEvent("running", event); //$NON-NLS-1$
+                        }
+
+                        @Override
+                        public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                        {
+                            RUNNING.remove(event.getJob());
+                            jobEvent("done", event); //$NON-NLS-1$
+                        }
+                    });
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
+                {
+                    Thread thread = new Thread(runnable, "Комфорт: временный лог расширенной проверки"); //$NON-NLS-1$
+                    thread.setDaemon(true);
+                    return thread;
+                }).scheduleWithFixedDelay(DeepCheckTrace::sample, PERIOD_MS, PERIOD_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+                Global.tempLog(TOPIC, "start"); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException(TOPIC, "start", t); //$NON-NLS-1$
+            }
+        }
+
+        private static boolean tracked(org.eclipse.core.runtime.jobs.Job job)
+        {
+            if (job == null)
+                return false;
+            String name = String.valueOf(job.getName()).toLowerCase();
+            return name.contains("проверк") || name.contains("сборк") || name.contains("валидац") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                || job.getClass().getName().contains("Derived"); //$NON-NLS-1$
+        }
+
+        private static void jobEvent(String kind, org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            org.eclipse.core.runtime.jobs.Job job = event.getJob();
+            if (!tracked(job))
+                return;
+            org.eclipse.core.runtime.IStatus result = event.getResult();
+            Global.tempLog(TOPIC, "job " + kind + " name=\"" + job.getName() + "\" class=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + job.getClass().getName() + " id=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
+                + (result != null ? " result=" + result.getSeverity() : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        }
+
+        private static void sample()
+        {
+            try
+            {
+                java.lang.management.ThreadMXBean mx = java.lang.management.ManagementFactory.getThreadMXBean();
+                StringBuilder busy = new StringBuilder();
+                int idle = 0;
+                ThreadGroup root = Thread.currentThread().getThreadGroup();
+                while (root.getParent() != null)
+                    root = root.getParent();
+                Thread[] threads = new Thread[root.activeCount() + 16];
+                int count = root.enumerate(threads, true);
+                for (int i = 0; i < count; i++)
+                {
+                    Thread thread = threads[i];
+                    if (thread == null)
+                        continue;
+                    String name = thread.getName();
+                    if (!name.startsWith("derived_data_executor_") && !name.startsWith("LCBuilderState") //$NON-NLS-1$ //$NON-NLS-2$
+                        && !name.contains("проверк")) //$NON-NLS-1$
+                        continue;
+                    long id = thread.getId();
+                    long cpu = mx.getThreadCpuTime(id);
+                    Long previous = CPU.put(id, cpu);
+                    long cpuDelta = previous == null || cpu < 0 ? -1 : (cpu - previous) / 1_000_000L;
+                    java.lang.management.ThreadInfo info = mx.getThreadInfo(id, 400);
+                    if (info == null)
+                        continue;
+                    StackTraceElement[] stack = info.getStackTrace();
+                    if (isIdle(stack))
+                    {
+                        idle++;
+                        continue;
+                    }
+                    busy.append("\n    ").append(name).append(' ').append(info.getThreadState()) //$NON-NLS-1$
+                        .append(" prio=").append(thread.getPriority()) //$NON-NLS-1$
+                        .append(" cpu+=").append(cpuDelta).append("ms") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(" depth=").append(stack.length); //$NON-NLS-1$
+                    if (info.getLockName() != null)
+                        busy.append(" lock=").append(info.getLockName()).append(" owner=") //$NON-NLS-1$ //$NON-NLS-2$
+                            .append(info.getLockOwnerName());
+                    busy.append(" top=").append(frame(firstOwn(stack, false))) //$NON-NLS-1$
+                        .append(" comfort=").append(frame(firstOwn(stack, true))) //$NON-NLS-1$
+                        .append(" task=").append(frame(taskFrame(stack))) //$NON-NLS-1$
+                        .append(" deep=").append(contains(stack, "performDeepAnalisys")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                long gc = 0;
+                for (java.lang.management.GarbageCollectorMXBean bean : java.lang.management.ManagementFactory
+                    .getGarbageCollectorMXBeans())
+                    gc += Math.max(0, bean.getCollectionTime());
+                long gcDelta = gcMs < 0 ? -1 : gc - gcMs;
+                gcMs = gc;
+                Runtime runtime = Runtime.getRuntime();
+                long usedMb = (runtime.totalMemory() - runtime.freeMemory()) >> 20;
+                StringBuilder jobs = new StringBuilder();
+                for (org.eclipse.core.runtime.jobs.Job job : RUNNING)
+                    jobs.append(jobs.length() == 0 ? "" : "; ").append(job.getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog(TOPIC, "sample heapMb=" + usedMb + "/" + (runtime.maxMemory() >> 20) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " gc+=" + gcDelta + "ms jobs=[" + jobs + "] idle=" + idle + " busy:" + busy); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException(TOPIC, "sample", t); //$NON-NLS-1$
+            }
+        }
+
+        /** Поток пула ждёт задачу. */
+        private static boolean isIdle(StackTraceElement[] stack)
+        {
+            for (int i = 0; i < Math.min(stack.length, 12); i++)
+            {
+                String method = stack[i].getMethodName();
+                if (method.equals("getTask") || method.equals("awaitWork") || method.equals("schedulingLoop") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    || method.equals("startJob")) //$NON-NLS-1$
+                    return true;
+            }
+            return false;
+        }
+
+        /** Первый кадр не из JDK/EMF/Guava; {@code comfort} — первый кадр плагина. */
+        private static StackTraceElement firstOwn(StackTraceElement[] stack, boolean comfort)
+        {
+            for (StackTraceElement element : stack)
+            {
+                String type = element.getClassName();
+                if (comfort ? type.startsWith("tormozit.") //$NON-NLS-1$
+                    : type.startsWith("com._1c.") || type.startsWith("com.e1c.") || type.startsWith("tormozit.")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    return element;
+            }
+            return null;
+        }
+
+        /** Кадр над {@code WorkerManager$TaskProcessor.processTask} — какой расчёт производных данных идёт. */
+        private static StackTraceElement taskFrame(StackTraceElement[] stack)
+        {
+            for (int i = 1; i < stack.length; i++)
+                if (stack[i].getMethodName().equals("processTask")) //$NON-NLS-1$
+                    return stack[i - 1];
+            return null;
+        }
+
+        private static boolean contains(StackTraceElement[] stack, String method)
+        {
+            for (StackTraceElement element : stack)
+                if (element.getMethodName().equals(method))
+                    return true;
+            return false;
+        }
+
+        private static String frame(StackTraceElement element)
+        {
+            if (element == null)
+                return "-"; //$NON-NLS-1$
+            String type = element.getClassName();
+            return type.substring(type.lastIndexOf('.') + 1) + "." + element.getMethodName() + ":" //$NON-NLS-1$ //$NON-NLS-2$
+                + element.getLineNumber();
+        }
+    }
+    // #endregion
 }

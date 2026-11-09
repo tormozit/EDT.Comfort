@@ -37,7 +37,7 @@ import com._1c.g5.v8.dt.platform.version.Version;
  * (автодополнение, проверка неизвестного члена, подсказки), в {@link BslLiteralValues} — значения литерала со
  * свойствами. Для подписей известный тип-расширение выбирается отдельно, без изменения модели выражения.
  */
-final class FormItemTypes
+public final class FormItemTypes
 {
     /** Базовый тип → префиксы имён его типов-расширений. */
     private static final Map<String, String[]> FAMILIES = Map.of(
@@ -138,6 +138,20 @@ final class FormItemTypes
             if (isExtensionOf(name, base))
                 return true;
         return false;
+    }
+
+    /**
+     * Значение типа-расширения совместимо с его базовым типом: {@code РасширениеТаблицыФормыДляДинамическогоСписка}
+     * передаётся туда, где ждут {@code ТаблицаФормы}.
+     */
+    public static boolean isExtensionOfBase(TypeItem extension, TypeItem base)
+    {
+        String name = extension != null ? McoreUtil.getTypeName(extension) : null;
+        String baseName = base != null ? McoreUtil.getTypeName(base) : null;
+        if (name == null || baseName == null)
+            return false;
+        int at = name.indexOf(EXTENSION_MARK);
+        return isPresentationExtensionOf(name, baseName) || at > 0 && name.substring(0, at).equals(baseName);
     }
 
     /** Функция вплетения: {@code {типы, ресурс}} → те же или дополненные типы. */

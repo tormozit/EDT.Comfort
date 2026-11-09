@@ -75,6 +75,7 @@ public final class Activator
         DebugValueEditorDialogWeaving.install(context);
         FullRebuildContainmentChecksWeaving.install(context);
         MarkerCreationDateWeaving.install(context);
+        CommonAttributeLossDiagnostics.install(context);
     }
 
     /**
@@ -2190,6 +2191,462 @@ public final class Activator
         }
     }
 
+    /**
+     * Временная диагностика #1022: из типов объектов пропадают общие реквизиты.
+     * md 27.0.0.v202605050943 (27.1.0.v202607090722, 28.0.0.v202610211527) {@code CommonAttributeFieldInferrer}:
+     * вход {@code updateContextDefs} запоминает объект метаданных и набор действующих общих реквизитов,
+     * вход {@code updateContextDef} пишет, какие свойства общих реквизитов EDT удалит из контекста и почему
+     * (источник — прокси или не входит в набор). Безусловно, каждый вызов; файл в {@code .tmp/temp-logs}.
+     * <p>Части пересчёта: {@code MdDerivedDataComputer$1.compute} — запуск частей CTX_DEF (новый ContextDef типа,
+     * старый с общими реквизитами выбрасывается) и CMN_AT_FLD с набором частей объекта; derived 17.0.200 (18.0.0,
+     * 19.0.0) {@code PartBasedObjectContext.addParts} — кто заказал эти части, со стеком.
+     */
+    private static final class CommonAttributeLossDiagnostics implements WeavingHook
+    {
+        private static final String CALLBACK = "tormozit.commonAttributeLoss.diagnostic"; //$NON-NLS-1$
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.internal.md.bm.derived.inferrers.CommonAttributeFieldInferrer"; //$NON-NLS-1$
+        private static final String OBJECTS_DESC = "(Lcom/_1c/g5/v8/dt/metadata/mdclass/MdObject;Ljava/util/Set;"
+            + "Lcom/_1c/g5/v8/bm/core/IBmTransaction;Lcom/_1c/g5/v8/dt/platform/version/Version;)V";
+        private static final String CONTEXT_DESC = "(Lcom/_1c/g5/v8/dt/mcore/ContextDef;Ljava/util/Set;Z"
+            + "Ljava/util/function/Supplier;Lcom/_1c/g5/v8/bm/core/IBmTransaction;)V";
+        /** Обёртка части пересчёта md (createPartComputerFromVisitor); id части — getSupportedPartId. */
+        private static final String PART_WRAPPER =
+            "com._1c.g5.v8.dt.internal.md.bm.derived.MdDerivedDataComputer$1"; //$NON-NLS-1$
+        private static final String PART_DESC = "(Lcom/_1c/g5/v8/bm/core/IBmObject;"
+            + "Lcom/_1c/g5/v8/derived/context/IPartBasedObjectContext;Lorg/eclipse/core/runtime/IProgressMonitor;)V";
+        private static final String PARTS_CONTEXT = "com._1c.g5.v8.derived.context.PartBasedObjectContext"; //$NON-NLS-1$
+        private static final String CTX_DEF = "CTX_DEF"; //$NON-NLS-1$
+        private static final String CMN_AT_FLD = "CMN_AT_FLD"; //$NON-NLS-1$
+        private static final java.nio.file.Path FILE = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/temp-logs/common-attribute-loss.log");
+        private final ThreadLocal<Object> currentObject = new ThreadLocal<>();
+        /** Строки SESSION/WEAVE этого запуска — повторяются в файле после очистки temp-logs основным бандлом. */
+        private final StringBuilder header = new StringBuilder();
+
+        static void install(BundleContext context)
+        {
+            var diagnostics = new CommonAttributeLossDiagnostics();
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
+            diagnostics.write("SESSION pid=" + ProcessHandle.current().pid()
+                + " workspace=" + System.getProperty("osgi.instance.area"));
+            context.registerService(WeavingHook.class, diagnostics, null);
+        }
+
+        private void record(Object[] args)
+        {
+            try
+            {
+                if ("objects".equals(args[0]))
+                    recordObject(args[1], (Set<?>) args[2], args[3]);
+                else if ("context".equals(args[0]))
+                    recordContext(args[1], (Set<?>) args[2], args[3]);
+                else if ("part".equals(args[0]))
+                    recordPart(args[1], args[2], args[3]);
+                else
+                    recordAddParts(args[1], args[2]);
+            }
+            catch (Throwable failure)
+            {
+                write("RECORD FAILED " + args[0] + " " + failure);
+            }
+        }
+
+        /**
+         * Запуск части пересчёта объекта. CTX_DEF создаёт новый ContextDef типа и выбрасывает старый вместе с
+         * общими реквизитами; вернуть их может только CMN_AT_FLD того же пересчёта.
+         */
+        private void recordPart(Object partComputer, Object object, Object context) throws Exception
+        {
+            Object partId = call(partComputer, "getSupportedPartId");
+            if (!CTX_DEF.equals(partId) && !CMN_AT_FLD.equals(partId))
+                return;
+            var parts = (Collection<?>) call(context, "getParts");
+            write("PART " + partId + " " + describeObject(object) + " parts=" + parts + " fullRebuild="
+                + (hasMethod(context, "isFullRebuild") ? call(context, "isFullRebuild") : "?")
+                + (CTX_DEF.equals(partId) && !parts.contains(CMN_AT_FLD)
+                    ? " LOSS: тип пересоздаётся без части CMN_AT_FLD — общие реквизиты пропадут" : ""));
+        }
+
+        /** Кто заказал части CTX_DEF/CMN_AT_FLD для объекта — стек сборщика контекстов. */
+        private void recordAddParts(Object context, Object added) throws Exception
+        {
+            var list = added instanceof Object[] array ? List.of(array) : List.copyOf((Collection<?>) added);
+            if (!list.contains(CTX_DEF) && !list.contains(CMN_AT_FLD))
+                return;
+            var text = new StringBuilder("ADDPARTS ").append(list).append(" to ")
+                .append(call(call(context, "getEClass"), "getName")).append(" id=")
+                .append(call(context, "getBmObjectId")).append(" had=").append(call(context, "getParts"));
+            int frames = 0;
+            for (var frame : Thread.currentThread().getStackTrace())
+                if (frame.getClassName().startsWith("com._1c.") && !frame.getClassName().equals(PARTS_CONTEXT)
+                    && frames++ < 25)
+                    text.append("\n  at ").append(frame);
+            write(text.toString());
+        }
+
+        private void recordObject(Object mdObject, Set<?> ids, Object transaction) throws Exception
+        {
+            currentObject.set(mdObject);
+            var names = new StringBuilder();
+            for (Object id : ids)
+                names.append(names.length() == 0 ? "" : ",").append(attributeName(byId(transaction, id)));
+            write("OBJECT " + describeObject(mdObject) + " effective=" + ids.size() + " [" + names + "] totalInTx="
+                + totalCommonAttributes(transaction, mdObject));
+        }
+
+        private void recordContext(Object contextDef, Set<?> ids, Object transaction) throws Exception
+        {
+            Object mdObject = currentObject.get();
+            String where = (mdObject == null ? "?" : describeObject(mdObject)) + " ctx=" + describeContext(contextDef);
+            if (contextDef == null)
+            {
+                write("CONTEXT " + where + " null");
+                return;
+            }
+            var existing = new StringBuilder();
+            var removed = new StringBuilder();
+            var removedAttributes = new java.util.ArrayList<Object>();
+            var present = new java.util.HashSet<Object>();
+            for (Object property : (Collection<?>) call(contextDef, "getProperties"))
+            {
+                if (!hasMethod(property, "getSource"))
+                    continue;
+                Object source = call(property, "getSource");
+                if (source == null || !isCommonAttribute(source))
+                    continue;
+                boolean proxy = Boolean.TRUE.equals(call(source, "eIsProxy"));
+                Object id = proxy ? null : call(source, "bmGetId");
+                String name = attributeName(source);
+                existing.append(existing.length() == 0 ? "" : ",").append(name);
+                if (proxy || !ids.contains(id))
+                {
+                    removed.append(removed.length() == 0 ? "" : ",").append(name)
+                        .append(proxy ? "(proxy " + call(source, "eProxyURI") + ")" : "(notInEffective id=" + id + ")");
+                    removedAttributes.add(source);
+                }
+                else
+                    present.add(id);
+            }
+            var added = new StringBuilder();
+            for (Object id : ids)
+                if (!present.contains(id))
+                    added.append(added.length() == 0 ? "" : ",").append(attributeName(byId(transaction, id)));
+            var text = new StringBuilder("CONTEXT ").append(where).append(" existing=[").append(existing)
+                .append("] effective=").append(ids.size()).append(" remove=[").append(removed)
+                .append("] add=[").append(added).append(']');
+            if (!removedAttributes.isEmpty())
+            {
+                for (Object attribute : removedAttributes)
+                    text.append("\n  removed ").append(explain(attribute, mdObject, transaction));
+                for (var frame : Thread.currentThread().getStackTrace())
+                    if (!frame.getClassName().equals(Thread.class.getName())
+                        && !frame.getClassName().startsWith(CommonAttributeLossDiagnostics.class.getName()))
+                        text.append("\n  at ").append(frame);
+            }
+            write(text.toString());
+        }
+
+        /** Почему реквизит не попал в набор: есть ли он среди верхних объектов транзакции и что в его составе. */
+        private String explain(Object attribute, Object mdObject, Object transaction)
+        {
+            var text = new StringBuilder(attributeName(attribute));
+            try
+            {
+                if (Boolean.TRUE.equals(call(attribute, "eIsProxy")))
+                {
+                    Object resolved = byUri(transaction, call(attribute, "eProxyURI"));
+                    return text.append(" proxy resolvedInTx=").append(resolved == null ? "null"
+                        : attributeName(resolved) + " id=" + call(resolved, "bmGetId")).toString();
+                }
+                Object id = call(attribute, "bmGetId");
+                Object inTx = byId(transaction, id);
+                text.append(" id=").append(id).append(" byIdInTx=").append(inTx == null ? "null"
+                    : inTx == attribute ? "same" : "other proxy=" + call(inTx, "eIsProxy"));
+                boolean topFound = false;
+                var iterator = (java.util.Iterator<?>) call(transaction, "getTopObjectIterator", call(attribute, "eClass"));
+                while (iterator.hasNext())
+                    if (java.util.Objects.equals(call(iterator.next(), "bmGetId"), id))
+                        topFound = true;
+                text.append(" inTopIterator=").append(topFound).append(" autoUse=").append(call(attribute, "getAutoUse"))
+                    .append(" dataSeparation=").append(call(attribute, "getDataSeparation"));
+                Object live = inTx != null ? inTx : attribute;
+                var content = (Collection<?>) call(live, "getContent");
+                text.append(" content=").append(content.size());
+                if (mdObject != null)
+                    for (Object item : content)
+                    {
+                        Object metadataRef = call(call(item, "eClass"), "getEStructuralFeature", "metadata");
+                        if (Boolean.TRUE.equals(call(item, "bmMatchSingleReference", metadataRef, mdObject)))
+                            text.append(" itemForObject.use=").append(call(item, "getUse"));
+                    }
+            }
+            catch (Throwable failure)
+            {
+                text.append(" explainFailed=").append(failure);
+            }
+            return text.toString();
+        }
+
+        /** Все общие реквизиты среди верхних объектов транзакции — тот же обход, что у getEffectiveCommonAttributes. */
+        private static String totalCommonAttributes(Object transaction, Object mdObject)
+        {
+            try
+            {
+                var literals = Class.forName("com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage$Literals", true,
+                    mdObject.getClass().getClassLoader());
+                Object eClass = literals.getField("COMMON_ATTRIBUTE").get(null);
+                var iterator = (java.util.Iterator<?>) call(transaction, "getTopObjectIterator", eClass);
+                int count = 0;
+                while (iterator.hasNext())
+                {
+                    iterator.next();
+                    count++;
+                }
+                return String.valueOf(count);
+            }
+            catch (Throwable failure)
+            {
+                return "<" + failure + ">";
+            }
+        }
+
+        private static Object byId(Object transaction, Object id)
+        {
+            try
+            {
+                return call(transaction, "getObjectById", ((Long) id).longValue());
+            }
+            catch (Throwable failure)
+            {
+                return null;
+            }
+        }
+
+        private static Object byUri(Object transaction, Object uri)
+        {
+            try
+            {
+                return call(transaction, "getObjectByUri", uri);
+            }
+            catch (Throwable failure)
+            {
+                return null;
+            }
+        }
+
+        private static boolean isCommonAttribute(Object object)
+        {
+            for (Class<?> type : object.getClass().getInterfaces())
+                if (type.getName().equals("com._1c.g5.v8.dt.metadata.mdclass.CommonAttribute"))
+                    return true;
+            return false;
+        }
+
+        private static String attributeName(Object attribute)
+        {
+            if (attribute == null)
+                return "null";
+            try
+            {
+                Object name = call(attribute, "getName");
+                return name == null ? "<noname " + call(attribute, "eIsProxy") + ">" : name.toString();
+            }
+            catch (Throwable failure)
+            {
+                return "<" + failure + ">";
+            }
+        }
+
+        private static String describeObject(Object mdObject)
+        {
+            try
+            {
+                return call(call(mdObject, "eClass"), "getName") + "." + call(mdObject, "getName") + " id="
+                    + call(mdObject, "bmGetId") + " uri=" + uri(mdObject);
+            }
+            catch (Throwable failure)
+            {
+                return "<" + failure + ">";
+            }
+        }
+
+        private static String describeContext(Object contextDef)
+        {
+            if (contextDef == null)
+                return "null";
+            try
+            {
+                Object container = call(contextDef, "eContainer");
+                String containerText = container == null ? "null" : call(call(container, "eClass"), "getName")
+                    + (hasMethod(container, "getName") ? ":" + call(container, "getName") : "");
+                return call(call(contextDef, "eClass"), "getName") + "@" + containerText;
+            }
+            catch (Throwable failure)
+            {
+                return "<" + failure + ">";
+            }
+        }
+
+        private static Object uri(Object object)
+        {
+            try
+            {
+                var util = Class.forName("org.eclipse.emf.ecore.util.EcoreUtil", true,
+                    object.getClass().getClassLoader());
+                for (var method : util.getMethods())
+                    if (method.getName().equals("getURI") && method.getParameterCount() == 1)
+                        return method.invoke(null, object);
+            }
+            catch (Throwable ignored)
+            {
+                // Адрес — только уточнение строки лога.
+            }
+            return "?";
+        }
+
+        private static boolean hasMethod(Object target, String name)
+        {
+            for (var method : target.getClass().getMethods())
+                if (method.getName().equals(name) && method.getParameterCount() == 0)
+                    return true;
+            return false;
+        }
+
+        private static Object call(Object target, String name, Object... args) throws Exception
+        {
+            for (var method : target.getClass().getMethods())
+            {
+                if (!method.getName().equals(name) || method.getParameterCount() != args.length)
+                    continue;
+                var types = method.getParameterTypes();
+                boolean fits = true;
+                for (int i = 0; i < args.length && fits; i++)
+                    fits = args[i] == null ? !types[i].isPrimitive()
+                        : types[i].isPrimitive() ? types[i] == long.class && args[i] instanceof Long
+                        : types[i].isInstance(args[i]);
+                if (!fits)
+                    continue;
+                method.setAccessible(true);
+                return method.invoke(target, args);
+            }
+            throw new NoSuchMethodException(target.getClass().getName() + "." + name + "/" + args.length);
+        }
+
+        private synchronized void write(String text)
+        {
+            try
+            {
+                String line = java.time.OffsetDateTime.now() + " [" + Thread.currentThread().getName() + "] "
+                    + text + "\r\n";
+                java.nio.file.Files.createDirectories(FILE.getParent());
+                if (java.nio.file.Files.exists(FILE) && java.nio.file.Files.size(FILE) >= 8 * 1024 * 1024)
+                    java.nio.file.Files.move(FILE, FILE.resolveSibling("common-attribute-loss.previous.log"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                // Основной бандл на старте очищает temp-logs: файл пропал — сначала заново строки SESSION/WEAVE.
+                String prefix = java.nio.file.Files.exists(FILE) ? "" : header.toString();
+                if (text.startsWith("SESSION") || text.startsWith("WEAVE"))
+                    header.append(line);
+                java.nio.file.Files.writeString(FILE, prefix + line,
+                    java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // Отказ диагностики не прерывает расчёт EDT.
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String owner = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || !owner.equals(TARGET) && !owner.equals(PART_WRAPPER) && !owner.equals(PARTS_CONTEXT))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] matches = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        // Метка и слоты аргументов, уходящих в обратный вызов.
+                        String tag;
+                        int[] slots;
+                        if (owner.equals(TARGET) && name.equals("updateContextDefs") && desc.equals(OBJECTS_DESC))
+                        {
+                            tag = "objects"; // md=1, set=2, tx=3
+                            slots = new int[] {1, 2, 3};
+                        }
+                        else if (owner.equals(TARGET) && name.equals("updateContextDef") && desc.equals(CONTEXT_DESC))
+                        {
+                            tag = "context"; // ctx=1, set=2, z=3, supplier=4, tx=5
+                            slots = new int[] {1, 2, 5};
+                        }
+                        else if (owner.equals(PART_WRAPPER) && name.equals("compute") && desc.equals(PART_DESC))
+                        {
+                            tag = "part"; // this=0, object=1, context=2
+                            slots = new int[] {0, 1, 2};
+                        }
+                        else if (owner.equals(PARTS_CONTEXT) && name.equals("addParts")
+                            && (desc.equals("(Ljava/util/Collection;)V") || desc.equals("([Ljava/lang/String;)V")))
+                        {
+                            tag = "addParts"; // this=0, parts=1
+                            slots = new int[] {0, 1};
+                        }
+                        else
+                            return original;
+                        matches[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(CALLBACK);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                super.visitLdcInsn(slots.length + 1);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitLdcInsn(tag);
+                                super.visitInsn(Opcodes.AASTORE);
+                                for (int i = 0; i < slots.length; i++)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitLdcInsn(i + 1);
+                                    super.visitVarInsn(Opcodes.ALOAD, slots[i]);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer",
+                                    "accept", "(Ljava/lang/Object;)V", true);
+                            }
+                        };
+                    }
+                }, 0);
+                int expected = owner.equals(PART_WRAPPER) ? 1 : 2;
+                if (matches[0] == expected)
+                    woven.setBytes(writer.toByteArray());
+                write("WEAVE " + owner + " methods=" + matches[0] + "/" + expected
+                    + (matches[0] == expected ? " OK" : " NOT APPLIED"));
+            }
+            catch (Throwable failure)
+            {
+                write("WEAVE FAILED " + failure);
+            }
+        }
+    }
+
     /** Временная диагностика потери привязок; включена до активации проектов, переживает перезапуск. */
     private static final class ApplicationResetDiagnostics implements WeavingHook
     {
@@ -4213,6 +4670,8 @@ public final class Activator
          * к абстрактному «ОбъектМетаданных» добавляются его наследники.
          */
         private static final String PROP_METHOD_TYPES = "tormozit.dynamicFeatureAccess.methodTypes"; //$NON-NLS-1$
+        /** То же для поиска свойств: {@code {типы, ресурс, имя}} → типы. */
+        private static final String PROP_PROPERTY_TYPES = "tormozit.dynamicFeatureAccess.propertyTypes"; //$NON-NLS-1$
         /**
          * Тип части цепочки при её разборе ({@code getTypesForPartByIndex}): {@code {типы, части, индекс}} → типы.
          * Разбор берёт тип найденного члена, а не обращения в тексте, и без этого не видит сужения по условию.
@@ -4225,6 +4684,7 @@ public final class Activator
         {
             System.getProperties().putIfAbsent(PROP_NAMING, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(PROP_METHOD_TYPES, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(PROP_PROPERTY_TYPES, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(PROP_PART_TYPES, (Function<Object[], Object>) args -> args[0]);
             // Основной бандл позже заменит эти функции; до него результат строго штатный.
             System.getProperties().putIfAbsent(PROP_PROPERTY_TRACE, (Function<Object[], Object>) args -> args[0]);
@@ -4485,7 +4945,9 @@ public final class Activator
                         public void visitCode()
                         {
                             super.visitCode();
-                            expandTypesAtEntry(this, 5, "java/util/Collection", PROP_FORM_ITEM_TYPES, -1); //$NON-NLS-1$
+                            // Локальные: 1 — типы, 3 — имя, 5 — ресурс. Свойство ищется только среди собственных
+                            // свойств типа: к «ОбъектМетаданных» добавляются наследники, объявляющие это имя.
+                            expandTypesAtEntry(this, 5, "java/util/Collection", PROP_PROPERTY_TYPES, 3); //$NON-NLS-1$
                             touched.set(true);
                         }
 

@@ -1908,14 +1908,15 @@ public class FormEditorHook implements IStartup
         PropertyInfo selected = getSelectedPropertyInfo(tree);
 
         // Поле реквизита-списка: настройки списка с активным полем набора данных (#1007).
+        // Только при «Произвольный запрос»: без него полей набора данных в настройках нет.
         FormAttribute listAttribute = null;
         PropertyInfo listField = null;
         for (PropertyInfo cur = selected, below = null; cur != null; below = cur, cur = parentPropertyInfo(cur))
         {
             if (cur.getSource() instanceof FormAttribute attribute
-                && attribute.getExtInfo() instanceof DynamicListExtInfo)
+                && attribute.getExtInfo() instanceof DynamicListExtInfo extInfo)
             {
-                if (below != null)
+                if (below != null && extInfo.isCustomQuery())
                 {
                     listAttribute = attribute;
                     listField = below;

@@ -139,6 +139,14 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
+        // #region agent log — временно: типы запроса при открытии модуля
+        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess tempAccess
+            && (RESULT_METHODS.contains(lower(tempAccess.getName())) || "найти".equals(lower(tempAccess.getName()))))
+            Global.tempLog("query-types-open", "getTypes " + (method == null ? "?" : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " ." + tempAccess.getName() + " session=" + (session != null) + " plan=" + (plan != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " planned=" + (planned == null ? "null" : String.valueOf(planned.size())) //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        // #endregion
         if (planned != null)
             return planned;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
@@ -442,7 +450,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         synchronized (lock)
         {
             Session session = session(module.eResource(), true);
-            session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
+            dropStalePlans(session, module);
             for (Method method : module.allMethods())
             {
                 if (cancellation.isCanceled())
@@ -464,6 +472,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             // Без обращений к полям схемы для автопроверки не нужны.
                             if (!plan.hasQueryFieldAccess(cancellation))
                             {
+                                Global.tempLog("query-types-open", "check " + method.getName() + " noQueryFieldAccess"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                                 continue;
                             }
                         }
@@ -483,6 +492,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         if (!plan.queries.isEmpty())
                             session.hasQueries = true;
                         session.plans.put(method, plan);
+                        Global.tempLog("query-types-open", "check " + method.getName() + " prepared types=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + plan.types.size() + " queries=" + plan.queries.size() //$NON-NLS-1$
+                            + " openScope=" + Boolean.TRUE.equals(OPEN_MODULE_CALCULATION.get())); //$NON-NLS-1$
                         if (!plan.types.isEmpty())
                             scheduleTypesRefresh(module.eResource(), node.getOffset());
                     }
@@ -490,6 +502,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 }
                 catch (QuerySchemaUnavailableException failure)
                 {
+                    Global.tempLog("query-types-open", "check " + method.getName() + " schemaUnavailable"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     // Не кэшируем недоступность: следующий расчёт повторит получение схемы.
                     session.plans.remove(method);
                 }
@@ -508,12 +521,25 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return;
         Method method = EcoreUtil2.getContainerOfType(
             BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), xtext, offset), Method.class);
-        ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
+        if (method != null)
+            refresh(resource, method, status, recompute);
+    }
+
+    /**
+     * {@link #refresh(Resource, int, Consumer, Predicate)} для известного метода — проход по всему модулю
+     * без поиска метода по смещению. Вызывающий держит readOnly документа и блокировку перевязки ресурса.
+     */
+    static void refresh(Resource resource, Method method, Consumer<String> status, Predicate<Method> recompute)
+    {
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
         if (node == null)
             return;
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
+        Global.tempLog("query-types-open", "refresh " + method.getName() + " offset=" + node.getOffset() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " previous=" + (previous == null ? "null" : "complete=" + previous.complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " current=" + current(previous, text) + " types=" + previous.types.size())); //$NON-NLS-1$ //$NON-NLS-2$
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -524,18 +550,24 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             // Валидация могла уже подготовить план, не переустанавливая типы BSL.
             if (plan != previous)
                 plan.prepare();
+            Global.tempLog("query-types-open", "refresh " + method.getName() + " planTypes=" + plan.types.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " queries=" + plan.queries.size()); //$NON-NLS-1$
             if (!plan.queries.isEmpty())
                 session.hasQueries = true;
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
             // только он. Старые методы удаляем, чтобы ресурс редактора их не удерживал.
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            long tempCleanStart = System.nanoTime();
             if (module != null)
-                session.plans.keySet().removeIf(old -> !module.allMethods().contains(old));
+                dropStalePlans(session, module);
+            Global.tempLog("query-types-open", "refresh " + method.getName() + " cleanMs=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (System.nanoTime() - tempCleanStart) / 1_000_000 + " plans=" + session.plans.size()); //$NON-NLS-1$
             session.plans.put(method, plan);
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
+                Global.tempLog("query-types-open", "refresh " + method.getName() + " recomputed=" + recomputed); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (!recomputed)
                 {
                     return;
@@ -546,6 +578,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         }
         catch (RuntimeException | LinkageError failure)
         {
+            Global.tempLogException("query-types-open", "refresh " + method.getName(), failure); //$NON-NLS-1$ //$NON-NLS-2$
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
             session.plans.remove(method);
         }
@@ -563,6 +596,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      * типы результатов запросов (поля выборки и выгрузки) оказываются в модели к любому чтению — списку из
      * UI-потока, премиям, подсказкам, переходам, — а не только у тех, кто досчитывает сам перед чтением.
      * Досчёт перед списком и наведением остаётся быстрым путём: при актуальном плане он возвращается сразу.
+     * Изменивший типы досчёт перезапускает проверку модуля: она прошла после разбора, до плана.
      * UI-поток; слушатель ставится один раз на документ.
      */
     static void watchEditor(BslXtextEditor editor)
@@ -590,6 +624,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         private final java.lang.ref.WeakReference<BslXtextEditor> editor;
         private final IXtextDocument document;
         private final Runnable fire = this::fire;
+        /**
+         * Первый досчёт после открытия — по всем методам: тип в методе под кареткой может зависеть от
+         * запроса в другом (параметр по вызову), а правки до сих пор не было.
+         */
+        private boolean wholeModule = true;
 
         EditRefresh(BslXtextEditor editor, IXtextDocument document)
         {
@@ -626,10 +665,17 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 return;
             if (assistOpen(current))
             {
+                Global.tempLog("query-types-open", "fire assistOpen -> retry"); //$NON-NLS-1$ //$NON-NLS-2$
                 restart(widget.getDisplay(), RELINK_ASSIST_RETRY_MS);
                 return;
             }
-            scheduleTypesRefresh(document, viewer.getSelectedRange().x, false);
+            Global.tempLog("query-types-open", "fire offset=" + viewer.getSelectedRange().x //$NON-NLS-1$
+                + " wholeModule=" + wholeModule); //$NON-NLS-1$
+            // Проверка модуля после разбора идёт раньше досчёта плана и ставит маркеры полей по штатным типам.
+            if (wholeModule)
+                scheduleTypesRefresh(document, WHOLE_MODULE, true);
+            wholeModule = false;
+            scheduleTypesRefresh(document, viewer.getSelectedRange().x, true);
         }
     }
 
@@ -655,6 +701,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     }
 
     private static final Map<IXtextDocument, TypeRefreshJob> TYPE_REFRESH_JOBS = new IdentityHashMap<>();
+
+    /** Смещение-признак в очереди досчёта: все методы модуля. */
+    private static final int WHOLE_MODULE = -1;
 
     /** Один читатель документа: запросы методов объединяются, одинаковые смещения не дублируются. */
     private static final class TypeRefreshJob extends Job
@@ -682,6 +731,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             boolean retry = false;
             boolean completed = false;
             int generation = BslDocCommentComputedTypes.typesGeneration();
+            Global.tempLog("query-types-open", "job batch=" + batch //$NON-NLS-1$ //$NON-NLS-2$
+                + " modelCurrent=" + ContentAssistSessionReloader.isModelCurrent(document)); //$NON-NLS-1$
             try
             {
                 if (!ContentAssistSessionReloader.isModelCurrent(document))
@@ -694,16 +745,24 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 {
                     if (monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
                         throw new org.eclipse.core.runtime.OperationCanceledException();
-                    for (Integer offset : batch.keySet())
+                    java.util.Set<Integer> offsets = new java.util.LinkedHashSet<>(batch.keySet());
+                    if (offsets.remove(Integer.valueOf(WHOLE_MODULE)))
+                        BslStructureInsertCommentTypes.refreshQueryTypesForModule(resource, monitor::isCanceled);
+                    long tempStart = System.nanoTime();
+                    for (Integer offset : offsets)
                     {
                         if (monitor.isCanceled())
                             throw new org.eclipse.core.runtime.OperationCanceledException();
                         BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset.intValue(),
                             status -> {}, null, monitor::isCanceled);
                     }
+                    Global.tempLog("query-types-open", "job methods=" + offsets.size() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ms=" + (System.nanoTime() - tempStart) / 1_000_000); //$NON-NLS-1$
                     // Один обход литералов для всех методов пакета, под тем же чтением модели.
-                    BslTempTableSessions.refreshDocument(document, resource,
-                        batch.keySet().stream().mapToInt(Integer::intValue).toArray(), monitor::isCanceled);
+                    // Сеансы временных таблиц — только у методов под кареткой, не у всего модуля.
+                    BslTempTableSessions.refreshDocument(document, resource, batch.keySet().stream()
+                        .mapToInt(Integer::intValue).filter(offset -> offset != WHOLE_MODULE).toArray(),
+                        monitor::isCanceled);
                     return Boolean.TRUE;
                 })));
                 if (!completed || monitor.isCanceled())
@@ -716,11 +775,15 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             catch (RuntimeException | LinkageError failure)
             {
+                Global.tempLogException("query-types-open", "job", failure); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
             {
                 needsValidation |= batch.containsValue(Boolean.TRUE)
                     && generation != BslDocCommentComputedTypes.typesGeneration();
+                Global.tempLog("query-types-open", "job end completed=" + completed + " retry=" + retry //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " needsValidation=" + needsValidation //$NON-NLS-1$
+                    + " generationChanged=" + (generation != BslDocCommentComputedTypes.typesGeneration())); //$NON-NLS-1$
                 synchronized (TYPE_REFRESH_JOBS)
                 {
                     if (retry && WATCHED_DOCUMENTS.containsKey(document))
@@ -760,6 +823,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 scheduleTypesRefresh(document, offset, true);
                 return;
             }
+    }
+
+    /**
+     * Убрать планы методов, которых уже нет в модуле. Методы — один раз в набор по ссылке:
+     * {@code allMethods()} внутри условия строит список на каждый план — квадратично от числа методов
+     * (18 с на проход по модулю БСП из 882 методов).
+     */
+    private static void dropStalePlans(Session session, Module module)
+    {
+        Set<Method> live = Collections.newSetFromMap(new IdentityHashMap<>());
+        live.addAll(module.allMethods());
+        session.plans.keySet().removeIf(old -> !live.contains(old));
     }
 
     private static Session session(Resource resource, boolean create)
