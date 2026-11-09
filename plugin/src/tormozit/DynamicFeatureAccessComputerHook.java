@@ -138,6 +138,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) FormItemTypes::expand);
         System.getProperties().put("tormozit.dynamicFeatureAccess.methodTypes", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.withChildren(FormItemTypes.expand(args), args[1], args[2]));
+        System.getProperties().put("tormozit.dynamicFeatureAccess.partTypes", //$NON-NLS-1$
+            (Function<Object[], Object>) DynamicFeatureAccessComputerHook::partTypes);
         System.getProperties().put("tormozit.bslValidator.checkLastMember",
             (Function<Object[], Object>) DynamicFeatureAccessComputerHook::checkLastMember);
         System.getProperties().put("tormozit.bslValidator.openType", //$NON-NLS-1$
@@ -278,6 +280,31 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             // Остаётся штатное поведение проверки.
         }
         return Boolean.valueOf(enabled);
+    }
+
+    /**
+     * Тип части цепочки при её разборе: {@code {типы, части, индекс}} из {@code getTypesForPartByIndex}. Штатный
+     * разбор считает тип найденного члена, а не обращения в тексте, поэтому сужение условием
+     * {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000) применяется здесь отдельно. Без этого проверка члена после
+     * точки не находила {@code А.Б.Член()}, а {@code unknownLeftPart} видел суженный тип и сообщал об ошибке.
+     */
+    @SuppressWarnings("unchecked")
+    private static Object partTypes(Object[] args)
+    {
+        Object result = args[0];
+        try
+        {
+            if (result instanceof java.util.List<?> types && args[1] instanceof java.util.List<?> parts
+                && args[2] instanceof Integer index && index >= 0 && index < parts.size()
+                && parts.get(index) instanceof DynamicFeatureAccess access)
+                result = BslStructureInsertCommentTypes.arrayExpressionTypes((java.util.List<TypeItem>)types, access,
+                    null);
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            // Остаётся штатный тип части.
+        }
+        return result;
     }
 
     /**

@@ -8,6 +8,7 @@ import java.lang.reflect.Proxy;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -569,7 +570,9 @@ public class GitBaselineFilterHook
             protected IStatus run(IProgressMonitor monitor)
             {
                 purgeBrokenTruncationMarkers();
-                if (!ensureInstalled() && attemptsLeft > 1)
+                boolean installed = ensureInstalled();
+                Global.tempLog("baseline-filter", "install attemptsLeft=" + attemptsLeft + " installed=" + installed); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
+                if (!installed && attemptsLeft > 1)
                     scheduleInstall(attemptsLeft - 1);
                 return Status.OK_STATUS;
             }
@@ -638,6 +641,140 @@ public class GitBaselineFilterHook
         return uid != null && ComfortCheckIds.BSL_AST_TRUNCATION.equals(uid.getCheckId());
     }
 
+    /**
+     * Проблемы схем компоновки по неизменённому файлу схемы. Штатная служба маркеры объектов
+     * ({@code BmObjectMarker}) не скрывает никогда, а проблемы схемы (в т.ч. ошибки запросов наборов
+     * данных хаба {@code bsl-ql-hub}) — именно такие маркеры. Схема, файл которой совпадает с файлом
+     * базовой ветки, ничего нового не вносит — её проблемы скрываются, как EDT скрывает проблемы
+     * неизменённых модулей. Изменённая или новая схема показывает все свои проблемы.
+     */
+    private static final class UnchangedSchemaFiles
+    {
+        /** «Проект/объект маркера» → файл схемы (пусто — объект не из схемы). */
+        private static final Map<String, Optional<org.eclipse.core.resources.IFile>> FILES = new ConcurrentHashMap<>();
+
+        /** Путь файла → итог сравнения для отметки изменения файла и коммита базовой ветки. */
+        private static final Map<String, Object[]> RESULTS = new ConcurrentHashMap<>();
+
+        private UnchangedSchemaFiles() {}
+
+        static boolean contains(Marker marker, org.eclipse.core.resources.IProject project, String baseline)
+        {
+            if (!(marker instanceof com._1c.g5.v8.dt.validation.marker.BmObjectMarker bmMarker) || baseline == null
+                || baseline.isBlank())
+                return false;
+            try
+            {
+                if (FILES.size() > 10_000)
+                    FILES.clear();
+                long objectId = bmMarker.getObjectId();
+                org.eclipse.core.resources.IFile file = FILES
+                    .computeIfAbsent(project.getName() + '/' + objectId,
+                        key -> Optional.ofNullable(schemaFile(project, objectId)))
+                    .orElse(null);
+                boolean unchanged = file != null && unchanged(file, baseline);
+                Global.tempLog("baseline-filter", "dcs objectId=" + objectId + " file=" + file //$NON-NLS-1$ //$NON-NLS-2$
+                    + " baseline=" + baseline + " unchanged=" + unchanged); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
+                return unchanged;
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLog("baseline-filter", "dcs failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$ // #region agent log
+                return false;
+            }
+        }
+
+        private static org.eclipse.core.resources.IFile schemaFile(org.eclipse.core.resources.IProject project,
+            long objectId)
+        {
+            com._1c.g5.v8.dt.core.platform.IBmModelManager models =
+                Global.getOsgiService(com._1c.g5.v8.dt.core.platform.IBmModelManager.class);
+            com._1c.g5.v8.dt.core.platform.IResourceLookup lookup =
+                Global.getOsgiService(com._1c.g5.v8.dt.core.platform.IResourceLookup.class);
+            com._1c.g5.v8.bm.integration.IBmModel model = models == null ? null : models.getModel(project);
+            if (model == null || lookup == null || model.isDisposed())
+                return null;
+            return model.executeReadonlyTask(
+                new com._1c.g5.v8.bm.integration.AbstractBmTask<org.eclipse.core.resources.IFile>(
+                    "comfort.baselineSchemaFile") //$NON-NLS-1$
+                {
+                    @Override
+                    public org.eclipse.core.resources.IFile execute(com._1c.g5.v8.bm.core.IBmTransaction transaction,
+                        IProgressMonitor monitor)
+                    {
+                        for (org.eclipse.emf.ecore.EObject object = transaction.getObjectById(objectId); object != null;
+                            object = object.eContainer())
+                        {
+                            if (object instanceof com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema schema)
+                                return lookup.getPlatformResource(schema);
+                        }
+                        return null;
+                    }
+                }, true);
+        }
+
+        private static boolean unchanged(org.eclipse.core.resources.IFile file, String baseline)
+        {
+            org.eclipse.egit.core.project.RepositoryMapping mapping =
+                org.eclipse.egit.core.project.RepositoryMapping.getMapping(file);
+            org.eclipse.jgit.lib.Repository repository = mapping == null ? null : mapping.getRepository();
+            String path = mapping == null ? null : mapping.getRepoRelativePath(file);
+            if (repository == null || path == null || !file.exists())
+                return false;
+            try
+            {
+                org.eclipse.jgit.lib.ObjectId commit = repository.resolve(baseline);
+                if (commit == null)
+                    return false;
+                long stamp = file.getModificationStamp();
+                Object[] cached = RESULTS.get(file.getFullPath().toString());
+                if (cached != null && ((Long)cached[0]).longValue() == stamp && commit.equals(cached[1]))
+                    return ((Boolean)cached[2]).booleanValue();
+                boolean result = sameContent(repository, commit, path, file);
+                RESULTS.put(file.getFullPath().toString(), new Object[] { stamp, commit.copy(), result });
+                return result;
+            }
+            catch (java.io.IOException | org.eclipse.core.runtime.CoreException e)
+            {
+                return false;
+            }
+        }
+
+        private static boolean sameContent(org.eclipse.jgit.lib.Repository repository,
+            org.eclipse.jgit.lib.ObjectId commitId, String path, org.eclipse.core.resources.IFile file)
+            throws java.io.IOException, org.eclipse.core.runtime.CoreException
+        {
+            try (org.eclipse.jgit.revwalk.RevWalk walk = new org.eclipse.jgit.revwalk.RevWalk(repository))
+            {
+                org.eclipse.jgit.revwalk.RevCommit commit = walk.parseCommit(commitId);
+                try (org.eclipse.jgit.treewalk.TreeWalk tree =
+                    org.eclipse.jgit.treewalk.TreeWalk.forPath(repository, path, commit.getTree()))
+                {
+                    // Файла нет в базовой ветке — схема новая.
+                    if (tree == null)
+                        return false;
+                    byte[] base = repository.open(tree.getObjectId(0)).getBytes();
+                    byte[] current;
+                    try (java.io.InputStream in = file.getContents(true))
+                    {
+                        current = in.readAllBytes();
+                    }
+                    // Концы строк рабочей копии зависят от core.autocrlf — сравниваем без CR.
+                    return java.util.Arrays.equals(withoutCr(base), withoutCr(current));
+                }
+            }
+        }
+
+        private static byte[] withoutCr(byte[] bytes)
+        {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(bytes.length);
+            for (byte b : bytes)
+                if (b != '\r')
+                    out.write(b);
+            return out.toByteArray();
+        }
+    }
+
     /** Делегирует настоящей службе всё, кроме решения о скрытии исключённых проблем. */
     private static final class ExemptingHandler
         implements InvocationHandler
@@ -666,11 +803,52 @@ public class GitBaselineFilterHook
 
             try
             {
-                return method.invoke(origin, args);
+                Object result = method.invoke(origin, args);
+                if (SHOULD_SKIP_MARKER.equals(name) && Boolean.FALSE.equals(result) && args != null
+                    && args.length == 2 && args[0] instanceof Marker marker
+                    && args[1] instanceof org.eclipse.core.resources.IProject project
+                    && origin.isFiltrationEnabledForProject(project)
+                    && UnchangedSchemaFiles.contains(marker, project, origin.getBaselineName(project)))
+                    result = Boolean.TRUE;
+                tempLogDecision(name, args, result, null); // #region agent log
+                return result;
             }
             catch (InvocationTargetException e)
             {
+                tempLogDecision(name, args, null, e.getCause()); // #region agent log
                 throw e.getCause() != null ? e.getCause() : e;
+            }
+        }
+
+        /** Временный лог: каждое решение об исключении по базовой ветке (скрытие проблем СКД). */
+        private static void tempLogDecision(String name, Object[] args, Object result, Throwable failure)
+        {
+            if (!SHOULD_SKIP_ISSUE.equals(name) && !SHOULD_SKIP_MARKER.equals(name))
+                return;
+            try
+            {
+                StringBuilder line = new StringBuilder(name).append(" result=").append(result);
+                if (failure != null)
+                    line.append(" failure=").append(failure);
+                if (args != null && args.length > 0 && args[0] instanceof Marker marker)
+                {
+                    line.append(" class=").append(marker.getClass().getSimpleName())
+                        .append(" check=").append(marker.getCheckId())
+                        .append(" feature=").append(marker.getFeatureId())
+                        .append(" msg=").append(marker.getMessage())
+                        .append(" extra=").append(marker.getExtraInfo());
+                    if (marker instanceof com._1c.g5.v8.dt.validation.marker.PlainEObjectMarker plain)
+                        line.append(" uri=").append(plain.getURI());
+                    if (marker instanceof com._1c.g5.v8.dt.validation.marker.BmObjectMarker bm)
+                        line.append(" objectId=").append(bm.getObjectId());
+                }
+                else if (args != null)
+                    line.append(" args=").append(java.util.Arrays.toString(args));
+                Global.tempLog("baseline-filter", line.toString()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                Global.tempLog("baseline-filter", name + " log failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 

@@ -4213,11 +4213,19 @@ public final class Activator
          * к абстрактному «ОбъектМетаданных» добавляются его наследники.
          */
         private static final String PROP_METHOD_TYPES = "tormozit.dynamicFeatureAccess.methodTypes"; //$NON-NLS-1$
+        /**
+         * Тип части цепочки при её разборе ({@code getTypesForPartByIndex}): {@code {типы, части, индекс}} → типы.
+         * Разбор берёт тип найденного члена, а не обращения в тексте, и без этого не видит сужения по условию.
+         */
+        private static final String PROP_PART_TYPES = "tormozit.dynamicFeatureAccess.partTypes"; //$NON-NLS-1$
+        private static final String PART_TYPES_DESC = "(Ljava/util/List;ILcom/_1c/g5/v8/dt/mcore/util/Environments;" //$NON-NLS-1$
+            + "Lorg/eclipse/xtext/util/CancelIndicator;)Ljava/util/List;"; //$NON-NLS-1$
 
         static void install(BundleContext context)
         {
             System.getProperties().putIfAbsent(PROP_NAMING, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(PROP_METHOD_TYPES, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(PROP_PART_TYPES, (Function<Object[], Object>) args -> args[0]);
             // Основной бандл позже заменит эти функции; до него результат строго штатный.
             System.getProperties().putIfAbsent(PROP_PROPERTY_TRACE, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(PROP_ALL_MEMBERS, (Function<Object[], Object>) args -> args[0]);
@@ -4405,6 +4413,50 @@ public final class Activator
                                     super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
                                         "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
                                     super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection"); //$NON-NLS-1$
+                                    touched.set(true);
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    // Тип части цепочки: результат → функция({результат, части, индекс}). Локальные: 1 — части, 2 — индекс.
+                    if (mv != null && "getTypesForPartByIndex".equals(name) && PART_TYPES_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.ARETURN)
+                                {
+                                    // Стек: результат.
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                                    super.visitLdcInsn(PROP_PART_TYPES);
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.SWAP);
+                                    // Стек: функция, результат.
+                                    super.visitInsn(Opcodes.ICONST_3);
+                                    super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.DUP_X1);
+                                    super.visitInsn(Opcodes.SWAP);
+                                    // Стек: функция, массив, массив, результат.
+                                    super.visitInsn(Opcodes.ICONST_0);
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitInsn(Opcodes.ICONST_1);
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitInsn(Opcodes.DUP);
+                                    super.visitInsn(Opcodes.ICONST_2);
+                                    super.visitVarInsn(Opcodes.ILOAD, 2);
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "(I)Ljava/lang/Integer;", false); //$NON-NLS-1$
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/List"); //$NON-NLS-1$
                                     touched.set(true);
                                 }
                                 super.visitInsn(opcode);
