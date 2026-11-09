@@ -63,7 +63,18 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.eclipse.ui.views.properties.IPropertySheetPage;
+
+import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import org.osgi.framework.Bundle;
 
 import com._1c.g5.v8.bm.core.IBmObject;
@@ -160,6 +171,23 @@ public final class SpreadsheetMergeWindow
     {
     }
 
+    /** Открытые окна по ключу (узел дерева сравнения): повторное открытие активирует окно. */
+    private static final java.util.Map<Object, Shell> OPEN_WINDOWS = new java.util.HashMap<>();
+
+    /**
+     * Полное имя макета для заголовка: подпись основной стороны без приписки «(источник)» в конце
+     * (подпись имеет вид «ОбщийМакет.ТаблДок1 (Рабочий каталог)»).
+     */
+    private static String templateName(Side main)
+    {
+        String label = main != null ? main.label() : null;
+        if (label == null || label.isBlank())
+            return ""; //$NON-NLS-1$
+        int bracket = label.lastIndexOf(" ("); //$NON-NLS-1$
+        String name = bracket > 0 && label.endsWith(")") ? label.substring(0, bracket) : label; //$NON-NLS-1$
+        return " — " + name; //$NON-NLS-1$
+    }
+
     /**
      * Запись XML в документ штатного просмотрщика сравнения (результата или левой стороны):
      * дальше изменения сохраняет штатная кнопка «ОК» окна сравнения.
@@ -190,8 +218,22 @@ public final class SpreadsheetMergeWindow
      *     по «ОК»: в узел плана объединения и/или штатный просмотрщик; {@code null} — записать некуда
      */
     public static void open(Shell parent, IDtProject dtProject, Side main, Side other, Side ancestor, Side result,
-        Consumer<String> writer)
+        Consumer<String> writer, Object key)
     {
+        // Повторное открытие той же строки дерева сравнения активирует ранее открытое окно
+        Shell existing = key != null ? OPEN_WINDOWS.get(key) : null;
+        if (existing != null && !existing.isDisposed())
+        {
+            tempLog("open: окно уже открыто, активируем"); //$NON-NLS-1$
+            if (existing.getMinimized())
+                existing.setMinimized(false);
+            var hwnd = WinWindowActivator.hwndFromShell(existing);
+            if (hwnd != null)
+                WinWindowActivator.activateWindowOnUiThread(hwnd);
+            else
+                existing.forceActive();
+            return;
+        }
         tempLog("open: project=" + (dtProject != null ? dtProject.getName() : null) //$NON-NLS-1$
             + ", main=" + describe(main) + ", other=" + describe(other) //$NON-NLS-1$ //$NON-NLS-2$
             + ", ancestor=" + describe(ancestor) + ", result=" + describe(result) //$NON-NLS-1$ //$NON-NLS-2$
@@ -207,9 +249,15 @@ public final class SpreadsheetMergeWindow
             tempLog("presentationService: исключение " + stackTrace(e)); //$NON-NLS-1$
         }
 
-        Shell shell = new Shell(parent, SWT.SHELL_TRIM | SWT.APPLICATION_MODAL);
-        shell.setText(Global.withPluginWindowTitle(MENU_LABEL));
+        Shell shell = new Shell(parent, SWT.SHELL_TRIM);
+        // Не модальное: свойства области правятся в панели «Свойства» главного окна
+        shell.setText(Global.withPluginWindowTitle(MENU_LABEL + templateName(main)));
         shell.setLayout(new GridLayout(1, false));
+        if (key != null)
+        {
+            OPEN_WINDOWS.put(key, shell);
+            shell.addDisposeListener(e -> OPEN_WINDOWS.remove(key, shell));
+        }
 
         boolean threeWay = result != null;
         // Правится только результат объединения, а без него (двустороннее сравнение) — основная сторона
@@ -261,7 +309,28 @@ public final class SpreadsheetMergeWindow
 
         Rectangle parentBounds = parent != null && !parent.isDisposed() ? parent.getBounds() : null;
         if (parentBounds != null)
+        {
+            // Окно не должно закрывать панель «Свойства»: она остаётся рядом и доступна для правки
+            Rectangle sheet = Session.openSheetBounds();
+            tempLog("open: панель свойств=" + sheet + " окно=" + parentBounds); //$NON-NLS-1$ //$NON-NLS-2$
+            if (sheet != null && sheet.intersects(parentBounds))
+            {
+                int parentRight = parentBounds.x + parentBounds.width;
+                int parentBottom = parentBounds.y + parentBounds.height;
+                if (sheet.x >= parentBounds.x + parentBounds.width / 2)
+                    parentBounds.width = Math.max(600, sheet.x - parentBounds.x);
+                else if (sheet.x + sheet.width <= parentBounds.x + parentBounds.width / 2)
+                {
+                    parentBounds.x = sheet.x + sheet.width;
+                    parentBounds.width = Math.max(600, parentRight - parentBounds.x);
+                }
+                else if (sheet.y >= parentBounds.y + parentBounds.height / 2)
+                    parentBounds.height = Math.max(400, sheet.y - parentBounds.y);
+                else
+                    parentBounds.height = Math.max(400, parentBottom - (sheet.y + sheet.height));
+            }
             shell.setBounds(parentBounds);
+        }
         else
             shell.setSize(1200, 800);
         shell.open();
@@ -1359,6 +1428,7 @@ public final class SpreadsheetMergeWindow
                 panes.add(ancestor);
             resultPane = result;
             target = resultPane != null ? resultPane : main.editable ? main : null;
+            sheetPane = target != null ? target : main;
             try
             {
                 for (Pane pane : allPanes())
@@ -1387,9 +1457,152 @@ public final class SpreadsheetMergeWindow
             Listener check = e -> afterUserMove(pane);
             control.addListener(SWT.MouseUp, check);
             control.addListener(SWT.KeyUp, check);
-            control.addSelectionChangedListener(e -> afterUserMove(pane));
+            // Окно само переставляет выделение в остальных сторонах (синхронизация) — в панель «Свойства»
+            // отдаётся только сторона, в которой работает пользователь, иначе панель показывала бы
+            // свойства чужой стороны (и не давала бы править редактируемую)
+            control.addSelectionChangedListener(e -> {
+                afterUserMove(pane);
+                if (pane == sheetPane)
+                    showInProperties(pane);
+            });
+            control.addListener(SWT.FocusIn, e -> {
+                sheetPane = pane;
+                showInProperties(pane);
+            });
             // Окно — не редактор табличного документа: штатный обработчик Copy здесь не активен
             CopyCommandSupport.wireCopyOverride(control, () -> copySelection(pane));
+        }
+
+        /** Сторона, свойства которой сейчас в панели «Свойства»: та, что последней получила фокус. */
+        private Pane sheetPane;
+        private IPropertySheetPage sheetPage;
+        private IWorkbenchPart sheetPart;
+        private ISelection sheetBefore;
+        private boolean sheetResolved;
+
+        /**
+         * Свойства текущей области стороны — в штатной панели «Свойства»: окно не часть воркбенча,
+         * поэтому выделение {@code MoxelControl} отдаётся странице панели напрямую
+         * ({@code IPropertySheetPage.selectionChanged}), как в {@code FormEditorHook}. Что панель
+         * показывала до окна, возвращается при закрытии.
+         */
+        private void showInProperties(Pane pane)
+        {
+            Display display = shell.getDisplay();
+            // Выделение контрола обновляется после уведомления слушателей — читаем позже
+            display.asyncExec(() -> {
+                if (shell.isDisposed() || pane.control.isDisposed())
+                    return;
+                try
+                {
+                    if (!sheetResolved)
+                        resolveSheet();
+                    ISelection selection = pane.control.getSelection();
+                    tempLog("properties: [" + pane.label + "] page=" + (sheetPage != null) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " selection=" + (selection == null ? "null" : selection.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " empty=" + selection.isEmpty())); //$NON-NLS-1$
+                    if (sheetPage != null && selection != null && !selection.isEmpty())
+                        sheetPage.selectionChanged(sheetPart, selection);
+                }
+                catch (RuntimeException | LinkageError e)
+                {
+                    tempLog("properties: исключение " + stackTrace(e)); //$NON-NLS-1$
+                }
+            });
+        }
+
+        private void resolveSheet()
+        {
+            sheetResolved = true;
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage workbenchPage = window != null ? window.getActivePage() : null;
+            if (workbenchPage == null)
+                return;
+            IViewPart view = findSheetView(workbenchPage);
+            tempLog("properties: панель открыта=" + (view != null)); //$NON-NLS-1$
+            if (view == null && workbenchPage.getActiveEditor() != null)
+            {
+                // Панель не открыта — открываем штатной командой «Свойства»
+                ShowPropertiesHandler.run(workbenchPage.getActiveEditor().getSite());
+                view = findSheetView(workbenchPage);
+                tempLog("properties: после команды открыта=" + (view != null)); //$NON-NLS-1$
+            }
+            if (view != null)
+            {
+                Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+                tempLog("properties: страница=" + (page == null ? "null" : page.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                if (page instanceof IPropertySheetPage sheet)
+                {
+                    sheetPage = sheet;
+                    sheetPart = workbenchPage.getActiveEditor() != null ? workbenchPage.getActiveEditor() : view;
+                    Object before = Global.invoke(page, "getCurrentSelection"); //$NON-NLS-1$
+                    sheetBefore = before instanceof ISelection s ? s : null;
+                    shell.addDisposeListener(e -> restoreSheet());
+                }
+            }
+        }
+
+        /** Границы панели «Свойства» на экране; панель открывается и выводится наверх, если её не видно. */
+        static Rectangle openSheetBounds()
+        {
+            try
+            {
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage workbenchPage = window != null ? window.getActivePage() : null;
+                if (workbenchPage == null)
+                    return null;
+                IViewPart view = findSheetView(workbenchPage);
+                if (view == null && workbenchPage.getActiveEditor() != null)
+                {
+                    ShowPropertiesHandler.run(workbenchPage.getActiveEditor().getSite());
+                    view = findSheetView(workbenchPage);
+                }
+                if (view == null)
+                {
+                    tempLog("properties: панель не найдена, active=" //$NON-NLS-1$
+                        + (workbenchPage.getActiveEditor() != null)); //$NON-NLS-1$
+                    return null;
+                }
+                // getView(true) лишь создаёт представление; показывает его showView
+                boolean visibleBefore = workbenchPage.isPartVisible(view);
+                IViewPart shown = workbenchPage.showView(view.getSite().getId(), null,
+                    IWorkbenchPage.VIEW_VISIBLE);
+                tempLog("properties: id=" + view.getSite().getId() + " видна до=" + visibleBefore //$NON-NLS-1$ //$NON-NLS-2$
+                    + " после=" + workbenchPage.isPartVisible(shown)); //$NON-NLS-1$
+                Object book = Global.invoke(view, "getPageBook"); //$NON-NLS-1$
+                if (!(book instanceof Control control) || control.isDisposed() || control.getParent() == null)
+                    return null;
+                return control.getDisplay().map(control.getParent(), null, control.getBounds());
+            }
+            catch (PartInitException | RuntimeException | LinkageError e)
+            {
+                tempLog("properties: границы: исключение " + stackTrace(e)); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private static IViewPart findSheetView(IWorkbenchPage workbenchPage)
+        {
+            for (IViewReference reference : workbenchPage.getViewReferences())
+            {
+                IViewPart view = reference.getView(true);
+                if (view != null && PropertyNameIdentifierHook.isPropertySheetView(view))
+                    return view;
+            }
+            return null;
+        }
+
+        private void restoreSheet()
+        {
+            try
+            {
+                if (sheetPage != null && sheetBefore != null && !sheetBefore.isEmpty())
+                    sheetPage.selectionChanged(sheetPart, sheetBefore);
+            }
+            catch (RuntimeException | LinkageError e)
+            {
+                tempLog("properties: возврат: исключение " + stackTrace(e)); //$NON-NLS-1$
+            }
         }
 
         /**

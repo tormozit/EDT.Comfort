@@ -24,6 +24,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
@@ -132,13 +133,23 @@ public final class CompareDialogCurrentLinesHook
             else
                 leftLabel += SAVED_RESULT_SUFFIX;
         }
-        SpreadsheetMergeWindow.open(parent,
+        // Окно «Сравнение текста» закрывается сразу после открытия окна объединения, поэтому владелец —
+        // главное окно: дочерние окна закрываются вместе с владельцем
+        Shell owner = parent;
+        if (dialogShell != null && PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null)
+            owner = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getShell();
+        SpreadsheetMergeWindow.open(owner,
             IrCompareValuesHandler.resolveDtProjectForCompare(
                 CompareTabularDocumentsInIr.resolveWorkspaceFile(left),
                 CompareTabularDocumentsInIr.resolveWorkspaceFile(right)),
             new SpreadsheetMergeWindow.Side(leftLabel, uiLeft),
             new SpreadsheetMergeWindow.Side(rightLabel, uiRight),
-            null, null, writer);
+            null, null, writer, node);
+        if (dialogShell != null && !dialogShell.isDisposed())
+            dialogShell.getDisplay().asyncExec(() -> {
+                if (!dialogShell.isDisposed())
+                    dialogShell.close();
+            });
     }
 
     private static boolean isDtCompareEditorInput(Object input)

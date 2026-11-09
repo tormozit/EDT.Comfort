@@ -665,15 +665,28 @@ public final class TextMergeEditorHook
             Global.getField(provider, "node") instanceof IPartialModelNode node ? node : null, "result"); //$NON-NLS-1$ //$NON-NLS-2$
         Consumer<String> viewerWriter = SpreadsheetMergeWindow.viewerWriter(
             MergeViewerReflection.extractSourceViewer(viewer, "resultViewer"), "result"); //$NON-NLS-1$ //$NON-NLS-2$
-        Consumer<String> writer = planWriter == null ? viewerWriter
+        // Диалог закрывается сразу после открытия окна объединения: его просмотрщик результата уже
+        // недоступен, результат пишется только в план (без плана диалог остаётся открытым)
+        boolean closeDialog = planWriter != null && provider instanceof Window;
+        Consumer<String> writer = closeDialog ? planWriter : planWriter == null ? viewerWriter
             : viewerWriter == null ? planWriter : planWriter.andThen(viewerWriter);
-        SpreadsheetMergeWindow.open(viewerControl.getShell(), resolveDtProjectForMerge(provider, viewer),
+        IWorkbenchWindow workbenchWindow = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        Shell owner = closeDialog && workbenchWindow != null ? workbenchWindow.getShell() : viewerControl.getShell();
+        SpreadsheetMergeWindow.open(owner, resolveDtProjectForMerge(provider, viewer),
             new SpreadsheetMergeWindow.Side(labelOrDefault(sideLabels[0], DEFAULT_LEFT_LABEL), mergeInput.getLeft()),
             new SpreadsheetMergeWindow.Side(labelOrDefault(sideLabels[1], DEFAULT_RIGHT_LABEL), mergeInput.getRight()),
             ancestor != null ? new SpreadsheetMergeWindow.Side(ANCESTOR_SIDE_LABEL, ancestor) : null,
             new SpreadsheetMergeWindow.Side(labelOrDefault(resolveResultSideLabel(viewer, mergeInput),
                 DEFAULT_RESULT_LABEL), mergeInput.getMergeResult()),
-            writer);
+            writer, Global.getField(provider, "node")); //$NON-NLS-1$
+        if (closeDialog && ((Window) provider).getShell() != null)
+        {
+            Shell dialogShell = ((Window) provider).getShell();
+            dialogShell.getDisplay().asyncExec(() -> {
+                if (!dialogShell.isDisposed())
+                    dialogShell.close();
+            });
+        }
     }
 
     private static IDtProject resolveDtProjectForMerge(IThreeSideTextMergeViewerProvider provider,
