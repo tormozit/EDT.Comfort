@@ -224,7 +224,6 @@ public final class SpreadsheetMergeWindow
         Shell existing = key != null ? OPEN_WINDOWS.get(key) : null;
         if (existing != null && !existing.isDisposed())
         {
-            tempLog("open: окно уже открыто, активируем"); //$NON-NLS-1$
             if (existing.getMinimized())
                 existing.setMinimized(false);
             var hwnd = WinWindowActivator.hwndFromShell(existing);
@@ -312,7 +311,6 @@ public final class SpreadsheetMergeWindow
         {
             // Окно не должно закрывать панель «Свойства»: она остаётся рядом и доступна для правки
             Rectangle sheet = Session.openSheetBounds();
-            tempLog("open: панель свойств=" + sheet + " окно=" + parentBounds); //$NON-NLS-1$ //$NON-NLS-2$
             if (sheet != null && sheet.intersects(parentBounds))
             {
                 int parentRight = parentBounds.x + parentBounds.width;
@@ -1498,9 +1496,6 @@ public final class SpreadsheetMergeWindow
                     if (!sheetResolved)
                         resolveSheet();
                     ISelection selection = pane.control.getSelection();
-                    tempLog("properties: [" + pane.label + "] page=" + (sheetPage != null) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " selection=" + (selection == null ? "null" : selection.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " empty=" + selection.isEmpty())); //$NON-NLS-1$
                     if (sheetPage != null && selection != null && !selection.isEmpty())
                         sheetPage.selectionChanged(sheetPart, selection);
                 }
@@ -1519,18 +1514,15 @@ public final class SpreadsheetMergeWindow
             if (workbenchPage == null)
                 return;
             IViewPart view = findSheetView(workbenchPage);
-            tempLog("properties: панель открыта=" + (view != null)); //$NON-NLS-1$
             if (view == null && workbenchPage.getActiveEditor() != null)
             {
                 // Панель не открыта — открываем штатной командой «Свойства»
                 ShowPropertiesHandler.run(workbenchPage.getActiveEditor().getSite());
                 view = findSheetView(workbenchPage);
-                tempLog("properties: после команды открыта=" + (view != null)); //$NON-NLS-1$
             }
             if (view != null)
             {
                 Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
-                tempLog("properties: страница=" + (page == null ? "null" : page.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
                 if (page instanceof IPropertySheetPage sheet)
                 {
                     sheetPage = sheet;
@@ -1558,17 +1550,9 @@ public final class SpreadsheetMergeWindow
                     view = findSheetView(workbenchPage);
                 }
                 if (view == null)
-                {
-                    tempLog("properties: панель не найдена, active=" //$NON-NLS-1$
-                        + (workbenchPage.getActiveEditor() != null)); //$NON-NLS-1$
                     return null;
-                }
                 // getView(true) лишь создаёт представление; показывает его showView
-                boolean visibleBefore = workbenchPage.isPartVisible(view);
-                IViewPart shown = workbenchPage.showView(view.getSite().getId(), null,
-                    IWorkbenchPage.VIEW_VISIBLE);
-                tempLog("properties: id=" + view.getSite().getId() + " видна до=" + visibleBefore //$NON-NLS-1$ //$NON-NLS-2$
-                    + " после=" + workbenchPage.isPartVisible(shown)); //$NON-NLS-1$
+                workbenchPage.showView(view.getSite().getId(), null, IWorkbenchPage.VIEW_VISIBLE);
                 Object book = Global.invoke(view, "getPageBook"); //$NON-NLS-1$
                 if (!(book instanceof Control control) || control.isDisposed() || control.getParent() == null)
                     return null;
