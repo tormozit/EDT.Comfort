@@ -1,0 +1,84 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?artifactRepository version='1.1.0'?>
+<repository name='Update Site' type='org.eclipse.equinox.p2.artifact.repository.simpleRepository' version='1.0.0'>
+  <properties size='2'>
+    <property name='p2.timestamp' value='1793054665382'/>
+    <property name='p2.compressed' value='true'/>
+  </properties>
+  <mappings size='3'>
+    <rule filter='(&amp; (classifier=osgi.bundle))' output='${repoUrl}/plugins/${id}_${version}.jar'/>
+    <rule filter='(&amp; (classifier=binary))' output='${repoUrl}/binary/${id}_${version}'/>
+    <rule filter='(&amp; (classifier=org.eclipse.update.feature))' output='${repoUrl}/features/${id}_${version}.jar'/>
+  </mappings>
+  <artifacts size='10'>
+    <artifact classifier='osgi.bundle' id='org.jsoup' version='1.16.1'>
+      <properties size='4'>
+        <property name='artifact.size' value='443295'/>
+        <property name='download.size' value='443295'/>
+        <property name='download.checksum.sha-512' value='7361e52006735b7588b291067226e6be0128161bea01a11d6ef4425b5815f08cf36db9f52e3a7afcbaa322f510df4084bee1fdff379521ddd5d6d326d2b9f3c3'/>
+        <property name='download.checksum.sha-256' value='1f115726540ddf71958c14bc517ebfc49cf481e91cd917b0face84f01272e901'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007'>
+      <properties size='4'>
+        <property name='artifact.size' value='12166'/>
+        <property name='download.size' value='12166'/>
+        <property name='download.checksum.sha-512' value='951848b11af748df3079c1c394f6a2b3f54263333ed7bb21f330cccdcf9f29106aef1507659b03b5f3c57cb60116c96c5960fa3fa16264fa135e50fffd60d6c6'/>
+        <property name='download.checksum.sha-256' value='c1c043481c10b9b40157ce95e25e34372b0e853c14878b6ed4a7f7109a83a2ef'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007'>
+      <properties size='4'>
+        <property name='artifact.size' value='380377'/>
+        <property name='download.size' value='380377'/>
+        <property name='download.checksum.sha-512' value='c48ee015602d12890a3402a95066434d6263c64903242496402cc6b49df2d697415bc06bc1c91d22dba7d9267d80d0291ba072f785abd008636c50d1ae972375'/>
+        <property name='download.checksum.sha-256' value='6983d7a6ebc6ca5ec3f64820615f1f0c74f34a722cde30220ed1acd4649ec8a7'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007'>
+      <properties size='4'>
+        <property name='artifact.size' value='15795'/>
+        <property name='download.size' value='15795'/>
+        <property name='download.checksum.sha-512' value='3cf325eb019b49a8ccc27fe85365e4b20e661eb4dc67ca51c8a4f3822dca48370a2c0b8ed8e620013729a8294318da07f63a786447e46806cfbe0edf6108a0c6'/>
+        <property name='download.checksum.sha-256' value='95411427dc990f5668158c18854e5ad1daa61994862dd78b4db778658c38b895'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.6.202610270144'>
+      <properties size='1'>
+        <property name='download.size' value='10516074'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007'>
+      <properties size='4'>
+        <property name='artifact.size' value='454318'/>
+        <property name='download.size' value='454318'/>
+        <property name='download.checksum.sha-512' value='90c3a3f077b32d74186a1a16335e46a5656cc6d369c5a6ca8238ae65c7c9489dc7f56ddd9b2c01a25d38898456c5272635448a6b882b0f0b05ca950229da5ac2'/>
+        <property name='download.checksum.sha-256' value='49755bbc1342010ef69ea8d1f80090a9337117cd9f4399300af4d51c29dec2a4'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007'>
+      <properties size='4'>
+        <property name='artifact.size' value='85756'/>
+        <property name='download.size' value='85756'/>
+        <property name='download.checksum.sha-512' value='3df014e3ed597ce6c4811e6c4e3a96e70141100f882cd4fe378b382f1b30eb47cc19df2752f1884366a10a66e719d49a0df67cac84ec4d261ce613ed11a40648'/>
+        <property name='download.checksum.sha-256' value='dbe0a02ea318296b0259e3fa4ba976ce4712af2aa859ce3237be04b7f49405a1'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort.checks' version='1.0.23'>
+      <properties size='1'>
+        <property name='download.size' value='78643'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.6.202610270144'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='1460'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort.early' version='1.0.1.202610270144'>
+      <properties size='1'>
+        <property name='download.size' value='116723'/>
+      </properties>
+    </artifact>
+  </artifacts>
+</repository>
