@@ -549,10 +549,19 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
          * таблицы и т. п.) проверяются только для вызова метода: динамические у них ключи, а не методы. Метод
          * ли помечаемый элемент, определяется не по последнему обращению цепочки, а по самому помечаемому — части
          * с номером {@code index - 1}: в {@code Выборка.Поле.Выгрузить()} помечалось бы поле выборки.
+         * Набор типов с {@code Undefined} означает, что часть цепочки в этом прогоне не типизирована: член не
+         * проверяется, остаётся штатный пропуск EDT.
          */
         static String validatorOpenType(Object typeName, Object access, Object parts, Object index, Object typeNames)
         {
             String name = String.valueOf(typeName);
+            // В наборе есть Undefined: часть цепочки в этом прогоне не типизирована (поле выгрузки запроса, пока
+            // нет плана), и метод у остальных типов не доказывает, что член существует, — остаётся штатный
+            // пропуск EDT (#1028).
+            boolean undefined = typeNames instanceof java.util.Collection<?> unknownTypes
+                && unknownTypes.contains("Undefined"); //$NON-NLS-1$
+            if (undefined)
+                return name;
             // Член найден, но EDT считает его неизвестным: isUnknownDFAPart принимает любое DerivedProperty без
             // source за заглушку имени, которую поиск создаёт для неизвестного элемента коллекции. Такое же свойство
             // без source объявляет и контекст формы (ПодчиненныеЭлементы группы). Объявленное в ContextDef — не

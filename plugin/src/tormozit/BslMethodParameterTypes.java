@@ -129,11 +129,6 @@ public final class BslMethodParameterTypes
             java.util.Set<?> bypass;
             /** Затронутые ключи идущих свежих расчётов, от внешнего к внутреннему. */
             final java.util.ArrayDeque<java.util.Set<String>> touched = new java.util.ArrayDeque<>();
-            // Временная диагностика: счётчики области.
-            int hits;
-            int computedCount;
-            int stock;
-            final long started = System.nanoTime();
         }
 
         private record Item(Object value, boolean free) {}
@@ -146,10 +141,8 @@ public final class BslMethodParameterTypes
                 return;
             System.getProperties().put(CALLBACK,
                 (java.util.function.Function<Object[], Object>) ReturnTypesMemo::apply);
-            boolean begin = chain(".begin", true); //$NON-NLS-1$
-            boolean end = chain(".end", false); //$NON-NLS-1$
-            Global.tempLog("return-memo", "install begin=" + begin + " end=" + end //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " early=" + (System.getProperties().get(CALLBACK) != null)); //$NON-NLS-1$
+            chain(".begin", true); //$NON-NLS-1$
+            chain(".end", false); //$NON-NLS-1$
         }
 
         @SuppressWarnings("unchecked")
@@ -194,14 +187,7 @@ public final class BslMethodParameterTypes
         {
             Scope scope = isScopeCheck(check) ? SCOPE.get() : null;
             if (scope != null && --scope.depth <= 0)
-            {
                 SCOPE.remove();
-                Global.tempLog("return-memo", "scope ms=" + (System.nanoTime() - scope.started) / 1_000_000 //$NON-NLS-1$ //$NON-NLS-2$
-                    + " entries=" + scope.memo.size() + " computed=" + scope.computedCount //$NON-NLS-1$ //$NON-NLS-2$
-                    + " hits=" + scope.hits + " stock=" + scope.stock //$NON-NLS-1$ //$NON-NLS-2$
-                    + " woven=" + System.getProperties().get(CALLBACK + ".woven") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-            }
         }
 
         static void consulted(String key)
@@ -268,16 +254,10 @@ public final class BslMethodParameterTypes
                 touched.addAll(fresh);
                 entry = new Entry(snapshot(computed), java.util.Set.copyOf(fresh), java.util.Set.copyOf(touched));
                 scope.memo.put(key, entry);
-                scope.computedCount++;
             }
-            else
-                scope.hits++;
             for (String reached : entry.touched)
                 if (visited.contains(reached))
-                {
-                    scope.stock++;
                     return null;
-                }
             for (java.util.Set<String> outer : scope.touched)
                 outer.addAll(entry.touched);
             ((java.util.Set<Object>) visited).addAll(entry.added);

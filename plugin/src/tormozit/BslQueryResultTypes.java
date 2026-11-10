@@ -94,20 +94,34 @@ import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldDef;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewDef;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewElement;
+import com._1c.g5.v8.dt.metadata.dbview.DbViewFieldTableDef;
 import com._1c.g5.v8.dt.metadata.dbview.DbViewVirtualFieldDef;
+import com._1c.g5.v8.dt.metadata.dbview.Table;
+import com._1c.g5.v8.dt.metadata.dbview.util.DbViewUtil;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.ql.DerivedTypeComputerForDbViewQuery;
 import com._1c.g5.v8.dt.ql.dcs.resource.IDependentQuerySchemaProvider;
 import com._1c.g5.v8.dt.ql.model.ABinaryOperatorsExpression;
+import com._1c.g5.v8.dt.ql.model.AbstractQuerySchemaQuerySourceJoin;
+import com._1c.g5.v8.dt.ql.model.AbstractQuerySchemaTable;
+import com._1c.g5.v8.dt.ql.model.CommonExpression;
+import com._1c.g5.v8.dt.ql.model.DbViewFromQuery;
 import com._1c.g5.v8.dt.ql.model.DbViewNestedTableFromQuery;
 import com._1c.g5.v8.dt.ql.model.InExpression;
+import com._1c.g5.v8.dt.ql.model.MultiPartCommonExpression;
 import com._1c.g5.v8.dt.ql.model.NestedTableAllFieldsExpression;
 import com._1c.g5.v8.dt.ql.model.ParameterExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchema;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaExpression;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaOperator;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaQuerySourceJoin;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaSelectQuery;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaSource;
+import com._1c.g5.v8.dt.ql.model.QuerySchemaTable;
+import com._1c.g5.v8.dt.ql.model.SinglePartCommonExpression;
 import com._1c.g5.v8.dt.ql.model.QuerySchemaTotalControlPoint;
 import com._1c.g5.v8.dt.ql.model.QlPackage;
 import com._1c.g5.v8.dt.ql.resource.QlMapper;
@@ -119,8 +133,10 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 /**
  * Поля выборки и выгрузки запроса из отдельного литерала (issue 836).
  * Схему получает тот же сервис, что у проверки «Хаб языка запросов».
- * Расширение системы типов читает готовый план. Проверки рассчитывают схемы закрытых
- * модулей только при включённой проверке «Хаб языка запросов» в профиле проекта.
+ * Расширение системы типов читает готовый план; если плана нет, а расчёт разрешён (открытый модуль
+ * или включённая проверка «Хаб языка запросов»), план считается по требованию — иначе проверки
+ * видят поле выгрузки запроса как нетипизированное (#1028).
+ * Проверки рассчитывают схемы закрытых модулей только при включённой проверке «Хаб языка запросов» в профиле проекта.
  */
 public final class BslQueryResultTypes implements IInvocationTypesComputerExtension
 {
@@ -139,16 +155,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Method method = EcoreUtil2.getContainerOfType(invocation, Method.class);
         Plan plan = session == null || method == null ? null : session.plans.get(method);
         List<TypeItem> planned = plan == null ? null : plan.types.get(invocation);
-        // #region agent log — временно: типы запроса при открытии модуля
-        if (invocation.getMethodAccess() instanceof DynamicFeatureAccess tempAccess
-            && (RESULT_METHODS.contains(lower(tempAccess.getName())) || "найти".equals(lower(tempAccess.getName()))))
-            Global.tempLog("query-types-open", "getTypes " + (method == null ? "?" : method.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " ." + tempAccess.getName() + " session=" + (session != null) + " plan=" + (plan != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " planned=" + (planned == null ? "null" : String.valueOf(planned.size())) //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
-        // #endregion
         if (planned != null)
             return planned;
+        List<TypeItem> onDemand = plannedOnDemand(invocation, session, method);
+        if (onDemand != null)
+            return onDemand;
         return method == null || !TYPE_WITHOUT_PLAN ? List.of() : queryResultWithoutPlan(method, invocation);
     }
 
@@ -158,6 +169,60 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      * каждый {@code Х.Выполнить()}, в том числе при сборке. Оставлено на случай, если понадобится.
      */
     private static final boolean TYPE_WITHOUT_PLAN = false;
+
+    /** Идёт расчёт плана по требованию: вложенный запрос типов не запускает второй расчёт. */
+    private static final ThreadLocal<Boolean> PLAN_ON_DEMAND = new ThreadLocal<>();
+
+    /**
+     * План метода по требованию (#1028): проверки и валидация идут на своём экземпляре ресурса, где плана
+     * редактора нет, и без него поле выгрузки запроса остаётся нетипизированным. Считается только для вызова,
+     * возвращающего результат запроса, и только там, где расчёт разрешён {@link #canComputeQueryModel}.
+     * Готовый план остаётся в сессии этого ресурса. {@code null} — путь не применялся.
+     */
+    private static List<TypeItem> plannedOnDemand(Invocation invocation, Session session, Method method)
+    {
+        if (method == null || !(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+            || !RESULT_METHODS.contains(lower(access.getName())))
+            return null;
+        // UI-поток (подсказки, подсветка) не ждёт расчёт схемы: там план готовит отложенный досчёт редактора.
+        boolean nested = Boolean.TRUE.equals(PLAN_ON_DEMAND.get());
+        boolean allowed = canComputeQueryModel(invocation);
+        boolean ui = Display.getCurrent() != null;
+        if (nested || !allowed || ui)
+            return null;
+        PLAN_ON_DEMAND.set(Boolean.TRUE);
+        try
+        {
+            Session target = session != null ? session : session(invocation.eResource(), true);
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+            String text = node == null ? null : node.getText();
+            if (target == null || text == null)
+                return List.of();
+            Plan plan = target.plans.get(method);
+            if (plan != null && !current(plan, text))
+            {
+                target.plans.remove(method);
+                plan = null;
+            }
+            if (plan == null)
+            {
+                plan = new Plan(method, text);
+                plan.prepare();
+                target.plans.put(method, plan);
+            }
+            List<TypeItem> types = plan.types.get(invocation);
+            return types == null ? List.of() : types;
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            // Неудачу не кэшируем: следующий запрос повторит расчёт.
+            return List.of();
+        }
+        finally
+        {
+            PLAN_ON_DEMAND.remove();
+        }
+    }
 
     /**
      * Тип {@code Запрос.Выполнить()}, пока плана нет: тот же признак запроса, что у плана, но без
@@ -472,7 +537,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                             // Без обращений к полям схемы для автопроверки не нужны.
                             if (!plan.hasQueryFieldAccess(cancellation))
                             {
-                                Global.tempLog("query-types-open", "check " + method.getName() + " noQueryFieldAccess"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                                 continue;
                             }
                         }
@@ -492,9 +556,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         if (!plan.queries.isEmpty())
                             session.hasQueries = true;
                         session.plans.put(method, plan);
-                        Global.tempLog("query-types-open", "check " + method.getName() + " prepared types=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + plan.types.size() + " queries=" + plan.queries.size() //$NON-NLS-1$
-                            + " openScope=" + Boolean.TRUE.equals(OPEN_MODULE_CALCULATION.get())); //$NON-NLS-1$
                         if (!plan.types.isEmpty())
                             scheduleTypesRefresh(module.eResource(), node.getOffset());
                     }
@@ -502,7 +563,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 }
                 catch (QuerySchemaUnavailableException failure)
                 {
-                    Global.tempLog("query-types-open", "check " + method.getName() + " schemaUnavailable"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     // Не кэшируем недоступность: следующий расчёт повторит получение схемы.
                     session.plans.remove(method);
                 }
@@ -537,9 +597,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         Session session = session(resource, true);
         String text = node.getText();
         Plan previous = session.plans.get(method);
-        Global.tempLog("query-types-open", "refresh " + method.getName() + " offset=" + node.getOffset() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " previous=" + (previous == null ? "null" : "complete=" + previous.complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " current=" + current(previous, text) + " types=" + previous.types.size())); //$NON-NLS-1$ //$NON-NLS-2$
         if (previous != null && previous.complete && current(previous, text))
         {
             return;
@@ -550,24 +607,18 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             // Валидация могла уже подготовить план, не переустанавливая типы BSL.
             if (plan != previous)
                 plan.prepare();
-            Global.tempLog("query-types-open", "refresh " + method.getName() + " planTypes=" + plan.types.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " queries=" + plan.queries.size()); //$NON-NLS-1$
             if (!plan.queries.isEmpty())
                 session.hasQueries = true;
             // В плане нет ссылок на другие методы: при частичном переразборе заменяется
             // только он. Старые методы удаляем, чтобы ресурс редактора их не удерживал.
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
-            long tempCleanStart = System.nanoTime();
             if (module != null)
                 dropStalePlans(session, module);
-            Global.tempLog("query-types-open", "refresh " + method.getName() + " cleanMs=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (System.nanoTime() - tempCleanStart) / 1_000_000 + " plans=" + session.plans.size()); //$NON-NLS-1$
             session.plans.put(method, plan);
             if (!plan.types.isEmpty() || previous != null && !previous.types.isEmpty())
             {
                 status.accept("Расчёт типов результата запроса…"); //$NON-NLS-1$
                 boolean recomputed = recompute.test(method);
-                Global.tempLog("query-types-open", "refresh " + method.getName() + " recomputed=" + recomputed); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (!recomputed)
                 {
                     return;
@@ -578,7 +629,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         }
         catch (RuntimeException | LinkageError failure)
         {
-            Global.tempLogException("query-types-open", "refresh " + method.getName(), failure); //$NON-NLS-1$ //$NON-NLS-2$
             // Не сохраняем неудачу как готовый результат: следующий запрос повторит расчёт.
             session.plans.remove(method);
         }
@@ -665,12 +715,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 return;
             if (assistOpen(current))
             {
-                Global.tempLog("query-types-open", "fire assistOpen -> retry"); //$NON-NLS-1$ //$NON-NLS-2$
                 restart(widget.getDisplay(), RELINK_ASSIST_RETRY_MS);
                 return;
             }
-            Global.tempLog("query-types-open", "fire offset=" + viewer.getSelectedRange().x //$NON-NLS-1$
-                + " wholeModule=" + wholeModule); //$NON-NLS-1$
             // Проверка модуля после разбора идёт раньше досчёта плана и ставит маркеры полей по штатным типам.
             if (wholeModule)
                 scheduleTypesRefresh(document, WHOLE_MODULE, true);
@@ -731,8 +778,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             boolean retry = false;
             boolean completed = false;
             int generation = BslDocCommentComputedTypes.typesGeneration();
-            Global.tempLog("query-types-open", "job batch=" + batch //$NON-NLS-1$ //$NON-NLS-2$
-                + " modelCurrent=" + ContentAssistSessionReloader.isModelCurrent(document)); //$NON-NLS-1$
             try
             {
                 if (!ContentAssistSessionReloader.isModelCurrent(document))
@@ -748,16 +793,13 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     java.util.Set<Integer> offsets = new java.util.LinkedHashSet<>(batch.keySet());
                     if (offsets.remove(Integer.valueOf(WHOLE_MODULE)))
                         BslStructureInsertCommentTypes.refreshQueryTypesForModule(resource, monitor::isCanceled);
-                    long tempStart = System.nanoTime();
                     for (Integer offset : offsets)
                     {
                         if (monitor.isCanceled())
                             throw new org.eclipse.core.runtime.OperationCanceledException();
                         BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset.intValue(),
-                            status -> {}, null, monitor::isCanceled);
+                            status -> {}, monitor::isCanceled);
                     }
-                    Global.tempLog("query-types-open", "job methods=" + offsets.size() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ms=" + (System.nanoTime() - tempStart) / 1_000_000); //$NON-NLS-1$
                     // Один обход литералов для всех методов пакета, под тем же чтением модели.
                     // Сеансы временных таблиц — только у методов под кареткой, не у всего модуля.
                     BslTempTableSessions.refreshDocument(document, resource, batch.keySet().stream()
@@ -775,15 +817,12 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             }
             catch (RuntimeException | LinkageError failure)
             {
-                Global.tempLogException("query-types-open", "job", failure); //$NON-NLS-1$ //$NON-NLS-2$
+                // Ошибка расчёта досчёта не отменяет задачу: следующий досчёт повторит попытку.
             }
             finally
             {
                 needsValidation |= batch.containsValue(Boolean.TRUE)
                     && generation != BslDocCommentComputedTypes.typesGeneration();
-                Global.tempLog("query-types-open", "job end completed=" + completed + " retry=" + retry //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " needsValidation=" + needsValidation //$NON-NLS-1$
-                    + " generationChanged=" + (generation != BslDocCommentComputedTypes.typesGeneration())); //$NON-NLS-1$
                 synchronized (TYPE_REFRESH_JOBS)
                 {
                     if (retry && WATCHED_DOCUMENTS.containsKey(document))
@@ -837,6 +876,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         session.plans.keySet().removeIf(old -> !live.contains(old));
     }
 
+    /** Одна сессия планов на ресурс: создание сериализовано между фоновыми расчётами. */
+    private static final Object SESSION_CREATION_LOCK = new Object();
+
     private static Session session(Resource resource, boolean create)
     {
         if (resource == null)
@@ -846,11 +888,19 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 return session;
         if (!create)
             return null;
-        Session session = new Session();
-        resource.eAdapters().add(session);
-        if (BslNodeLookup.rootAst(resource) instanceof Module module)
-            watchMetadata(module);
-        return session;
+        // Создание сессии из разных фоновых расчётов: без общей блокировки в список адаптеров ресурса
+        // добавляются две сессии, и половина планов теряется.
+        synchronized (SESSION_CREATION_LOCK)
+        {
+            for (var adapter : resource.eAdapters())
+                if (adapter instanceof Session session)
+                    return session;
+            Session session = new Session();
+            resource.eAdapters().add(session);
+            if (BslNodeLookup.rootAst(resource) instanceof Module module)
+                watchMetadata(module);
+            return session;
+        }
     }
 
     /**
@@ -1315,7 +1365,10 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         }
     }
 
-    /** @param nested колонки вложенной таблицы запроса ({@code Поле.(Колонка1, Колонка2)}): значение поля — РезультатЗапроса; иначе null */
+    /**
+     * @param nested колонки вложенной таблицы запроса ({@code Поле.(Колонка1, Колонка2)}) или табличной части,
+     *     выбранной целиком ({@code Справочник1.ТабличнаяЧасть}): значение поля — РезультатЗапроса; иначе null
+     */
     private record Field(String name, String nameRu, List<TypeItem> types,
         URI literalUri, int offset, int length, Result nested)
     {
@@ -1788,8 +1841,11 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         fields.add(new Field(field.getName(), field.getNameRu(),
                             type == null ? List.of() : List.copyOf(type.getTypes()),
                             literalUri, offset, length,
-                            field instanceof DbViewNestedTableFromQuery nested
-                                ? nestedResult(nested, computer, literalUri, offset, length) : null));
+                            field instanceof DbViewNestedTableFromQuery nestedTable
+                                ? nestedResult(nestedTable, computer, literalUri, offset, length)
+                                : field == selected
+                                    ? tableResult(selected, select, mapper, computer, literalUri, offset, length)
+                                    : null));
                     }
                 }
                 // Сохраняем место УНИЧТОЖИТЬ/ПОМЕСТИТЬ в пакете. Его колонки
@@ -1807,8 +1863,219 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         private static Result nestedResult(DbViewNestedTableFromQuery nested,
             DerivedTypeComputerForDbViewQuery computer, URI literalUri, int offset, int length)
         {
+            return columnsResult(nested.getActualFields(), computer, literalUri, offset, length);
+        }
+
+        /**
+         * Табличная часть, выбранная целиком ({@code Справочник1.ТабличнаяЧасть}), — тоже вложенная таблица:
+         * в результате запроса это РезультатЗапроса, после {@code Выгрузить()} — ТаблицаЗначений.
+         * Колонки берём из dbview табличной части, которую находим по ссылкам модели запроса
+         * (itemDbView выражения и dbview таблицы из FROM). Только чтение: расчёт производных данных
+         * здесь запускать нельзя — проверка модулей после него ставит сама себя заново и зацикливается (#985).
+         */
+        private static Result tableResult(DbViewFieldDef field, QuerySchemaSelectQuery select, QlMapper mapper,
+            DerivedTypeComputerForDbViewQuery computer, URI literalUri, int offset, int length)
+        {
+            if (field == null)
+                return null;
+            for (EObject source : mapper.getSourceObjects(field))
+            {
+                CommonExpression expression = source instanceof QuerySchemaExpression schemaExpression
+                    && schemaExpression.getExpression() instanceof CommonExpression common ? common : null;
+                DbViewElement dbView = expression == null ? null : tableDbView(expression, select);
+                Result result = dbView instanceof DbViewFieldTableDef table
+                    ? columnsResult(fields(table), computer, literalUri, offset, length) : null;
+                // Временный лог допущения: табличная dbview выражения находится чтением ссылок, без расчёта.
+                CommonExpression head = expression instanceof MultiPartCommonExpression multiPart
+                    ? multiPart.getSourceTable() : null;
+                Global.tempLog("query-nested-ts", "field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " expr=" + className(expression) //$NON-NLS-1$
+                    + " content=" + (expression == null ? "" : expression.getFullContent()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " itemDbView=" + describe(expression == null ? null : expression.getItemDbView()) //$NON-NLS-1$
+                    + " headDbView=" + describe(head == null ? null : tableDbView(head, select)) //$NON-NLS-1$
+                    + " fromTable=" + describe(fromTableDbView(select, headName(expression))) //$NON-NLS-1$
+                    + " tableDbView=" + describe(dbView) //$NON-NLS-1$
+                    + " nested=" + (result != null) //$NON-NLS-1$
+                    + " columns=" + (result == null ? "" : result.fields().stream() //$NON-NLS-1$ //$NON-NLS-2$
+                        .map(Field::name).toList().toString())
+                    + (result == null ? typeDetail(tableDbView(head, select),
+                        expression instanceof MultiPartCommonExpression multi ? multi.getContent() : null) : "")); //$NON-NLS-1$
+                if (result != null)
+                    return result;
+            }
+            Global.tempLog("query-nested-ts", "field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " sources=none from=[" + sourceNames(select) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+
+        /** dbview последней части выражения ({@code ТабличнаяЧасть93} в {@code Справочник1.ТабличнаяЧасть93}). */
+        private static DbViewElement tableDbView(CommonExpression expression, QuerySchemaSelectQuery select)
+        {
+            if (expression == null)
+                return null;
+            if (expression instanceof SinglePartCommonExpression single)
+            {
+                DbViewElement item = single.getItemDbView();
+                return item != null ? item : fromTableDbView(select, single.getContent());
+            }
+            if (!(expression instanceof MultiPartCommonExpression multi))
+                return expression.getItemDbView();
+            DbViewElement found = fieldByName(tableDbView(multi.getSourceTable(), select), multi.getContent());
+            return found != null ? found
+                : fieldByName(fromTableDbView(select, headName(expression)), multi.getContent());
+        }
+
+        /** Самое левое имя выражения — имя или псевдоним таблицы из FROM. */
+        private static String headName(CommonExpression expression)
+        {
+            CommonExpression current = expression;
+            while (current instanceof MultiPartCommonExpression multi)
+                current = multi.getSourceTable();
+            return current == null ? null : current.getContent();
+        }
+
+        /** Таблица из FROM по её имени или псевдониму — ссылка {@code tableDbView} заполняется расчётом схемы. */
+        private static DbViewElement fromTableDbView(QuerySchemaSelectQuery select, String alias)
+        {
+            if (select == null || alias == null || alias.isBlank())
+                return null;
+            for (QuerySchemaOperator operator : select.getOperators())
+            for (QuerySchemaSource source : allSources(operator))
+            {
+                if (source.getSource() instanceof QuerySchemaTable queryTable && queryTable.getTable() != null)
+                {
+                    AbstractQuerySchemaTable target = queryTable.getTable();
+                    String name = queryTable.getAlias() == null ? target.getTableName() : queryTable.getAlias();
+                    if (name == null || !name.equalsIgnoreCase(alias))
+                        continue;
+                    // У таблицы-результата запроса ссылка на таблицу пуста, заполнена вычисленная (#1028).
+                    DbViewElement dbView = target.getTableDbView();
+                    return dbView != null ? dbView : target.getComputeDbView();
+                }
+                // Источник-вложенный запрос: его dbview лежит в списке оператора и ссылается на сам источник.
+                if (source.getSource() == null || !alias.equalsIgnoreCase(source.getSource().getAlias()))
+                    continue;
+                for (DbViewDef dbView : operator.getDbViewByFrom())
+                    if (dbView.getMdObject() == source || dbView.getMdObject() == source.getSource())
+                        return dbView;
+            }
+            return null;
+        }
+
+        /** Источники FROM с учётом соединений: {@code ИЗ A ЛЕВОЕ СОЕДИНЕНИЕ B КАК Псевдоним}. */
+        private static List<QuerySchemaSource> allSources(QuerySchemaOperator operator)
+        {
+            List<QuerySchemaSource> sources = new ArrayList<>();
+            for (QuerySchemaSource source : operator.getSources())
+                addSource(source, sources);
+            return sources;
+        }
+
+        private static void addSource(QuerySchemaSource source, List<QuerySchemaSource> sources)
+        {
+            if (source == null)
+                return;
+            sources.add(source);
+            for (AbstractQuerySchemaQuerySourceJoin join : source.getJoins())
+                if (join instanceof QuerySchemaQuerySourceJoin sourceJoin)
+                    addSource(sourceJoin.getSource(), sources);
+        }
+
+        private static DbViewElement fieldByName(DbViewElement element, String content)
+        {
+            DbViewElement found = nameIn(fields(element), content);
+            // Часть выражения — ссылочное поле: следующая идёт по полям его типа
+            // ({@code Ссылка.ФункциональныеОпции}), а не по полям таблицы.
+            return found != null ? found : nameIn(typeFields(element), content);
+        }
+
+        /** Поля таблицы dbview: у результата запроса они лежат в актуальных, а не в собственных (#1028). */
+        private static List<DbViewFieldDef> fields(DbViewElement element)
+        {
+            if (!(element instanceof Table table))
+                return List.of();
+            return table instanceof DbViewFromQuery fromQuery ? fromQuery.getActualFields() : table.getFields();
+        }
+
+        /** Поля типа поля dbview — табличные части ссылочного типа, прочитанные из метаданных. */
+        private static List<DbViewFieldDef> typeFields(DbViewElement element)
+        {
+            if (!(element instanceof DbViewFieldDef field) || field.getType() == null)
+                return List.of();
+            try
+            {
+                return DbViewUtil.getFields(field, field);
+            }
+            catch (RuntimeException | AssertionError error)
+            {
+                return List.of();
+            }
+        }
+
+        private static DbViewElement nameIn(List<DbViewFieldDef> fields, String content)
+        {
+            if (content == null || content.isBlank())
+                return null;
+            for (DbViewFieldDef candidate : fields)
+                if (content.equalsIgnoreCase(candidate.getName())
+                    || content.equalsIgnoreCase(candidate.getNameRu()))
+                    return candidate;
+            return null;
+        }
+
+        /** Вид dbview и число его полей — временная диагностика выбора табличной части результата запроса. */
+        private static String describe(DbViewElement element)
+        {
+            if (!(element instanceof Table table))
+                return className(element);
+            String text = className(element) + "[fields=" + table.getFields().size(); //$NON-NLS-1$
+            if (element instanceof DbViewFromQuery fromQuery)
+                text += ",actual=" + fromQuery.getActualFields().size() //$NON-NLS-1$
+                    + ",original=" + className(fromQuery.getOriginalDbView()); //$NON-NLS-1$
+            if (element instanceof DbViewFieldDef field)
+                text += ",type=" + (field.getType() == null ? 0 : field.getType().getTypes().size()); //$NON-NLS-1$
+            return text + "]"; //$NON-NLS-1$
+        }
+
+        /** Временная проверка допущения: есть ли часть среди полей типа родительского поля. */
+        private static String typeDetail(DbViewElement parent, String content)
+        {
+            if (!(parent instanceof DbViewFieldDef field) || field.getType() == null)
+                return " parentType=none"; //$NON-NLS-1$
+            List<DbViewFieldDef> candidates = typeFields(parent);
+            return " parentType=" + field.getType().getTypes().size() //$NON-NLS-1$
+                + " typeFields=" + candidates.size() //$NON-NLS-1$
+                + " typeHas=" + (nameIn(candidates, content) != null); //$NON-NLS-1$
+        }
+
+        /** Имена и псевдонимы источников FROM — временная диагностика ненайденной таблицы. */
+        private static String sourceNames(QuerySchemaSelectQuery select)
+        {
+            if (select == null)
+                return ""; //$NON-NLS-1$
+            List<String> names = new ArrayList<>();
+            for (QuerySchemaOperator operator : select.getOperators())
+            for (QuerySchemaSource source : allSources(operator))
+            {
+                String name = source.getSource() == null ? null : source.getSource().getAlias();
+                if (name == null && source.getSource() instanceof QuerySchemaTable queryTable
+                    && queryTable.getTable() != null)
+                    name = queryTable.getTable().getTableName();
+                names.add(className(source.getSource()) + ":" + name); //$NON-NLS-1$
+            }
+            return String.join(",", names); //$NON-NLS-1$
+        }
+
+        private static String className(Object element)
+        {
+            return element == null ? "null" : element.getClass().getSimpleName(); //$NON-NLS-1$
+        }
+
+        private static Result columnsResult(List<DbViewFieldDef> columnsSource,
+            DerivedTypeComputerForDbViewQuery computer, URI literalUri, int offset, int length)
+        {
             List<Field> columns = new ArrayList<>();
-            for (DbViewFieldDef column : nested.getActualFields())
+            for (DbViewFieldDef column : columnsSource)
             {
                 TypeDescription type = computer.getFieldType(column).getFirst();
                 columns.add(new Field(column.getName(), column.getNameRu(),

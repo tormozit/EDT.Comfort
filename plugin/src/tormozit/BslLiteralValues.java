@@ -1908,6 +1908,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             String leftOfAssignment = ""; //$NON-NLS-1$
             Module handlerModule = null;
             List<TypeItem> objectTypes = call.sourceTypes;
+            if (containsAny(parameterLower, "ключ", "индекс", "колонк", "сортировк", "группировк")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                Global.tempLog("tabular-union", "literal method=" + method + " parameter=" + parameter //$NON-NLS-1$ //$NON-NLS-2$
+                    + " context=" + context + " index=" + call.index //$NON-NLS-1$ //$NON-NLS-2$
+                    + " source=" + (call.source == null ? "null" : text(call.source)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " sourceTypes=" + typeNames(call.sourceTypes) //$NON-NLS-1$
+                    + " elements=" + typeNames(elementTypes(call.sourceTypes))); //$NON-NLS-1$
             if (call.index == 0 && in(method, "УстановитьЗначение", "SetValue") //$NON-NLS-1$ //$NON-NLS-2$
                 && hasType(objectTypes, "DataLockItem")) //$NON-NLS-1$
             {
@@ -2029,7 +2035,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 && isTableType(objectTypes))
             {
                 branch("columns"); //$NON-NLS-1$
-                addAll(columns(objectTypes));
+                List<String> columnNames = columns(objectTypes);
+                Global.tempLog("tabular-union", "literal columns objectTypes=" + typeNames(objectTypes) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " rows=" + typeNames(elementTypes(objectTypes)) + " columns=" + columnNames); //$NON-NLS-1$ //$NON-NLS-2$
+                addAll(columnNames);
                 // Колонка с неизвестным именем (Колонки.Добавить(Колонка.Имя)) EDT в тип не заносит — набор неполный.
                 if (hasColumnAddWithUnknownName(call))
                     full = false;
@@ -2046,7 +2055,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     || hasTabularSection(objectTypes) && (context.contains("ТабличнаяЧасть") || STRUCTURE.equalsIgnoreCase(context)))) //$NON-NLS-1$
             {
                 branch("keys"); //$NON-NLS-1$
-                addAll(hasTabularSection(objectTypes) ? elementProperties(objectTypes) : structureKeyNames(objectTypes));
+                List<String> keys = hasTabularSection(objectTypes) ? elementProperties(objectTypes)
+                    : structureKeyNames(objectTypes);
+                Global.tempLog("tabular-union", "literal keys objectTypes=" + typeNames(objectTypes) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " tabular=" + hasTabularSection(objectTypes) + " rows=" + typeNames(elementTypes(objectTypes)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " properties=" + keys); //$NON-NLS-1$
+                addAll(keys);
                 // Ключ с неизвестным именем (Вставить(Ключ, …)) EDT в тип не заносит — набор неполный.
                 if (hasStructureInsertWithUnknownKey(call))
                     full = false;

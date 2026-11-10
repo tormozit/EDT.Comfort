@@ -2678,6 +2678,7 @@ boolean inLiteral = endCaret >= 0
                 }
                 catch (org.eclipse.core.runtime.OperationCanceledException busy)
                 {
+                    releaseCanceledHold("low", sync); //$NON-NLS-1$
                     monitor.setCanceled(true);
                     return null;
                 }
@@ -3528,6 +3529,7 @@ boolean inLiteral = endCaret >= 0
         }
         catch (org.eclipse.core.runtime.OperationCanceledException e)
         {
+            releaseCanceledHold(preemptLowPriority ? "assist" : "low", job); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         catch (RuntimeException e)
@@ -3552,6 +3554,35 @@ boolean inLiteral = endCaret >= 0
         traces.removeLast();
         if (traces.isEmpty())
             HOLD_TRACES.remove();
+    }
+
+    /**
+     * Снять правило после отменённого {@code beginRule}.
+     *
+     * <p>{@code ImplicitJobs.begin} кладёт правило в стек ThreadJob ещё до проверки
+     * отмены и регистрирует задание за потоком в {@code finally}
+     * ({@code ThreadJob.joinRun} бросает {@code OperationCanceledException} уже после
+     * {@code push}). Поэтому «правило не взято» не значит «ничего не удерживается»:
+     * без парного {@code endRule} правило остаётся за потоком до конца реального
+     * задания, и оно заканчивается ошибкой
+     * «Worker thread ended job: …, but still holds rule». Пока остаток висит,
+     * любой следующий {@code beginRule} на этом потоке идёт вложенной веткой
+     * и замок не берёт — удержание разбора молча перестаёт работать.
+     */
+    private static void releaseCanceledHold(String kind, org.eclipse.core.runtime.jobs.Job job)
+    {
+        org.eclipse.core.runtime.jobs.ISchedulingRule rule = syncHoldRule(job);
+        try
+        {
+            org.eclipse.core.runtime.jobs.Job.getJobManager().endRule(rule);
+        }
+        catch (RuntimeException e)
+        {
+            // Незавершённого правила не было (отмена до push) — снимать нечего.
+            SmartContentAssistProcessor.uiBlockLogThrowable("modelSync.hold.release.err", e); //$NON-NLS-1$
+        }
+        Global.tempLog("assist-sync-hold", "canceled kind=" + kind //$NON-NLS-1$ //$NON-NLS-2$
+            + " rule=" + rule + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private record ModelHold(long id, long started, org.eclipse.core.runtime.jobs.ISchedulingRule rule) {}

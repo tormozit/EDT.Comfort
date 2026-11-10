@@ -4550,6 +4550,8 @@ return EMPTY;
         {
             IDocument doc = viewer != null ? viewer.getDocument() : null;
             boolean comment = isCommentAssistContext(doc, caret);
+            if (comment && doc instanceof IXtextDocument commentDoc && caret >= 0)
+                delegateStock = withTypeFirstSegments(commentDoc, caret, delegateStock);
             if (!(doc instanceof IXtextDocument xdoc) || caret < 0
                 || (!comment && !isStringLiteralAssistContext(viewer, caret))
                 || (!comment && isQueryLiteralSegment(doc, caret)))
@@ -4719,6 +4721,104 @@ return EMPTY;
             {
                 return stock;
             }
+        }
+
+        /**
+         * Штатный список типов комментария берёт имена из области конструкторов: в ней нет первых
+         * сегментов конкретных типов («ОбработкаОбъект» из «ОбработкаОбъект.Обработка1»), которые
+         * список литерала даёт из области типов. Они добавляются к списку типов комментария (его строки
+         * со значком конструктора) с тем же диапазоном замены.
+         */
+        private static ICompletionProposal[] withTypeFirstSegments(IXtextDocument xdoc, int caret,
+            ICompletionProposal[] stock)
+        {
+            if (stock == null || stock.length == 0)
+                return stock;
+            try
+            {
+                // После «Имя.» — члены и дочерние типы, а не первые сегменты.
+                if (receiverAt(xdoc, caret) != null)
+                    return stock;
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                return stock;
+            }
+            Image constructor = BslSharedImages.getImage("com._1c.g5.v8.dt.bsl.ui/obj16/constructor.png"); //$NON-NLS-1$
+            ConfigurableCompletionProposal source = null;
+            Set<String> existing = new HashSet<>();
+            for (ICompletionProposal proposal : stock)
+            {
+                String name = proposal != null ? filterMatchName(proposal) : null;
+                if (name != null)
+                    existing.add(name.toLowerCase(java.util.Locale.ROOT));
+                if (source == null && constructor != null
+                    && unwrapProposal(proposal) instanceof ConfigurableCompletionProposal typeRow
+                    && typeRow.getImage() == constructor)
+                    source = typeRow;
+            }
+            if (source == null)
+            {
+                // #region agent log — допущение: список типов комментария узнаётся по значку конструктора
+                Global.tempLog("comment-type-segments", "no constructor row, stock=" + stock.length); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return stock;
+            }
+            ConfigurableCompletionProposal from = source;
+            List<ICompletionProposal> added;
+            try
+            {
+                added = xdoc.readOnly(resource ->
+                {
+                    List<ICompletionProposal> result = new ArrayList<>();
+                    if (resource == null || resource.getContents().isEmpty())
+                        return result;
+                    var projects = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+                    var project = projects != null ? projects.getProject(resource.getURI()) : null;
+                    boolean english = project != null && project.getScriptVariant() == ScriptVariant.ENGLISH;
+                    IScope scope = resource.getResourceServiceProvider().get(IScopeProvider.class)
+                        .getScope(resource.getContents().get(0), McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+                    for (IEObjectDescription desc : scope.getAllElements())
+                    {
+                        if (!McorePackage.Literals.TYPE.isSuperTypeOf(desc.getEClass()))
+                            continue;
+                        EObject object = EcoreUtil.resolve(desc.getEObjectOrProxy(), resource);
+                        if (!(object instanceof Type type) || type.eIsProxy() || isCommonModuleTypeName(type.getName()))
+                            continue;
+                        String name = english ? type.getName() : type.getNameRu();
+                        if (name == null || name.isBlank())
+                            name = type.getName();
+                        if (!english && name != null)
+                            name = ITypeNameMapping.DEFAULT.getRussianTypeName(name);
+                        if (name == null || name.indexOf('.') <= 0)
+                            continue;
+                        String segment = MdTypeMapping.firstSegment(name);
+                        if (existing.add(segment.toLowerCase(java.util.Locale.ROOT)))
+                            result.add(new NameProposal(segment, from.getReplacementOffset(),
+                                from.getReplacementLength(), segment.length(), from.getImage(),
+                                new StyledString(segment), null, "Тип")); //$NON-NLS-1$
+                    }
+                    return result;
+                });
+            }
+            catch (RuntimeException failure)
+            {
+                Global.tempLog("comment-type-segments", "failure " + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                return stock;
+            }
+            // #region agent log
+            StringBuilder names = new StringBuilder();
+            for (ICompletionProposal proposal : added)
+                names.append(' ').append(filterMatchName(proposal));
+            Global.tempLog("comment-type-segments", "stock=" + stock.length + " offset=" //$NON-NLS-1$ //$NON-NLS-2$
+                + from.getReplacementOffset() + " length=" + from.getReplacementLength() //$NON-NLS-1$
+                + " added=" + added.size() + ":" + names); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (added.isEmpty())
+                return stock;
+            List<ICompletionProposal> result = new ArrayList<>(Arrays.asList(stock));
+            result.addAll(added);
+            return result.toArray(ICompletionProposal[]::new);
         }
 
         /**

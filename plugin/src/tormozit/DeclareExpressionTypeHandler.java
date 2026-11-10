@@ -122,7 +122,7 @@ public final class DeclareExpressionTypeHandler
                 Edit edit = document.readOnly(resource -> plan(resource, document, caret));
                 if (edit == null)
                 {
-                    toast(MENU_LABEL, "Не найдено присвоение выражению в текущей ветви или объявление параметра/результата");
+                    toast(MENU_LABEL, "Не найдено присвоение выражению или объявление параметра/результата метода. Активна экономная генерация комментария к методу.");
                     return;
                 }
                 if (!edit.text().isEmpty() || edit.replaced() > 0)

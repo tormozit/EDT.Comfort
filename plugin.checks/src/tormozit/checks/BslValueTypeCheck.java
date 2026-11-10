@@ -106,7 +106,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
         try
         {
-            new Session(resource, acceptor).check(module, monitor);
+            Session session = new Session(resource, acceptor);
+            session.check(module, monitor);
         }
         finally
         {

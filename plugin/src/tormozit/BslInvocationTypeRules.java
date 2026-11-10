@@ -559,22 +559,34 @@ public class BslInvocationTypeRules
             String names = namesExpression == null ? "" : stringValue(namesExpression); //$NON-NLS-1$
             if (names == null)
                 return null;
-            List<Property> columns = rowProperties(receiverRows());
-            if (columns.isEmpty())
+            List<TypeItem> rows = receiverRows();
+            List<Property> all = allRowProperties(rows);
+            String trace = "copyColumns " + name + " receiver=" + typeNames(receiverTypes()) + " rows=" + typeNames(rows) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                + " all=" + propertyNames(all) + " names=[" + names + "]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (all.isEmpty())
+            {
+                Global.tempLog("tabular-union", trace + " -> no columns"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
+            }
+            List<Property> columns = all;
             if (!names.isBlank())
             {
                 List<Property> selected = new ArrayList<>();
                 for (String part : names.split(",")) //$NON-NLS-1$
                 {
-                    Property column = byName(columns, part.trim());
+                    Property column = byName(all, part.trim());
                     if (column == null)
+                    {
+                        Global.tempLog("tabular-union", trace + " -> unknown [" + part.trim() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         return null;
+                    }
                     selected.add(column);
                 }
                 columns = selected;
             }
             Type table = valueTableType(columns);
+            Global.tempLog("tabular-union", trace + " -> columns=" + propertyNames(columns) //$NON-NLS-1$ //$NON-NLS-2$
+                + " table=" + (table == null ? "null" : "ok")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return table == null ? null : List.of(table);
         }
 
@@ -832,9 +844,29 @@ public class BslInvocationTypeRules
             return List.of();
         }
 
+        /**
+         * Свойства всех типов строки, объединённые по имени: у объединения табличных частей с разным
+         * составом колонок нужны колонки каждой части, а не только первой. Одноимённое свойство берётся
+         * у первого типа — для выбора колонки по имени этого достаточно.
+         */
+        List<Property> allRowProperties(List<TypeItem> rows)
+        {
+            List<Property> result = new ArrayList<>();
+            for (TypeItem row : rows)
+                for (Property property : properties(List.of(row)))
+                {
+                    String propertyName = property.getName();
+                    String propertyNameRu = property.getNameRu();
+                    if ((propertyName == null || byName(result, propertyName) == null)
+                        && (propertyNameRu == null || byName(result, propertyNameRu) == null))
+                        result.add(property);
+                }
+            return result;
+        }
+
         Type rowStructure(List<TypeItem> rows)
         {
-            List<Property> properties = rowProperties(rows);
+            List<Property> properties = allRowProperties(rows);
             if (properties.isEmpty())
                 return null;
             Type structure = baseStructure();
@@ -1136,6 +1168,22 @@ public class BslInvocationTypeRules
         {
             String typeName = item == null ? null : McoreUtil.getTypeNameRu(item);
             return typeName == null ? "" : typeName; //$NON-NLS-1$
+        }
+
+        static List<String> typeNames(List<TypeItem> types)
+        {
+            List<String> names = new ArrayList<>();
+            for (TypeItem item : types)
+                names.add(typeNameRu(item));
+            return names;
+        }
+
+        static List<String> propertyNames(List<Property> properties)
+        {
+            List<String> names = new ArrayList<>();
+            for (Property property : properties)
+                names.add(property.getName());
+            return names;
         }
 
         /** Тип значения макета — как у штатного {@code ПолучитьМакет} ({@code GetTemplateInvocationTypesComputer}). */

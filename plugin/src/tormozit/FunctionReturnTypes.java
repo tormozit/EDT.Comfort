@@ -391,7 +391,17 @@ final class FunctionReturnTypes
                 {
                     // Чужие модели сериализуются только на этом пути. Чтение открытого
                     // документа ниже берёт его собственное правило синхронизации.
-                    Job.getJobManager().beginRule(ForeignModuleModel.SERIAL, monitor);
+                    try
+                    {
+                        Job.getJobManager().beginRule(ForeignModuleModel.SERIAL, monitor);
+                    }
+                    catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+                    {
+                        // ImplicitJobs.begin регистрирует ThreadJob и кладёт правило в стек
+                        // до проверки отмены: без парного endRule оно остаётся за потоком.
+                        Job.getJobManager().endRule(ForeignModuleModel.SERIAL);
+                        throw canceled;
+                    }
                     try
                     {
                         computeIndex(index);
