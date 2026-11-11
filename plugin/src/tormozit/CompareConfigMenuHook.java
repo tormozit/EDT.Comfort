@@ -1279,6 +1279,8 @@ public class CompareConfigMenuHook implements IStartup
                                 EObject target = value.side == ComparisonSide.OTHER ? value.other : value.main;
                                 if (target == null)
                                     continue;
+                                if (isRemovedCompositionReference(object, feature, target, value.side))
+                                    continue;
                                 // Внутренние связи форм/контекстов не являются ссылками метаданных.
                                 if (!MdReferenceSupport.isMetadataReferenceTarget(target))
                                     continue;
@@ -1309,6 +1311,27 @@ public class CompareConfigMenuHook implements IStartup
                         }
                     }
                 }
+            }
+
+            /** EDT убирает из состава родителя только объекты, удаляемые этим объединением. */
+            private boolean isRemovedCompositionReference(EObject owner, EReference feature, EObject target,
+                ComparisonSide side)
+            {
+                if (side != ComparisonSide.MAIN || !feature.isMany()
+                    || feature.getEAnnotation("http://www.1c.ru/v8/dt/metadata/MdClass") == null
+                    || target.eIsProxy() || !(target instanceof IBmObject bm) || !bm.bmIsTop()
+                    || !(owner instanceof IBmObject holder) || holder.bmGetNamespace() != bm.bmGetNamespace())
+                    return false;
+                ComparisonNode node = mainNodes.get(bm.bmGetId());
+                Resolution state = node != null ? targetStates.get(node.bmGetId()) : null;
+                String name = bm.bmGetFqn();
+                // Как в MdReferenceSupport.detachedFromConfiguration: у вложенной подсистемы
+                // родитель — подсистема, у корневого объекта — конфигурация.
+                int nameDot = name != null ? name.lastIndexOf('.') : -1;
+                int parentEnd = nameDot > 0 ? name.lastIndexOf('.', nameDot - 1) : -1;
+                String parent = parentEnd > 0 ? name.substring(0, parentEnd) : "Configuration";
+                return name != null && state != null && !state.exists
+                    && parent.equals(holder.bmGetFqn());
             }
 
             private boolean mayAffect(Pair owner, EReference feature)
