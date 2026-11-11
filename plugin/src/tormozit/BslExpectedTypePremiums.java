@@ -497,6 +497,9 @@ final class BslExpectedTypePremiums
             return queryPremium.intValue();
         // ИР: значения литерала при ручном вызове — повышенный рейтинг (ДобавитьПростыеСловаВТаблицу).
         int literal = BslLiteralValues.raisedPremiumOf(proposal);
+        // Отдельное «Знач» выше шаблона «Знач …», в том числе до готовности снимка премий.
+        if (BslCompletionTemplates.isByValueKeyword(proposal))
+            literal++;
         Snapshot snapshot = active;
         if (snapshot == null || snapshot.premiums().values().isEmpty() || proposal == null)
             return literal;

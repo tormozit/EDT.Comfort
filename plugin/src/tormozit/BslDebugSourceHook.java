@@ -18,11 +18,18 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.eclipse.compare.rangedifferencer.IRangeComparator;
 import org.eclipse.compare.rangedifferencer.RangeDifference;
 import org.eclipse.compare.rangedifferencer.RangeDifferencer;
+import org.eclipse.core.filebuffers.FileBuffers;
+import org.eclipse.core.filebuffers.LocationKind;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IMarker;
+import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
@@ -44,6 +51,8 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.texteditor.AbstractMarkerAnnotationModel;
+import org.eclipse.ui.texteditor.SimpleMarkerAnnotation;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IExtensionProject;
@@ -51,6 +60,8 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.BslModuleReference;
 import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugTargetThread;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 
@@ -60,7 +71,8 @@ import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
  * <p>Сохраняет штатную аннотацию и её жизненный цикл InstructionPointerManager.
  * Поле DynamicInstructionPointerAnnotation.fStackFrame проверено в исходниках
  * org.eclipse.debug.ui 3.18.200.v20231106-1112. Не меняет номера строк кадров,
- * точки останова, команды шага и вычисление выражений.
+ * команды шага и вычисление выражений. Номера точек останова пересчитываются
+ * только для команд отладчику; маркеры остаются в координатах редактора (#1040).
  *
  * <p>Выгрузка через существующий агент, как в ProfilingViewHook. Текст принимается
  * только при совпадении поколения до и после выгрузки с поколением предмета.
@@ -119,6 +131,7 @@ public final class BslDebugSourceHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        BreakpointMapping.install();
         try
         {
             Class<?> type = Platform.getBundle("org.eclipse.debug.ui").loadClass(
@@ -178,6 +191,12 @@ public final class BslDebugSourceHook implements IStartup
         });
     }
 
+    /** Только готовое состояние сопоставления; отрисовка списка ничего не запускает и не ждёт. */
+    static boolean isBreakpointSourceUncertain(IBslLineBreakpoint breakpoint)
+    {
+        return BreakpointMapping.isUncertain(breakpoint);
+    }
+
     private static void attach(BslXtextEditor editor, StyledText painted)
     {
         if (editor == null)
@@ -230,6 +249,7 @@ public final class BslDebugSourceHook implements IStartup
         void install()
         {
             SESSIONS.add(this);
+            BreakpointMapping.open(file, document, model);
             model.addAnnotationModelListener(modelListener);
             document.addDocumentListener(this);
             document.insertPositionUpdater(positionUpdater, 0);
@@ -241,6 +261,7 @@ public final class BslDebugSourceHook implements IStartup
         {
             closed = true;
             SESSIONS.remove(this);
+            BreakpointMapping.close(file, document, model);
             revision++;
             model.removeAnnotationModelListener(modelListener);
             document.removeDocumentListener(this);
@@ -528,6 +549,7 @@ public final class BslDebugSourceHook implements IStartup
         {
             changingDocument = false;
             queue();
+            BreakpointMapping.refresh(file);
         }
     }
 
@@ -686,29 +708,35 @@ public final class BslDebugSourceHook implements IStartup
 
     private static String source(IBslStackFrame frame, IFile file) throws Exception
     {
+        return source(frame.getDebugTarget(), frame.getReference(),
+            frame.getThread().getRuntimeDebugTarget().getConfigVersion(), file,
+            frame::getModule, () -> DebugViewHook.isSessionMetadataStale(frame));
+    }
+
+    private static String source(IRuntimeDebugClientTarget target, BslModuleReference reference,
+        String generation, IFile file, Supplier<com._1c.g5.v8.dt.bsl.model.Module> moduleSupplier,
+        BooleanSupplier stale) throws Exception
+    {
         // Проверяем весь сеанс перед обращением к кэшу: старый снимок не даёт права
         // показывать зелёный указатель после обновления метаданных базы.
-        if (DebugViewHook.isSessionMetadataStale(frame))
+        if (stale.getAsBoolean())
             throw new StaleSessionMetadataException();
-        IRuntimeDebugClientTarget target = frame.getDebugTarget();
         if (target == null
             || !(target.getApplication().orElse(null) instanceof IInfobaseApplication application)
-            || frame.getReference() == null || frame.getReference().getProject() == null)
+            || reference == null || reference.getProject() == null)
             throw new IllegalStateException("Не определена информационная база кадра");
-        String generation = frame.getThread().getRuntimeDebugTarget().getConfigVersion();
         if (generation == null || generation.isBlank())
             throw new IllegalStateException("Нет поколения метаданных предмета отладки");
-        SourceKey key = new SourceKey(generation, frame.getReference().getProject().getName(),
-            frame.getReference().getParentUuid());
+        SourceKey key = new SourceKey(generation, reference.getProject().getName(), reference.getParentUuid());
         synchronized (SOURCES)
         {
-            if (DebugViewHook.isSessionMetadataStale(frame))
+            if (stale.getAsBoolean())
                 throw new StaleSessionMetadataException();
             Map<SourceKey, ExportedSource> cache = SOURCES.computeIfAbsent(target, ignored -> new HashMap<>());
             ExportedSource exported = cache.get(key);
             if (exported == null)
             {
-                var module = frame.getModule();
+                var module = moduleSupplier.get();
                 if (module == null || !(module.getOwner() instanceof IBmObject owner))
                     throw new IllegalStateException("Не определён владелец исполняемого модуля");
                 String ownerName = owner.bmGetFqn();
@@ -724,7 +752,7 @@ public final class BslDebugSourceHook implements IStartup
                 String extension = "";
                 if (Global.getServiceByClass(IV8ProjectManager.class) instanceof IV8ProjectManager manager)
                 {
-                    var project = manager.getProject(frame.getReference().getProject());
+                    var project = manager.getProject(reference.getProject());
                     if (project == null)
                         throw new IllegalStateException("Не определён проект исполняемого модуля");
                     if (project instanceof IExtensionProject extensionProject)
@@ -741,7 +769,7 @@ public final class BslDebugSourceHook implements IStartup
                 exported = new ExportedSource(directory, key.owner);
                 cache.put(key, exported);
             }
-            return exported.module(frame.getReference().getParentUuid(), file.getName());
+            return exported.module(reference.getParentUuid(), file.getName());
         }
     }
 
@@ -823,6 +851,453 @@ public final class BslDebugSourceHook implements IStartup
             if (e.getCause() instanceof Exception cause)
                 throw cause;
             throw e;
+        }
+    }
+
+    /** Координаты точек принадлежат редактору; отладчику передаётся отдельное представление. */
+    private static final class BreakpointMapping
+    {
+        private static final String TOPIC = "breakpoint-lines-1040";
+        private static final Map<IRuntimeDebugClientTarget, Map<IBslLineBreakpoint, State>> STATES =
+            new WeakHashMap<>();
+        // XtextDocumentProvider наследует FileDocumentProvider, а не TextFileDocumentProvider:
+        // его несохранённого документа может вообще не быть в FileBuffers.
+        private static final Map<IFile, List<EditorDocument>> OPEN = new HashMap<>();
+        private static final Map<IRuntimeDebugClientTarget, Map<IFile, ReverseMapping>> MATCHINGS = new WeakHashMap<>();
+
+        static void open(IFile file, IDocument document, IAnnotationModel model)
+        {
+            synchronized (OPEN)
+            {
+                OPEN.computeIfAbsent(file, ignored -> new ArrayList<>()).add(new EditorDocument(document, model));
+            }
+            refresh(file);
+        }
+
+        static void close(IFile file, IDocument document, IAnnotationModel model)
+        {
+            synchronized (OPEN)
+            {
+                List<EditorDocument> editors = OPEN.get(file);
+                if (editors != null)
+                {
+                    editors.remove(new EditorDocument(document, model));
+                    if (editors.isEmpty())
+                        OPEN.remove(file);
+                }
+            }
+            refresh(file);
+        }
+
+        static void install()
+        {
+            System.getProperties().put("tormozit.debug.breakpoints.outgoing",
+                (BiFunction<Object, Object, Object>) (target, breakpoint) -> wrap(target, breakpoint, false));
+            System.getProperties().put("tormozit.debug.breakpoints.lookup",
+                (BiFunction<Object, Object, Object>) (target, breakpoint) -> wrap(target, breakpoint, true));
+            Global.tempLog(TOPIC, "install weaving="
+                + System.getProperty("tormozit.debug.breakpoints.outgoing.status", "not loaded"));
+            DebugPlugin.getDefault().addDebugEventListener(events ->
+            {
+                for (DebugEvent event : events)
+                    if (event.getSource() instanceof org.eclipse.debug.core.model.IDebugElement element
+                        && element.getDebugTarget() instanceof IRuntimeDebugClientTarget target)
+                    {
+                        if (event.getKind() == DebugEvent.TERMINATE || event.getKind() == DebugEvent.CHANGE)
+                            BreakpointListHook.sourceMappingChanged();
+                        if (event.getKind() != DebugEvent.CREATE && event.getKind() != DebugEvent.CHANGE
+                            && event.getKind() != DebugEvent.SUSPEND)
+                            continue;
+                        Global.tempLog(TOPIC, "event kind=" + event.getKind() + " weaving="
+                            + System.getProperty("tormozit.debug.breakpoints.outgoing.status", "not loaded"));
+                        refresh(target, null);
+                    }
+            });
+        }
+
+        static void refresh(IFile file)
+        {
+            refresh(null, file);
+        }
+
+        static boolean isUncertain(IBslLineBreakpoint breakpoint)
+        {
+            synchronized (STATES)
+            {
+                for (var entry : STATES.entrySet())
+                {
+                    IRuntimeDebugClientTarget target = entry.getKey();
+                    if (target.isTerminated() || target.isDisconnected())
+                        continue;
+                    List<IRuntimeDebugTargetThread> subjects = connectedSubjects(target);
+                    if (subjects.isEmpty())
+                        continue;
+                    State state = entry.getValue().get(breakpoint);
+                    if (state != null)
+                        synchronized (state)
+                        {
+                            if (state.version != null && state.line < 1)
+                                for (var subject : subjects)
+                                    if (Objects.equals(state.version.generation,
+                                        subject.getRuntimeDebugTarget().getConfigVersion()))
+                                        return true;
+                        }
+                }
+            }
+            return false;
+        }
+
+        /** Соединение с сервером отладки само по себе ещё не означает подключение к предмету. */
+        private static List<IRuntimeDebugTargetThread> connectedSubjects(IRuntimeDebugClientTarget target)
+        {
+            List<IRuntimeDebugTargetThread> subjects = new ArrayList<>();
+            for (var thread : target.getThreads())
+                if (thread.isConnected() && !thread.isTerminated())
+                    subjects.add(thread);
+            return subjects;
+        }
+
+        private static void refresh(IRuntimeDebugClientTarget onlyTarget, IFile onlyFile)
+        {
+            synchronized (STATES)
+            {
+                if (STATES.isEmpty())
+                    return;
+            }
+            // Нельзя отправлять команды из уведомления документа/отладчика и под монитором STATES.
+            // Задача проверяет версии повторно; неизменившиеся события не порождают команды.
+            Job job = Job.create("Комфорт: обновление строк точек останова", monitor ->
+            {
+                Map<IRuntimeDebugClientTarget, Map<IBslLineBreakpoint, State>> copy = new IdentityHashMap<>();
+                synchronized (STATES)
+                {
+                    STATES.forEach((target, states) ->
+                    {
+                        if (onlyTarget == null || target == onlyTarget)
+                            copy.put(target, new HashMap<>(states));
+                    });
+                }
+                copy.forEach((target, states) -> states.forEach((breakpoint, state) ->
+                {
+                    try
+                    {
+                        IMarker marker = breakpoint.getMarker();
+                        if (marker == null || !marker.exists() || !(marker.getResource() instanceof IFile file)
+                            || (onlyFile != null && !onlyFile.equals(file)))
+                            return;
+                        Version version = version(target, breakpoint, file);
+                        synchronized (state)
+                        {
+                            if (version.equals(state.version))
+                                return;
+                        }
+                        resend(target, breakpoint);
+                    }
+                    catch (Exception e)
+                    {
+                        Global.tempLog(TOPIC, "refresh failed: " + e);
+                    }
+                }));
+                return Status.OK_STATUS;
+            });
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private static Object wrap(Object candidate, Object value, boolean lookup)
+        {
+            if (!(candidate instanceof IRuntimeDebugClientTarget target)
+                || !(value instanceof IBslLineBreakpoint breakpoint))
+                return value;
+            int line = -1;
+            try
+            {
+                IMarker marker = breakpoint.getMarker();
+                if (marker == null || !marker.exists() || !(marker.getResource() instanceof IFile file) || !file.exists())
+                    return value;
+                State state;
+                synchronized (STATES)
+                {
+                    state = STATES.computeIfAbsent(target, ignored -> new WeakHashMap<>())
+                        .computeIfAbsent(breakpoint, ignored -> new State());
+                }
+                if (lookup)
+                {
+                    synchronized (state)
+                    {
+                        // Именно отправленная строка, даже если редактор с тех пор изменился.
+                        line = state.version == null ? breakpoint.getLineNumber() : state.sentLine;
+                    }
+                }
+                else
+                {
+                    Version version = version(target, breakpoint, file);
+                    boolean schedule = false;
+                    synchronized (state)
+                    {
+                        if (!version.equals(state.version))
+                        {
+                            state.version = version;
+                            state.line = -1;
+                            state.reason = "Соответствие строки ещё рассчитывается";
+                            schedule = true;
+                        }
+                        line = state.line;
+                        state.sentLine = line;
+                    }
+                    if (schedule)
+                    {
+                        BreakpointListHook.sourceMappingChanged();
+                        prepare(target, breakpoint, file, state, version);
+                    }
+                    Global.tempLog(TOPIC, "outgoing file=" + file.getFullPath() + " marker="
+                        + version.markerLine + " runtime=" + line + " generation=" + version.generation
+                        + " reason=" + state.reason);
+                }
+                if (lookup)
+                    Global.tempLog(TOPIC, "lookup file=" + file.getFullPath() + " runtime=" + line);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "wrap lookup=" + lookup + " failed: " + e);
+            }
+            int mapped = line;
+            return Proxy.newProxyInstance(IBslLineBreakpoint.class.getClassLoader(),
+                new Class<?>[] { IBslLineBreakpoint.class }, (proxy, method, arguments) ->
+                {
+                    if (method.getName().equals("getLineNumber"))
+                        return mapped;
+                    if (!lookup && method.getName().equals("isEnabled") && mapped < 1)
+                        return false;
+                    try
+                    {
+                        return method.invoke(breakpoint, arguments);
+                    }
+                    catch (InvocationTargetException e)
+                    {
+                        throw e.getCause();
+                    }
+                });
+        }
+
+        private static Version version(IRuntimeDebugClientTarget target, IBslLineBreakpoint breakpoint, IFile file)
+            throws CoreException
+        {
+            EditorDocument editor = null;
+            String reason = "";
+            synchronized (OPEN)
+            {
+                List<EditorDocument> editors = OPEN.get(file);
+                if (editors != null)
+                    for (EditorDocument next : editors)
+                    {
+                        if (editor != null && editor.document != next.document)
+                            reason = "Для модуля открыто несколько разных документов редактора";
+                        editor = next;
+                    }
+            }
+            if (editor == null)
+            {
+                var buffer = FileBuffers.getTextFileBufferManager()
+                    .getTextFileBuffer(file.getFullPath(), LocationKind.IFILE);
+                if (buffer != null)
+                    editor = new EditorDocument(buffer.getDocument(), buffer.getAnnotationModel());
+            }
+            IDocument document = editor != null ? editor.document : null;
+            long stamp = document != null ? documentStamp(document) : IDocumentExtension4.UNKNOWN_MODIFICATION_STAMP;
+            String generation = null;
+            List<IRuntimeDebugTargetThread> subjects = connectedSubjects(target);
+            for (var thread : subjects)
+            {
+                if (DebugViewHook.isSessionMetadataStale(thread))
+                    reason = STALE_REASON;
+                String next = thread.getRuntimeDebugTarget().getConfigVersion();
+                if (next == null || next.isBlank())
+                    continue;
+                if (generation != null && !generation.equals(next))
+                    reason = "Предметы отладки используют разные поколения метаданных";
+                generation = next;
+            }
+            if (generation == null && reason.isEmpty())
+                reason = "Не определено поколение метаданных предмета отладки";
+            Global.tempLog(TOPIC, "subjects target=" + System.identityHashCode(target)
+                + " connected=" + subjects.size() + " generation=" + generation + " reason=" + reason);
+            return new Version(document, editor != null ? editor.model : null,
+                stamp, file.getModificationStamp(), breakpoint.getLineNumber(),
+                generation, reason, document != null && stamp == IDocumentExtension4.UNKNOWN_MODIFICATION_STAMP
+                    ? document.get() : null);
+        }
+
+        private static void prepare(IRuntimeDebugClientTarget target, IBslLineBreakpoint breakpoint,
+            IFile file, State state, Version expected)
+        {
+            Display.getDefault().asyncExec(() ->
+            {
+                String text = null;
+                int line = expected.markerLine;
+                String failure = expected.reason;
+                try
+                {
+                    if (!expected.equals(version(target, breakpoint, file)))
+                    {
+                        resend(target, breakpoint);
+                        return;
+                    }
+                    if (expected.document != null)
+                    {
+                        text = expected.document.get();
+                        Position position = markerPosition(expected.model, breakpoint.getMarker());
+                        if (position != null && !position.isDeleted())
+                            line = expected.document.getLineOfOffset(position.offset) + 1;
+                        else
+                            failure = "Не найдена текущая позиция точки в редакторе модуля";
+                        Global.tempLog(TOPIC, "capture file=" + file.getFullPath() + " document="
+                            + expected.document.getClass().getName() + " stamp=" + expected.stamp
+                            + " model=" + (expected.model != null ? expected.model.getClass().getName() : "null")
+                            + " position=" + position + " marker=" + expected.markerLine + " editor=" + line);
+                    }
+                }
+                catch (Exception e)
+                {
+                    failure = "Не удалось прочитать текущую строку точки: " + e.getMessage();
+                }
+                String captured = text;
+                int editorLine = line;
+                String captureFailure = failure;
+                Job job = Job.create("Комфорт: сопоставление строки точки останова", monitor ->
+                {
+                    int runtimeLine = -1;
+                    String reason = captureFailure;
+                    try
+                    {
+                        if (reason.isEmpty())
+                        {
+                            String current = captured;
+                            if (current == null)
+                                try (var contents = file.getContents())
+                                {
+                                    current = new String(contents.readAllBytes(),
+                                        java.nio.charset.Charset.forName(file.getCharset()));
+                                }
+                            BslModuleReference reference = target.getModuleLocator().getReference(file);
+                            String original = source(target, reference, expected.generation, file,
+                                () -> target.getModuleLocator().getModule(reference, true),
+                                () -> !expected.equals(uncheckedVersion(target, breakpoint, file)));
+                            Mapping mapping = matching(target, file, expected.generation, current, original)
+                                .at(editorLine - 1);
+                            if (mapping.exact)
+                                runtimeLine = mapping.line + 1;
+                            else
+                                reason = "У строки нет однозначного соответствия в модуле базы";
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        reason = "Не удалось сопоставить строку с модулем базы: " + e.getMessage();
+                        Global.tempLog(TOPIC, "prepare failed file=" + file.getFullPath() + ": " + e);
+                    }
+                    Global.tempLog(TOPIC, "prepared file=" + file.getFullPath() + " marker="
+                        + expected.markerLine + " editor=" + editorLine + " runtime=" + runtimeLine
+                        + " reason=" + reason);
+                    synchronized (state)
+                    {
+                        if (!expected.equals(state.version))
+                            return Status.OK_STATUS;
+                        state.line = runtimeLine;
+                        state.reason = reason;
+                    }
+                    BreakpointListHook.sourceMappingChanged();
+                    resend(target, breakpoint);
+                    return Status.OK_STATUS;
+                });
+                job.setSystem(true);
+                job.schedule();
+            });
+        }
+
+        /** Один diff на модуль и снимок текста, а не на каждую точку в модуле. Только фон. */
+        private static LineMapping matching(IRuntimeDebugClientTarget target, IFile file,
+            String generation, String current, String original)
+        {
+            synchronized (MATCHINGS)
+            {
+                Map<IFile, ReverseMapping> files = MATCHINGS.computeIfAbsent(target, ignored -> new HashMap<>());
+                ReverseMapping cached = files.get(file);
+                if (cached == null || !Objects.equals(cached.generation, generation)
+                    || !cached.current.equals(current) || !cached.original.equals(original))
+                {
+                    cached = new ReverseMapping(generation, current, original, new LineMapping(current, original));
+                    files.put(file, cached);
+                }
+                return cached.matching;
+            }
+        }
+
+        private static Position markerPosition(IAnnotationModel model, IMarker marker)
+        {
+            if (model instanceof AbstractMarkerAnnotationModel markers)
+            {
+                Position position = markers.getMarkerPosition(marker);
+                if (position != null)
+                    return position;
+            }
+            if (model != null)
+                for (var iterator = model.getAnnotationIterator(); iterator.hasNext();)
+                {
+                    Annotation annotation = iterator.next();
+                    if (annotation instanceof SimpleMarkerAnnotation marked && marker.equals(marked.getMarker()))
+                        return model.getPosition(annotation);
+                }
+            return null;
+        }
+
+        private static Version uncheckedVersion(IRuntimeDebugClientTarget target, IBslLineBreakpoint breakpoint, IFile file)
+        {
+            try
+            {
+                return version(target, breakpoint, file);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog(TOPIC, "version failed file=" + file.getFullPath() + ": " + e);
+                return null;
+            }
+        }
+
+        private static void resend(IRuntimeDebugClientTarget target, IBslLineBreakpoint breakpoint)
+        {
+            DebugPlugin.getDefault().asyncExec(() ->
+            {
+                try
+                {
+                    IMarker marker = breakpoint.getMarker();
+                    if (!target.isTerminated() && !target.isDisconnected() && marker != null
+                        && marker.exists() && breakpoint.isRegistered())
+                    {
+                        Global.tempLog(TOPIC, "resend marker=" + marker.getId());
+                        target.breakpointChanged(breakpoint, null);
+                    }
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(TOPIC, "resend failed: " + e);
+                }
+            });
+        }
+
+        private record EditorDocument(IDocument document, IAnnotationModel model) {}
+
+        private record ReverseMapping(String generation, String current, String original, LineMapping matching) {}
+
+        private record Version(IDocument document, IAnnotationModel model, long stamp, long fileStamp, int markerLine,
+            String generation, String reason, String unknownText) {}
+
+        private static final class State
+        {
+            Version version;
+            int line = -1;
+            int sentLine = -1;
+            volatile String reason = "";
         }
     }
 

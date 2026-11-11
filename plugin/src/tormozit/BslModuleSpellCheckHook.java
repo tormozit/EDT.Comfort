@@ -3405,7 +3405,8 @@ public final class BslModuleSpellCheckHook implements IStartup
         @Override
         public boolean canFix(Annotation annotation)
         {
-            return delegate != null && delegate.canFix(annotation)
+            return BslQueryLiteralSupport.isLiveQueryAnnotation(annotation)
+                || delegate != null && delegate.canFix(annotation)
                 || annotation instanceof XtextAnnotation live
                     && similarNameProposalForUnresolvedReference(live, null, null, true) != null;
         }
@@ -3442,8 +3443,14 @@ public final class BslModuleSpellCheckHook implements IStartup
                 Annotation annotation = annotations.next();
                 Position position = model.getPosition(annotation);
                 if (position == null || position.isDeleted || context.getOffset() < position.offset
-                    || context.getOffset() > position.offset + position.length
-                    || !(annotation instanceof XtextAnnotation live))
+                    || context.getOffset() > position.offset + position.length)
+                    continue;
+                if (BslQueryLiteralSupport.isLiveQueryAnnotation(annotation))
+                {
+                    Collections.addAll(result, BslQueryLiteralSupport.liveQueryProposals(annotation));
+                    continue;
+                }
+                if (!(annotation instanceof XtextAnnotation live))
                     continue;
                 ICompletionProposal proposal = similarNameProposalForUnresolvedReference(live, viewer, null, true);
                 if (proposal != null)
@@ -3802,6 +3809,13 @@ public final class BslModuleSpellCheckHook implements IStartup
         if (typedLength < 12)
             return 2;
         return 3;
+    }
+
+    /** Общий подбор опечаток для готового списка допустимых имён, без обращения к модели. */
+    static String similarNameCorrection(Iterable<String> names, String typed)
+    {
+        NameMatch match = matchInNames(names, typed);
+        return match == null || match.exact ? null : match.name;
     }
 
     /**

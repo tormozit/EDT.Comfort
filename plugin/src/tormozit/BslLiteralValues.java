@@ -512,6 +512,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             && request.produced.contains(configurable.getReplacementString());
     }
 
+    /**
+     * Хотя бы одно значение связано со свойством или методом модели: смысл списка известен,
+     * даже если при выполнении в коллекции могут появиться другие имена (открытое множество).
+     */
+    static boolean hasModelValues(ICompletionProposal[] proposals)
+    {
+        Request request = REQUEST.get();
+        if (request == null || proposals == null)
+            return false;
+        for (ICompletionProposal proposal : proposals)
+            if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable
+                && request.infos.get(configurable.getReplacementString()) instanceof EObject)
+                return true;
+        return false;
+    }
+
     static int raisedPremiumOf(ICompletionProposal proposal)
     {
         return proposal != null && RAISED.containsKey(SmartContentAssistProcessor.unwrapProposal(proposal)) ? 1 : 0;
@@ -1212,6 +1228,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         boolean full;
         /** Значения взяты из реквизитов формы, которые модуль создаёт кодом: список заведомо неполный. */
         private boolean dynamicFormAttributes;
+        /** Элементы и команды могут добавляться при выполнении; даже непустой список не полный. */
+        private boolean dynamicFormCollection;
         /** Ограничивать полноту по веткам только при поиске роли в вызываемом методе. */
         ParameterSearch parameterSearch;
         boolean sortDirection;
@@ -1423,9 +1441,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         void finish()
         {
-            if (validation && values.isEmpty() && stockContext != null)
+            if (validation && values.isEmpty() && stockContext != null && !dynamicFormCollection)
                 addStockValues();
-            if (dynamicFormAttributes)
+            if (dynamicFormAttributes || dynamicFormCollection)
                 full = false;
             // Единственный шаблонный член не задаёт полный список допустимых имён.
             if (values.size() == 1)
@@ -1908,6 +1926,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             String leftOfAssignment = ""; //$NON-NLS-1$
             Module handlerModule = null;
             List<TypeItem> objectTypes = call.sourceTypes;
+            if (call.index == 0 && in(method, "Найти", "Find") //$NON-NLS-1$ //$NON-NLS-2$
+                && hasType(objectTypes, "FormAllItems", "FormCommands")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                branch("formCollectionFind"); //$NON-NLS-1$
+                // Контекст коллекции содержит те же имена, что доступны после Элементы./Команды.,
+                // включая служебные элементы, которых нет в Form.getItems().
+                dynamicFormCollection = true;
+                full = false;
+                addAll(properties(objectTypes));
+                Global.tempLog("literal-form-collections", "method=" + method + " validation=" + validation //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " source=" + (call.source == null ? "null" : text(call.source)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " types=" + typeNames(objectTypes) + " parent=" + parent //$NON-NLS-1$ //$NON-NLS-2$
+                    + " values=" + values.values() + " full=" + full); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
             if (containsAny(parameterLower, "ключ", "индекс", "колонк", "сортировк", "группировк")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
                 Global.tempLog("tabular-union", "literal method=" + method + " parameter=" + parameter //$NON-NLS-1$ //$NON-NLS-2$
                     + " context=" + context + " index=" + call.index //$NON-NLS-1$ //$NON-NLS-2$
@@ -2205,12 +2238,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 branch("metadataCollection"); //$NON-NLS-1$
                 addAll(metadataCollection(text(call.source)));
-            }
-            else if ("Найти".equalsIgnoreCase(method) && moduleForm() != null //$NON-NLS-1$
-                && hasType(objectTypes, "FormAllItems")) //$NON-NLS-1$
-            {
-                branch("formItems"); //$NON-NLS-1$
-                addFormItems(moduleForm());
             }
             else
                 full = false;

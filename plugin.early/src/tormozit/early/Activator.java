@@ -76,6 +76,117 @@ public final class Activator
         FullRebuildContainmentChecksWeaving.install(context);
         MarkerCreationDateWeaving.install(context);
         CommonAttributeLossDiagnostics.install(context);
+        DebugBreakpointsWeaving.install(context);
+    }
+
+    /**
+     * Номера точек в командах и обратном поиске: debug.core 18.0.0.v202605050943,
+     * 19.0.1.v202607090722.
+     * Маркеры остаются в координатах редактора. Подмена IBslLineBreakpoint действует
+     * только на время формирования команды; условия и остальные свойства делегируются оригиналу.
+     */
+    private static final class DebugBreakpointsWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.internal.debug.core.model.RuntimeDebugClientTarget";
+        private static final String PREFIX = "com/_1c/g5/v8/dt/debug/core/model/breakpoints/";
+        private static final String BREAKPOINT = PREFIX + "IBslBreakpoint";
+        private static final String LINE = PREFIX + "IBslLineBreakpoint";
+        private static final String OUT = "tormozit.debug.breakpoints.outgoing";
+        private static final String LOOKUP = "tormozit.debug.breakpoints.lookup";
+
+        static void install(BundleContext context)
+        {
+            BiFunction<Object, Object, Object> identity = (target, breakpoint) -> breakpoint;
+            System.getProperties().put(OUT, identity);
+            System.getProperties().put(LOOKUP, identity);
+            context.registerService(WeavingHook.class, new DebugBreakpointsWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (!TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] bytes = transform(woven.getBytes());
+                if (bytes != null)
+                    woven.setBytes(bytes);
+                System.setProperty(OUT + ".status", bytes != null ? "woven" : "bytecode differs");
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(OUT + ".status", failure.toString());
+            }
+        }
+
+        static byte[] transform(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] patched = new int[2];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean outgoing = "getModulesBreakpoints".equals(name)
+                        && "()Ljava/util/Map;".equals(descriptor);
+                    boolean lookup = "getLineBreakpoint".equals(name)
+                        && ("(Lcom/_1c/g5/v8/dt/debug/core/model/BslModuleReference;I)L" + LINE + ";").equals(descriptor);
+                    if (!outgoing && !lookup)
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        private int loaded = -1;
+
+                        @Override
+                        public void visitVarInsn(int opcode, int variable)
+                        {
+                            loaded = opcode == Opcodes.ALOAD ? variable : -1;
+                            super.visitVarInsn(opcode, variable);
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String desc, boolean face)
+                        {
+                            if (outgoing && opcode == Opcodes.INVOKEINTERFACE && BREAKPOINT.equals(owner)
+                                && "isEnabled".equals(method) && "()Z".equals(desc) && loaded > 0)
+                            {
+                                wrap(OUT, BREAKPOINT);
+                                // Снимок номера один для проверки включённости и конструктора команды.
+                                // В исходном байткоде здесь ALOAD локального IBslBreakpoint (слот 3).
+                                mv.visitInsn(Opcodes.DUP);
+                                mv.visitVarInsn(Opcodes.ASTORE, loaded);
+                                patched[0]++;
+                            }
+                            else if (lookup && opcode == Opcodes.INVOKEINTERFACE && LINE.equals(owner)
+                                && "getLineNumber".equals(method) && "()I".equals(desc))
+                            {
+                                wrap(LOOKUP, LINE);
+                                patched[1]++;
+                            }
+                            super.visitMethodInsn(opcode, owner, method, desc, face);
+                        }
+
+                        /** Стек …, breakpoint → …, callback.apply(this, breakpoint). */
+                        private void wrap(String key, String type)
+                        {
+                            EarlyWeaving.emitGetProperty(mv, key, "java/util/function/BiFunction");
+                            mv.visitInsn(Opcodes.SWAP);
+                            mv.visitVarInsn(Opcodes.ALOAD, 0);
+                            mv.visitInsn(Opcodes.SWAP);
+                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                            mv.visitTypeInsn(Opcodes.CHECKCAST, type);
+                        }
+                    };
+                }
+            }, 0);
+            return patched[0] == 1 && patched[1] == 1 ? writer.toByteArray() : null;
+        }
     }
 
     /**
@@ -2196,7 +2307,8 @@ public final class Activator
      * md 27.0.0.v202605050943 (27.1.0.v202607090722, 28.0.0.v202610211527) {@code CommonAttributeFieldInferrer}:
      * вход {@code updateContextDefs} запоминает объект метаданных и набор действующих общих реквизитов,
      * вход {@code updateContextDef} пишет, какие свойства общих реквизитов EDT удалит из контекста и почему
-     * (источник — прокси или не входит в набор). Безусловно, каждый вызов; файл в {@code .tmp/temp-logs}.
+     * (источник — прокси или не входит в набор). Безусловно, каждый вызов; файл в {@code .tmp/temp-logs},
+     * копия между запусками — {@code .tmp/common-attribute-loss/diagnostic.log}.
      * <p>Части пересчёта: {@code MdDerivedDataComputer$1.compute} — запуск частей CTX_DEF (новый ContextDef типа,
      * старый с общими реквизитами выбрасывается) и CMN_AT_FLD с набором частей объекта; derived 17.0.200 (18.0.0,
      * 19.0.0) {@code PartBasedObjectContext.addParts} — кто заказал эти части, со стеком.
@@ -2220,6 +2332,9 @@ public final class Activator
         private static final String CMN_AT_FLD = "CMN_AT_FLD"; //$NON-NLS-1$
         private static final java.nio.file.Path FILE = java.nio.file.Path.of(
             "C:/VC/EDT.Comfort/.tmp/temp-logs/common-attribute-loss.log");
+        /** Не очищается Global.clearTempLogs(): потеря могла сохраниться в модели до текущего запуска. */
+        private static final java.nio.file.Path HISTORY_FILE = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/common-attribute-loss/diagnostic.log");
         private final ThreadLocal<Object> currentObject = new ThreadLocal<>();
         /** Строки SESSION/WEAVE этого запуска — повторяются в файле после очистки temp-logs основным бандлом. */
         private final StringBuilder header = new StringBuilder();
@@ -2229,7 +2344,8 @@ public final class Activator
             var diagnostics = new CommonAttributeLossDiagnostics();
             System.getProperties().put(CALLBACK, (Consumer<Object[]>) diagnostics::record);
             diagnostics.write("SESSION pid=" + ProcessHandle.current().pid()
-                + " workspace=" + System.getProperty("osgi.instance.area"));
+                + " workspace=" + System.getProperty("osgi.instance.area")
+                + " early=" + context.getBundle().getVersion() + " history=" + HISTORY_FILE);
             context.registerService(WeavingHook.class, diagnostics, null);
         }
 
@@ -2535,19 +2651,28 @@ public final class Activator
 
         private synchronized void write(String text)
         {
+            String line = java.time.OffsetDateTime.now() + " [" + Thread.currentThread().getName() + "] "
+                + text + "\r\n";
+            String previousHeader = header.toString();
+            if (text.startsWith("SESSION") || text.startsWith("WEAVE"))
+                header.append(line);
+            // Независимые записи: отказ одного файла не должен лишать нас второго.
+            append(HISTORY_FILE, line, "");
+            append(FILE, line, previousHeader);
+        }
+
+        private static void append(java.nio.file.Path file, String line, String header)
+        {
             try
             {
-                String line = java.time.OffsetDateTime.now() + " [" + Thread.currentThread().getName() + "] "
-                    + text + "\r\n";
-                java.nio.file.Files.createDirectories(FILE.getParent());
-                if (java.nio.file.Files.exists(FILE) && java.nio.file.Files.size(FILE) >= 8 * 1024 * 1024)
-                    java.nio.file.Files.move(FILE, FILE.resolveSibling("common-attribute-loss.previous.log"),
+                java.nio.file.Files.createDirectories(file.getParent());
+                if (java.nio.file.Files.exists(file) && java.nio.file.Files.size(file) >= 8 * 1024 * 1024)
+                    java.nio.file.Files.move(file, file.resolveSibling(file.getFileName().toString()
+                        .replace(".log", ".previous.log")),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 // Основной бандл на старте очищает temp-logs: файл пропал — сначала заново строки SESSION/WEAVE.
-                String prefix = java.nio.file.Files.exists(FILE) ? "" : header.toString();
-                if (text.startsWith("SESSION") || text.startsWith("WEAVE"))
-                    header.append(line);
-                java.nio.file.Files.writeString(FILE, prefix + line,
+                String prefix = java.nio.file.Files.exists(file) ? "" : header;
+                java.nio.file.Files.writeString(file, prefix + line,
                     java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
                     java.nio.file.StandardOpenOption.APPEND);
             }
@@ -4205,6 +4330,9 @@ public final class Activator
         private static final String STATUS = "tormozit.typeComputation.early"; //$NON-NLS-1$
         private static final String INFERRER = "com._1c.g5.v8.dt.form.resource.FormImplicitRefInferrer"; //$NON-NLS-1$
         private static final String COMPUTER = "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
+        private static final String UNLOAD =
+            "com._1c.g5.v8.dt.bsl.typesystem.UnloadRecordSetInvocationTypesComputer"; //$NON-NLS-1$
+        private static final String TABULAR_UNLOAD = "tormozit.invocation.tabularUnload"; //$NON-NLS-1$
         private static final String ATTRIBUTE = "tormozit.formAttribute.types"; //$NON-NLS-1$
         private static final String BINARY = "tormozit.expression.plusTypes"; //$NON-NLS-1$
         private static final String ATTRIBUTE_ACCESS = "tormozit.formAttribute.accessTypes"; //$NON-NLS-1$
@@ -4222,6 +4350,7 @@ public final class Activator
             System.getProperties().putIfAbsent(BINARY, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(ATTRIBUTE_ACCESS, (Function<Object[], Object>) args -> args[0]);
             System.getProperties().putIfAbsent(INDEX_ACCESS, (Function<Object[], Object>) args -> args[0]);
+            System.getProperties().putIfAbsent(TABULAR_UNLOAD, (Function<Object[], Object>) args -> args[0]);
             context.registerService(WeavingHook.class, new TypeComputationWeaving(context), null);
             System.getProperties().put(STATUS, Boolean.TRUE);
         }
@@ -4230,7 +4359,8 @@ public final class Activator
         public void weave(WovenClass woven)
         {
             String name = woven.getClassName();
-            if (woven.getState() != WovenClass.TRANSFORMING || !INFERRER.equals(name) && !COMPUTER.equals(name))
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || !INFERRER.equals(name) && !COMPUTER.equals(name) && !UNLOAD.equals(name))
                 return;
             try
             {
@@ -4239,13 +4369,23 @@ public final class Activator
                     throw new IllegalStateException("Type computation method not found: " + name); //$NON-NLS-1$
                 woven.setBytes(bytes);
                 System.getProperties().put(STATUS + "." + name, Boolean.TRUE); //$NON-NLS-1$
+                reportTabularUnload(name, "woven=true"); //$NON-NLS-1$
                 log("woven " + name, null); //$NON-NLS-1$
             }
             catch (RuntimeException failure)
             {
                 System.getProperties().put(STATUS + "." + name, Boolean.FALSE); //$NON-NLS-1$
+                reportTabularUnload(name, "woven=false failure=" + failure); //$NON-NLS-1$
                 log("weaving failed " + name, failure); //$NON-NLS-1$
             }
+        }
+
+        @SuppressWarnings("unchecked")
+        private static void reportTabularUnload(String name, String result)
+        {
+            if (UNLOAD.equals(name)
+                && System.getProperties().get(TABULAR_UNLOAD + ".weaving") instanceof Consumer<?> observer) //$NON-NLS-1$
+                ((Consumer<Object>)observer).accept(result);
         }
 
         private void log(String message, Throwable failure)
@@ -4276,6 +4416,7 @@ public final class Activator
             AtomicBoolean binary = new AtomicBoolean();
             AtomicBoolean attributeAccess = new AtomicBoolean();
             AtomicBoolean indexAccess = new AtomicBoolean();
+            AtomicBoolean tabularUnload = new AtomicBoolean();
             reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
             {
                 @Override
@@ -4284,7 +4425,13 @@ public final class Activator
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
                     String callback;
-                    if (INFERRER.equals(className) && "inferProperty".equals(name) //$NON-NLS-1$
+                    if (UNLOAD.equals(className) && "getTypes".equals(name) //$NON-NLS-1$
+                        && "(Lcom/_1c/g5/v8/dt/bsl/model/Invocation;)Ljava/util/List;".equals(descriptor)) //$NON-NLS-1$
+                    {
+                        callback = TABULAR_UNLOAD;
+                        tabularUnload.set(true);
+                    }
+                    else if (INFERRER.equals(className) && "inferProperty".equals(name) //$NON-NLS-1$
                         && "(Lcom/_1c/g5/v8/dt/form/model/FormAttribute;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Lcom/_1c/g5/v8/dt/mcore/DerivedProperty;".equals(descriptor)) //$NON-NLS-1$
                     {
                         callback = ATTRIBUTE;
@@ -4356,7 +4503,10 @@ public final class Activator
                             {
                                 super.visitInsn(Opcodes.DUP);
                                 super.visitLdcInsn(index);
-                                super.visitVarInsn(Opcodes.ALOAD, index == 1 ? 1 : index == 3 ? 0 : 2);
+                                if (index == 4 && TABULAR_UNLOAD.equals(callback))
+                                    super.visitInsn(Opcodes.ACONST_NULL);
+                                else
+                                    super.visitVarInsn(Opcodes.ALOAD, index == 1 ? 1 : index == 3 ? 0 : 2);
                                 super.visitInsn(Opcodes.AASTORE);
                             }
                             super.visitInsn(Opcodes.DUP);
@@ -4370,7 +4520,7 @@ public final class Activator
                     };
                 }
             }, 0);
-            return property.get()
+            return tabularUnload.get() || property.get()
                 && (!COMPUTER.equals(className) || binary.get() && attributeAccess.get() && indexAccess.get())
                 ? writer.toByteArray() : null;
         }
@@ -6714,6 +6864,9 @@ public final class Activator
         /** Совпадает с {@code BslXtextDocumentHook.ValidationTrace.PROP_ERROR}: текст исключения из ATHROW. */
         private static final String PROP_VALIDATION_ERROR = "tormozit.bslXtextDoc.validationTrace.error"; //$NON-NLS-1$
         private static final String PROP_MODEL_HIGHLIGHTING = "tormozit.bslHighlighting.modelChanged"; //$NON-NLS-1$
+        private static final String ANNOTATION_ISSUE_PROCESSOR =
+            "org.eclipse.xtext.ui.editor.validation.AnnotationIssueProcessor"; //$NON-NLS-1$
+        private static final String PROP_QUERY_ANNOTATIONS = "tormozit.queryLiteral.filterAnnotations"; //$NON-NLS-1$
         private static final String DOC_LOCKER =
             "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocument$CustomXtextDocumentLocker"; //$NON-NLS-1$
         private static final String PROP_VALIDATION_REENTRY = "tormozit.bslXtextDoc.validationReentry"; //$NON-NLS-1$
@@ -6744,7 +6897,7 @@ public final class Activator
             FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
             DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER, BSL_HIGHLIGHTING,
-            XTEXT_DOCUMENT, BSL_XTEXT_DOCUMENT);
+            XTEXT_DOCUMENT, BSL_XTEXT_DOCUMENT, ANNOTATION_ISSUE_PROCESSOR);
 
         private static final String EXTRACT_SUPPRESSIONS_DESC = "(Lorg/eclipse/xtext/nodemodel/ILeafNode;)Ljava/util/Set;"; //$NON-NLS-1$
         private static final String ILEAF_NODE = "org/eclipse/xtext/nodemodel/ILeafNode"; //$NON-NLS-1$
@@ -6815,6 +6968,8 @@ public final class Activator
             System.getProperties().putIfAbsent(PROP_BEFORE_MERGE_COMMIT, (Function<Object, Object>) callback -> null);
             System.getProperties().putIfAbsent(PROP_LOCAL_STRING_SOURCE,
                 (BiFunction<Object, Object, Object>) (dialog, component) -> dialog);
+            System.getProperties().putIfAbsent(PROP_QUERY_ANNOTATIONS,
+                (BiFunction<Object, Object, Object>) (model, annotations) -> annotations);
             // До основного бандла: ожидание бессмысленно только внутри расчёта — разбор ждёт наш монитор.
             System.getProperties().putIfAbsent(PROP_SKIP_WAIT,
                 (java.util.function.BooleanSupplier) () -> AssistReadLock.depth() > 0);
@@ -6872,6 +7027,8 @@ public final class Activator
                 if (XTEXT_DOCUMENT.equals(name) || BSL_XTEXT_DOCUMENT.equals(name))
                     System.setProperty(PROP_VALIDATION_TRACE
                         + (BSL_XTEXT_DOCUMENT.equals(name) ? ".bsl.patch" : ".patch"), "error " + t); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                if (ANNOTATION_ISSUE_PROCESSOR.equals(name))
+                    System.setProperty(PROP_QUERY_ANNOTATIONS + ".patch", "error " + t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -7481,6 +7638,8 @@ public final class Activator
             }
             if (BSL_HIGHLIGHTING.equals(className))
                 return transformModelHighlighting(bytes);
+            if (ANNOTATION_ISSUE_PROCESSOR.equals(className))
+                return transformQueryAnnotations(bytes);
             if (DCS_LOCAL_STRING_EDITOR.equals(className) || DCS_FIELD_EDITING.equals(className)
                 || DCS_PARAMETER_EDITING.equals(className))
                 return transformDcsLocalStringSource(className, bytes);
@@ -8053,6 +8212,48 @@ public final class Activator
          * {@link #transformFoldingProvider}. Функции ставит {@link #install} до хука, поэтому
          * вплетённый код зовёт их без проверок.
          */
+        /** #1042: убираем перекрытые живыми отметки хаба до публикации пакета в модели редактора. */
+        private static byte[] transformQueryAnnotations(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            String owner = reader.getClassName();
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"updateAnnotations".equals(name) //$NON-NLS-1$
+                        || !"(Lorg/eclipse/core/runtime/IProgressMonitor;Ljava/util/List;Ljava/util/Map;)V" //$NON-NLS-1$
+                            .equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            emitGetProperty(this, PROP_QUERY_ANNOTATIONS, "java/util/function/BiFunction"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitFieldInsn(Opcodes.GETFIELD, owner, "annotationModel", //$NON-NLS-1$
+                                "Lorg/eclipse/jface/text/source/IAnnotationModel;"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ALOAD, 3);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Map"); //$NON-NLS-1$
+                            super.visitVarInsn(Opcodes.ASTORE, 3);
+                            touched[0]++;
+                        }
+                    };
+                }
+            }, 0);
+            System.setProperty(PROP_QUERY_ANNOTATIONS + ".patch", "methods=" + touched[0]); //$NON-NLS-1$ //$NON-NLS-2$
+            return touched[0] == 1 ? writer.toByteArray() : null;
+        }
+
         /** BSL проверяет активность и stamp сам; только тяжёлый вызов родителя переносится в Job. */
         private static byte[] transformModelHighlighting(byte[] bytes)
         {

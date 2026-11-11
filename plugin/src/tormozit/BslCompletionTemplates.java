@@ -20,6 +20,51 @@ final class BslCompletionTemplates
 {
     private BslCompletionTemplates() {}
 
+    /** Отдельное ключевое слово; шаблон «Знач …» содержит также имя и значение параметра. */
+    static boolean isByValueKeyword(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        if (!(raw instanceof ConfigurableCompletionProposal cp))
+            return false;
+        String replacement = cp.getReplacementString();
+        return replacement != null && (replacement.trim().equalsIgnoreCase("Знач") //$NON-NLS-1$
+            || replacement.trim().equalsIgnoreCase("Val")); //$NON-NLS-1$
+    }
+
+    /** «Знач» / {@code Val}: пробел после ключевого слова, каретка перед именем параметра. */
+    static Point applyByValueKeyword(ICompletionProposal proposal, IDocument document, ITextViewer viewer,
+        int caret, Integer stateMask)
+    {
+        if (!isByValueKeyword(proposal) || document == null)
+            return null;
+        ConfigurableCompletionProposal cp = (ConfigurableCompletionProposal)
+            SmartContentAssistProcessor.unwrapProposal(proposal);
+        int start = cp.getReplacementOffset();
+        Point selected = viewer != null ? viewer.getSelectedRange() : null;
+        int length = caret - start + (selected != null && selected.x == caret ? selected.y : 0);
+        if (stateMask != null && (stateMask & 262144) != 0)
+            length = cp.getReplaceContextLength();
+        if (start < 0 || caret < start || caret > document.getLength() || length < 0
+            || start + length > document.getLength())
+            return null;
+        try
+        {
+            String text = cp.getReplacementString().stripTrailing();
+            boolean existingSpace = start + length < document.getLength()
+                && document.getChar(start + length) == ' ';
+            if (!existingSpace)
+                text += " "; //$NON-NLS-1$
+            SmartContentAssistProcessor.clearCtorPendingApplyState();
+            document.replace(start, length, text);
+            Point selection = new Point(start + text.length() + (existingSpace ? 1 : 0), 0);
+            return selection;
+        }
+        catch (BadLocationException error)
+        {
+            return null;
+        }
+    }
+
     /** Возвращает каретку после вставки либо {@code null}, если шаблон неприменим. */
     static Point apply(ICompletionProposal proposal, IDocument document, ITextViewer viewer,
         int caret, Integer stateMask)

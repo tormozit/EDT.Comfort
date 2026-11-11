@@ -385,6 +385,8 @@ public final class BslEditorHighlighting
         static void highlight(Object nativeCalculator, EObject root, IHighlightedPositionAcceptor acceptor,
             CancelIndicator cancelIndicator)
         {
+            Global.tempLog("query-highlighting-1042", "queries.begin resource=" //$NON-NLS-1$ //$NON-NLS-2$
+                + root.eResource().getURI());
             Object lexer = null;
             java.lang.reflect.Method update = null;
             java.lang.reflect.Method start = null;
@@ -443,7 +445,10 @@ public final class BslEditorHighlighting
                     return;
                 }
                 acceptLiteral(text, offset, end, tokens, ids, acceptor);
+                Global.tempLog("query-highlighting-1042", "literal offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " end=" + end + " tokens=" + tokens.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
+            Global.tempLog("query-highlighting-1042", "queries.end canceled=" + isCanceled(cancelIndicator)); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /** Первое слово текста (после пробелов, «|» и комментариев) — ВЫБРАТЬ/SELECT или УНИЧТОЖИТЬ/DROP. */
@@ -497,6 +502,21 @@ public final class BslEditorHighlighting
                 int tokenEnd = Math.min(end, tokenOffset + tokens.get(i)[1]);
                 if (tokenOffset < position || tokenEnd <= tokenOffset)
                     continue;
+                // Лексер EDT отдаёт ИмяТаблицы.* одним ошибочным токеном типа 0:
+                // IDENT поглощает точку, но после неё ожидает ещё один символ имени (#1042).
+                if (UNMAPPED_ID.equals(ids.get(i)) && isWildcardSelection(text, tokenOffset, tokenEnd))
+                {
+                    if (tokenOffset > position)
+                        acceptQueryText(text, position, tokenOffset, acceptor);
+                    acceptor.addPosition(tokenOffset, tokenEnd - tokenOffset - 2,
+                        BslServerCallHighlightingConfiguration.queryTokenId(OTHERS_ID));
+                    acceptor.addPosition(tokenEnd - 2, 2,
+                        BslServerCallHighlightingConfiguration.queryTokenId("Ql_Operators")); //$NON-NLS-1$
+                    Global.tempLog("query-highlighting-1042", "wildcard.split offset=" + tokenOffset //$NON-NLS-1$ //$NON-NLS-2$
+                        + " length=" + (tokenEnd - tokenOffset)); //$NON-NLS-1$
+                    position = tokenEnd;
+                    continue;
+                }
                 String qlId = qlId(text, tokenOffset, tokenEnd, ids.get(i));
                 if (qlId == null)
                     continue;
@@ -508,6 +528,31 @@ public final class BslEditorHighlighting
             }
             if (end > position)
                 acceptQueryText(text, position, end, acceptor);
+        }
+
+        /** Имя либо путь из имён, затем «.*»; строки, параметры и комментарии сюда не попадают. */
+        private static boolean isWildcardSelection(String text, int from, int to)
+        {
+            if (to - from < 3 || text.charAt(to - 2) != '.' || text.charAt(to - 1) != '*')
+                return false;
+            boolean start = true;
+            for (int i = from; i < to - 2; i++)
+            {
+                char c = text.charAt(i);
+                if (c == '.')
+                {
+                    if (start)
+                        return false;
+                    start = true;
+                }
+                else
+                {
+                    if (!(Character.isLetter(c) || c == '_' || !start && Character.isDigit(c)))
+                        return false;
+                    start = false;
+                }
+            }
+            return !start;
         }
 
         /** Фон промежутка без отступа перед «|» в начале строки продолжения. */
@@ -584,6 +629,7 @@ public final class BslEditorHighlighting
 
         private static void logFailure(String message, Throwable e)
         {
+            Global.tempLogException("query-highlighting-1042", message, e); //$NON-NLS-1$
             if (failureLogged)
                 return;
             failureLogged = true;

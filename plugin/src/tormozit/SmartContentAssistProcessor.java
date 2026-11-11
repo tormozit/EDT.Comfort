@@ -4570,14 +4570,20 @@ return EMPTY;
                 return delegateStock;
             ICompletionProposal[] stock = comment ? delegateStock
                 : dropTemplateTypesInLiteral(viewer, caret, delegateStock);
-            // ИР (#983): значения литерала из неполного набора не закрывают список — низковероятные слова
-            // добавляются рядом, значения выше по рейтингу (BslLiteralValues.raisedPremiumOf).
+            // Неполный список со свойствами/методами модели уже задаёт смысл литерала (#1039).
+            // Только текстовые догадки (#983) допускают рядом низковероятные слова.
+            boolean modelValues = !comment && BslLiteralValues.hasModelValues(stock);
             List<ICompletionProposal> partialValues = new ArrayList<>();
             List<ICompletionProposal> otherStock = new ArrayList<>();
             if (stock != null)
                 for (ICompletionProposal proposal : stock)
                     (BslLiteralValues.isPartialValue(proposal) ? partialValues : otherStock).add(proposal);
-            if (stock == null || hasNativeVariants(otherStock.toArray(ICompletionProposal[]::new)))
+            boolean nativeVariants = hasNativeVariants(otherStock.toArray(ICompletionProposal[]::new));
+            Global.tempLog("literal-low-probability", "caret=" + caret + " comment=" + comment //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " modelValues=" + modelValues + " partialValues=" + partialValues.size() //$NON-NLS-1$ //$NON-NLS-2$
+                + " otherStock=" + otherStock.size() + " nativeVariants=" + nativeVariants //$NON-NLS-1$ //$NON-NLS-2$
+                + " addLowProbability=" + (stock != null && !modelValues && !nativeVariants)); //$NON-NLS-1$
+            if (stock == null || modelValues || nativeVariants)
                 return stock;
             try
             {

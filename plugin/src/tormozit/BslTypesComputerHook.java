@@ -38,6 +38,7 @@ final class BslTypesComputerHook
     {
         if (!installed.compareAndSet(false, true))
             return;
+        BslInvocationTypeRules.installTabularUnload();
         System.getProperties().put(CALLBACK, (Function<Object[], Object>) BslTypesComputerHook::afterBinaryTypes);
         if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
         {
@@ -78,7 +79,7 @@ final class BslTypesComputerHook
     /**
      * Возврат метода EDT → Function({результат, аргумент 1, versionSupport, this, аргумент 2}).
      * Для бинарного выражения перехватывается результат штатного computeTypes левой части.
-     * Оба потребителя используют подтверждённые сигнатуры с EObject и Environments.
+     * У метода с единственным аргументом последний элемент массива — null.
      */
     static byte[] transformReturnCallback(String className, byte[] bytes, String method, String descriptor,
         String callback)
@@ -146,7 +147,10 @@ final class BslTypesComputerHook
                         super.visitInsn(Opcodes.AASTORE);
                         super.visitInsn(Opcodes.DUP);
                         super.visitInsn(Opcodes.ICONST_4);
-                        super.visitVarInsn(Opcodes.ALOAD, 2);
+                        if (org.objectweb.asm.Type.getArgumentTypes(descriptor).length > 1)
+                            super.visitVarInsn(Opcodes.ALOAD, 2);
+                        else
+                            super.visitInsn(Opcodes.ACONST_NULL);
                         super.visitInsn(Opcodes.AASTORE);
                         super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         super.visitTypeInsn(Opcodes.CHECKCAST, cast);

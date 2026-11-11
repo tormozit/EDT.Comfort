@@ -1,9 +1,14 @@
 package tormozit;
 
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
+
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.debug.ui.IDebugView;
 import org.eclipse.jface.dialogs.InputDialog;
+import org.eclipse.jface.preference.PreferenceConverter;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -14,6 +19,7 @@ import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
@@ -30,8 +36,10 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.editors.text.EditorsUI;
 
 import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslExceptionBreakpoint;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
 
 /**
  * Панель «Точки останова», точки останова по исключению («Сообщение исключения: […]»):
@@ -55,6 +63,7 @@ public final class BreakpointListHook implements IStartup
     private static final String DOUBLE_CLICK_KEY = "tormozit.exceptionBreakpointDoubleClick"; //$NON-NLS-1$
     private static final String DIALOG_TITLE = "Сообщение исключения"; //$NON-NLS-1$
     private static final String DIALOG_MESSAGE = "Текст фильтра сообщения исключения:"; //$NON-NLS-1$
+    private static final Set<Tree> SOURCE_STATUS_TREES = Collections.newSetFromMap(new WeakHashMap<>());
 
     @Override
     public void earlyStartup()
@@ -125,6 +134,8 @@ public final class BreakpointListHook implements IStartup
         if (Boolean.TRUE.equals(structuredViewer.getControl().getData(DOUBLE_CLICK_KEY)))
             return;
         structuredViewer.getControl().setData(DOUBLE_CLICK_KEY, Boolean.TRUE);
+        if (structuredViewer.getControl() instanceof Tree tree)
+            installSourceStatusPainting(tree);
 
         structuredViewer.addDoubleClickListener(event ->
         {
@@ -141,6 +152,75 @@ public final class BreakpointListHook implements IStartup
             return null;
         Object element = structured.getFirstElement();
         return element instanceof IBslExceptionBreakpoint bp ? bp : null;
+    }
+
+    /** Перерисовка по готовому результату фонового сопоставления, без обновления модели EDT. */
+    static void sourceMappingChanged()
+    {
+        Display display = Display.getDefault();
+        if (!display.isDisposed())
+            display.asyncExec(() ->
+            {
+                SOURCE_STATUS_TREES.removeIf(Tree::isDisposed);
+                for (Tree tree : SOURCE_STATUS_TREES)
+                    tree.redraw();
+            });
+    }
+
+    private static void installSourceStatusPainting(Tree tree)
+    {
+        SOURCE_STATUS_TREES.add(tree);
+        Global.tempLog("breakpoint-lines-1040", "install row painting tree=" + tree.getClass().getName());
+        var store = EditorsUI.getPreferenceStore();
+        org.eclipse.jface.util.IPropertyChangeListener preferences = event ->
+        {
+            if ("comfort.debug.uncertainIP.color".equals(event.getProperty()))
+                sourceMappingChanged();
+        };
+        store.addPropertyChangeListener(preferences);
+        tree.addDisposeListener(event ->
+        {
+            SOURCE_STATUS_TREES.remove(tree);
+            store.removePropertyChangeListener(preferences);
+        });
+        tree.addListener(SWT.EraseItem, event ->
+        {
+            if (!(event.item instanceof TreeItem item) || !(item.getData() instanceof IBslLineBreakpoint breakpoint)
+                || !BslDebugSourceHook.isBreakpointSourceUncertain(breakpoint))
+                return;
+            RGB stored = store.contains("comfort.debug.uncertainIP.color")
+                ? PreferenceConverter.getColor(store, "comfort.debug.uncertainIP.color") : new RGB(245, 220, 220);
+            RGB rgb = ThemeAwareColors.toEffectiveBackgroundRgb(stored);
+            if ((event.detail & SWT.SELECTED) != 0)
+            {
+                RGB foreground = item.getForeground(event.index).getRGB();
+                rgb = new RGB((rgb.red * 9 + foreground.red) / 10,
+                    (rgb.green * 9 + foreground.green) / 10, (rgb.blue * 9 + foreground.blue) / 10);
+            }
+            var background = event.gc.getBackground();
+            event.gc.setBackground(EditorsUI.getSharedTextColors().getColor(rgb));
+            event.gc.fillRectangle(0, event.y, tree.getClientArea().width, event.height);
+            event.gc.setBackground(background);
+            // Нативное выделение иначе закроет розовый фон; выбранная строка темнее и с рамкой.
+            event.detail &= ~(SWT.BACKGROUND | SWT.SELECTED | SWT.HOT);
+            event.gc.setForeground(item.getForeground(event.index));
+        });
+        tree.addListener(SWT.PaintItem, event ->
+        {
+            if (!(event.item instanceof TreeItem item) || !(item.getData() instanceof IBslLineBreakpoint breakpoint)
+                || !BslDebugSourceHook.isBreakpointSourceUncertain(breakpoint))
+                return;
+            for (TreeItem selected : tree.getSelection())
+                if (selected == item)
+                {
+                    var foreground = event.gc.getForeground();
+                    event.gc.setForeground(item.getForeground(event.index));
+                    event.gc.drawRectangle(0, event.y, Math.max(0, tree.getClientArea().width - 1),
+                        Math.max(0, event.height - 1));
+                    event.gc.setForeground(foreground);
+                    break;
+                }
+        });
     }
 
     // -----------------------------------------------------------------------

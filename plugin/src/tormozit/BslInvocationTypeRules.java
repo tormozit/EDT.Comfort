@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.lang.instrument.ClassFileTransformer;
+import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -9,6 +11,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import org.eclipse.emf.common.util.URI;
@@ -67,8 +71,10 @@ import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
+import com._1c.g5.v8.dt.metadata.mdtype.TabularSectionTypes;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -180,6 +186,100 @@ public class BslInvocationTypeRules
     /** Цикл зависимостей писателя и читателя хранилища: тот же AST-вызов уже вычисляется этим правилом. */
     private static final ThreadLocal<Set<Invocation>> COMPUTING =
         ThreadLocal.withInitial(() -> Collections.newSetFromMap(new IdentityHashMap<>()));
+
+    /**
+     * EDT bsl 28.0.1.v202605050943: UnloadRecordSetInvocationTypesComputer.getTypes возвращает
+     * таблицу по первому найденному методу коллекции, игнорируя маску. Исправляем его результат
+     * для табличных частей здесь: и TypesComputer, и CreatorTreeState вызывают этот вычислитель.
+     * Остальные правила видят уже исправленный ответ через computedByOthers и не добавляют второй тип.
+     */
+    static void installTabularUnload()
+    {
+        TabularUnload.install();
+    }
+
+    private static final class TabularUnload implements ClassFileTransformer
+    {
+        private static final String TARGET =
+            "com._1c.g5.v8.dt.bsl.typesystem.UnloadRecordSetInvocationTypesComputer"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.invocation.tabularUnload"; //$NON-NLS-1$
+        private static final String DESCRIPTOR =
+            "(Lcom/_1c/g5/v8/dt/bsl/model/Invocation;)Ljava/util/List;"; //$NON-NLS-1$
+        private static final AtomicBoolean installed = new AtomicBoolean();
+        private static final ThreadLocal<Set<Invocation>> computing =
+            ThreadLocal.withInitial(() -> Collections.newSetFromMap(new IdentityHashMap<>()));
+
+        static void install()
+        {
+            if (!installed.compareAndSet(false, true))
+                return;
+            System.getProperties().put(CALLBACK, (Function<Object[], Object>)TabularUnload::replace);
+            System.getProperties().put(CALLBACK + ".weaving", (java.util.function.Consumer<Object>) //$NON-NLS-1$
+                result -> Global.tempLog("tabular-union", "unload weaving " + result)); //$NON-NLS-1$ //$NON-NLS-2$
+            if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
+            {
+                Global.tempLog("tabular-union", "install tabular unload=early woven=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + System.getProperties().get("tormozit.typeComputation.early." + TARGET)); //$NON-NLS-1$
+                return;
+            }
+            boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new TabularUnload(), TARGET);
+            Global.tempLog("tabular-union", "install tabular unload=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!ok)
+                installed.set(false);
+        }
+
+        private static Object replace(Object[] args)
+        {
+            Invocation invocation = (Invocation)args[1];
+            Global.tempLog("tabular-union", "unload entry at=" + Call.offsetOf(invocation) //$NON-NLS-1$ //$NON-NLS-2$
+                + " expression=" + Call.text(invocation)); //$NON-NLS-1$
+            if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(invocation))
+                return args[0];
+            Set<Invocation> active = computing.get();
+            if (!active.add(invocation))
+            {
+                Global.tempLog("tabular-union", "unload reentrant at=" + Call.offsetOf(invocation)); //$NON-NLS-1$ //$NON-NLS-2$
+                return args[0];
+            }
+            try
+            {
+                Call call = new Call(invocation, access);
+                List<TypeItem> sections = Call.tabularSections(call.receiverTypes());
+                for (TypeItem section : call.assignedTabularSections())
+                    Call.addDistinct(sections, section);
+                if (sections.isEmpty())
+                    return args[0];
+                List<TypeItem> result = call.copyColumns();
+                Global.tempLog("tabular-union", "unload result at=" + Call.offsetOf(invocation) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " expression=" + Call.text(invocation) + " sections=" + call.collectionTrace(sections) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " replaced=" + (result != null)); //$NON-NLS-1$
+                return result == null ? args[0] : result;
+            }
+            catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                throw canceled;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                Global.tempLog("tabular-union", "unload failure=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                return args[0];
+            }
+            finally
+            {
+                active.remove(invocation);
+                if (active.isEmpty())
+                    computing.remove();
+            }
+        }
+
+        @Override
+        public byte[] transform(ClassLoader loader, String name, Class<?> redefining, ProtectionDomain domain, byte[] bytes)
+        {
+            return TARGET.replace('.', '/').equals(name)
+                ? BslTypesComputerHook.transformReturnCallback(TARGET, bytes, "getTypes", DESCRIPTOR, CALLBACK) : null; //$NON-NLS-1$
+        }
+    }
 
     @Override
     public List<TypeItem> getTypes(Invocation invocation)
@@ -561,7 +661,9 @@ public class BslInvocationTypeRules
                 return null;
             List<TypeItem> rows = receiverRows();
             List<Property> all = allRowProperties(rows);
-            String trace = "copyColumns " + name + " receiver=" + typeNames(receiverTypes()) + " rows=" + typeNames(rows) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            String trace = "copyColumns " + name + " receiver=" + collectionTrace(receiverTypes()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " assigned=" + collectionTrace(assignedTabularSections()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " rows=" + typeNames(rows) //$NON-NLS-1$ //$NON-NLS-2$
                 + " all=" + propertyNames(all) + " names=[" + names + "]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (all.isEmpty())
             {
@@ -827,9 +929,128 @@ public class BslInvocationTypeRules
             }
         }
 
+        /**
+         * Типы строк получателя. У объединения табличных частей ({@code Если … тч = Объект.Товары … КонецЕсли})
+         * штатный разбор коллекции бывает пуст или содержит только одну ветвь: дополняем его строками
+         * из присваиваний переменной и произведённых типов каждой табличной части.
+         */
         List<TypeItem> receiverRows()
         {
-            return new ArrayList<>(TypeSystemUtil.getCollectionElementTypes(receiverTypes(), invocation));
+            List<TypeItem> types = receiverTypes();
+            List<TypeItem> rows = rowsOf(types);
+            List<TypeItem> sections = tabularSections(types);
+            for (TypeItem section : assignedTabularSections())
+                addDistinct(sections, section);
+            for (TypeItem section : sections)
+            {
+                List<TypeItem> sectionRows = rowsOf(List.of(section));
+                if (sectionRows.isEmpty())
+                    sectionRows = metadataRows(List.of(section));
+                for (TypeItem row : sectionRows)
+                    addDistinct(rows, row);
+            }
+            return rows;
+        }
+
+        /** Строки коллекции: штатный разбор (с проверкой {@code isIterable}), затем — элементы напрямую. */
+        List<TypeItem> rowsOf(List<TypeItem> types)
+        {
+            List<TypeItem> rows = new ArrayList<>(TypeSystemUtil.getCollectionElementTypes(types, invocation));
+            if (!rows.isEmpty())
+                return rows;
+            for (TypeItem item : types)
+                if (resolve(item) instanceof Type type && type.getCollectionElementTypes() != null)
+                    rows.addAll(type.getCollectionElementTypes().allTypes());
+            return rows;
+        }
+
+        /** Табличные части среди типов получателя (без типов строк). */
+        static List<TypeItem> tabularSections(List<TypeItem> types)
+        {
+            List<TypeItem> result = new ArrayList<>();
+            for (TypeItem item : types)
+                if (isTabularSection(item))
+                    addDistinct(result, item);
+            return result;
+        }
+
+        static boolean isTabularSection(TypeItem item)
+        {
+            String typeName = typeName(item);
+            return typeName.contains("TabularSection") && !typeName.contains("TabularSectionRow"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Табличные части, присвоенные переменной-получателю выше вызова (ветви {@code Если}). */
+        List<TypeItem> assignedTabularSections()
+        {
+            if (!(access instanceof DynamicFeatureAccess dynamic))
+                return List.of();
+            List<TypeItem> result = new ArrayList<>();
+            for (Expression value : assignedValues(dynamic.getSource()))
+                for (TypeItem type : typesOf(value))
+                    if (isTabularSection(type))
+                        addDistinct(result, type);
+            return result;
+        }
+
+        /**
+         * Значения выражения выше места вызова: правые части присваиваний переменной, рекурсивно. В отличие от
+         * {@link #origins}, выражение без присваиваний — тоже значение: получатель {@code Объект.Товары}
+         * присваиванием не является.
+         */
+        List<Expression> assignedValues(Expression expression)
+        {
+            List<Expression> result = new ArrayList<>();
+            collectAssignedValues(expression, offsetOf(invocation), Collections.newSetFromMap(new IdentityHashMap<>()),
+                result);
+            return result;
+        }
+
+        void collectAssignedValues(Expression expression, int before, Set<EObject> visited, List<Expression> result)
+        {
+            if (expression == null || !visited.add(expression))
+                return;
+            boolean variable = (expression instanceof StaticFeatureAccess || expression instanceof DynamicFeatureAccess)
+                && !(expression instanceof Invocation);
+            Method method = variable ? EcoreUtil2.getContainerOfType(expression, Method.class) : null;
+            List<SimpleStatement> assignments = method == null ? List.of()
+                : assignments(method, withoutSpaces(text(expression)), before);
+            if (assignments.isEmpty())
+            {
+                result.add(expression);
+                return;
+            }
+            for (SimpleStatement statement : assignments)
+                collectAssignedValues(statement.getRight(), offsetOf(statement), visited, result);
+        }
+
+        /** Строки табличной части по метаданным: произведённый тип строки части. */
+        List<TypeItem> metadataRows(List<TypeItem> sections)
+        {
+            List<TypeItem> rows = new ArrayList<>();
+            for (TypeItem item : sections)
+            {
+                MdObject md = MdTypeUtil.getTypeProducer(resolve(item));
+                EObject produced = md instanceof DbObjectTabularSection section ? section.getProducedTypes() : null;
+                produced = produced == null ? null : EcoreUtil.resolve(produced, invocation);
+                if (produced instanceof TabularSectionTypes types && types.getRowType() != null)
+                    addDistinct(rows, types.getRowType().getType());
+            }
+            return rows;
+        }
+
+        /** Для временного лога: тип, признак итерируемости и число элементов коллекции. */
+        String collectionTrace(List<TypeItem> types)
+        {
+            List<String> parts = new ArrayList<>();
+            for (TypeItem item : types)
+            {
+                Type type = resolve(item) instanceof Type resolved ? resolved : null;
+                parts.add(typeName(item) + "[iterable=" + (type != null && type.isIterable()) //$NON-NLS-1$
+                    + " elements=" + (type == null || type.getCollectionElementTypes() == null ? "-" //$NON-NLS-1$ //$NON-NLS-2$
+                        : Integer.toString(type.getCollectionElementTypes().allTypes().size())) + "]"); //$NON-NLS-1$
+            }
+            return parts.toString();
         }
 
         /** Свойства первого типа строки, у которого они есть ({@code ЛучшийТипИзТаблицыТипов}). */

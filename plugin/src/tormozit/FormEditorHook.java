@@ -281,7 +281,6 @@ import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 import org.eclipse.emf.ecore.EEnumLiteral;
 import org.eclipse.emf.ecore.EStructuralFeature;
-import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.URI;
@@ -3811,40 +3810,26 @@ public class FormEditorHook implements IStartup
         /**
          * Вид команды кнопки для суффикса в дереве: «С» — стандартная, «Г» — глобальная (общая). Берётся из
          * того же кеша, что и наследуемый заголовок (ссылка на команду разрешается в фоне);
-         * пока источник не посчитан — {@code null}. Команды формы суффикса не получают.
+         * непустой путь к данным сразу определяет параметризованную глобальную команду.
+         * При пустом пути до расчёта источника — {@code null}. Команды формы суффикса не получают.
          */
         static String buttonCommandKind(FormEditorPage page, FormItem item)
         {
-            if (!(item instanceof Button))
+            if (!(item instanceof Button button))
                 return null;
-            Source source = cached(page, item);
-            if (source == UNKNOWN)
-                return null;
-            if (source.object instanceof FormStandardCommand)
-                return "С"; //$NON-NLS-1$
-            com._1c.g5.v8.dt.mcore.Command command = ((Button)item).getCommandName();
-            if (command == null || command instanceof FormCommand)
-                return null;
-            // Команда не из формы: её имя составное («Объект.Команда») — точка в имени и есть признак.
-            String name = commandFullName(command);
-            return name != null && name.indexOf('.') >= 0 ? "Г" : null; //$NON-NLS-1$
+            AbstractDataPath path = button.getDataPath();
+            boolean parameterizedGlobal = path != null && !path.getSegments().isEmpty();
+            return parameterizedGlobal ? "Г" : commandKind(cached(page, item).object); //$NON-NLS-1$
         }
 
-        /** Имя команды без разрешения ссылки: у прокси оно лежит во фрагменте URI. */
-        private static String commandFullName(com._1c.g5.v8.dt.mcore.Command command)
+        /** Тип уже разрешённой команды: имя и путь параметра на её вид не влияют. */
+        private static String commandKind(EObject command)
         {
-            try
-            {
-                URI uri = command instanceof InternalEObject internal && command.eIsProxy()
-                    ? internal.eProxyURI() : EcoreUtil.getURI(command);
-                if (uri != null && uri.fragment() != null)
-                    return uri.fragment();
-            }
-            catch (RuntimeException e)
-            {
-                // ниже — имя объекта
-            }
-            return Global.invoke(command, "getName") instanceof String name ? name : null; //$NON-NLS-1$
+            if (command instanceof FormStandardCommand)
+                return "С"; //$NON-NLS-1$
+            if (command instanceof FormCommand)
+                return null;
+            return command instanceof com._1c.g5.v8.dt.mcore.Command ? "Г" : null; //$NON-NLS-1$
         }
 
         /**

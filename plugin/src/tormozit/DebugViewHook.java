@@ -36,6 +36,8 @@ import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.TextLayout;
 import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Tree;
@@ -333,7 +335,12 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
     /** Тот же результат проверки поколения, что используется для подписи сеанса. Без запроса к агенту. */
     static boolean isSessionMetadataStale(IBslStackFrame frame)
     {
-        if (!(frame.getThread().getThreadGroup() instanceof IDebugSession session))
+        return isSessionMetadataStale(frame.getThread());
+    }
+
+    static boolean isSessionMetadataStale(IRuntimeDebugTargetThread thread)
+    {
+        if (!(thread.getThreadGroup() instanceof IDebugSession session))
             return false;
         SessionStatus status = STATES.get(session);
         if (status == null)
@@ -512,7 +519,7 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
         }
     }
 
-    /** Красным рисуется только суффикс об устаревании сеанса. */
+    /** Устаревание сеанса — красным, базы — мягким синим с учётом темы. */
     static void installSuffixPainting(Tree tree)
     {
         String key = "tormozit.debug.metadataSuffixPainting"; //$NON-NLS-1$
@@ -534,6 +541,9 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             if (start < 0)
                 return;
             var oldForeground = event.gc.getForeground();
+            boolean sessionStale = text.endsWith(SESSION_STALE);
+            Color suffixColor = sessionStale ? tree.getDisplay().getSystemColor(SWT.COLOR_RED)
+                : new Color(tree.getDisplay(), ThemeAwareColors.toEffectiveRgb(new RGB(80, 120, 160)));
             TextLayout layout = new TextLayout(tree.getDisplay());
             try
             {
@@ -548,7 +558,7 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
                 // COLOR_LIST_SELECTION_TEXT не совпадает с ним в теме Explorer Windows.
                 layout.setFont(item.getFont(event.index));
                 layout.setText(text);
-                layout.setStyle(new TextStyle(null, tree.getDisplay().getSystemColor(SWT.COLOR_RED), null),
+                layout.setStyle(new TextStyle(null, suffixColor, null),
                     start, text.length() - 1);
                 var bounds = item.getTextBounds(event.index);
                 layout.draw(event.gc, bounds.x, bounds.y);
@@ -556,6 +566,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
             finally
             {
                 layout.dispose();
+                if (!sessionStale)
+                    suffixColor.dispose();
                 event.gc.setForeground(oldForeground);
             }
         });
@@ -565,6 +577,8 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
     {
         if (text.endsWith(SESSION_STALE))
             return text.length() - SESSION_STALE.length();
+        if (text.endsWith(BASE_STALE))
+            return text.length() - BASE_STALE.length();
         return -1;
     }
 

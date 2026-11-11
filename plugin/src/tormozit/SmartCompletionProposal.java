@@ -1850,6 +1850,9 @@ public class SmartCompletionProposal implements
 
     private boolean tryApplyTemplate(IDocument document, ITextViewer viewer, int caret, Integer stateMask)
     {
+        templateSelection = BslCompletionTemplates.applyByValueKeyword(delegate, document, viewer, caret, stateMask);
+        if (templateSelection != null)
+            return true;
         templateSelection = BslCompletionTemplates.applyIdleHandler(delegate, document, viewer, caret, stateMask);
         if (templateSelection != null)
             return true;

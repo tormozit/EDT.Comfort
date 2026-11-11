@@ -28,6 +28,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextPresentationListener;
+import org.eclipse.jface.text.ITextInputListener;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CaretEvent;
@@ -94,6 +95,10 @@ public final class BslEditorHighlightingHook implements IStartup
                 if (!(reconciler instanceof HighlightingReconciler hr) || !(resource instanceof XtextResource))
                     return false;
                 XtextSourceViewer source = resolveSourceViewer(hr);
+                Global.tempLog("query-highlighting-1042", "modelChanged reconciler=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + EditorPaintDebug.identity(hr) + " resource=" + EditorPaintDebug.identity(resource) //$NON-NLS-1$
+                    + " stamp=" + ((XtextResource)resource).getModificationStamp() //$NON-NLS-1$
+                    + " source=" + EditorPaintDebug.identity(source)); //$NON-NLS-1$
                 if (source == null || source.getXtextDocument() == null)
                     return false;
                 applyHighlightingNow(reconciler);
@@ -174,6 +179,9 @@ public final class BslEditorHighlightingHook implements IStartup
             if (document == null)
                 return;
 
+            Global.tempLog("query-highlighting-1042", "schedule reconciler=" //$NON-NLS-1$ //$NON-NLS-2$
+                + EditorPaintDebug.identity(hr) + " document=" + EditorPaintDebug.identity(document)); //$NON-NLS-1$
+
             synchronized (pendingApplyJobs)
             {
                 Job previous = pendingApplyJobs.get(hr);
@@ -185,6 +193,8 @@ public final class BslEditorHighlightingHook implements IStartup
                     @Override
                     protected IStatus run(IProgressMonitor monitor)
                     {
+                        Global.tempLog("query-highlighting-1042", "job.begin reconciler=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + EditorPaintDebug.identity(hr) + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
                         try
                         {
                             if (monitor.isCanceled())
@@ -194,11 +204,14 @@ public final class BslEditorHighlightingHook implements IStartup
                         }
                         catch (Exception e)
                         {
+                            Global.tempLogException("query-highlighting-1042", "job.failed", e); //$NON-NLS-1$ //$NON-NLS-2$
                             Global.log(TAG, "applyHighlightingNow job failed: " //$NON-NLS-1$
                                 + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$
                         }
                         finally
                         {
+                            Global.tempLog("query-highlighting-1042", "job.end reconciler=" //$NON-NLS-1$ //$NON-NLS-2$
+                                + EditorPaintDebug.identity(hr) + " canceled=" + monitor.isCanceled()); //$NON-NLS-1$
                             synchronized (pendingApplyJobs)
                             {
                                 if (pendingApplyJobs.get(hr) == this)
@@ -320,7 +333,10 @@ public final class BslEditorHighlightingHook implements IStartup
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
                     return;
 
-                HighlightingRead prepared = ContentAssistSessionReloader.readOnlyLowPriority(document, monitor,
+                // Раскраска читает готовый AST: чтение для автодополнения отменяет проверку
+                // и запускает её заново, из-за чего при каждом вводе мигают маркеры проблем (#1042).
+                Global.tempLog("query-highlighting-1042", "read.mode=peekAst"); //$NON-NLS-1$ //$NON-NLS-2$
+                HighlightingRead prepared = ContentAssistSessionReloader.readOnlyPeekAstLowPriority(document, monitor,
                     resource -> {
                         if (monitor.isCanceled() || resource == null || resource.getParseResult() == null
                             || resource.getParseResult().getRootNode() == null
@@ -330,12 +346,18 @@ public final class BslEditorHighlightingHook implements IStartup
                             return null;
                         }
                         resetDelegateStamp(hr);
+                        Global.tempLog("query-highlighting-1042", "reconcile resource=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + EditorPaintDebug.identity(resource) + " stamp=" + resource.getModificationStamp()); //$NON-NLS-1$
                         reconcileMethod.invoke(hr, resource, (CancelIndicator) monitor::isCanceled);
                         return new HighlightingRead(resource,
                             ((org.eclipse.jface.text.IDocumentExtension4) document).getModificationStamp(),
                             new ArrayList<>((List<AttributedPosition>) addedField.get(hr)),
                             new ArrayList<>((List<AttributedPosition>) removedField.get(hr)));
                     });
+                Global.tempLog("query-highlighting-1042", "prepared=" + (prepared != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " canceled=" + monitor.isCanceled() + " presenterCanceled=" + presenter.isCanceled() //$NON-NLS-1$ //$NON-NLS-2$
+                    + (prepared == null ? "" : " added=" + prepared.added().size() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " removed=" + prepared.removed().size())); //$NON-NLS-1$
                 if (prepared == null || presenter.isCanceled() || monitor.isCanceled())
                     return;
                 // Текстовая presentation использует готовые позиции, а не AST. Модель уже свободна.
@@ -353,6 +375,7 @@ public final class BslEditorHighlightingHook implements IStartup
                     return;
                 }
                 updateMethod.invoke(hr, textPresentation, added, removed, prepared.resource());
+                Global.tempLog("query-highlighting-1042", "update.queued stamp=" + prepared.stamp()); //$NON-NLS-1$ //$NON-NLS-2$
             }
             finally
             {
@@ -374,6 +397,7 @@ public final class BslEditorHighlightingHook implements IStartup
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            Global.tempLogException("query-highlighting-1042", "apply.failed", cause); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log(TAG, "runFullHighlightingApply failed: " //$NON-NLS-1$
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
         }
@@ -521,12 +545,75 @@ public final class BslEditorHighlightingHook implements IStartup
             boolean firstTimeWrap = wrapCalculator(reconciler);
             if (firstTimeWrap && !patchedReconcilers.contains(reconciler))
                 patchedReconcilers.add(reconciler);
+            if (viewer instanceof XtextSourceViewer sourceViewer && reconciler instanceof HighlightingReconciler hr)
+                HighlightingDocumentListener.install(sourceViewer, hr);
             registerServerCallStyle(reconciler);
             applyHighlightingNow(reconciler);
         }
         catch (Exception e)
         {
             Global.log(TAG, "patchEditor failed: " + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** #1042: после автодополнения изменения текста могут не сопровождаться modelChanged. */
+    private static final class HighlightingDocumentListener implements IDocumentListener, ITextInputListener
+    {
+        private static final String KEY = "tormozit.highlightingDocumentListener"; //$NON-NLS-1$
+        private final HighlightingReconciler reconciler;
+        private IDocument document;
+
+        private HighlightingDocumentListener(HighlightingReconciler reconciler)
+        {
+            this.reconciler = reconciler;
+        }
+
+        static void install(XtextSourceViewer viewer, HighlightingReconciler reconciler)
+        {
+            StyledText text = viewer.getTextWidget();
+            if (text == null || text.isDisposed() || text.getData(KEY) != null)
+                return;
+            HighlightingDocumentListener listener = new HighlightingDocumentListener(reconciler);
+            text.setData(KEY, listener);
+            viewer.addTextInputListener(listener);
+            listener.bind(viewer.getDocument());
+            text.addDisposeListener(event -> {
+                listener.bind(null);
+                viewer.removeTextInputListener(listener);
+            });
+        }
+
+        private void bind(IDocument next)
+        {
+            if (document != null)
+                document.removeDocumentListener(this);
+            document = next;
+            if (document != null)
+                document.addDocumentListener(this);
+        }
+
+        @Override
+        public void documentAboutToBeChanged(DocumentEvent event) {}
+
+        @Override
+        public void documentChanged(DocumentEvent event)
+        {
+            Global.tempLog("query-highlighting-1042", "document.schedule reconciler=" //$NON-NLS-1$ //$NON-NLS-2$
+                + EditorPaintDebug.identity(reconciler) + " offset=" + event.getOffset()); //$NON-NLS-1$
+            if (ComfortSettings.isQueryLiteralHighlightingEnabled())
+                applyHighlightingNow(reconciler);
+        }
+
+        @Override
+        public void inputDocumentAboutToBeChanged(IDocument oldInput, IDocument newInput)
+        {
+            bind(null);
+        }
+
+        @Override
+        public void inputDocumentChanged(IDocument oldInput, IDocument newInput)
+        {
+            bind(newInput);
         }
     }
 
@@ -967,6 +1054,9 @@ public final class BslEditorHighlightingHook implements IStartup
         private final AtomicLong documentChanges = new AtomicLong();
         private final AtomicLong presentations = new AtomicLong();
         private final ITextPresentationListener presentationListener = presentation -> {
+            IRegion extent = presentation.getExtent();
+            Global.tempLog("query-highlighting-1042", "presentation editor=" + id() //$NON-NLS-1$ //$NON-NLS-2$
+                + " extent=" + extent); //$NON-NLS-1$
             if (Global.isLogEnabled())
                 presentations.incrementAndGet();
         };
@@ -976,6 +1066,9 @@ public final class BslEditorHighlightingHook implements IStartup
 
             @Override public void documentChanged(DocumentEvent event)
             {
+                Global.tempLog("query-highlighting-1042", "change editor=" + id() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " offset=" + event.getOffset() + " removed=" + event.getLength() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " inserted=" + (event.getText() == null ? 0 : event.getText().length())); //$NON-NLS-1$
                 if (Global.isLogEnabled())
                 {
                     documentChanges.incrementAndGet();

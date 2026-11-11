@@ -1538,11 +1538,13 @@ public class Activator extends AbstractUIPlugin
     /**
      * Временная диагностика, тема {@code deep-check}. События заданий проверки и сборки и раз в
      * {@link #PERIOD_MS} снимок потоков производных данных и сборки: состояние, прирост процессорного
-     * времени, что считают, кого ждут; плюс куча и прирост времени GC. Пишет всегда, без флажка.
+     * времени, что считают, кого ждут; плюс куча и прирост времени GC. Для проверки редактора —
+     * полный стек. PID разделяет записи IDE и отладочной EDT. Пишет всегда, без флажка.
      */
     private static final class DeepCheckTrace
     {
         private static final String TOPIC = "deep-check"; //$NON-NLS-1$
+        private static final long PID = ProcessHandle.current().pid();
         private static final long PERIOD_MS = 5_000L;
         private static final java.util.Map<Long, Long> CPU = new java.util.HashMap<>();
         private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> RUNNING =
@@ -1584,7 +1586,7 @@ public class Activator extends AbstractUIPlugin
                     return thread;
                 }).scheduleWithFixedDelay(DeepCheckTrace::sample, PERIOD_MS, PERIOD_MS,
                     java.util.concurrent.TimeUnit.MILLISECONDS);
-                Global.tempLog(TOPIC, "start"); //$NON-NLS-1$
+                Global.tempLog(TOPIC, "start pid=" + PID); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
@@ -1607,7 +1609,7 @@ public class Activator extends AbstractUIPlugin
             if (!tracked(job))
                 return;
             org.eclipse.core.runtime.IStatus result = event.getResult();
-            Global.tempLog(TOPIC, "job " + kind + " name=\"" + job.getName() + "\" class=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.tempLog(TOPIC, "job " + kind + " pid=" + PID + " name=\"" + job.getName() + "\" class=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                 + job.getClass().getName() + " id=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
                 + (result != null ? " result=" + result.getSeverity() : "") //$NON-NLS-1$ //$NON-NLS-2$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
@@ -1631,8 +1633,9 @@ public class Activator extends AbstractUIPlugin
                     if (thread == null)
                         continue;
                     String name = thread.getName();
+                    String lowerName = name.toLowerCase(java.util.Locale.ROOT);
                     if (!name.startsWith("derived_data_executor_") && !name.startsWith("LCBuilderState") //$NON-NLS-1$ //$NON-NLS-2$
-                        && !name.contains("проверк")) //$NON-NLS-1$
+                        && !lowerName.contains("проверк")) //$NON-NLS-1$
                         continue;
                     long id = thread.getId();
                     long cpu = mx.getThreadCpuTime(id);
@@ -1658,6 +1661,11 @@ public class Activator extends AbstractUIPlugin
                         .append(" comfort=").append(frame(firstOwn(stack, true))) //$NON-NLS-1$
                         .append(" task=").append(frame(taskFrame(stack))) //$NON-NLS-1$
                         .append(" deep=").append(contains(stack, "performDeepAnalisys")); //$NON-NLS-1$ //$NON-NLS-2$
+                    // Проверка Xтекст раньше выпадала из фильтра из-за заглавной «П».
+                    // Полный стек отличает расчёт типов от ожидания блокировки модели.
+                    if (lowerName.contains("проверк") && lowerName.contains("текст")) //$NON-NLS-1$ //$NON-NLS-2$
+                        for (StackTraceElement element : stack)
+                            busy.append("\n        at ").append(element); //$NON-NLS-1$
                 }
                 long gc = 0;
                 for (java.lang.management.GarbageCollectorMXBean bean : java.lang.management.ManagementFactory
@@ -1670,7 +1678,7 @@ public class Activator extends AbstractUIPlugin
                 StringBuilder jobs = new StringBuilder();
                 for (org.eclipse.core.runtime.jobs.Job job : RUNNING)
                     jobs.append(jobs.length() == 0 ? "" : "; ").append(job.getName()); //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog(TOPIC, "sample heapMb=" + usedMb + "/" + (runtime.maxMemory() >> 20) //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog(TOPIC, "sample pid=" + PID + " heapMb=" + usedMb + "/" + (runtime.maxMemory() >> 20) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " gc+=" + gcDelta + "ms jobs=[" + jobs + "] idle=" + idle + " busy:" + busy); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             }
             catch (Throwable t)

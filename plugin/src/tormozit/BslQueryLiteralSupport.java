@@ -17,6 +17,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -3423,6 +3424,55 @@ final class BslQueryLiteralSupport
     private static final String[] HUB_PREFIXES =
         { "Запрос в строковом литерале: ", "Query in string literal: " }; //$NON-NLS-1$ //$NON-NLS-2$
     private static final Map<BslXtextEditor, MarkerSession> MARKER_SESSIONS = new WeakHashMap<>();
+    /** Тот же ключ, что в раннем вплетении AnnotationIssueProcessor.updateAnnotations. */
+    private static final String QUERY_ANNOTATIONS_CALLBACK = "tormozit.queryLiteral.filterAnnotations"; //$NON-NLS-1$
+    /** Публикуется из UI; фон читает только неизменяемые координаты, без SWT и ожидания UI. */
+    private static final Map<IAnnotationModel, List<CoveredRange>> PUBLISHED_COVERAGES =
+        Collections.synchronizedMap(new java.util.IdentityHashMap<>());
+    private record CoveredRange(int start, int end, AtomicInteger hidden) {}
+
+    /** Список Issue остаётся штатным; фильтруется только пакет аннотаций редактора. */
+    private static Object filterHubAnnotations(Object modelObject, Object additionsObject)
+    {
+        if (!(modelObject instanceof IAnnotationModel model) || !(additionsObject instanceof Map<?, ?> additions))
+            return additionsObject;
+        List<CoveredRange> ranges = PUBLISHED_COVERAGES.get(model);
+        Global.tempLog("query-marker-events-1042", "beforePublish model=" //$NON-NLS-1$ //$NON-NLS-2$
+            + Integer.toHexString(System.identityHashCode(model)) + " incoming=" + additions.size() //$NON-NLS-1$
+            + " ranges=" + (ranges == null ? 0 : ranges.size())); //$NON-NLS-1$
+        if (ranges == null || ranges.isEmpty() || !ComfortSettings.isQueryLiteralHighlightingEnabled())
+            return additionsObject;
+        Map<Annotation, Position> filtered = new LinkedHashMap<>();
+        int suppressed = 0;
+        for (Map.Entry<?, ?> entry : additions.entrySet())
+        {
+            Annotation annotation = (Annotation)entry.getKey();
+            Position position = (Position)entry.getValue();
+            CoveredRange covered = null;
+            if (position != null && !position.isDeleted() && isHubAnnotation(annotation))
+            {
+                for (CoveredRange range : ranges)
+                {
+                    if (position.getOffset() <= range.end()
+                        && position.getOffset() + Math.max(0, position.getLength()) >= range.start())
+                    {
+                        covered = range;
+                        break;
+                    }
+                }
+            }
+            if (covered == null)
+                filtered.put(annotation, position);
+            else
+            {
+                covered.hidden().incrementAndGet();
+                suppressed++;
+            }
+        }
+        Global.tempLog("query-marker-events-1042", "beforePublish suppressed=" + suppressed //$NON-NLS-1$ //$NON-NLS-2$
+            + " remaining=" + filtered.size()); //$NON-NLS-1$
+        return suppressed == 0 ? additionsObject : filtered;
+    }
     /** Ошибки и группы операторных слов из одного готового дерева живой проверки. */
     private static record QueryValidation(String query, List<Issue> issues, List<List<int[]>> groups,
         List<int[]> pairs) {}
@@ -3471,6 +3521,10 @@ final class BslQueryLiteralSupport
         if (markersPreferenceListenerInstalled)
             return;
         markersPreferenceListenerInstalled = true;
+        System.getProperties().put(QUERY_ANNOTATIONS_CALLBACK,
+            (java.util.function.BiFunction<Object, Object, Object>) BslQueryLiteralSupport::filterHubAnnotations);
+        Global.tempLog("query-marker-events-1042", "filter.register patch=" //$NON-NLS-1$ //$NON-NLS-2$
+            + System.getProperty(QUERY_ANNOTATIONS_CALLBACK + ".patch")); //$NON-NLS-1$
         // Хранилище, в которое пишет страница «Редактор кода»: у Activator — другой экземпляр,
         // его слушатель смену флажка не получал.
         ComfortSettings.getInstance().getPreferenceStore().addPropertyChangeListener(event ->
@@ -3497,28 +3551,118 @@ final class BslQueryLiteralSupport
     }
 
     /**
-     * Исправления живой отметки: только подавление хаба {@code //@skip-check bsl-ql-hub}, как у
-     * штатной отметки хаба. Есть и при отключённой проверке хаба (issue 870). Модель не читает.
+     * Исправления живой отметки: похожее допустимое поле и подавление хаба
+     * {@code //@skip-check bsl-ql-hub}. Читают только готовые данные проверки, без обращения к модели.
      */
     static ICompletionProposal[] liveQueryProposals(Annotation annotation)
     {
         if (!(annotation instanceof QueryProblemAnnotation live))
             return new ICompletionProposal[0];
-        return new ICompletionProposal[] { new SuppressHubProposal(live) };
+        if (live.correction == null)
+            return new ICompletionProposal[] { new SuppressHubProposal(live) };
+        return new ICompletionProposal[] { new QueryNameProposal(live), new SuppressHubProposal(live) };
     }
 
     /** Ошибка запроса в литерале, найденная проверкой скрытого редактора запроса. */
     private static final class QueryProblemAnnotation extends Annotation
     {
         final Severity severity;
+        final QueryNameCorrection correction;
         /** Позиция в модели аннотаций редактора: сдвигается вместе с текстом. */
         final Position position;
 
-        QueryProblemAnnotation(String type, String text, Severity severity, Position position)
+        QueryProblemAnnotation(String type, String text, Severity severity, Position position,
+            QueryNameCorrection correction)
         {
             super(type, false, text);
             this.severity = severity;
             this.position = position;
+            this.correction = correction;
+        }
+    }
+
+    private record QueryNameCorrection(String original, String replacement) {}
+
+    /** EDT передаёт допустимые поля в issueData ошибки CommonExpressionChecker «Field not found». */
+    private static QueryNameCorrection queryNameCorrection(Issue issue, String query)
+    {
+        if (!"Field not found".equals(issue.getCode())) //$NON-NLS-1$
+            return null;
+        Integer offset = issue.getOffset();
+        Integer length = issue.getLength();
+        String[] names = issue.getData();
+        String typed = offset == null || length == null || offset < 0 || length <= 0
+            || offset > query.length() || length > query.length() - offset
+                ? "" : query.substring(offset, offset + length); //$NON-NLS-1$
+        boolean identifier = !typed.isEmpty() && (Character.isLetter(typed.charAt(0)) || typed.charAt(0) == '_')
+            && typed.chars().allMatch(c -> Character.isLetterOrDigit(c) || c == '_');
+        String replacement = !identifier || names == null ? null
+            : BslModuleSpellCheckHook.similarNameCorrection(Arrays.asList(names), typed);
+        return replacement == null ? null : new QueryNameCorrection(typed, replacement);
+    }
+
+    /** Позиция сдвигается моделью аннотаций; устаревшее исправление не меняет уже другой текст. */
+    private static final class QueryNameProposal implements ICompletionProposal
+    {
+        private final QueryProblemAnnotation annotation;
+        private int selection = -1;
+
+        QueryNameProposal(QueryProblemAnnotation annotation)
+        {
+            this.annotation = annotation;
+        }
+
+        @Override
+        public String getDisplayString()
+        {
+            return "Заменить на '" + annotation.correction.replacement() + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @Override
+        public Image getImage()
+        {
+            return null;
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return null;
+        }
+
+        @Override
+        public IContextInformation getContextInformation()
+        {
+            return null;
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            selection = -1;
+            Position position = annotation.position;
+            QueryNameCorrection correction = annotation.correction;
+            try
+            {
+                boolean current = !annotation.isMarkedDeleted() && !position.isDeleted()
+                    && correction.original().equals(document.get(position.getOffset(), position.getLength()));
+                if (current)
+                {
+                    int offset = position.getOffset();
+                    document.replace(offset, position.getLength(), correction.replacement());
+                    selection = offset + correction.replacement().length();
+                }
+            }
+            catch (org.eclipse.jface.text.BadLocationException e)
+            {
+                // Документ изменился после открытия списка исправлений.
+            }
+        }
+
+        @Override
+        public Point getSelection(IDocument document)
+        {
+            return selection < 0 ? null : new Point(selection, 0);
         }
     }
 
@@ -3636,7 +3780,7 @@ final class BslQueryLiteralSupport
         final Position range;
         final List<QueryProblemAnnotation> ours = new ArrayList<>();
         /** Сколько отметок хаба убрано под этим покрытием. */
-        int hubHidden;
+        final AtomicInteger hubHidden = new AtomicInteger();
 
         Coverage(Position range)
         {
@@ -3666,6 +3810,7 @@ final class BslQueryLiteralSupport
             @Override
             public void documentChanged(DocumentEvent event)
             {
+                publishCoverages();
                 schedule(MARKERS_DELAY_MS);
             }
         };
@@ -3674,10 +3819,12 @@ final class BslQueryLiteralSupport
         final IAnnotationModelListener annotationListener = new AnnotationListener();
         DefaultPositionUpdater positionUpdater;
         IAnnotationModel listenedModel;
+        IAnnotationModel ownerModel;
         IGitMarkerFilterManager baselineManager;
         IProject baselineProject;
         final IGitMarkerFilterManagerListener baselineListener = (project, path) -> refreshBaseline();
         int generation;
+        boolean disposed;
         /** Склеенные литералы по готовому дереву; поля читаются и пишутся только в UI-потоке. */
         ConcatenatedState concatenatedState;
         String concatenatedPending;
@@ -3698,6 +3845,7 @@ final class BslQueryLiteralSupport
             document.addDocumentListener(documentListener);
             viewer.addViewportListener(viewportListener);
             listenedModel = viewer.getAnnotationModel();
+            ownerModel = documentAnnotationModel();
             if (listenedModel != null)
                 listenedModel.addAnnotationModelListener(annotationListener);
             viewer.getTextWidget().addDisposeListener(e -> dispose());
@@ -3708,7 +3856,10 @@ final class BslQueryLiteralSupport
             if (!MARKER_SESSIONS.containsKey(editor))
                 return;
             ++generation;
+            disposed = true;
             MARKER_SESSIONS.remove(editor);
+            PUBLISHED_COVERAGES.remove(listenedModel);
+            PUBLISHED_COVERAGES.remove(ownerModel);
             if (baselineManager != null)
                 baselineManager.removeListener(baselineProject, baselineListener);
             try
@@ -3724,6 +3875,8 @@ final class BslQueryLiteralSupport
             {
                 // Редактор уже закрыт — модель аннотаций ушла вместе с ним.
             }
+            PUBLISHED_COVERAGES.remove(listenedModel);
+            PUBLISHED_COVERAGES.remove(ownerModel);
             try
             {
                 document.removeDocumentListener(documentListener);
@@ -3804,6 +3957,25 @@ final class BslQueryLiteralSupport
                 if (gen == generation)
                     run();
             });
+        }
+
+        /** Позиции уже сдвинуты DocumentEvent; в фон передаём только их снимок. */
+        private void publishCoverages()
+        {
+            if (disposed)
+                return;
+            List<CoveredRange> ranges = new ArrayList<>();
+            for (Coverage coverage : coverages)
+            {
+                if (!coverage.range.isDeleted())
+                    ranges.add(new CoveredRange(coverage.range.getOffset(),
+                        coverage.range.getOffset() + coverage.range.getLength(), coverage.hubHidden));
+            }
+            List<CoveredRange> snapshot = List.copyOf(ranges);
+            if (listenedModel != null)
+                PUBLISHED_COVERAGES.put(listenedModel, snapshot);
+            if (ownerModel != null)
+                PUBLISHED_COVERAGES.put(ownerModel, snapshot);
         }
 
         /** Смена базы или состояния фильтра касается и отметок вне видимой области. */
@@ -3978,8 +4150,9 @@ final class BslQueryLiteralSupport
                 matched.add(coverage);
                 // Результат проверки кэшируется, но строка в модуле и фильтр базы меняются
                 // даже при неизменном тексте запроса — видимость пересчитывается каждый раз.
-                remove.addAll(coverage.ours);
+                List<QueryProblemAnnotation> previous = new ArrayList<>(coverage.ours);
                 coverage.ours.clear();
+                int reused = 0;
                 for (Issue issue : validation.issues())
                 {
                     // Важность самой ошибки запроса решает лишь, показывать ли её (IGNORE — нет).
@@ -3997,13 +4170,42 @@ final class BslQueryLiteralSupport
                     int problemEnd = Math.max(problemStart + 1, lit.docOffset(Math.max(offsetEnd, offset + 1)));
                     if (hiddenByBaseline(problemStart))
                         continue;
+                    // Позиция уже сдвинута моделью при вводе. Не пересоздаём неизменную
+                    // отметку: её удаление и добавление вызывает лишнее обновление маркеров (#1042).
+                    QueryNameCorrection correction = queryNameCorrection(issue, schemaText);
+                    QueryProblemAnnotation retained = null;
+                    for (QueryProblemAnnotation candidate : previous)
+                    {
+                        Position current = model.getPosition(candidate);
+                        if (current != null && !current.isDeleted()
+                            && current.getOffset() == problemStart
+                            && current.getLength() == problemEnd - problemStart
+                            && type.equals(candidate.getType())
+                            && issue.getMessage().equals(candidate.getText())
+                            && hubSeverity == candidate.severity
+                            && java.util.Objects.equals(correction, candidate.correction))
+                        {
+                            retained = candidate;
+                            break;
+                        }
+                    }
+                    if (retained != null)
+                    {
+                        previous.remove(retained);
+                        coverage.ours.add(retained);
+                        reused++;
+                        continue;
+                    }
                     // Модель аннотаций сдвигает этот же экземпляр позиции вместе с текстом.
                     Position position = new Position(problemStart, problemEnd - problemStart);
                     QueryProblemAnnotation annotation = new QueryProblemAnnotation(type, issue.getMessage(),
-                        hubSeverity, position);
+                        hubSeverity, position, correction);
                     coverage.ours.add(annotation);
                     add.put(annotation, position);
                 }
+                remove.addAll(previous);
+                Global.tempLog("query-markers-1042", "literal=" + start + " reused=" + reused //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " removed=" + previous.size() + " current=" + coverage.ours.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
             // Покрытие в видимой области, где литерала-запроса больше нет, снимается.
             boolean hubWasHidden = false;
@@ -4014,11 +4216,14 @@ final class BslQueryLiteralSupport
                 if (coverage.range.isDeleted() || coverage.overlaps(visStart, visEnd - visStart))
                     hubWasHidden |= dropCoverage(coverage, remove);
             }
+            publishCoverages();
             // Проход проверки модуля после правки мог пройти, пока покрытие ещё стояло.
             if (hubWasHidden)
                 requestRevalidation();
             if (!remove.isEmpty() || !add.isEmpty())
             {
+                Global.tempLog("query-markers-1042", "replace removed=" + remove.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " added=" + add.size()); //$NON-NLS-1$
                 if (model instanceof IAnnotationModelExtension extension)
                     extension.replaceAnnotations(remove.toArray(new Annotation[0]), add);
                 else
@@ -4043,7 +4248,8 @@ final class BslQueryLiteralSupport
             remove.addAll(coverage.ours);
             coverage.ours.clear();
             untrack(coverage.range);
-            return coverage.hubHidden > 0;
+            publishCoverages();
+            return coverage.hubHidden.get() > 0;
         }
 
         /**
@@ -4100,7 +4306,7 @@ final class BslQueryLiteralSupport
                 boolean inOwner = owner != null && owner.getPosition(annotation) != null;
                 (inOwner ? owner : visual).removeAnnotation(annotation);
                 if (visual.getPosition(annotation) == null)
-                    coverage.hubHidden++;
+                    coverage.hubHidden.incrementAndGet();
             }
         }
 
@@ -4120,6 +4326,14 @@ final class BslQueryLiteralSupport
             @Override
             public void modelChanged(AnnotationModelEvent event)
             {
+                StringBuilder trace = new StringBuilder("model.event thread=") //$NON-NLS-1$
+                    .append(Thread.currentThread().getName()).append(" world=").append(event.isWorldChange()); //$NON-NLS-1$
+                traceAnnotations(trace, "added", event.getAddedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
+                traceAnnotations(trace, "removed", event.getRemovedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
+                traceAnnotations(trace, "changed", event.getChangedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
+                for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+                    trace.append('\n').append("  at ").append(frame); //$NON-NLS-1$
+                Global.tempLog("query-marker-events-1042", trace.toString()); //$NON-NLS-1$
                 List<Annotation> candidates = new ArrayList<>();
                 for (Annotation annotation : event.getAddedAnnotations())
                 {
@@ -4142,6 +4356,22 @@ final class BslQueryLiteralSupport
                         if (visual != null && MARKER_SESSIONS.get(editor) == MarkerSession.this)
                             hideHubUnderCoverage(visual, candidates);
                     });
+            }
+
+            private void traceAnnotations(StringBuilder trace, String phase, Annotation[] annotations,
+                IAnnotationModel model)
+            {
+                trace.append('\n').append(phase).append('=').append(annotations.length);
+                for (Annotation annotation : annotations)
+                {
+                    Position position = model.getPosition(annotation);
+                    trace.append('\n').append(annotation.getClass().getName()).append('@')
+                        .append(Integer.toHexString(System.identityHashCode(annotation)))
+                        .append(" type=").append(annotation.getType()) //$NON-NLS-1$
+                        .append(" position=").append(position) //$NON-NLS-1$
+                        .append(" deleted=").append(annotation.isMarkedDeleted()) //$NON-NLS-1$
+                        .append(" message=").append(annotation.getText()); //$NON-NLS-1$
+                }
             }
         }
     }
