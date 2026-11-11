@@ -9,15 +9,21 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.Keyword;
+import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.ui.editor.autoedit.SingleLineTerminalsStrategy;
+import org.eclipse.xtext.ui.editor.contentassist.ContentAssistContext;
+import org.eclipse.xtext.ui.editor.contentassist.ICompletionProposalAcceptor;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.hooks.weaving.WeavingHook;
@@ -31,6 +37,23 @@ import org.objectweb.asm.Opcodes;
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexManager;
 import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexProvider;
 import com._1c.g5.v8.dt.bsl.model.IfPreprocessorStatement;
+import com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart;
+import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
+import com._1c.g5.v8.dt.bsl.model.BslContextDef;
+import com._1c.g5.v8.dt.bsl.model.BslIndexPackage;
+import com._1c.g5.v8.dt.bsl.model.ModuleContextDefIndex;
+import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
+import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com.e1c.g5.dt.core.api.platform.BmOperationContext;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.xtext.scoping.IScopeProvider;
 import com._1c.g5.v8.dt.bsl.model.IfStatement;
 import com._1c.g5.v8.dt.bsl.model.LoopStatement;
 import com._1c.g5.v8.dt.bsl.model.RegionPreprocessorStatement;
@@ -84,6 +107,7 @@ public class Activator extends AbstractUIPlugin
 
         super.start(context);
         instance = this;
+        PortalLoginNotifications.install();
         RightsEditDialogHook.start(context);
         BuiltinCheckReplacements.start(context);
         QlHubOpenModules.start();
@@ -91,6 +115,7 @@ public class Activator extends AbstractUIPlugin
         ProblemViewHook.AnchorLocation.start();
         MarkerCreationDates.start();
         EmptyExceptStatementFix.start();
+        DocCommentLinks.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
         CheckRecomputeNotifications.install();
@@ -267,12 +292,14 @@ public class Activator extends AbstractUIPlugin
         BslLiteralValues.stopTypeNameCache();
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();
+        PortalLoginNotifications.stop();
         BuiltinCheckReplacements.stop();
         QlHubOpenModules.stop();
         SuppressionRanges.stop();
         ProblemViewHook.AnchorLocation.stop();
         MarkerCreationDates.stop();
         EmptyExceptStatementFix.stop();
+        DocCommentLinks.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
         QueryNullCastFix.stop();
@@ -286,6 +313,64 @@ public class Activator extends AbstractUIPlugin
 
         instance = null;
         super.stop(context);
+    }
+
+    /** #1025: одно уведомление за сеанс, включая запросы до запуска основного бандла. */
+    private static final class PortalLoginNotifications
+    {
+        private static final String NOTIFY = "tormozit.portalLogin.notify"; //$NON-NLS-1$
+        private static final String PENDING = "tormozit.portalLogin.pending"; //$NON-NLS-1$
+        private static final java.util.concurrent.atomic.AtomicBoolean notified =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        private static volatile boolean running;
+
+        static void install()
+        {
+            running = true;
+            Object pending;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                properties.put(NOTIFY, (Runnable) PortalLoginNotifications::request);
+                pending = properties.remove(PENDING);
+            }
+            Global.tempLog("portal-login", "INSTALL pending=" + pending); //$NON-NLS-1$ //$NON-NLS-2$
+            if (Boolean.TRUE.equals(pending))
+                request();
+        }
+
+        private static void request()
+        {
+            boolean first = running && notified.compareAndSet(false, true);
+            Global.tempLog("portal-login", "REQUEST first=" + first); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!first)
+                return;
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> showPending(display));
+        }
+
+        private static void showPending(Display display)
+        {
+            if (!running || display.isDisposed())
+                return;
+            if (!org.eclipse.ui.PlatformUI.isWorkbenchRunning()
+                || org.eclipse.ui.PlatformUI.getWorkbench().getWorkbenchWindows().length == 0)
+            {
+                display.timerExec(500, () -> showPending(display));
+                return;
+            }
+            Shell toast = ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
+                "Запрос входа через Портал 1С:ИТС отменён. Доступ к ресурсам, требующим авторизации, ограничен.", //$NON-NLS-1$
+                8_000);
+            Global.tempLog("portal-login", "SHOW created=" + (toast != null)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static void stop()
+        {
+            running = false;
+            System.getProperties().remove(NOTIFY);
+        }
     }
 
     /** Уведомления о полном пересчёте; ранний бандл не зависит от Workbench. */
@@ -683,6 +768,488 @@ public class Activator extends AbstractUIPlugin
         return Guice.createInjector(new ExternalDependenciesModule(this));
     }
 
+    /**
+     * Общий резолвер «см.»: настоящий BSL Method/FormalParam вместо проверки одного имени (#1026).
+     * Точки входа подтверждены bsl.comment 6.1.0.v202605050943: проверка, гиперссылки,
+     * комментарий и вычисление типов вызывают LinkPart.getActualObjectForPart.
+     */
+    private static final class DocCommentLinks
+    {
+        private static final String CALLBACK = "tormozit.docCommentLink.resolve"; //$NON-NLS-1$
+        private static final String PROPOSALS = "tormozit.docCommentLink.proposals"; //$NON-NLS-1$
+        private static final String DOCUMENTATION_NODE = "tormozit.docCommentLink.documentationNode"; //$NON-NLS-1$
+        private static final java.util.Map<URI, Model> MODELS = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final java.util.Set<URI> PENDING = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private static final ThreadLocal<Boolean> PREPARING = new ThreadLocal<>();
+
+        private record Model(long stamp, XtextResource resource) {}
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK,
+                (java.util.function.Function<Object[], Object>)DocCommentLinks::resolve);
+            System.getProperties().put(PROPOSALS, (Consumer<Object[]>)DocCommentLinks::complete);
+            System.getProperties().put(DOCUMENTATION_NODE,
+                (java.util.function.Function<Object[], Object>)DocCommentLinks::isDocumentationComment);
+        }
+
+        static void stop()
+        {
+            System.getProperties().put(CALLBACK, (java.util.function.Function<Object[], Object>)args -> args[0]);
+            System.getProperties().put(PROPOSALS, (Consumer<Object[]>)args -> {});
+            System.getProperties().put(DOCUMENTATION_NODE, (java.util.function.Function<Object[], Object>)args -> args[0]);
+            MODELS.clear();
+        }
+
+        private static boolean isDocumentationComment(Object[] args)
+        {
+            boolean result = Boolean.TRUE.equals(args[0]);
+            try
+            {
+                if (!result || !(args[1] instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                    || !(args[2] instanceof INode node))
+                    return result;
+                Object provider = Global.getField(args[3], "commentProvider"); //$NON-NLS-1$
+                if (!(provider instanceof BslMultiLineCommentDocumentationProvider comments))
+                    return result;
+                var documentation = comments.getDocumentationNodes(method);
+                result = documentationContains(node, documentation);
+                return result;
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+                return result;
+            }
+        }
+
+        private static boolean documentationContains(INode comment, java.util.List<? extends INode> documentation)
+        {
+            int start = comment.getTotalOffset();
+            int end = comment.getTotalEndOffset();
+            for (INode node : documentation)
+                if (start >= node.getTotalOffset() && end <= node.getTotalEndOffset())
+                    return true;
+            return false;
+        }
+
+        /** Кандидаты ссылки «см. Модуль.Метод»: штатный список включает только Экспорт. */
+        private static void complete(Object[] args)
+        {
+            try
+            {
+                Object provider = args[0];
+                LinkPart link = (LinkPart)args[1];
+                int offset = ((Integer)args[2]).intValue();
+                EObject source = (EObject)args[3];
+                ContentAssistContext assist = (ContentAssistContext)args[4];
+                ICompletionProposalAcceptor acceptor = (ICompletionProposalAcceptor)args[5];
+                BmOperationContext context = (BmOperationContext)args[6];
+                boolean enabled = BslDocCommentComputedTypes.isExtendedTypesEnabled(source);
+                if (!enabled)
+                    return;
+                // Точно как начало createProposalsForLinkPartCommentContent в EDT:
+                // offset и смещения частей находятся в координатах строки комментария.
+                int part = -1;
+                for (var pair : link.getPartsWithOffset())
+                {
+                    if (offset < pair.getSecond().intValue())
+                        break;
+                    part++;
+                }
+                if (part < 1)
+                    return;
+                Object scope = Global.getField(provider, "bslScope"); //$NON-NLS-1$
+                Object projectManager = Global.getField(provider, "v8projectManager"); //$NON-NLS-1$
+                if (!(scope instanceof IScopeProvider scopes) || !(projectManager instanceof IV8ProjectManager projects))
+                    return;
+                EObject owner = link.getActualObjectForPart(part - 1, scopes, source, projects, context);
+                if (owner instanceof BasicForm form)
+                    owner = form.getForm();
+                if (owner == null || owner.eIsProxy())
+                    return;
+                if (part >= 2 && owner instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                {
+                    // Штатная ветка внешнего модуля работает только с mcore.Method,
+                    // а неэкспортная цель резолвится в настоящий BSL Method.
+                    var names = completionParameterNames(method);
+                    acceptCompletionNames(provider, names, null, assist, acceptor);
+                    return;
+                }
+                boolean formMethods = owner instanceof AbstractForm;
+                String featureName = formMethods || owner instanceof CommonModule ? "module" : "managerModule"; //$NON-NLS-1$ //$NON-NLS-2$
+                var feature = owner.eClass().getEStructuralFeature(featureName);
+                if (feature == null || !(owner.eGet(feature, false) instanceof EObject proxy))
+                    return;
+                URI uri = EcoreUtil.getURI(proxy);
+                String fqn = context.getNamingService().getDependentObjectFqnAsString(uri,
+                    BslIndexPackage.Literals.MODULE_CONTEXT_DEF_INDEX);
+                var index = context.getPlatformTransaction().getTopObjectByFqn(context.getNamespace(uri), fqn);
+                if (!(index instanceof ModuleContextDefIndex moduleIndex) || moduleIndex.getContextDef() == null)
+                    return;
+                // Только индекс имён: для списка не нужны AST, типы возврата и связывание модуля.
+                var names = completionNames(moduleIndex.getContextDef(), formMethods);
+                var image = BslSharedImages.getImage("com._1c.g5.v8.dt.bsl.ui/obj16/meth_obj.png"); //$NON-NLS-1$
+                acceptCompletionNames(provider, names, image, assist, acceptor);
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+            }
+        }
+
+        private static void acceptCompletionNames(Object provider, java.util.List<String> names, Image image,
+            ContentAssistContext context, ICompletionProposalAcceptor acceptor)
+        {
+            for (String name : names)
+            {
+                Object proposal = Global.invoke(provider, "createSimpleProposals", name, name, image, context); //$NON-NLS-1$
+                if (proposal instanceof ICompletionProposal completion)
+                {
+                    acceptor.accept(completion);
+                }
+            }
+        }
+
+        private static java.util.List<String> completionParameterNames(com._1c.g5.v8.dt.bsl.model.Method method)
+        {
+            var names = new java.util.ArrayList<String>();
+            for (var parameter : method.getFormalParams())
+                if (parameter.getName() != null && !parameter.getName().isEmpty())
+                    names.add(parameter.getName());
+            return names;
+        }
+
+        private static com._1c.g5.v8.dt.bsl.model.FormalParam parameterFromMethod(
+            com._1c.g5.v8.dt.bsl.model.Method method, String name)
+        {
+            for (var parameter : method.getFormalParams())
+                if (name.equalsIgnoreCase(parameter.getName()))
+                    return parameter;
+            return null;
+        }
+
+        private static java.util.List<String> completionNames(BslContextDef context, boolean formMethods)
+        {
+            var seen = new java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
+            // В обычном модуле экспортные уже предложены EDT. У формы штатная ветка
+            // предлагает реквизиты/элементы, а методы не предлагает вовсе.
+            if (!formMethods)
+                for (var method : context.getMethods())
+                    if (method.getName() != null)
+                        seen.add(method.getName());
+            var names = new java.util.ArrayList<String>();
+            String all = context.getAllMethodNames();
+            if (all != null)
+                for (String name : all.split(",")) //$NON-NLS-1$
+                    if (!name.isEmpty() && seen.add(name))
+                        names.add(name);
+            return names;
+        }
+
+        private static Object resolve(Object[] args)
+        {
+            EObject result = (EObject)args[0];
+            LinkPart link = (LinkPart)args[1];
+            int part = ((Integer)args[2]).intValue();
+            try
+            {
+                var parts = link.getPartsWithOffset();
+                if (result != null || part < 1 || part >= parts.size())
+                    return result;
+                IScopeProvider scopes = (IScopeProvider)args[3];
+                EObject source = (EObject)args[4];
+                IV8ProjectManager projects = (IV8ProjectManager)args[5];
+                BmOperationContext context = (BmOperationContext)args[6];
+                if (source == null || scopes == null || context == null || projects == null)
+                    return null;
+                boolean enabled = BslDocCommentComputedTypes.isExtendedTypesEnabled(source);
+                if (!enabled)
+                    return result;
+                // Предыдущий сегмент разрешается тем же общим механизмом. Это также
+                // позволяет ссылаться на параметр найденного неэкспортного метода.
+                EObject owner = link.getActualObjectForPart(part - 1, scopes, source, projects, context);
+                String name = parts.get(part).getFirst();
+                if (owner instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                {
+                    result = parameterFromMethod(method, name);
+                    return result;
+                }
+                if (owner instanceof BasicForm form)
+                    owner = form.getForm();
+                if (owner == null || owner.eIsProxy())
+                    return null;
+                String featureName = owner instanceof AbstractForm || owner instanceof CommonModule
+                    ? "module" : "managerModule"; //$NON-NLS-1$ //$NON-NLS-2$
+                var feature = owner.eClass().getEStructuralFeature(featureName);
+                if (feature == null || !(owner.eGet(feature, false) instanceof EObject proxy))
+                    return null;
+                URI uri = EcoreUtil.getURI(proxy);
+                // BslBmLinkProvider.update(Resource) сохраняет и модель открытого
+                // редактора. Читаем готовую запись, включая несохранённые правки,
+                // без getResource/getObject: они могут загрузить и пересчитать цель.
+                Resource nativeResource = peekNativeResource(uri);
+                if (nativeResource != null)
+                {
+                    if (ready(nativeResource))
+                    {
+                        result = findMethod((XtextResource)nativeResource, name);
+                        return result;
+                    }
+                    // Облегчённая модель не перекрывает подготовленную. linked=false
+                    // означает отсутствие расчёта типов, а не отсутствие объявления.
+                }
+                // Методы берём из AST, а не allMethodNames: нужны тело, параметры,
+                // комментарий и исходный URI для всех потребителей ссылки.
+                var sourceResource = source.eResource();
+                var set = sourceResource != null ? sourceResource.getResourceSet() : null;
+                Resource existing = set != null ? set.getResource(uri.trimFragment(), false) : null;
+                if (ready(existing) && sameSource(nativeResource, existing))
+                {
+                    result = findMethod((XtextResource)existing, name);
+                    return result;
+                }
+                var file = ForeignModuleModel.fileOf(uri.trimFragment());
+                if (file == null)
+                    return null;
+                Model cached = MODELS.get(uri.trimFragment());
+                if (cached != null && cached.stamp() == file.getModificationStamp() && ready(cached.resource())
+                    && sameSource(nativeResource, cached.resource()))
+                {
+                    result = findMethod(cached.resource(), name);
+                    return result;
+                }
+                Resource parsed = parsedModule(nativeResource) != null ? nativeResource : existing;
+                if (parsedModule(parsed) != null)
+                {
+                    // Ctrl+клик, проверка существования и имена параметров читают AST.
+                    // Для них нельзя требовать полного расчёта возвращаемого типа.
+                    result = findMethod(parsed, name);
+                    if (result != null)
+                        request(uri, source);
+                    return result;
+                }
+                boolean peek = peekOnly();
+                boolean inner = Thread.currentThread()
+                    instanceof com._1c.g5.v8.dt.bsl.resource.BslInnerProcessorThread;
+                // BslResource.linkBatched явно пропускает BslInnerProcessorThread.
+                // В нём повторная загрузка цели не может подготовить её типы.
+                if (peek || inner || Boolean.TRUE.equals(PREPARING.get()))
+                {
+                    request(uri, source);
+                    return null;
+                }
+                // Обычный фоновый расчёт типов/проверки может подготовить цель сразу.
+                // В цепочке подсказки этот путь закрыт, даже если она считается не в UI.
+                Model model = load(uri, file);
+                result = model != null ? findMethod(model.resource(), name) : null;
+                if (model == null)
+                    request(uri, source);
+                return result;
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+                return result;
+            }
+        }
+
+        private static com._1c.g5.v8.dt.bsl.model.Module parsedModule(Resource resource)
+        {
+            // getContents() у DerivedStateAwareResource может запускать производное состояние;
+            // готовый корень берём непосредственно из результата разбора.
+            return resource instanceof XtextResource xtext && xtext.getParseResult() != null
+                && xtext.getParseResult().getRootASTElement() instanceof com._1c.g5.v8.dt.bsl.model.Module module
+                    ? module : null;
+        }
+
+        private static boolean sameSource(Resource current, Resource prepared)
+        {
+            if (current == null || current == prepared)
+                return true;
+            if (!(current instanceof XtextResource first) || !(prepared instanceof XtextResource second))
+                return false;
+            var firstParse = first.getParseResult();
+            var secondParse = second.getParseResult();
+            // Файловый штамп не меняется от несохранённой правки открытого документа.
+            // Модель с диска допустима только для точно того же текста.
+            return firstParse != null && secondParse != null && firstParse.getRootNode() != null
+                && secondParse.getRootNode() != null
+                && firstParse.getRootNode().getText().equals(secondParse.getRootNode().getText());
+        }
+
+        private static com._1c.g5.v8.dt.bsl.model.Method methodFromModel(Resource resource, String name)
+        {
+            var module = parsedModule(resource);
+            if (module != null)
+                for (var method : module.allMethods())
+                    if (name.equalsIgnoreCase(method.getName()))
+                        return method;
+            return null;
+        }
+
+        private static EObject findMethod(Resource resource, String name)
+        {
+            return methodFromModel(resource, name);
+        }
+
+        private static void publishReturnTypes(XtextResource resource)
+        {
+            var parsed = resource.getParseResult();
+            if (parsed != null && parsed.getRootASTElement()
+                instanceof com._1c.g5.v8.dt.bsl.model.Module module)
+            {
+                // computeTypesByLinkPart дополняет комментарий только из этого кэша.
+                // Подготовка отдельного ресурса сама по себе запись туда не гарантирует.
+                BslDocCommentComputedTypes.rememberModuleReturnTypes(module);
+            }
+        }
+
+        private static Resource peekNativeResource(URI uri)
+        {
+            try
+            {
+                var services = IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
+                Bundle bundle = Platform.getBundle("com._1c.g5.v8.dt.bsl.bm"); //$NON-NLS-1$
+                if (services == null || bundle == null)
+                    return null;
+                Object provider = services.get(bundle.loadClass("com._1c.g5.v8.dt.bsl.bm.BslBmLinkProvider")); //$NON-NLS-1$
+                // XtextBmLinkProvider.allLoadedResources / getIfPresent подтверждены
+                // dt.bm.xtext: используем только чтение, не штатный загружающий getter.
+                Object cache = Global.getField(provider, "allLoadedResources"); //$NON-NLS-1$
+                Object found = cache != null ? Global.invoke(cache, "getIfPresent", uri.trimFragment()) : null; //$NON-NLS-1$
+                return found instanceof Resource resource ? resource : null;
+            }
+            catch (ClassNotFoundException | RuntimeException | LinkageError ignored)
+            {
+                return null;
+            }
+        }
+
+        private static boolean ready(Resource resource)
+        {
+            return resource instanceof com._1c.g5.v8.dt.bsl.resource.BslResource bsl
+                && bsl.getParseResult() != null && bsl.isFullyInitialized() && bsl.isLinkedBatch();
+        }
+
+        private static boolean peekOnly()
+        {
+            if (Display.getCurrent() != null)
+                return true;
+            // Оба вида подсказок используют чтение готовой модели. Учитываем также
+            // штатного провайдера документации, вызываемого вне нашего чтения AST.
+            return StackWalker.getInstance().walk(frames -> frames.anyMatch(frame ->
+                frame.getMethodName().startsWith("readOnlyPeekAst")
+                || "getAdditionalProposalInfo".equals(frame.getMethodName())
+                || frame.getClassName().startsWith("tormozit.BslEditorHoverHook")
+                || frame.getClassName().startsWith("tormozit.ParamHintHtmlModifier")
+                || frame.getClassName().startsWith("com._1c.g5.v8.dt.internal.bsl.ui.documentation.")));
+        }
+
+        private static Model load(URI uri, org.eclipse.core.resources.IFile file)
+        {
+            URI resourceUri = uri.trimFragment();
+            long stamp = file.getModificationStamp();
+            var services = IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resourceUri);
+            var set = services != null ? BslOccurrenceContextResolver.newLiveResourceSet(services, file.getProject()) : null;
+            if (set == null)
+                return null;
+            Boolean previous = PREPARING.get();
+            PREPARING.set(Boolean.TRUE);
+            try
+            {
+                // Готовая модель с живым индексом — тот же путь, что ForeignModuleModel.
+                // Не создаём модель из снимка текста открытого редактора (#877).
+                XtextResource resource = BslOccurrenceContextResolver.loadLinkedResource(resourceUri, set);
+                if (!ready(resource) || stamp != file.getModificationStamp())
+                    return null;
+                publishReturnTypes(resource);
+                Model model = new Model(stamp, resource);
+                if (MODELS.size() >= 64)
+                    MODELS.clear();
+                MODELS.put(resourceUri, model);
+                return model;
+            }
+            finally
+            {
+                if (previous == null)
+                    PREPARING.remove();
+                else
+                    PREPARING.set(previous);
+            }
+        }
+
+        private static void request(URI uri, EObject source)
+        {
+            URI resourceUri = uri.trimFragment();
+            if (!PENDING.add(resourceUri))
+                return;
+            var file = ForeignModuleModel.fileOf(resourceUri);
+            var consumerResource = source.eResource();
+            var consumerMethod = EcoreUtil2.getContainerOfType(source, com._1c.g5.v8.dt.bsl.model.Method.class);
+            URI consumer = EcoreUtil.getURI(consumerMethod != null ? consumerMethod : source);
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+            {
+                PENDING.remove(resourceUri);
+                return;
+            }
+            // Поиск открытого документа — UI, чтение/подготовка — отдельное задание.
+            // Несохранённый документ не заменяется моделью с диска.
+            display.asyncExec(() ->
+            {
+                if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(source))
+                {
+                    PENDING.remove(resourceUri);
+                    return;
+                }
+                var document = file != null ? ForeignModuleModel.openDocument(file) : null;
+                org.eclipse.core.runtime.jobs.Job job = org.eclipse.core.runtime.jobs.Job.create(
+                    "Подготовка метода по ссылке в комментарии", monitor ->
+                    {
+                        try
+                        {
+                            if (file != null && !monitor.isCanceled()
+                                && BslDocCommentComputedTypes.isExtendedTypesEnabled(source))
+                            {
+                                Model model = document == null ? load(resourceUri, file)
+                                    : document.readOnly(resource ->
+                                    {
+                                        if (resource == null || resource.getResourceSet() == null)
+                                            return null;
+                                        XtextResource prepared = BslOccurrenceContextResolver.loadLinkedResource(
+                                            resourceUri, resource.getResourceSet());
+                                        if (ready(prepared))
+                                            publishReturnTypes(prepared);
+                                        return ready(prepared) ? new Model(file.getModificationStamp(), prepared) : null;
+                                    });
+                                if (model != null && BslDocCommentComputedTypes.isExtendedTypesEnabled(source))
+                                {
+                                    // И модель открытого документа нужна следующему обращению.
+                                    // Раньше сохранялась только модель, загруженная с диска.
+                                    MODELS.put(resourceUri, model);
+                                    // Обновление типов потребителя выполняется отдельно от подсказки,
+                                    // без запуска автопроверок и ожидания в потоке её показа.
+                                    BslStructureInsertCommentTypes.refreshDocReturnConsumer(
+                                        consumerResource, consumer);
+                                    BslDocCommentComputedTypes.bumpTypesGeneration();
+                                    // Первый список мог открыться пустым до подготовки цели.
+                                    // Как в DocReturnDependencies: пересчитать и уже открытый список.
+                                    display.asyncExec(ContentAssistSessionReloader::refreshPopupIfOpen);
+                                }
+                            }
+                        }
+                        catch (RuntimeException | LinkageError ignored)
+                        {
+                        }
+                        finally
+                        {
+                            PENDING.remove(resourceUri);
+                        }
+                    });
+                job.setRule(ForeignModuleModel.SERIAL);
+                job.setSystem(true);
+                job.schedule();
+            });
+        }
+    }
     /**
      * empty-except-statement из com.e1c.v8codestyle.bsl 0.7.0.v20260515-0037 и
      * 0.8.0.v20260915-2022: штатное условие пустого списка операторов сохранено ранним

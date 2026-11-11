@@ -1,6 +1,9 @@
 package tormozit;
 
 import java.lang.instrument.ClassFileTransformer;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
@@ -11,22 +14,33 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
+import org.eclipse.core.databinding.Binding;
+import org.eclipse.core.databinding.DataBindingContext;
+import org.eclipse.core.databinding.UpdateValueStrategy;
+import org.eclipse.core.databinding.conversion.IConverter;
+import org.eclipse.core.databinding.validation.IValidator;
+import org.eclipse.core.databinding.validation.ValidationStatus;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.egit.core.RepositoryUtil;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.emf.ecore.EAttribute;
+import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.databinding.swt.ISWTObservableValue;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
@@ -68,9 +82,15 @@ import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
+import com._1c.g5.v8.dt.md.IExternalPropertyManagerRegistry;
+import com._1c.g5.v8.dt.metadata.IExternalPropertyManager;
+import com._1c.g5.v8.dt.search.core.ISearchResultCollector;
 import com._1c.g5.v8.dt.search.core.Match;
 import com._1c.g5.v8.dt.search.core.SearchFor;
 import com._1c.g5.v8.dt.search.core.SearchIn;
+import com._1c.g5.v8.dt.search.core.TextSearchScopeSettings;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 
@@ -78,6 +98,7 @@ public class ConfigSearchDialogHook implements IStartup
 {
     private static final String SETTINGS_SECTION = "TormozitConfigurationSearchSettings";
     private static final String KEY_WHOLE_WORD = "wholeWord";
+    private static final String KEY_REGULAR_EXPRESSION = "regularExpression";
     private static final String KEY_SHELL_WIDTH = "shell.width";
     private static final String KEY_SHELL_HEIGHT = "shell.height";
     private static final String KEY_PROJECTS_TABLE_WIDTH = "projectsTable.width";
@@ -242,8 +263,10 @@ public class ConfigSearchDialogHook implements IStartup
         }
 
         IDialogSettings settings = getDialogSettings();
+        Button cbWholeWord = RegexSearch.nativeWholeWordButton(page);
+        Composite options = parent;
 
-        if (btnCase != null)
+        if (btnCase != null && cbWholeWord == null)
         {
             Composite vGroup = new Composite(parent, SWT.NONE);
             GridLayout vLayout = new GridLayout(1, false);
@@ -275,28 +298,22 @@ public class ConfigSearchDialogHook implements IStartup
 
             btnCase.setParent(vGroup);
             btnCase.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
-
-            Button cbWholeWord = new Button(vGroup, SWT.CHECK);
-            cbWholeWord.setText("Слово целиком");
-            cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
-                + Global.pluginSignForTooltip());
-            cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
-            cbWholeWord.addListener(SWT.Selection,
-                e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
-            cbWholeWord.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+            options = vGroup;
         }
-        else
+        if (cbWholeWord == null)
         {
-            Button cbWholeWord = new Button(parent, SWT.CHECK);
+            cbWholeWord = new Button(options, SWT.CHECK);
             cbWholeWord.setText("Слово целиком");
-            cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
-                + Global.pluginSignForTooltip());
+            cbWholeWord.setToolTipText(TooltipText.wrap(cbWholeWord,
+                "Искать только целые слова, а не подстроки" + Global.pluginSignForTooltip()));
             cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
             cbWholeWord.setLayoutData(
                 new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
+            Button legacyWholeWord = cbWholeWord;
             cbWholeWord.addListener(SWT.Selection,
-                e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
+                e -> settings.put(KEY_WHOLE_WORD, legacyWholeWord.getSelection()));
         }
+        RegexSearch.install(page, options, cbWholeWord, settings);
         parent.layout(true, true);
         restoreScopeTableSizes(page);
         installObjectTypesCountLabel(page);
@@ -1917,6 +1934,11 @@ public class ConfigSearchDialogHook implements IStartup
 
     private static Object wrapExecutor(Object executor) throws Exception
     {
+        // Провайдер вызывается при создании запроса в UI: повторный поиск сохраняет его режим,
+        // даже если в другом окне пользователь уже изменил флажки.
+        final boolean regularExpression = getDialogSettings().getBoolean(KEY_REGULAR_EXPRESSION);
+        final boolean legacyWholeWord = getDialogSettings().getBoolean(KEY_WHOLE_WORD);
+        final Map<String, List<String>> scopeRefs = SearchScopeGroup.refs();
         ClassLoader cl = executor.getClass().getClassLoader();
         final ClassLoader executorCL = cl != null ? cl
             : ConfigSearchDialogHook.class.getClassLoader();
@@ -1928,15 +1950,14 @@ public class ConfigSearchDialogHook implements IStartup
             {
                 if ("run".equals(method.getName()) && args != null && args.length == 3)
                 {
-                    boolean wholeWord = getDialogSettings().getBoolean(KEY_WHOLE_WORD);
-                    Map<String, List<String>> scopeRefs = SearchScopeGroup.refs();
                     Object input = args[0];
+                    boolean wholeWord = !(Global.invoke(input, "isWholeWord") instanceof Boolean) && legacyWholeWord;
                     NStrCategory nstr = NStrCategory.forInput(input);
                     try
                     {
                         String wordFilter = null;
                         boolean caseSensitive = false;
-                        if (wholeWord || scopeRefs != null)
+                        if (!regularExpression && (wholeWord || scopeRefs != null))
                         {
                             String sq = (String) Global.invoke(input, "getSearchString");
                             boolean wildcards = sq != null && (sq.contains("?") || sq.contains("*"));
@@ -1947,6 +1968,12 @@ public class ConfigSearchDialogHook implements IStartup
                         if (wordFilter != null || scopeRefs != null || nstr != null)
                             args[1] = createFilteredCollector(
                                 args[1], wordFilter, caseSensitive, scopeRefs, nstr, executorCL);
+                        if (regularExpression)
+                        {
+                            RegexSearch.run(executor, input, (ISearchResultCollector) args[1],
+                                (IProgressMonitor) args[2]);
+                            return null;
+                        }
                         return method.invoke(executor, args);
                     }
                     finally
@@ -1993,6 +2020,398 @@ public class ConfigSearchDialogHook implements IStartup
                 }
                 return method.invoke(origCollector, args);
             });
+    }
+
+    /** Режим принадлежит запросу, а не текущему состоянию флажка в другом окне поиска. */
+    static boolean isRegularExpressionInput(Object input)
+    {
+        synchronized (RegexSearch.INPUTS)
+        {
+            return RegexSearch.INPUTS.containsKey(input);
+        }
+    }
+
+    /**
+     * Регулярные выражения Java (#1046). Файлы читаются целиком, без полнотекстового индекса;
+     * свойства модели обходит штатный TextModelSearcher, затем их полный текст проверяет Matcher.
+     * Сигнатуры и предикаты проверены в search.core 12.3.100.v202605050943 и 14.0.0.v202610211527.
+     */
+    private static final class RegexSearch
+    {
+        private static final Map<Object, Boolean> INPUTS = new WeakHashMap<>();
+        private static final Pattern FULL_TEXT = Pattern.compile("\\A[\\s\\S]*\\z");
+
+        private RegexSearch() {}
+
+        /** В EDT 2026 флажок уже штатный: определяем его по привязке к getWholeWordValue(). */
+        static Button nativeWholeWordButton(Object page)
+        {
+            Object store = Global.getField(page, "searchData");
+            Object value = Global.invoke(store, "getWholeWordValue");
+            Object support = Global.getField(page, "bindingSupport");
+            if (value != null && Global.invoke(support, "getDBContext") instanceof DataBindingContext context)
+                for (Object candidate : context.getBindings())
+                    if (candidate instanceof Binding binding && binding.getModel() == value
+                        && binding.getTarget() instanceof ISWTObservableValue<?> target
+                        && target.getWidget() instanceof Button button)
+                        return button;
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        static void install(Object page, Composite parent, Button wholeWord, IDialogSettings settings)
+        {
+            Button button = new Button(parent, SWT.CHECK);
+            button.moveAbove(wholeWord);
+            button.setText("Регулярное выражение");
+            button.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+            button.setSelection(settings.getBoolean(KEY_REGULAR_EXPRESSION));
+            button.setToolTipText(TooltipText.wrap(button,
+                "Искать по регулярному выражению Java в полных текстах файлов и свойствах объектов. "
+                    + "Поддерживаются границы слов, проверки соседнего текста и многострочные совпадения. "
+                    + "Поиск может занимать больше времени" + Global.pluginSignForTooltip()));
+            try
+            {
+                Object support = Global.getField(page, "bindingSupport");
+                if (!(Global.invoke(support, "getDBContext") instanceof DataBindingContext context))
+                    throw new IllegalStateException("Нет контекста привязки строки поиска");
+                Object store = Global.getField(page, "searchData");
+                Runnable updateWholeWord = () -> wholeWord.setEnabled(!button.getSelection());
+                Object enabled = Global.invoke(store, "getWholeWordEnable");
+                for (Object candidate : context.getBindings())
+                    if (candidate instanceof Binding binding && enabled != null && binding.getModel() == enabled
+                        && binding.getTarget() instanceof ISWTObservableValue<?> target
+                        && target.getWidget() == wholeWord
+                        && Global.getField(binding, "modelToTarget") instanceof UpdateValueStrategy<?, ?> raw)
+                    {
+                        UpdateValueStrategy<Boolean, Boolean> strategy = (UpdateValueStrategy<Boolean, Boolean>) raw;
+                        strategy.setConverter(IConverter.create(Boolean.class, Boolean.class,
+                            value -> Boolean.TRUE.equals(value) && !button.getSelection()));
+                        updateWholeWord = binding::updateModelToTarget;
+                        break;
+                    }
+                Runnable refreshWholeWord = updateWholeWord;
+                Object searchText = Global.invoke(store, "getSearchText");
+                for (Object candidate : context.getBindings())
+                {
+                    if (!(candidate instanceof Binding binding) || binding.getModel() != searchText
+                        || !(binding.getTarget() instanceof ISWTObservableValue<?> target)
+                        || !(target.getWidget() instanceof Combo combo)
+                        || !(Global.getField(binding, "targetToModel") instanceof UpdateValueStrategy<?, ?> raw))
+                        continue;
+                    UpdateValueStrategy<Object, Object> strategy = (UpdateValueStrategy<Object, Object>) raw;
+                    IValidator<Object> stock = (IValidator<Object>) Global.getField(strategy, "afterGetValidator");
+                    strategy.setAfterGetValidator(value -> {
+                        if (!button.getSelection())
+                            return stock != null ? stock.validate(value) : ValidationStatus.ok();
+                        try
+                        {
+                            compile(String.valueOf(value), true);
+                            return ValidationStatus.ok();
+                        }
+                        catch (PatternSyntaxException e)
+                        {
+                            return ValidationStatus.error("Ошибка регулярного выражения: " + e.getDescription()
+                                + (e.getIndex() >= 0 ? " (позиция " + (e.getIndex() + 1) + ")" : ""));
+                        }
+                    });
+                    button.addListener(SWT.Selection, event -> {
+                        settings.put(KEY_REGULAR_EXPRESSION, button.getSelection());
+                        refreshWholeWord.run();
+                        binding.updateTargetToModel();
+                    });
+                    refreshWholeWord.run();
+                    binding.updateTargetToModel();
+                    return;
+                }
+                throw new IllegalStateException("Не найдена привязка строки поиска");
+            }
+            catch (RuntimeException e)
+            {
+                settings.put(KEY_REGULAR_EXPRESSION, false);
+                button.setSelection(false);
+                button.setEnabled(false);
+                wholeWord.setEnabled(true);
+            }
+        }
+
+        private static Pattern compile(String expression, boolean caseSensitive)
+        {
+            return Pattern.compile(expression, Pattern.MULTILINE
+                | (caseSensitive ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE));
+        }
+
+        static void run(Object executor, Object input, ISearchResultCollector target,
+            IProgressMonitor monitor) throws Exception
+        {
+            synchronized (INPUTS)
+            {
+                INPUTS.put(input, Boolean.TRUE);
+            }
+            String expression = (String) required(input, "getSearchString");
+            Pattern pattern = compile(expression, Boolean.TRUE.equals(required(input, "isCaseSensitive")));
+            TextSearchScopeSettings scope = new TextSearchScopeSettings()
+                .addSearchFor(inputSet(input, "getSearchFors"))
+                .addSearchIn(inputSet(input, "getSearchIns"))
+                .addSearchScope(inputSet(input, "getSearchScopes"))
+                .addDtProjects(inputSet(input, "getProjects"));
+            IBmModelManager models = (IBmModelManager) Global.getField(executor, "bmModelManager");
+            IExternalPropertyManagerRegistry registry =
+                (IExternalPropertyManagerRegistry) Global.getField(executor, "managerRegistry");
+            if (models == null || registry == null)
+                throw new IllegalStateException("Не доступны службы поиска по модели EDT");
+            ISearchResultCollector collector = new ISearchResultCollector()
+            {
+                @Override
+                public void addMatch(Match match)
+                {
+                    checkCanceled(monitor);
+                    target.addMatch(match);
+                }
+
+                @Override
+                public void addMatches(Collection<Match> matches)
+                {
+                    for (Match match : matches)
+                        addMatch(match);
+                }
+            };
+            for (IProject project : scope.getProjects())
+            {
+                checkCanceled(monitor);
+                IBmModel model = models.getModel(project);
+                if (model == null)
+                    throw new IllegalStateException("Нет модели проекта " + project.getName());
+                monitor.subTask("Поиск по регулярному выражению: " + project.getName());
+                searchFiles(project, model, scope, pattern, collector, monitor);
+                searchModel(executor, model, registry.getExternalPropertyManager(model), scope, pattern,
+                    collector, monitor);
+            }
+        }
+
+        private static void searchFiles(IProject project, IBmModel model, TextSearchScopeSettings scope,
+            Pattern pattern, ISearchResultCollector collector, IProgressMonitor monitor)
+            throws Exception
+        {
+            if (!scope.getSearchFors().isEmpty() && !scope.getSearchFors().contains(SearchFor.LANGUAGE_ELEMENTS))
+                return;
+            Class<?> contextClass = coreClass("text.TextSearchFileContextProvider");
+            Object context = contextClass.getField("INSTANCE").get(null);
+            Method searchIn = contextClass.getMethod("getFileSearchIn", IFile.class);
+            Method searchScope = contextClass.getMethod("getFileSearchScopes", IFile.class);
+            List<IFile> files = new ArrayList<>();
+            var source = project.getFolder("src");
+            if (!source.isAccessible())
+                throw new IllegalStateException("Нет каталога исходников " + source.getFullPath());
+            source.accept(resource -> {
+                checkCanceled(monitor);
+                if (resource instanceof IFile file)
+                {
+                    String extension = file.getFileExtension();
+                    if ("bsl".equalsIgnoreCase(extension) || "html".equalsIgnoreCase(extension)
+                        || "txt".equalsIgnoreCase(extension))
+                        files.add(file);
+                }
+                return true;
+            });
+            for (IFile file : files)
+            {
+                checkCanceled(monitor);
+                Object in = searchIn.invoke(context, file);
+                Object type = searchScope.invoke(context, file);
+                if (!scope.getSearchIns().isEmpty() && !scope.getSearchIns().contains(in)
+                    || !scope.getSearchScopes().isEmpty() && !scope.getSearchScopes().contains(type))
+                    continue;
+                String text;
+                try (var stream = file.getContents(true))
+                {
+                    text = new String(stream.readAllBytes(), java.nio.charset.Charset.forName(file.getCharset(true)));
+                }
+                org.eclipse.jface.text.Document document = new org.eclipse.jface.text.Document(text);
+                Matcher matcher = pattern.matcher(new CancelableText(text, monitor));
+                while (matcher.find())
+                {
+                    checkCanceled(monitor);
+                    int line = document.getLineOfOffset(matcher.start());
+                    int start = document.getLineOffset(line);
+                    int lastLine = document.getLineOfOffset(matcher.end());
+                    org.eclipse.jface.text.IRegion end = document.getLineInformation(lastLine);
+                    String excerpt = text.substring(start, Math.max(matcher.end(), end.getOffset() + end.getLength()));
+                    collector.addMatch(new TextSearchFileMatch(model, file, excerpt, matcher.start() - start,
+                        matcher.end() - matcher.start(), matcher.start(), line + 1L));
+                }
+            }
+        }
+
+        private static void searchModel(Object executor, IBmModel model, IExternalPropertyManager external,
+            TextSearchScopeSettings scope, Pattern pattern, ISearchResultCollector collector,
+            IProgressMonitor monitor) throws Exception
+        {
+            Predicate<EClass> types = classPredicate("SearchInPredicatesProvider", scope.getSearchIns())
+                .and(classPredicate("SearchScopePredicatesProvider", scope.getSearchScopes()));
+            var excludedField = Class.forName("com._1c.g5.v8.dt.search.core.TextSearcher",
+                true, Match.class.getClassLoader()).getDeclaredField("EXCLUDED_ECLASSES");
+            excludedField.setAccessible(true);
+            Collection<?> excluded = (Collection<?>) excludedField.get(null);
+            Map<Long, EClass> ids = model.executeReadonlyTask(new AbstractBmTask<Map<Long, EClass>>("comfort.regex.ids")
+            {
+                @Override
+                public Map<Long, EClass> execute(IBmTransaction transaction, IProgressMonitor taskMonitor)
+                {
+                    Map<Long, EClass> result = new java.util.LinkedHashMap<>();
+                    var classes = transaction.getTopObjectEClasses();
+                    while (classes.hasNext())
+                    {
+                        checkCanceled(monitor);
+                        EClass type = classes.next();
+                        if (excluded.contains(type.getName()) || !types.test(type))
+                            continue;
+                        var objects = transaction.getTopObjectIdsByEClass(type);
+                        while (objects.hasNext())
+                        {
+                            checkCanceled(monitor);
+                            result.put(objects.next(), type);
+                        }
+                    }
+                    return result;
+                }
+            }, true);
+            if (ids == null)
+                throw new IllegalStateException("Не получены объекты модели для поиска");
+            Class<?> taskClass = Class.forName(
+                "com._1c.g5.v8.dt.search.core.TextSearcher$ExecuteTextModelSearcher",
+                true, Match.class.getClassLoader());
+            Constructor<?> constructor;
+            boolean lazyImport;
+            try
+            {
+                constructor = taskClass.getDeclaredConstructor(long.class, EClass.class, IBmModel.class,
+                    Pattern.class, Set.class, Set.class, Set.class, IExternalPropertyManager.class,
+                    IDerivedDataManagerProvider.class, ISearchResultCollector.class);
+                lazyImport = true;
+            }
+            catch (NoSuchMethodException oldEdt)
+            {
+                constructor = taskClass.getDeclaredConstructor(long.class, IBmModel.class, Pattern.class,
+                    Set.class, Set.class, Set.class, IExternalPropertyManager.class, ISearchResultCollector.class);
+                lazyImport = false;
+            }
+            constructor.setAccessible(true);
+            Object derived = Global.getField(executor, "derivedDataManagerProvider");
+            if (lazyImport && derived == null)
+                throw new IllegalStateException("Не доступна служба загрузки табличных документов EDT");
+            // Штатный обход выбирает свойства по категориям, типам и «Искать в». Получаем каждое
+            // значение целиком: пользовательский Matcher работает с отменяемым CharSequence.
+            ISearchResultCollector properties = new ISearchResultCollector()
+            {
+                @Override
+                public void addMatch(Match match)
+                {
+                    checkCanceled(monitor);
+                    if (!(match instanceof TextSearchModelMatch property))
+                        throw new IllegalStateException("Неожиданный результат обхода свойств " + match);
+                    String text = property.getText();
+                    Matcher matcher = pattern.matcher(new CancelableText(text, monitor));
+                    while (matcher.find())
+                    {
+                        checkCanceled(monitor);
+                        collector.addMatch(new TextSearchModelMatch(model, text, property.getTopObjectId(),
+                            property.getObjectId(), property.getFeature(), matcher.start(), matcher.end() - matcher.start()));
+                    }
+                }
+
+                @Override
+                public void addMatches(Collection<Match> matches)
+                {
+                    for (Match match : matches)
+                        addMatch(match);
+                }
+            };
+            for (Map.Entry<Long, EClass> entry : ids.entrySet())
+            {
+                checkCanceled(monitor);
+                long id = entry.getKey();
+                try
+                {
+                    Runnable task = (Runnable) (lazyImport
+                        ? constructor.newInstance(id, entry.getValue(), model, FULL_TEXT, scope.getSearchFors(),
+                            scope.getSearchIns(), scope.getSearchScopes(), external, derived, properties)
+                        : constructor.newInstance(id, model, FULL_TEXT, scope.getSearchFors(),
+                            scope.getSearchIns(), scope.getSearchScopes(), external, properties));
+                    task.run();
+                    checkCanceled(monitor);
+                }
+                catch (InvocationTargetException e)
+                {
+                    throw new IllegalStateException("Не удалось создать поиск в объекте " + id, e.getCause());
+                }
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Predicate<EClass> classPredicate(String provider, Collection<?> values) throws Exception
+        {
+            return (Predicate<EClass>) coreClass(provider).getMethod("getEClassPredicate", Collection.class)
+                .invoke(null, values);
+        }
+
+        private static Class<?> coreClass(String name) throws ClassNotFoundException
+        {
+            return Class.forName("com._1c.g5.v8.dt.internal.search.core." + name,
+                true, Match.class.getClassLoader());
+        }
+
+        @SuppressWarnings("unchecked")
+        private static <T> Set<T> inputSet(Object input, String method)
+        {
+            return (Set<T>) required(input, method);
+        }
+
+        private static Object required(Object input, String method)
+        {
+            Object result = Global.invoke(input, method);
+            if (result == null)
+                throw new IllegalStateException("Нет параметра поиска " + method);
+            return result;
+        }
+
+        private static void checkCanceled(IProgressMonitor monitor)
+        {
+            if (monitor.isCanceled() || Thread.currentThread().isInterrupted())
+                throw new OperationCanceledException();
+        }
+
+        /** Позволяет отменить и длительный backtracking внутри одного Matcher.find(). */
+        private static final class CancelableText implements CharSequence
+        {
+            private final String text;
+            private final IProgressMonitor monitor;
+
+            CancelableText(String text, IProgressMonitor monitor)
+            {
+                this.text = text;
+                this.monitor = monitor;
+            }
+
+            @Override
+            public int length() { return text.length(); }
+
+            @Override
+            public char charAt(int index)
+            {
+                checkCanceled(monitor);
+                return text.charAt(index);
+            }
+
+            @Override
+            public CharSequence subSequence(int start, int end)
+            {
+                return new CancelableText(text.substring(start, end), monitor);
+            }
+
+            @Override
+            public String toString() { return text; }
+        }
     }
 
     /**

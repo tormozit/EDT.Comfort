@@ -519,8 +519,9 @@ public final class ConfigSearchResultsHook implements IStartup
             return false;
         Object query = Global.invoke(result, "getQuery"); //$NON-NLS-1$
         Object input = query != null ? Global.getField(query, "searchInput") : null; //$NON-NLS-1$
-        return input != null && Global.invoke(input, "getSearchString") instanceof String pattern //$NON-NLS-1$
-            && hasSearchWildcards(pattern);
+        return ConfigSearchDialogHook.isRegularExpressionInput(input)
+            || input != null && Global.invoke(input, "getSearchString") instanceof String pattern //$NON-NLS-1$
+                && hasSearchWildcards(pattern);
     }
 
     /** Диапазон готового результата; повторно шаблон не вычисляем. */

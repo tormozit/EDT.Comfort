@@ -40,6 +40,7 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        DocCommentLinkWeaving.install(context);
         CheckSchedulerWeaving.install(context);
         AssistLeafLookupWeaving.install(context);
         ApplicationResetDiagnostics.install(context);
@@ -72,6 +73,7 @@ public final class Activator
         SuppressionRangesWeaving.install(context);
         LocationCellTextWeaving.install(context);
         P2InstallOperationWeaving.install(context);
+        PortalLoginFacadeWeaving.install(context);
         DebugValueEditorDialogWeaving.install(context);
         FullRebuildContainmentChecksWeaving.install(context);
         MarkerCreationDateWeaving.install(context);
@@ -907,6 +909,264 @@ public final class Activator
         }
     }
 
+    /** Общий резолвер ссылок bsl.comment 6.1.0.v202605050943, не отдельная проверка (#1026). */
+    private static final class DocCommentLinkWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart";
+        private static final String CALLBACK = "tormozit.docCommentLink.resolve";
+        private static final String PROPOSAL_TARGET = "com._1c.g5.v8.dt.bsl.ui.contentassist.BslProposalProvider";
+        private static final String PROPOSALS = "tormozit.docCommentLink.proposals";
+        private static final String HYPERLINK_TARGET = "com._1c.g5.v8.dt.bsl.ui.editor.BslHyperlinkHelper";
+        private static final String DOCUMENTATION_NODE = "tormozit.docCommentLink.documentationNode";
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(CALLBACK,
+                (Function<Object[], Object>)args -> args[0]);
+            System.setProperty(CALLBACK + ".status", "registered");
+            System.getProperties().put(PROPOSALS, (Consumer<Object[]>)args -> {});
+            System.setProperty(PROPOSALS + ".status", "registered");
+            System.getProperties().put(DOCUMENTATION_NODE, (Function<Object[], Object>)args -> args[0]);
+            System.setProperty(DOCUMENTATION_NODE + ".status", "registered");
+            context.registerService(WeavingHook.class, new DocCommentLinkWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() == WovenClass.TRANSFORMING && HYPERLINK_TARGET.equals(woven.getClassName()))
+            {
+                weaveCommentClassification(woven);
+                return;
+            }
+            if (woven.getState() == WovenClass.TRANSFORMING && PROPOSAL_TARGET.equals(woven.getClassName()))
+            {
+                weaveProposals(woven);
+                return;
+            }
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"getActualObjectForPart".equals(name)
+                            || !("(ILorg/eclipse/xtext/scoping/IScopeProvider;Lorg/eclipse/emf/ecore/EObject;"
+                                + "Lcom/_1c/g5/v8/dt/core/platform/IV8ProjectManager;"
+                                + "Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;"
+                                + ")Lorg/eclipse/emf/ecore/EObject;").equals(descriptor))
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode != Opcodes.ARETURN)
+                                {
+                                    super.visitInsn(opcode);
+                                    return;
+                                }
+                                // Результат → [результат, LinkPart, part, scopes, source, projects, context].
+                                // Только прямой код перед ARETURN; исходные кадры сохраняются.
+                                mv.visitIntInsn(Opcodes.BIPUSH, 7);
+                                mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                mv.visitInsn(Opcodes.DUP_X1);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitInsn(Opcodes.ICONST_0);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitInsn(Opcodes.AASTORE);
+                                for (int i = 1; i <= 6; i++)
+                                {
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitIntInsn(Opcodes.BIPUSH, i);
+                                    if (i == 2)
+                                    {
+                                        mv.visitVarInsn(Opcodes.ILOAD, 1);
+                                        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+                                            "(I)Ljava/lang/Integer;", false);
+                                    }
+                                    else
+                                        mv.visitVarInsn(Opcodes.ALOAD, i == 1 ? 0 : i - 1);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                }
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                mv.visitLdcInsn(CALLBACK);
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function");
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "org/eclipse/emf/ecore/EObject");
+                                super.visitInsn(opcode);
+                                patched[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", patched[0] > 0 ? "woven returns=" + patched[0] : "bytecode differs");
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", failure.toString());
+            }
+        }
+
+        /** Последний скрытый комментарий тела AST относит к Method, как и комментарий перед заголовком. */
+        private static void weaveCommentClassification(WovenClass woven)
+        {
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"createHyperliksFromCommentLinkPart".equals(name)
+                            || !("(Lorg/eclipse/xtext/resource/XtextResource;I"
+                                + "Lorg/eclipse/xtext/ui/editor/hyperlinking/IHyperlinkAcceptor;"
+                                + "Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)Z").equals(descriptor))
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitTypeInsn(int opcode, String type)
+                            {
+                                super.visitTypeInsn(opcode, type);
+                                if (opcode != Opcodes.INSTANCEOF || !"com/_1c/g5/v8/dt/bsl/model/Method".equals(type))
+                                    return;
+                                // [instanceof Method, semantic (6), comment node (5), helper (0)].
+                                // Слоты подтверждены bsl.ui 22.0.0.v202605050943.
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                    "(Z)Ljava/lang/Boolean;", false);
+                                mv.visitInsn(Opcodes.ICONST_4);
+                                mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                mv.visitInsn(Opcodes.DUP_X1);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitInsn(Opcodes.ICONST_0);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitInsn(Opcodes.AASTORE);
+                                int[] slots = { 6, 5, 0 };
+                                for (int i = 0; i < slots.length; i++)
+                                {
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitIntInsn(Opcodes.BIPUSH, i + 1);
+                                    mv.visitVarInsn(Opcodes.ALOAD, slots[i]);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                }
+                                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                mv.visitLdcInsn(DOCUMENTATION_NODE);
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function");
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                patched[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(DOCUMENTATION_NODE + ".status", patched[0] == 1 ? "woven" : "bytecode differs: " + patched[0]);
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(DOCUMENTATION_NODE + ".status", failure.toString());
+            }
+        }
+
+        private static void weaveProposals(WovenClass woven)
+        {
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"createProposalsForLinkPartCommentContent".equals(name)
+                            || !("(Lcom/_1c/g5/v8/dt/bsl/documentation/comment/LinkPart;I"
+                                + "Lorg/eclipse/emf/ecore/EObject;"
+                                + "Lorg/eclipse/xtext/ui/editor/contentassist/ContentAssistContext;"
+                                + "Lorg/eclipse/xtext/ui/editor/contentassist/ICompletionProposalAcceptor;"
+                                + "Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)V").equals(descriptor))
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.RETURN)
+                                {
+                                    mv.visitIntInsn(Opcodes.BIPUSH, 7);
+                                    mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    for (int i = 0; i <= 6; i++)
+                                    {
+                                        mv.visitInsn(Opcodes.DUP);
+                                        mv.visitIntInsn(Opcodes.BIPUSH, i);
+                                        if (i == 2)
+                                        {
+                                            mv.visitVarInsn(Opcodes.ILOAD, i);
+                                            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+                                                "(I)Ljava/lang/Integer;", false);
+                                        }
+                                        else
+                                            mv.visitVarInsn(Opcodes.ALOAD, i);
+                                        mv.visitInsn(Opcodes.AASTORE);
+                                    }
+                                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                        "()Ljava/util/Properties;", false);
+                                    mv.visitLdcInsn(PROPOSALS);
+                                    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                    mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                    mv.visitInsn(Opcodes.SWAP);
+                                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept",
+                                        "(Ljava/lang/Object;)V", true);
+                                    patched[0]++;
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(PROPOSALS + ".status", patched[0] > 0 ? "woven returns=" + patched[0] : "bytecode differs");
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(PROPOSALS + ".status", failure.toString());
+            }
+        }
+    }
+
     /** Уточнение штатной empty-except-statement без добавления второй проверки (#988). */
     private static final class EmptyExceptStatementWeaving implements WeavingHook
     {
@@ -1118,6 +1378,107 @@ public final class Activator
             catch (Throwable failure)
             {
                 System.setProperty("tormozit.debugValueEditor.weaveFailure", failure.toString());
+            }
+        }
+    }
+
+    /**
+     * #1025: cloud.auth.p2.ui 0.8.0.3 и 0.9.0.103, SwtDialogLoginFacade.obtainAuthUser.
+     * Optional.empty() — штатный результат отмены LoginDialog; сохранённые токены не меняются.
+     */
+    private static final class PortalLoginFacadeWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com.e1c.g5.dt.cloud.auth.p2.ui.SwtDialogLoginFacade";
+        private static final String REQUEST = "tormozit.portalLogin.request";
+        private static final String NOTIFY = "tormozit.portalLogin.notify";
+        private static final String PENDING = "tormozit.portalLogin.pending";
+        private static final java.nio.file.Path LOG = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/issue-1025/runtime.log");
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(REQUEST, (Runnable) PortalLoginFacadeWeaving::request);
+            context.registerService(WeavingHook.class, new PortalLoginFacadeWeaving(), null);
+            diagnostic("INSTALL pid=" + ProcessHandle.current().pid());
+        }
+
+        private static void request()
+        {
+            Object callback;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                callback = properties.get(NOTIFY);
+                if (!(callback instanceof Runnable))
+                    properties.put(PENDING, Boolean.TRUE);
+            }
+            diagnostic("REQUEST thread=" + Thread.currentThread().getName()
+                + "; notificationReady=" + (callback instanceof Runnable));
+            if (callback instanceof Runnable runnable)
+                runnable.run();
+        }
+
+        private static synchronized void diagnostic(String text)
+        {
+            // Временная безусловная диагностика #1025; сохранять до подтверждения в EDT.
+            try
+            {
+                java.nio.file.Files.createDirectories(LOG.getParent());
+                java.nio.file.Files.writeString(LOG, java.time.OffsetDateTime.now() + " " + text + "\r\n",
+                    java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception failure)
+            {
+                System.setProperty(REQUEST + ".logFailure", failure.toString());
+            }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] matches = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"obtainAuthUser".equals(name) || !"()Ljava/util/Optional;".equals(descriptor)
+                            || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
+                            return mv;
+                        matches[0]++;
+                        mv.visitCode();
+                        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                            "()Ljava/util/Properties;", false);
+                        mv.visitLdcInsn(REQUEST);
+                        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                            "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Runnable");
+                        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/lang/Runnable", "run", "()V", true);
+                        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Optional", "empty",
+                            "()Ljava/util/Optional;", false);
+                        mv.visitInsn(Opcodes.ARETURN);
+                        mv.visitMaxs(0, 0);
+                        mv.visitEnd();
+                        return null; // Исходное тело с syncExec и модальным диалогом не копируем.
+                    }
+                }, 0);
+                if (matches[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                diagnostic("WEAVE bundle=" + woven.getBundleWiring().getBundle().getVersion()
+                    + "; methods=" + matches[0]);
+            }
+            catch (Throwable failure)
+            {
+                diagnostic("WEAVE FAILED " + failure);
             }
         }
     }

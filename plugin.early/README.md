@@ -1,5 +1,9 @@
 # Бандл раннего старта (`tormozit.comfort.early`)
 
+## Авторизация на Портале 1С:ИТС (#1025)
+
+`PortalLoginFacadeWeaving` заменяет `SwtDialogLoginFacade.obtainAuthUser()` в `com.e1c.g5.dt.cloud.auth.p2.ui` (проверены JAR 0.8.0.3 и 0.9.0.103) штатным результатом отмены `Optional.empty()`. Диалог не создаётся, сохранённые токены не меняются. Запрос до активации основного бандла запоминается; `Activator.PortalLoginNotifications` показывает одно уведомление за сеанс, повторные запросы его не создают заново. Временная безусловная диагностика: `.tmp/issue-1025/runtime.log` (вплетение и каждый запрос), `.tmp/temp-logs/portal-login.log` (приём запроса и показ). Сохранять до подтверждения в EDT.
+
 ## Установка предыдущей версии Комфорта (#976)
 
 `P2InstallOperationWeaving` меняет только сравнение версий группы `tormozit.comfort.feature.feature.group` в `InstallOperation.computeProfileChangeRequest`. Выбор старой версии проходит через штатную ветку `dealWithUpdates`: установленная IU удаляется из запроса, выбранная добавляется. Проверка `LOCK_UPDATE`, разрешение зависимостей и остальные плагины сохраняют штатное поведение. Метаданные сайта не обходят ранний отказ `ALTERED_IGNORED_IMPLIED_DOWNGRADE` в этом методе.
