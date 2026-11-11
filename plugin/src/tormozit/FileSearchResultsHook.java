@@ -97,6 +97,8 @@ public final class FileSearchResultsHook implements IStartup
     private static final String KEY_COL_FILE_WIDTH = "colFileWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_LINE_WIDTH = "colLineWidth"; //$NON-NLS-1$
+    private static final String MATCH_COLUMN_KEY = "tormozit.fileSearchMatchColumn"; //$NON-NLS-1$
+    private static final String KEY_COL_MATCH_WIDTH = "colMatchWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "colTextWidth"; //$NON-NLS-1$
     private static final String REPLACED_MARK = "✓"; //$NON-NLS-1$
     private static final String REPLACE_REFACTORING_UPDATE_CHANGE =
@@ -674,7 +676,7 @@ public final class FileSearchResultsHook implements IStartup
             }
         });
 
-        FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
+        FormTableColumnState.loadOrder(columnSettings, resultColumnOrderKey(table), table);
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
             KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
         FormTableInteraction interaction = new FormTableInteraction(table, tableViewer);
@@ -734,10 +736,11 @@ public final class FileSearchResultsHook implements IStartup
         if (table == null || table.isDisposed())
             return;
         boolean fillMode = interaction != null && interaction.isColumnsExactFill();
-        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), resultColumnOrderKey(table), KEY_COL_FILL_MODE, fillMode,
             new String[] { KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH,
-                KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
-            new TableColumn[] { pathColumn, fileColumn, typeColumn, lineColumn, textColumn }, table);
+                KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH, KEY_COL_MATCH_WIDTH },
+            new TableColumn[] { pathColumn, fileColumn, typeColumn, lineColumn, textColumn,
+                (TableColumn) table.getData(MATCH_COLUMN_KEY) }, table);
     }
 
     /** Как {@link #saveResultColumnState()}, но безопасно из любого потока (query listener). */
@@ -804,6 +807,63 @@ public final class FileSearchResultsHook implements IStartup
         return null;
     }
 
+    private static String resultColumnOrderKey(Table table)
+    {
+        return KEY_COL_ORDER + (table.getData(MATCH_COLUMN_KEY) != null ? ".matches" : ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Добавление/удаление колонки вместо скрытия нулевой шириной. Остальные индексы стабильны. */
+    private static void ensureMatchColumn(TableViewer viewer, AbstractTextSearchResult result)
+    {
+        Table table = viewer.getTable();
+        boolean dynamic = result != null && result.getQuery() instanceof FileSearchQuery query
+            && (query.isRegexSearch() || ConfigSearchResultsHook.hasSearchWildcards(query.getSearchString()));
+        TableColumn column = (TableColumn) table.getData(MATCH_COLUMN_KEY);
+        if (dynamic == (column != null))
+            return;
+        FormTableInteraction interaction = cachedTableInteraction;
+        saveResultColumnState();
+        int active = interaction.activeColumn();
+        if (dynamic)
+        {
+            TableViewerColumn matchCol = new TableViewerColumn(viewer, SWT.LEFT);
+            column = matchCol.getColumn();
+            column.setText("Совпадение"); //$NON-NLS-1$
+            column.setWidth(FormTableColumnState.readWidth(dialogSettings(), KEY_COL_MATCH_WIDTH, 180, 1));
+            matchCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    if (!(element instanceof FileSearchRow row) || row.replaced)
+                        return ""; //$NON-NLS-1$
+                    List<String> fragments = new ArrayList<>();
+                    for (int i = 0; i < row.matchOffsets.length; i++)
+                        fragments.add(ConfigSearchResultsHook.searchMatchFragment(
+                            row.text, row.matchOffsets[i], row.matchLengths[i]));
+                    return String.join(" | ", fragments); //$NON-NLS-1$
+                }
+            });
+            table.setData(MATCH_COLUMN_KEY, column);
+            interaction.setHeaderTooltipExtra(column,
+                "Конкретные найденные фрагменты по шаблону; несколько вхождений строки разделены знаком |"
+                    + Global.pluginSignForTooltip());
+        }
+        else
+        {
+            int index = table.indexOf(column);
+            interaction.clearColumnFilter(index);
+            if (interaction.headerSortColumnIndex() == index)
+                interaction.restoreHeaderSort(0, true);
+            column.dispose();
+            table.setData(MATCH_COLUMN_KEY, null);
+        }
+        interaction.notifyColumnsChanged();
+        FormTableColumnState.loadOrder(dialogSettings(), resultColumnOrderKey(table), table);
+        interaction.restoreActiveColumn(Math.min(active, table.getColumnCount() - 1));
+        viewer.refresh();
+    }
+
     private static void updateTableFromSelection(TreeViewer treeViewer, TableViewer tableViewer)
     {
         try
@@ -812,6 +872,7 @@ public final class FileSearchResultsHook implements IStartup
             List<Object> selectedNodes = sel.toList();
             Object resultInput = treeViewer.getInput();
             AbstractTextSearchResult searchResult = resultInput instanceof AbstractTextSearchResult r ? r : null;
+            ensureMatchColumn(tableViewer, searchResult);
             if (selectedNodes.isEmpty())
             {
                 // Последнее вхождение заменено — дерево пустое, выделять нечего: показываем все

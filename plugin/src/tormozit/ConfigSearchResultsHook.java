@@ -212,6 +212,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String KEY_COL_PARENT_TYPE_WIDTH = "matchColParentTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SYNTAX_WIDTH = "matchColSyntaxWidth"; //$NON-NLS-1$
     private static final String KEY_COL_SUITABLE_WIDTH = "matchColSuitableWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_MATCH_WIDTH = "matchColMatchWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
     private static final String KEY_COL_REPLACED_WIDTH = "matchColReplacedWidth"; //$NON-NLS-1$
     /** Колонка «Заменено» (issue #800): значок в шапке, в ячейке — пометка. */
@@ -421,20 +422,20 @@ public final class ConfigSearchResultsHook implements IStartup
      * «Заменено» добавлена позже — бит 256 при месте перед «Текстом», чтобы маски прежних наборов
      * колонок (ключи сохранённых порядка и ширин) не изменились.
      */
-    private static final int[] MATCH_COLUMN_BITS = {1, 2, 4, 8, 16, 32, 64, 256, 128};
+    private static final int[] MATCH_COLUMN_BITS = {1, 2, 4, 8, 16, 32, 64, 256, 512, 128};
 
     private static String[] allMatchWidthKeys()
     {
         return new String[] {KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH,
             KEY_COL_PARENT_WIDTH, KEY_COL_PARENT_TYPE_WIDTH, KEY_COL_SYNTAX_WIDTH,
-            KEY_COL_SUITABLE_WIDTH, KEY_COL_REPLACED_WIDTH, KEY_COL_TEXT_WIDTH};
+            KEY_COL_SUITABLE_WIDTH, KEY_COL_REPLACED_WIDTH, KEY_COL_MATCH_WIDTH, KEY_COL_TEXT_WIDTH};
     }
 
     private static TableColumn[] allMatchColumns()
     {
         return new TableColumn[] {cachedMatchPathColumn, cachedMatchPropertyColumn, cachedMatchLineColumn,
             cachedMatchParentColumn, cachedMatchParentTypeColumn, cachedMatchSyntaxColumn,
-            cachedMatchSuitableColumn, cachedMatchReplacedColumn, cachedMatchTextColumn};
+            cachedMatchSuitableColumn, cachedMatchReplacedColumn, cachedMatchFragmentColumn, cachedMatchTextColumn};
     }
 
     private static String matchColumnKey(TableColumn column)
@@ -475,6 +476,7 @@ public final class ConfigSearchResultsHook implements IStartup
         return switch (key)
         {
             case KEY_COL_PATH_WIDTH -> MATCH_PATH_COLUMN_WIDTH;
+            case KEY_COL_MATCH_WIDTH -> 180;
             case KEY_COL_PROPERTY_WIDTH -> 140;
             case KEY_COL_LINE_WIDTH -> 60;
             case KEY_COL_PARENT_WIDTH -> MATCH_PARENT_COLUMN_WIDTH;
@@ -494,6 +496,8 @@ public final class ConfigSearchResultsHook implements IStartup
         interaction.setHeaderTooltipExtra(cachedMatchPropertyColumn,
             "Для вхождений в BSL-модуле — модуль и метод" + sign); //$NON-NLS-1$
         interaction.setHeaderTooltipExtra(cachedMatchLineColumn, "Номер строки вхождения" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchFragmentColumn,
+            "Конкретный найденный фрагмент по шаблону" + sign); //$NON-NLS-1$
         interaction.setHeaderTooltipExtra(cachedMatchTextColumn, "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
         BslOccurrenceContextResolver.applyColumnHeaderTooltips(interaction, cachedMatchParentColumn,
             cachedMatchParentTypeColumn, cachedMatchSyntaxColumn);
@@ -503,13 +507,38 @@ public final class ConfigSearchResultsHook implements IStartup
             "Заменено. Текст вхождения заменён, в колонке «Текст» — строка после замены" + sign); //$NON-NLS-1$
     }
 
+    /** Маски EDT используют * и ?, как и штатный отбор «Слово целиком». */
+    static boolean hasSearchWildcards(String pattern)
+    {
+        return pattern != null && (pattern.indexOf('*') >= 0 || pattern.indexOf('?') >= 0);
+    }
+
+    private static boolean hasDynamicSearchPattern(Object result)
+    {
+        if (!ConfigSearchReplace.isTextSearchResult(result))
+            return false;
+        Object query = Global.invoke(result, "getQuery"); //$NON-NLS-1$
+        Object input = query != null ? Global.getField(query, "searchInput") : null; //$NON-NLS-1$
+        return input != null && Global.invoke(input, "getSearchString") instanceof String pattern //$NON-NLS-1$
+            && hasSearchWildcards(pattern);
+    }
+
+    /** Диапазон готового результата; повторно шаблон не вычисляем. */
+    static String searchMatchFragment(String text, int offset, int length)
+    {
+        if (text == null || offset < 0 || length < 0 || offset > text.length()
+            || length > text.length() - offset)
+            return ""; //$NON-NLS-1$
+        return text.substring(offset, offset + length);
+    }
+
     private static void ensureMatchColumns(TableViewer viewer, boolean references, boolean suitable,
-        boolean path, boolean replaced, List<MatchRow> rows)
+        boolean path, boolean replaced, boolean dynamicPattern, List<MatchRow> rows)
     {
         boolean text = rows.isEmpty() || rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank()
             || row.tableItem != null && isDeferredCalculationItem(row.tableItem));
         int mask = 2 | 4 | 32 | (path ? 1 : 0) | (references ? 8 | 16 : 0)
-            | (references && suitable ? 64 : 0) | (text ? 128 : 0) | (replaced ? 256 : 0);
+            | (references && suitable ? 64 : 0) | (text ? 128 : 0) | (replaced ? 256 : 0) | (dynamicPattern ? 512 : 0);
         if (mask == matchColumnMask || changingMatchColumns || cachedMatchTableInteraction == null)
             return;
         FormTableInteraction interaction = cachedMatchTableInteraction;
@@ -719,6 +748,23 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
             });
         }
+        TableViewerColumn fragmentCol = null;
+        if ((mask & 512) != 0)
+        {
+            fragmentCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+            fragmentCol.getColumn().setText("Совпадение"); //$NON-NLS-1$
+            fragmentCol.getColumn().setWidth(
+                FormTableColumnState.readWidth(matchSettings, KEY_COL_MATCH_WIDTH, 180, 1));
+            fragmentCol.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof MatchRow row ? row.matchedText : ""; //$NON-NLS-1$
+                }
+            });
+        }
+        cachedMatchFragmentColumn = fragmentCol != null ? fragmentCol.getColumn() : null;
         TableViewerColumn textCol = null;
         if ((mask & 128) != 0)
         {
@@ -1006,6 +1052,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static TableColumn cachedMatchSyntaxColumn;
     private static TableColumn cachedMatchSuitableColumn;
     private static TableColumn cachedMatchReplacedColumn;
+    private static TableColumn cachedMatchFragmentColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
     private static IToolBarManager cachedMatchToolBar;
@@ -1124,6 +1171,7 @@ public final class ConfigSearchResultsHook implements IStartup
         volatile int directHlLen;
         /** Текст вхождения заменён ({@link ConfigSearchReplace}): в «Тексте» — строка после замены. */
         boolean replaced;
+        String matchedText = ""; //$NON-NLS-1$
 
         MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
                 Object tableItem, String moduleKindSegment, URI sourceUri, EReference sourceReference,
@@ -1365,6 +1413,8 @@ public final class ConfigSearchResultsHook implements IStartup
         interaction.setHeaderTooltipExtra(cachedMatchPropertyColumn,
             "Для вхождений в BSL-модуле — модуль и метод" + sign); //$NON-NLS-1$
         interaction.setHeaderTooltipExtra(cachedMatchLineColumn, "Номер строки вхождения" + sign); //$NON-NLS-1$
+        interaction.setHeaderTooltipExtra(cachedMatchFragmentColumn,
+            "Конкретный найденный фрагмент по шаблону" + sign); //$NON-NLS-1$
         interaction.setHeaderTooltipExtra(cachedMatchTextColumn, "Строка исходного текста с вхождением" + sign); //$NON-NLS-1$
         // Колонки «Родитель»/«Тип родителя»/«Категория» — общие с табличным режимом
         // рефакторинга, заголовки и подсказки в едином источнике.
@@ -1400,6 +1450,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 BslOccurrenceContextResolver.clearCaches();
                 cachedMatchTableViewer = null;
                 lastSyncedTableItems = null;
+                cachedMatchFragmentColumn = null;
                 cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
                 cachedMatchPropertyColumn = null;
@@ -1669,6 +1720,10 @@ public final class ConfigSearchResultsHook implements IStartup
                 row.directLength = fm.getTextLength();
                 row.categoryOnly = !referenceSearch;
             }
+            if (match instanceof TextSearchFileMatch fm)
+                row.matchedText = searchMatchFragment(fm.getText(), fm.getTextOffset(), fm.getTextLength());
+            else if (match instanceof TextSearchModelMatch mm)
+                row.matchedText = searchMatchFragment(mm.getText(), mm.getTextOffset(), mm.getTextLength());
             ConfigSearchReplace.ReplacedText replacedText = ConfigSearchReplace.replacedText(searchResult, match);
             if (replacedText != null)
             {
@@ -1687,7 +1742,8 @@ public final class ConfigSearchResultsHook implements IStartup
             rows.add(row);
         }
         ensureMatchColumns(matchViewer, referenceSearch, cachedSought != null,
-            !isTerminalTreeSelection(selectedNodes), ConfigSearchReplace.hasReplaced(searchResult), rows);
+            !isTerminalTreeSelection(selectedNodes), ConfigSearchReplace.hasReplaced(searchResult),
+            hasDynamicSearchPattern(searchResult), rows);
         matchViewer.setInput(rows);
         scheduleMatchMethodResolution(matchViewer, rows);
         scheduleMatchContextResolution(matchViewer, rows);
