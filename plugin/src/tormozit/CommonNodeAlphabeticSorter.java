@@ -15,13 +15,19 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreePathViewerSorter;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.util.IPropertyChangeListener;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.ui.model.IWorkbenchAdapter;
 import org.osgi.framework.Bundle;
 
+import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionType;
 import com._1c.g5.v8.dt.compare.model.CollectionComparisonNode;
 import com._1c.g5.v8.dt.compare.model.CollectionElementComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
@@ -44,6 +50,7 @@ import com._1c.g5.aef2.standard.viewModels.TreeItemViewModel;
  *
  * <p>В дереве сравнения/объединения дополнительно упорядочивает элементы коллекций по главному
  * источнику, см. {@link #mainSideKey}.
+ * Методы в деревьях сравнения и объединения могут сортироваться по имени (#1033).
  */
 final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
 {
@@ -85,7 +92,9 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         System.getProperties().put("tormozit.commonNode.children", //$NON-NLS-1$
             (BiFunction<Object, Object, Object>) (parent, children) -> {
                 Object element = parent instanceof TreePath path ? path.getLastSegment() : parent;
-                if (!(children instanceof Object[] elements) || !isCommonNode(element))
+                if (!(children instanceof Object[] elements))
+                    return children;
+                if (!isCommonNode(element))
                     return children;
                 if (!isEnabled() || !ComfortSettings.isReplaceListFiltersEnabled())
                     return children;
@@ -171,6 +180,56 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     }
 
     private final ViewerComparator delegate;
+    private static final String METHOD_ORDER_OVERRIDE_KEY = "tormozit.methodOrderOverride"; //$NON-NLS-1$
+
+    /** Локальное переключение порядка в окне объединения; настройки других деревьев не меняются. */
+    static void installMethodOrderToggle(TreeViewer viewer)
+    {
+        installOn(viewer);
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed() || tree.getColumnCount() == 0)
+            return;
+        TreeColumn column = tree.getColumn(0);
+        if (Boolean.TRUE.equals(column.getData(METHOD_ORDER_OVERRIDE_KEY)))
+            return;
+        column.setData(METHOD_ORDER_OVERRIDE_KEY, Boolean.TRUE);
+        Runnable updateHeader = () -> {
+            if (tree.isDisposed() || column.isDisposed())
+                return;
+            boolean alphabetic = isMethodsEnabled(viewer);
+            tree.setSortColumn(alphabetic ? column : null);
+            tree.setSortDirection(alphabetic ? SWT.UP : SWT.NONE);
+            column.setToolTipText(TooltipText.wrap(tree,
+                (alphabetic ? "Методы по алфавиту. Нажмите для порядка по позиции в модуле."
+                    : "Методы по позиции в модуле. Нажмите для порядка по алфавиту.")
+                + Global.pluginSignForTooltip()));
+        };
+        column.addListener(SWT.Selection, event -> {
+            boolean alphabetic = !isMethodsEnabled(viewer);
+            tree.setData(METHOD_ORDER_OVERRIDE_KEY, alphabetic);
+            updateHeader.run();
+            var selection = viewer.getSelection();
+            viewer.refresh();
+            viewer.setSelection(selection, true);
+        });
+        var store = ComfortSettings.getInstance().getPreferenceStore();
+        IPropertyChangeListener listener = event -> {
+            if (ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED.equals(event.getProperty())
+                    || ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(event.getProperty()))
+                tree.getDisplay().asyncExec(updateHeader);
+        };
+        store.addPropertyChangeListener(listener);
+        tree.addDisposeListener(event -> store.removePropertyChangeListener(listener));
+        updateHeader.run();
+    }
+
+    private static boolean isMethodsEnabled(Viewer viewer)
+    {
+        Control control = viewer.getControl();
+        Object override = control != null && !control.isDisposed()
+            ? control.getData(METHOD_ORDER_OVERRIDE_KEY) : null;
+        return override instanceof Boolean alphabetic ? alphabetic : isMethodsEnabled();
+    }
 
     private static Collator createRuCollator()
     {
@@ -204,6 +263,7 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
             var store = ComfortSettings.getInstance().getPreferenceStore();
             IPropertyChangeListener listener = event -> {
                 if (!ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED.equals(event.getProperty())
+                        && !ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED.equals(event.getProperty())
                         && !ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(event.getProperty()))
                     return;
                 control.getDisplay().asyncExec(() -> {
@@ -283,6 +343,9 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     @Override
     public int compare(Viewer viewer, TreePath parentPath, Object e1, Object e2)
     {
+        Integer byMethod = compareMethods(viewer, e1, e2);
+        if (byMethod != null)
+            return byMethod;
         Integer byMainSide = compareByMainSide(e1, e2);
         if (byMainSide != null)
             return byMainSide;
@@ -298,6 +361,9 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
     @Override
     public int compare(Viewer viewer, Object e1, Object e2)
     {
+        Integer byMethod = compareMethods(viewer, e1, e2);
+        if (byMethod != null)
+            return byMethod;
         Integer byMainSide = compareByMainSide(e1, e2);
         if (byMainSide != null)
             return byMainSide;
@@ -308,6 +374,52 @@ final class CommonNodeAlphabeticSorter extends TreePathViewerSorter
         if (delegate != null)
             return delegate.compare(viewer, e1, e2);
         return 0;
+    }
+
+    /**
+     * Оба дерева используют IPartialModelNode и BslModuleSectionComparisonNode (проверено по EDT).
+     * Служебные разделы идут перед методами: единая категория сохраняет транзитивность
+     * при вставке строк JFace через add, когда getSortedChildren не вызывается.
+     */
+    private static Integer compareMethods(Viewer viewer, Object e1, Object e2)
+    {
+        if (!isMethodsEnabled(viewer) || !(e1 instanceof IPartialModelNode first)
+                || !(e2 instanceof IPartialModelNode second) || first.getParent() != second.getParent())
+            return null;
+        boolean firstMethod = isMethod(first);
+        boolean secondMethod = isMethod(second);
+        if (!firstMethod && !secondMethod)
+            return null;
+        if (firstMethod != secondMethod)
+            return firstMethod ? 1 : -1;
+        synchronized (RU_COLLATOR)
+        {
+            return RU_COLLATOR.compare(methodName(first), methodName(second));
+        }
+    }
+
+    /** Основная сторона задаёт имя, для добавленного метода — другая, затем общий предок. */
+    private static String methodName(IPartialModelNode node)
+    {
+        BslModuleSectionComparisonNode section = (BslModuleSectionComparisonNode) node.retrieveComparisonNode();
+        String name = section.getMainName();
+        if (name == null || name.isEmpty())
+            name = section.getOtherName();
+        if (name == null || name.isEmpty())
+            name = section.getAncestorName();
+        return name != null ? name : ""; //$NON-NLS-1$
+    }
+
+    private static boolean isMethod(IPartialModelNode node)
+    {
+        return node.retrieveComparisonNode() instanceof BslModuleSectionComparisonNode section
+            && (section.getSectionType() == BslModuleSectionType.PROCEDURE
+                || section.getSectionType() == BslModuleSectionType.FUNCTION);
+    }
+
+    private static boolean isMethodsEnabled()
+    {
+        return ComfortSettings.isAlphabeticMethodsEnabled() && ComfortSettings.isReplaceListFiltersEnabled();
     }
 
     /** Сортировка и сокращение подписей подчинены флажку «Улучшать списки». */

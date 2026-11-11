@@ -1935,10 +1935,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 dynamicFormCollection = true;
                 full = false;
                 addAll(properties(objectTypes));
-                Global.tempLog("literal-form-collections", "method=" + method + " validation=" + validation //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " source=" + (call.source == null ? "null" : text(call.source)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " types=" + typeNames(objectTypes) + " parent=" + parent //$NON-NLS-1$ //$NON-NLS-2$
-                    + " values=" + values.values() + " full=" + full); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (containsAny(parameterLower, "ключ", "индекс", "колонк", "сортировк", "группировк")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$

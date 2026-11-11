@@ -571,6 +571,18 @@ public class ComfortPreferencePage
             + "Требует флажка «Улучшать списки».", //$NON-NLS-1$
             navigatorGroup);
 
+        BooleanFieldEditor alphabeticMethodsField = new BooleanFieldEditor(
+            ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED,
+            ComfortVisibleSettings.label(ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED),
+            navigatorGroup);
+        addField(alphabeticMethodsField);
+        setFieldTooltip(alphabeticMethodsField,
+            "Процедуры и функции идут по алфавиту имён в дереве сравнения конфигураций "
+            + "и в окне «Настройка объединения модулей». Служебные разделы идут перед методами.\n"
+            + "Меняется только порядок строк дерева, а не порядок методов при объединении.\n"
+            + "Требует флажка «Улучшать списки».", //$NON-NLS-1$
+            navigatorGroup);
+
         // FieldEditor в конструкторе обнуляет margin* группы — вернуть отступ
         // под заголовком «Навигатор», иначе первое поле слипается с рамкой.
         restoreGroupContentInsets(navigatorGroup);

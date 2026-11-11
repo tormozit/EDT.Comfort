@@ -6651,6 +6651,7 @@ public class CompareConfigMenuHook implements IStartup
                 TreeViewer viewer = treeControl != null ? treeControl.getTreeViewer() : null;
                 if (viewer != null && !viewer.getTree().isDisposed())
                 {
+                    CommonNodeAlphabeticSorter.installMethodOrderToggle(viewer);
                     CompareConfigMethodColors.install(viewer.getTree());
                     viewer.getTree().redraw();
                 }

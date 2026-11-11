@@ -143,6 +143,12 @@ public final class ComfortSettings
     /** Алфавитный порядок узла «Общие» выключен по умолчанию (opt-in). */
     public static final boolean DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED = false;
 
+    /** Ключ: алфавитный порядок методов в деревьях сравнения и объединения модулей (#1033). */
+    public static final String PREF_ALPHABETIC_METHODS_ENABLED =
+            "comfort.compare.alphabeticMethods.enabled"; //$NON-NLS-1$
+
+    public static final boolean DEFAULT_ALPHABETIC_METHODS_ENABLED = false;
+
     /**
      * Ключ: вкладки редактора объекта метаданных списком слева,
      * если вкладок больше 10 ({@link MdEditorTabsHook}).
@@ -794,6 +800,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_ALPHABETIC_COMMON_NODE_ENABLED);
+    }
+
+    /** Читает актуальное значение из хранилища (без кэша). */
+    public static boolean isAlphabeticMethodsEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_ALPHABETIC_METHODS_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_ALPHABETIC_METHODS_ENABLED);
     }
 
     /** Вкладки редактора объекта метаданных списком слева. */

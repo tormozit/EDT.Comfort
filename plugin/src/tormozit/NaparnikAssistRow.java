@@ -591,6 +591,8 @@ public final class NaparnikAssistRow
     {
         List<Word> words = new ArrayList<>();
         List<ICompletionProposal> list = ContentAssistPopupSync.computedProposals(assistant);
+        Global.tempLog("naparnik-prefix", "collect baseOffset=" + baseOffset + " proposals=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + (list == null ? "null" : list.size())); //$NON-NLS-1$
         if (list == null)
             return words;
         for (ICompletionProposal p : list)
@@ -599,19 +601,28 @@ public final class NaparnikAssistRow
                 continue;
             ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(p);
             if (!(raw instanceof ICompletionProposalExtension3 ext3))
+            {
+                Global.tempLog("naparnik-prefix", "collect skipped class=" + raw.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " display=" + raw.getDisplayString() + " reason=noExtension3"); //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
+            }
             try
             {
                 CharSequence text = ext3.getPrefixCompletionText(null, 0);
                 String display = raw.getDisplayString();
+                Global.tempLog("naparnik-prefix", "collect class=" + raw.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " display=" + display + " text=" + text //$NON-NLS-1$ //$NON-NLS-2$
+                    + " name=" + SmartContentAssistProcessor.filterMatchName(raw)); //$NON-NLS-1$
                 if (text == null || display == null)
                     continue;
                 int priority = raw instanceof ConfigurableCompletionProposal configurable
                     ? configurable.getPriority() : 0;
                 words.add(new Word(display, text.toString(), priority));
             }
-            catch (RuntimeException ignored)
+            catch (RuntimeException failure)
             {
+                Global.tempLog("naparnik-prefix", "collect failed class=" + raw.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " failure=" + failure); //$NON-NLS-1$
             }
         }
         return words;
@@ -1205,24 +1216,34 @@ public final class NaparnikAssistRow
     /** Регистр набранной части первого слова — из совпавшего полного имени списка. */
     private String correctedPrefix(IDocument document, int caret) throws org.eclipse.jface.text.BadLocationException
     {
+        Global.tempLog("naparnik-prefix", "correct caret=" + caret + " baseOffset=" + baseOffset //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " words=" + completionWords.size() + " full=" + full + " remaining=" + remaining); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         int start = caret;
         while (start > 0 && isWordChar(document.getChar(start - 1)))
             start--;
         if (start == caret)
+        {
+            Global.tempLog("naparnik-prefix", "correct no word before caret"); //$NON-NLS-1$ //$NON-NLS-2$
             return ""; //$NON-NLS-1$
+        }
         String prefix = document.get(start, caret - start);
         int end = 0;
         while (end < remaining.length() && isWordChar(remaining.charAt(end)))
             end++;
         String firstWord = prefix + remaining.substring(0, end);
+        Global.tempLog("naparnik-prefix", "correct prefix=" + prefix + " firstWord=" + firstWord); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         for (Word word : completionWords)
         {
             int wordEnd = 0;
             while (wordEnd < word.text.length() && isWordChar(word.text.charAt(wordEnd)))
                 wordEnd++;
             if (wordEnd == firstWord.length() && word.text.regionMatches(true, 0, firstWord, 0, wordEnd))
+            {
+                Global.tempLog("naparnik-prefix", "correct matched display=" + word.display + " text=" + word.text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return word.text.substring(0, prefix.length());
+            }
         }
+        Global.tempLog("naparnik-prefix", "correct no matching word"); //$NON-NLS-1$ //$NON-NLS-2$
         return ""; //$NON-NLS-1$
     }
 

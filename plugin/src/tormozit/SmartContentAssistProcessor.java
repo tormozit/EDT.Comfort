@@ -4579,10 +4579,6 @@ return EMPTY;
                 for (ICompletionProposal proposal : stock)
                     (BslLiteralValues.isPartialValue(proposal) ? partialValues : otherStock).add(proposal);
             boolean nativeVariants = hasNativeVariants(otherStock.toArray(ICompletionProposal[]::new));
-            Global.tempLog("literal-low-probability", "caret=" + caret + " comment=" + comment //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " modelValues=" + modelValues + " partialValues=" + partialValues.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + " otherStock=" + otherStock.size() + " nativeVariants=" + nativeVariants //$NON-NLS-1$ //$NON-NLS-2$
-                + " addLowProbability=" + (stock != null && !modelValues && !nativeVariants)); //$NON-NLS-1$
             if (stock == null || modelValues || nativeVariants)
                 return stock;
             try

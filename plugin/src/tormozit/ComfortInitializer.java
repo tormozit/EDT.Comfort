@@ -125,6 +125,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED,
             ComfortSettings.DEFAULT_ALPHABETIC_COMMON_NODE_ENABLED);
         store.setDefault(
+            ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED,
+            ComfortSettings.DEFAULT_ALPHABETIC_METHODS_ENABLED);
+        store.setDefault(
             ComfortSettings.PREF_MD_EDITOR_VERTICAL_TABS,
             ComfortSettings.DEFAULT_MD_EDITOR_VERTICAL_TABS);
         store.setDefault(

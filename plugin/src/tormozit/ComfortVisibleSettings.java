@@ -45,6 +45,8 @@ final class ComfortVisibleSettings
             "Суффиксы набора 2 (через запятую):", Kind.TEXT), //$NON-NLS-1$
         new Setting("Комфорт", ComfortSettings.PREF_ALPHABETIC_COMMON_NODE_ENABLED, //$NON-NLS-1$
             "Сортировать по алфавиту ветку «Общие» в деревьях конфигурации", Kind.FLAG), //$NON-NLS-1$
+        new Setting("Комфорт", ComfortSettings.PREF_ALPHABETIC_METHODS_ENABLED, //$NON-NLS-1$
+            "Сортировать по алфавиту методы в деревьях сравнения и объединения", Kind.FLAG), //$NON-NLS-1$
         new Setting("Комфорт", ComfortSettings.PREF_FILTER_MATCH_COLOR, //$NON-NLS-1$
             "Цвет фильтра:", Kind.THEME_COLOR), //$NON-NLS-1$
         new Setting("Комфорт", ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD, //$NON-NLS-1$
