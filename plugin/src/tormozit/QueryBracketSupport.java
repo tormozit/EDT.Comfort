@@ -213,13 +213,10 @@ final class QueryBracketSupport
     {
         int offset = withSelection ? Math.min(selection.x, target) : target;
         int length = withSelection ? Math.max(selection.x + selection.y, target + 1) - offset : 1;
-        Global.tempLog("query-bracket-navigation", "from=" + selection + ", target=" + target //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + ", range=" + offset + ":" + length); //$NON-NLS-1$ //$NON-NLS-2$
         if (viewer instanceof ITextViewerExtension5 extension)
         {
             // false означает «диапазон уже виден», а не ошибку раскрытия.
-            boolean changed = extension.exposeModelRange(new Region(offset, length));
-            Global.tempLog("query-bracket-navigation", "projection changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
+            extension.exposeModelRange(new Region(offset, length));
         }
         else
             viewer.resetVisibleRegion();

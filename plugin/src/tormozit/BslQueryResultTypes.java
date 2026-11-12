@@ -1885,26 +1885,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 DbViewElement dbView = expression == null ? null : tableDbView(expression, select);
                 Result result = dbView instanceof DbViewFieldTableDef table
                     ? columnsResult(fields(table), computer, literalUri, offset, length) : null;
-                // Временный лог допущения: табличная dbview выражения находится чтением ссылок, без расчёта.
-                CommonExpression head = expression instanceof MultiPartCommonExpression multiPart
-                    ? multiPart.getSourceTable() : null;
-                Global.tempLog("query-nested-ts", "field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " expr=" + className(expression) //$NON-NLS-1$
-                    + " content=" + (expression == null ? "" : expression.getFullContent()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " itemDbView=" + describe(expression == null ? null : expression.getItemDbView()) //$NON-NLS-1$
-                    + " headDbView=" + describe(head == null ? null : tableDbView(head, select)) //$NON-NLS-1$
-                    + " fromTable=" + describe(fromTableDbView(select, headName(expression))) //$NON-NLS-1$
-                    + " tableDbView=" + describe(dbView) //$NON-NLS-1$
-                    + " nested=" + (result != null) //$NON-NLS-1$
-                    + " columns=" + (result == null ? "" : result.fields().stream() //$NON-NLS-1$ //$NON-NLS-2$
-                        .map(Field::name).toList().toString())
-                    + (result == null ? typeDetail(tableDbView(head, select),
-                        expression instanceof MultiPartCommonExpression multi ? multi.getContent() : null) : "")); //$NON-NLS-1$
                 if (result != null)
                     return result;
             }
-            Global.tempLog("query-nested-ts", "field=" + field.getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " sources=none from=[" + sourceNames(select) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
 
@@ -2021,54 +2004,6 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     || content.equalsIgnoreCase(candidate.getNameRu()))
                     return candidate;
             return null;
-        }
-
-        /** Вид dbview и число его полей — временная диагностика выбора табличной части результата запроса. */
-        private static String describe(DbViewElement element)
-        {
-            if (!(element instanceof Table table))
-                return className(element);
-            String text = className(element) + "[fields=" + table.getFields().size(); //$NON-NLS-1$
-            if (element instanceof DbViewFromQuery fromQuery)
-                text += ",actual=" + fromQuery.getActualFields().size() //$NON-NLS-1$
-                    + ",original=" + className(fromQuery.getOriginalDbView()); //$NON-NLS-1$
-            if (element instanceof DbViewFieldDef field)
-                text += ",type=" + (field.getType() == null ? 0 : field.getType().getTypes().size()); //$NON-NLS-1$
-            return text + "]"; //$NON-NLS-1$
-        }
-
-        /** Временная проверка допущения: есть ли часть среди полей типа родительского поля. */
-        private static String typeDetail(DbViewElement parent, String content)
-        {
-            if (!(parent instanceof DbViewFieldDef field) || field.getType() == null)
-                return " parentType=none"; //$NON-NLS-1$
-            List<DbViewFieldDef> candidates = typeFields(parent);
-            return " parentType=" + field.getType().getTypes().size() //$NON-NLS-1$
-                + " typeFields=" + candidates.size() //$NON-NLS-1$
-                + " typeHas=" + (nameIn(candidates, content) != null); //$NON-NLS-1$
-        }
-
-        /** Имена и псевдонимы источников FROM — временная диагностика ненайденной таблицы. */
-        private static String sourceNames(QuerySchemaSelectQuery select)
-        {
-            if (select == null)
-                return ""; //$NON-NLS-1$
-            List<String> names = new ArrayList<>();
-            for (QuerySchemaOperator operator : select.getOperators())
-            for (QuerySchemaSource source : allSources(operator))
-            {
-                String name = source.getSource() == null ? null : source.getSource().getAlias();
-                if (name == null && source.getSource() instanceof QuerySchemaTable queryTable
-                    && queryTable.getTable() != null)
-                    name = queryTable.getTable().getTableName();
-                names.add(className(source.getSource()) + ":" + name); //$NON-NLS-1$
-            }
-            return String.join(",", names); //$NON-NLS-1$
-        }
-
-        private static String className(Object element)
-        {
-            return element == null ? "null" : element.getClass().getSimpleName(); //$NON-NLS-1$
         }
 
         private static Result columnsResult(List<DbViewFieldDef> columnsSource,

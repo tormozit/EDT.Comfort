@@ -3,7 +3,11 @@ package tormozit;
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
 import java.util.Collection;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -11,7 +15,15 @@ import java.util.function.Predicate;
 import org.eclipse.core.runtime.Plugin;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.Keyword;
@@ -68,6 +80,9 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
 import com._1c.g5.v8.dt.metadata.mdclass.URLTemplate;
+import com._1c.g5.v8.dt.rights.model.Right;
+import com._1c.g5.v8.dt.rights.model.RightValue;
+import com._1c.g5.v8.dt.rights.model.util.RightsModelUtil;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.ql.model.CastOperationExpression;
 import com._1c.g5.v8.dt.ql.model.NullLiteralExpression;
@@ -146,6 +161,13 @@ public class Activator extends AbstractUIPlugin
         NavigatorFilterHook.installProblemSeverityWeaving();
         MdEventHandlersPageHook.installWeavingHook();
         OpenHelperAttributePropertiesHook.installWeavingHook();
+        // Ошибка необязательной доработки установщика не должна срывать запуск плагина.
+        try { AvailableSoftwareDialogHook.installUpdateRefreshHook(); }
+        catch (Throwable failure)
+        {
+            try { Global.tempLogException("available-software", "install update refresh hook", failure); } //$NON-NLS-1$ //$NON-NLS-2$
+            catch (Throwable ignored) { }
+        }
         WorkbenchTabsHook.installWeavingHook();
         ProblemViewHook.installWeavingHook();
         MoxelEditorHook.installWeavingHooks();
@@ -322,6 +344,8 @@ public class Activator extends AbstractUIPlugin
         private static final String PENDING = "tormozit.portalLogin.pending"; //$NON-NLS-1$
         private static final java.util.concurrent.atomic.AtomicBoolean notified =
             new java.util.concurrent.atomic.AtomicBoolean();
+        private static final java.util.concurrent.atomic.AtomicBoolean authenticating =
+            new java.util.concurrent.atomic.AtomicBoolean();
         private static volatile boolean running;
 
         static void install()
@@ -331,15 +355,15 @@ public class Activator extends AbstractUIPlugin
             var properties = System.getProperties();
             synchronized (properties)
             {
-                properties.put(NOTIFY, (Runnable) PortalLoginNotifications::request);
+                properties.put(NOTIFY, (Consumer<Runnable>) PortalLoginNotifications::request);
                 pending = properties.remove(PENDING);
             }
-            Global.tempLog("portal-login", "INSTALL pending=" + pending); //$NON-NLS-1$ //$NON-NLS-2$
-            if (Boolean.TRUE.equals(pending))
-                request();
+            Global.tempLog("portal-login", "INSTALL pending=" + (pending instanceof Runnable)); //$NON-NLS-1$ //$NON-NLS-2$
+            if (pending instanceof Runnable login)
+                request(login);
         }
 
-        private static void request()
+        private static void request(Runnable login)
         {
             boolean first = running && notified.compareAndSet(false, true);
             Global.tempLog("portal-login", "REQUEST first=" + first); //$NON-NLS-1$ //$NON-NLS-2$
@@ -347,23 +371,46 @@ public class Activator extends AbstractUIPlugin
                 return;
             Display display = Display.getDefault();
             if (display != null && !display.isDisposed())
-                display.asyncExec(() -> showPending(display));
+                display.asyncExec(() -> showPending(display, login));
         }
 
-        private static void showPending(Display display)
+        private static void showPending(Display display, Runnable login)
         {
             if (!running || display.isDisposed())
                 return;
             if (!org.eclipse.ui.PlatformUI.isWorkbenchRunning()
                 || org.eclipse.ui.PlatformUI.getWorkbench().getWorkbenchWindows().length == 0)
             {
-                display.timerExec(500, () -> showPending(display));
+                display.timerExec(500, () -> showPending(display, login));
                 return;
             }
             Shell toast = ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
-                "Запрос входа через Портал 1С:ИТС отменён. Доступ к ресурсам, требующим авторизации, ограничен.", //$NON-NLS-1$
-                8_000);
+                "Для доступа к этому ресурсу требуется вход через Портал 1С:ИТС. После входа повторите операцию.", //$NON-NLS-1$
+                5_000, () -> login(login), "Войти через Портал 1С:ИТС"); //$NON-NLS-1$
             Global.tempLog("portal-login", "SHOW created=" + (toast != null)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void login(Runnable action)
+        {
+            boolean start = running && authenticating.compareAndSet(false, true);
+            Global.tempLog("portal-login", "LOGIN start=" + start); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!start)
+                return;
+            try
+            {
+                action.run();
+                Global.tempLog("portal-login", "LOGIN returned"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException failure)
+            {
+                Global.tempLog("portal-login", "LOGIN failed=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
+                    "Не удалось открыть авторизацию: " + failure.getMessage(), 8_000); //$NON-NLS-1$
+            }
+            finally
+            {
+                authenticating.set(false);
+            }
         }
 
         static void stop()
@@ -595,53 +642,76 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
-     * В rights.ui 13.0.100.v202605050943 getCurrentSelectedObjects используется и для
-     * списка прав (setRightsInputs), и для сохранения (buttonPressed). У HTTP-сервиса
-     * права принадлежат дочерним объектам; одного корня недостаточно (issue 924).
+     * Доработки RightsEditDialog и входного выделения его контроллера.
+     * API и точки изменения проверены в rights.ui 13.0.100.v202605050943:
+     * методы HTTP-сервисов (#924), массовое применение состояний и помеченных прав (#1051).
      */
     private static final class RightsEditDialogHook implements WeavingHook, ClassFileTransformer
     {
         private static final String TARGET =
             "com._1c.g5.v8.dt.internal.rights.ui.dialogs.RightsEditDialog"; //$NON-NLS-1$
         private static final String CALLBACK = "tormozit.rightsEditDialog.objects"; //$NON-NLS-1$
-        private static volatile boolean woven;
+        private static final String ACTION = "tormozit.rightsEditDialog.action";
+        private static final String DEPENDENCIES = "tormozit.rightsEditDialog.dependencies";
+        private static final String CONTROLLER =
+            "com._1c.g5.v8.dt.rights.ui.editors.controllers.RightsEditorController";
+        private static final String PANEL = "com._1c.g5.v8.dt.internal.rights.ui.panels.RightsPanel";
+        private static final int SET_CHECKED = 301;
+        private static final int UNSET_CHECKED = 302;
+        private static final Map<Object, Boolean> REMOVAL_MODES = new java.util.WeakHashMap<>();
+        private final java.util.Set<String> woven = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
         static void start(BundleContext context)
         {
             System.getProperties().put(CALLBACK,
                 (BiFunction<Object, Object, Object>)RightsEditDialogHook::expandObjects);
+            System.getProperties().put(ACTION, (BiFunction<Object, Object, Object>)RightsEditDialogHook::action);
+            System.getProperties().put(DEPENDENCIES,
+                (BiFunction<Object, Object, Object>)RightsEditDialogHook::dependencyDirection);
             RightsEditDialogHook hook = new RightsEditDialogHook();
             context.registerService(WeavingHook.class, hook, null);
-            try
+            List<String> loaded = new ArrayList<>();
+            for (String target : List.of(TARGET, CONTROLLER, PANEL))
             {
-                Bundle bundle = org.eclipse.core.runtime.Platform.getBundle("com._1c.g5.v8.dt.rights.ui"); //$NON-NLS-1$
-                if (bundle == null)
-                    throw new IllegalStateException("Бандл редактора прав EDT недоступен"); //$NON-NLS-1$
-                bundle.loadClass(TARGET);
-                if (!woven)
-                    BslDocCommentDescriptionFix.registerExtraTransformer(hook, TARGET);
+                try
+                {
+                    Bundle bundle = Platform.getBundle("com._1c.g5.v8.dt.rights.ui");
+                    if (bundle == null)
+                        throw new IllegalStateException("Бандл редактора прав EDT недоступен");
+                    bundle.loadClass(target);
+                    if (!hook.woven.contains(target))
+                        loaded.add(target);
+                }
+                catch (ClassNotFoundException | RuntimeException | LinkageError failure)
+                {
+                    Global.logError("RightsEditDialog", "start", failure);
+                }
             }
-            catch (ClassNotFoundException | RuntimeException | LinkageError failure)
-            {
-                Global.logError("RightsEditDialog", "start", failure); //$NON-NLS-1$ //$NON-NLS-2$
-            }
+            if (!loaded.isEmpty())
+                BslDocCommentDescriptionFix.registerExtraTransformer(hook, loaded.toArray(String[]::new));
         }
 
         static void stop()
         {
             System.getProperties().put(CALLBACK, (BiFunction<Object, Object, Object>)(input, add) -> input);
+            System.getProperties().put(ACTION, (BiFunction<Object, Object, Object>)(event, dialog) ->
+                event instanceof Collection<?> ? event : Boolean.FALSE);
+            System.getProperties().put(DEPENDENCIES, (BiFunction<Object, Object, Object>)(checked, panel) -> checked);
+            REMOVAL_MODES.clear();
         }
 
         @Override
         public void weave(WovenClass type)
         {
-            if (type.getState() != WovenClass.TRANSFORMING || !TARGET.equals(type.getClassName()))
+            if (type.getState() != WovenClass.TRANSFORMING
+                || !TARGET.equals(type.getClassName()) && !CONTROLLER.equals(type.getClassName())
+                    && !PANEL.equals(type.getClassName()))
                 return;
-            byte[] rewritten = rewrite(type.getBytes());
+            byte[] rewritten = rewrite(type.getClassName(), type.getBytes());
             if (rewritten != null)
             {
                 type.setBytes(rewritten);
-                woven = true;
+                woven.add(type.getClassName());
             }
         }
 
@@ -651,14 +721,12 @@ public class Activator extends AbstractUIPlugin
                 return input;
             if (!Boolean.TRUE.equals(Global.getField(dialog, "isAddAction"))) //$NON-NLS-1$
             {
-                // Контроллер сохраняет права content[0] и RightsPanel.initRights читает
-                // текущие значения из той же строки; список прав должен относиться к ней.
-                Object content = Global.getField(dialog, "content"); //$NON-NLS-1$
-                Object selected = content instanceof java.util.List<?> rows && !rows.isEmpty()
-                    ? Global.invoke(rows.get(0), "getEObject") : null; //$NON-NLS-1$
-                if (selected instanceof com._1c.g5.v8.dt.metadata.mdclass.Method method)
-                    return java.util.List.of(method);
-                return input;
+                // Панель может содержать родителей методов; права нужны именно входным строкам.
+                LinkedHashSet<EObject> selected = new LinkedHashSet<>();
+                for (Object row : rows(dialog))
+                    if (Global.invoke(row, "getEObject") instanceof EObject object)
+                        selected.add(object);
+                return selected;
             }
             LinkedHashSet<Object> expanded = null;
             for (Object object : objects)
@@ -680,12 +748,260 @@ public class Activator extends AbstractUIPlugin
         public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
             ProtectionDomain domain, byte[] bytes)
         {
-            if (!TARGET.replace('.', '/').equals(name))
+            String target = name == null ? "" : name.replace('/', '.');
+            if (!TARGET.equals(target) && !CONTROLLER.equals(target) && !PANEL.equals(target))
                 return null;
-            return rewrite(bytes);
+            return rewrite(target, bytes);
         }
 
-        private static byte[] rewrite(byte[] bytes)
+        private static List<?> rows(Object dialog)
+        {
+            Object content = Global.getField(dialog, "content");
+            if (!(content instanceof List<?> rows) || rows.isEmpty())
+                throw new IllegalStateException("Не получены выбранные объекты редактора прав");
+            return rows;
+        }
+
+        private static boolean isEdit(Object dialog)
+        {
+            return Boolean.FALSE.equals(Global.getField(dialog, "isAddAction"));
+        }
+
+        private static Object action(Object event, Object dialog)
+        {
+            if (!isEdit(dialog))
+                return event instanceof Collection<?> ? event : Boolean.FALSE;
+            if ("updateButtons".equals(event))
+            {
+                updateButtons(dialog);
+                return Boolean.TRUE;
+            }
+            if (event instanceof Composite parent)
+            {
+                configureButtons(dialog, parent);
+                return Boolean.TRUE;
+            }
+            if (event instanceof Collection<?>)
+            {
+                LinkedHashSet<Object> roles = new LinkedHashSet<>();
+                for (Object row : rows(dialog))
+                    roles.add(java.util.Objects.requireNonNull(Global.invoke(row, "getRole"), "Роль строки"));
+                return roles;
+            }
+            if (event instanceof Integer id
+                && (id == IDialogConstants.OK_ID || id == SET_CHECKED))
+            {
+                boolean removal = isRemoval(dialog);
+                if (id == IDialogConstants.OK_ID && removal)
+                {
+                    return Boolean.TRUE;
+                }
+                int operation = id == SET_CHECKED && removal ? UNSET_CHECKED : id;
+                try
+                {
+                    if (apply(dialog, operation))
+                    {
+                        // Сохранение уже выполнено для всех строк. Старый контроллер должен
+                        // пропустить свой блок сохранения content[0], для этого возвращаем CANCEL.
+                        requireInvoke(dialog, "setReturnCode", IDialogConstants.CANCEL_ID);
+                        requireInvoke(dialog, "close");
+                    }
+                }
+                catch (RuntimeException | LinkageError failure)
+                {
+                    Global.logError("RightsEditDialog", "apply", failure);
+                    Shell shell = (Shell)Global.invoke(dialog, "getShell");
+                    MessageDialog.openError(shell, "Редактирование прав", "Не удалось применить права: "
+                        + failure.getMessage());
+                }
+                return Boolean.TRUE;
+            }
+            return Boolean.FALSE;
+        }
+
+        private static void configureButtons(Object dialog, Composite parent)
+        {
+            Button all = (Button)Global.invoke(dialog, "getButton", IDialogConstants.OK_ID);
+            all.setText("Установить все");
+            if (all.getLayoutData() instanceof GridData data)
+                data.widthHint = Math.max(data.widthHint, all.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
+            all.setToolTipText(TooltipText.wrap(all,
+                "Применить все показанные состояния прав ко всем выбранным объектам: помеченные права установить, непомеченные снять, для наследуемых оставить штатное наследование."
+                    + Global.pluginSignForTooltip()));
+            Button set = (Button)Global.invoke(dialog, "createButton", parent, SET_CHECKED,
+                "Установить помеченные", false);
+            set.moveAbove(all);
+            Object panel = java.util.Objects.requireNonNull(Global.getField(dialog, "rightsPanel"));
+            CheckboxTreeViewer viewer = (CheckboxTreeViewer)java.util.Objects.requireNonNull(Global.getField(panel, "viewer"));
+            Composite listParent = viewer.getTree().getParent();
+            Composite modeArea = new Composite(listParent, SWT.NONE);
+            GridLayout modeLayout = new GridLayout(1, false);
+            modeLayout.marginWidth = 0;
+            modeLayout.marginHeight = 0;
+            modeLayout.marginTop = 4;
+            modeLayout.marginBottom = 4;
+            modeArea.setLayout(modeLayout);
+            modeArea.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            modeArea.moveAbove(viewer.getTree());
+            Button removal = new Button(modeArea, SWT.CHECK);
+            removal.setText("Для снятия прав");
+            removal.setToolTipText(TooltipText.wrap(removal,
+                "Подготовить пометки для снятия прав. При переключении все пометки очищаются. Помеченные права снимаются кнопкой «Снять помеченные»."
+                    + Global.pluginSignForTooltip()));
+            removal.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            REMOVAL_MODES.put(panel, Boolean.FALSE);
+            removal.addListener(SWT.Selection, event -> {
+                changeMode(panel, removal.getSelection());
+                requireInvoke(dialog, "updateOkButton");
+                parent.layout(true, true);
+            });
+            removal.addListener(SWT.Dispose, event -> REMOVAL_MODES.remove(panel));
+            requireInvoke(dialog, "updateOkButton");
+            if (rows(dialog).size() > 1)
+            {
+                Shell shell = (Shell)Global.invoke(dialog, "getShell");
+                shell.setText("Редактировать права на объекты");
+                requireInvoke(dialog, "setMessage", "Выбрано строк: " + rows(dialog).size()
+                    + ". Начальные состояния прав показаны по первому объекту. Действие применяется ко всем выбранным строкам.");
+            }
+        }
+
+        private static void changeMode(Object panel, boolean removal)
+        {
+            // AbstractViewerPanel хранит пометки скрытых фильтром строк в этих наборах.
+            // Поля и checkAll проверены в dt.ui 23.0.0.v202605050943.
+            Object checkedState = Global.getField(panel, "checkedElements");
+            Object grayedState = Global.getField(panel, "grayedElements");
+            if (!(checkedState instanceof Collection<?> checked) || !(grayedState instanceof Collection<?> grayed))
+                throw new IllegalStateException("Не получены сохранённые пометки списка прав EDT");
+            REMOVAL_MODES.put(panel, removal);
+            checked.clear();
+            grayed.clear();
+            requireInvoke(panel, "checkAll", false);
+        }
+
+        private static boolean isRemoval(Object dialog)
+        {
+            return Boolean.TRUE.equals(REMOVAL_MODES.get(Global.getField(dialog, "rightsPanel")));
+        }
+
+        private static void updateButtons(Object dialog)
+        {
+            boolean removal = isRemoval(dialog);
+            Button all = (Button)Global.invoke(dialog, "getButton", IDialogConstants.OK_ID);
+            Button marked = (Button)Global.invoke(dialog, "getButton", SET_CHECKED);
+            // updateOkButton сначала применяет штатную доступность, затем ограничиваем режимом.
+            if (all != null && removal)
+                all.setEnabled(false);
+            if (marked != null)
+            {
+                marked.setText(removal ? "Снять помеченные" : "Установить помеченные");
+                marked.setToolTipText(TooltipText.wrap(marked, (removal
+                    ? "Снять только помеченные права у всех выбранных объектов. Остальные права сохраняются с учётом зависимостей EDT."
+                    : "Установить только помеченные права у всех выбранных объектов. Остальные права сохраняются с учётом зависимостей EDT.")
+                        + Global.pluginSignForTooltip()));
+                if (marked.getLayoutData() instanceof GridData data)
+                    data.widthHint = Math.max(data.widthHint, marked.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
+            }
+        }
+
+        private static Object dependencyDirection(Object value, Object panel)
+        {
+            boolean checked = Boolean.TRUE.equals(value);
+            boolean removal = Boolean.TRUE.equals(REMOVAL_MODES.get(panel));
+            boolean direction = checked != removal;
+            return direction;
+        }
+
+        private static void requireInvoke(Object target, String method, Object... arguments)
+        {
+            if (!Global.invokeVoid(target, method, arguments))
+                throw new IllegalStateException("Не найден метод EDT: " + method);
+        }
+
+        private static List<Right> panelRights(Object panel, String method)
+        {
+            Object result = Global.invoke(panel, method);
+            if (!(result instanceof Collection<?> values))
+                throw new IllegalStateException("Не получен список прав: " + method);
+            List<Right> rights = new ArrayList<>();
+            for (Object value : values)
+                if (value instanceof Right right)
+                    rights.add(right);
+            return rights;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static boolean apply(Object dialog, int id)
+        {
+            Object controller = java.util.Objects.requireNonNull(Global.getField(dialog, "controller"));
+            Object panel = java.util.Objects.requireNonNull(Global.getField(dialog, "rightsPanel"));
+            List<Right> grayed = panelRights(panel, "getGrayedElements");
+            List<Right> checked = panelRights(panel, "getCheckedElements");
+            checked.removeIf(right -> RightsModelUtil.isRightContains(right, grayed));
+            if (id != IDialogConstants.OK_ID && checked.isEmpty())
+            {
+                requireInvoke(dialog, "setMessage", "Пометьте права, которые требуется установить или снять.");
+                return false;
+            }
+
+            Map<Object, Map<EObject, Map<Right, RightValue>>> changesByRole = new LinkedHashMap<>();
+            for (Object row : rows(dialog))
+            {
+                EObject object = (EObject)java.util.Objects.requireNonNull(Global.invoke(row, "getEObject"));
+                Object role = java.util.Objects.requireNonNull(Global.invoke(row, "getRole"));
+                Object description = java.util.Objects.requireNonNull(Global.invoke(row, "getRoleDescription"));
+                if (!Boolean.TRUE.equals(Global.invoke(row, "canEditRole")))
+                    throw new IllegalStateException("Роль недоступна для редактирования: " + Global.invoke(row, "getRoleName"));
+                Map<Right, RightValue> requested;
+                if (id == IDialogConstants.OK_ID)
+                {
+                    Object result = Global.invoke(controller, "getNewObjectRights", grayed, checked, object);
+                    if (!(result instanceof Map<?, ?>))
+                        throw new IllegalStateException("Не получены состояния прав объекта " + object);
+                    requested = (Map<Right, RightValue>)result;
+                }
+                else
+                {
+                    requested = new LinkedHashMap<>();
+                    for (Right right : checked)
+                        requested.put(right, id == SET_CHECKED ? RightValue.SET : RightValue.UNSET);
+                }
+                Map<EObject, Map<Right, RightValue>> changes = changesByRole.computeIfAbsent(role,
+                    key -> new LinkedHashMap<>());
+                // Та же обработка доступности, зависимых прав и вложенных объектов, что у штатного ОК.
+                Map<EObject, Map<Right, RightValue>> rowChanges = new LinkedHashMap<>();
+                requireInvoke(controller, "collectRightChangesToEditRightValues", description, object,
+                    requested, rowChanges, true);
+                rowChanges.forEach((changedObject, rights) -> changes.computeIfAbsent(changedObject,
+                    key -> new LinkedHashMap<>()).putAll(rights));
+            }
+
+            // Все планы рассчитываем до первой записи; один штатный task на роль.
+            List<Object> tasks = new ArrayList<>();
+            for (var entry : changesByRole.entrySet())
+            {
+                if (entry.getValue().isEmpty())
+                    continue;
+                Object task = Global.newInstance("com._1c.g5.v8.dt.rights.tasks.EditRightValuesTask",
+                    controller.getClass().getClassLoader(), entry.getKey(), entry.getValue(),
+                    Global.getField(controller, "project"), Global.getField(controller, "eventBroker"),
+                    Global.getField(controller, "sorter"));
+                tasks.add(java.util.Objects.requireNonNull(task, "Не создана задача изменения прав EDT"));
+            }
+            Object editingContext = java.util.Objects.requireNonNull(Global.getField(controller, "editingContext"));
+            for (Object task : tasks)
+            {
+                Object result = Global.invoke(editingContext, "execute", task);
+                if (!(result instanceof org.eclipse.core.runtime.IStatus status))
+                    throw new IllegalStateException("Не получен результат изменения прав EDT");
+                if (!status.isOK())
+                    throw new IllegalStateException(status.getMessage(), status.getException());
+            }
+            return true;
+        }
+
+        private static byte[] rewrite(String target, byte[] bytes)
         {
             ClassReader reader = new ClassReader(bytes);
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
@@ -697,28 +1013,142 @@ public class Activator extends AbstractUIPlugin
                     String signature, String[] exceptions)
                 {
                     MethodVisitor visitor = super.visitMethod(access, method, descriptor, signature, exceptions);
-                    if (!"getCurrentSelectedObjects".equals(method) //$NON-NLS-1$
-                        || !"()Ljava/util/Collection;".equals(descriptor)) //$NON-NLS-1$
+                    if (PANEL.equals(target))
+                    {
+                        if (!method.equals("getDependedRights") || !descriptor.equals(
+                            "(Lcom/_1c/g5/v8/dt/rights/model/Right;Ljava/util/HashSet;Z)Ljava/util/Collection;"))
+                            return visitor;
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(DEPENDENCIES);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
+                                super.visitVarInsn(Opcodes.ILOAD, 3);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                                    "(Z)Ljava/lang/Boolean;", false);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                super.visitVarInsn(Opcodes.ISTORE, 3);
+                                returns[0]++;
+                            }
+                        };
+                    }
+                    if (CONTROLLER.equals(target))
+                    {
+                        if (!method.equals("openEditObjectRightsWizard")
+                            || !descriptor.equals("(Lorg/eclipse/swt/widgets/Shell;)V"))
+                            return visitor;
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String name, String desc,
+                                boolean isInterface)
+                            {
+                                if (owner.equals("java/util/List") && name.equals("subList")
+                                    && desc.equals("(II)Ljava/util/List;"))
+                                {
+                                    // list, 0, 1 -> list: передаём в диалог всё выделение.
+                                    super.visitInsn(Opcodes.POP2);
+                                    returns[0]++;
+                                }
+                                else
+                                    super.visitMethodInsn(opcode, owner, name, desc, isInterface);
+                            }
+                        };
+                    }
+                    boolean objects = method.equals("getCurrentSelectedObjects")
+                        && descriptor.equals("()Ljava/util/Collection;");
+                    boolean roles = method.equals("getContentRoles") && descriptor.equals("()Ljava/util/Collection;");
+                    boolean inputs = method.equals("setRightsInputs") && descriptor.equals("()V");
+                    boolean buttons = method.equals("createButtonsForButtonBar")
+                        && descriptor.equals("(Lorg/eclipse/swt/widgets/Composite;)V");
+                    boolean press = method.equals("buttonPressed") && descriptor.equals("(I)V");
+                    boolean update = method.equals("updateOkButton") && descriptor.equals("()V");
+                    if (!objects && !roles && !inputs && !buttons && !press && !update)
                         return visitor;
                     return new MethodVisitor(Opcodes.ASM9, visitor)
                     {
+                        private void callback(String key)
+                        {
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                "()Ljava/util/Properties;", false);
+                            super.visitLdcInsn(key);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
+                        }
+
+                        private void applyCallback()
+                        {
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                        }
+
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            if (press)
+                            {
+                                callback(ACTION);
+                                super.visitVarInsn(Opcodes.ILOAD, 1);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+                                    "(I)Ljava/lang/Integer;", false);
+                                applyCallback();
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                org.objectweb.asm.Label original = new org.objectweb.asm.Label();
+                                super.visitJumpInsn(Opcodes.IFEQ, original);
+                                super.visitInsn(Opcodes.RETURN);
+                                super.visitLabel(original);
+                                super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                                returns[0]++;
+                            }
+                        }
+
+                        @Override
+                        public void visitJumpInsn(int opcode, org.objectweb.asm.Label label)
+                        {
+                            // Обе штатные проверки content.size() == 1 теперь допускают >= 1.
+                            if ((roles || inputs) && opcode == Opcodes.IF_ICMPNE)
+                            {
+                                opcode = Opcodes.IF_ICMPLT;
+                                returns[0]++;
+                            }
+                            super.visitJumpInsn(opcode, label);
+                        }
+
                         @Override
                         public void visitInsn(int opcode)
                         {
-                            if (opcode == Opcodes.ARETURN)
+                            if ((objects || roles) && opcode == Opcodes.ARETURN)
                             {
-                                // Collection → BiFunction.apply(Collection, dialog).
-                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
-                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
-                                super.visitLdcInsn(CALLBACK);
-                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", //$NON-NLS-1$
-                                    "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                                callback(objects ? CALLBACK : ACTION);
                                 super.visitInsn(Opcodes.SWAP);
-                                super.visitVarInsn(Opcodes.ALOAD, 0);
-                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", //$NON-NLS-1$
-                                    "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$
-                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection"); //$NON-NLS-1$
+                                applyCallback();
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection");
+                                returns[0]++;
+                            }
+                            else if ((buttons || update) && opcode == Opcodes.RETURN)
+                            {
+                                callback(ACTION);
+                                if (buttons)
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                else
+                                    super.visitLdcInsn("updateButtons");
+                                applyCallback();
+                                super.visitInsn(Opcodes.POP);
                                 returns[0]++;
                             }
                             super.visitInsn(opcode);

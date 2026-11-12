@@ -214,16 +214,9 @@ public class BslInvocationTypeRules
             if (!installed.compareAndSet(false, true))
                 return;
             System.getProperties().put(CALLBACK, (Function<Object[], Object>)TabularUnload::replace);
-            System.getProperties().put(CALLBACK + ".weaving", (java.util.function.Consumer<Object>) //$NON-NLS-1$
-                result -> Global.tempLog("tabular-union", "unload weaving " + result)); //$NON-NLS-1$ //$NON-NLS-2$
             if (Boolean.TRUE.equals(System.getProperties().get("tormozit.typeComputation.early"))) //$NON-NLS-1$
-            {
-                Global.tempLog("tabular-union", "install tabular unload=early woven=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + System.getProperties().get("tormozit.typeComputation.early." + TARGET)); //$NON-NLS-1$
                 return;
-            }
             boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new TabularUnload(), TARGET);
-            Global.tempLog("tabular-union", "install tabular unload=" + ok); //$NON-NLS-1$ //$NON-NLS-2$
             if (!ok)
                 installed.set(false);
         }
@@ -231,17 +224,12 @@ public class BslInvocationTypeRules
         private static Object replace(Object[] args)
         {
             Invocation invocation = (Invocation)args[1];
-            Global.tempLog("tabular-union", "unload entry at=" + Call.offsetOf(invocation) //$NON-NLS-1$ //$NON-NLS-2$
-                + " expression=" + Call.text(invocation)); //$NON-NLS-1$
             if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access)
                 || !BslDocCommentComputedTypes.isExtendedTypesEnabled(invocation))
                 return args[0];
             Set<Invocation> active = computing.get();
             if (!active.add(invocation))
-            {
-                Global.tempLog("tabular-union", "unload reentrant at=" + Call.offsetOf(invocation)); //$NON-NLS-1$ //$NON-NLS-2$
                 return args[0];
-            }
             try
             {
                 Call call = new Call(invocation, access);
@@ -251,9 +239,6 @@ public class BslInvocationTypeRules
                 if (sections.isEmpty())
                     return args[0];
                 List<TypeItem> result = call.copyColumns();
-                Global.tempLog("tabular-union", "unload result at=" + Call.offsetOf(invocation) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " expression=" + Call.text(invocation) + " sections=" + call.collectionTrace(sections) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " replaced=" + (result != null)); //$NON-NLS-1$
                 return result == null ? args[0] : result;
             }
             catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
@@ -262,7 +247,6 @@ public class BslInvocationTypeRules
             }
             catch (RuntimeException | LinkageError failure)
             {
-                Global.tempLog("tabular-union", "unload failure=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
                 return args[0];
             }
             finally
@@ -661,15 +645,8 @@ public class BslInvocationTypeRules
                 return null;
             List<TypeItem> rows = receiverRows();
             List<Property> all = allRowProperties(rows);
-            String trace = "copyColumns " + name + " receiver=" + collectionTrace(receiverTypes()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " assigned=" + collectionTrace(assignedTabularSections()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " rows=" + typeNames(rows) //$NON-NLS-1$ //$NON-NLS-2$
-                + " all=" + propertyNames(all) + " names=[" + names + "]"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (all.isEmpty())
-            {
-                Global.tempLog("tabular-union", trace + " -> no columns"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
-            }
             List<Property> columns = all;
             if (!names.isBlank())
             {
@@ -678,17 +655,12 @@ public class BslInvocationTypeRules
                 {
                     Property column = byName(all, part.trim());
                     if (column == null)
-                    {
-                        Global.tempLog("tabular-union", trace + " -> unknown [" + part.trim() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         return null;
-                    }
                     selected.add(column);
                 }
                 columns = selected;
             }
             Type table = valueTableType(columns);
-            Global.tempLog("tabular-union", trace + " -> columns=" + propertyNames(columns) //$NON-NLS-1$ //$NON-NLS-2$
-                + " table=" + (table == null ? "null" : "ok")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return table == null ? null : List.of(table);
         }
 
@@ -1039,20 +1011,6 @@ public class BslInvocationTypeRules
             return rows;
         }
 
-        /** Для временного лога: тип, признак итерируемости и число элементов коллекции. */
-        String collectionTrace(List<TypeItem> types)
-        {
-            List<String> parts = new ArrayList<>();
-            for (TypeItem item : types)
-            {
-                Type type = resolve(item) instanceof Type resolved ? resolved : null;
-                parts.add(typeName(item) + "[iterable=" + (type != null && type.isIterable()) //$NON-NLS-1$
-                    + " elements=" + (type == null || type.getCollectionElementTypes() == null ? "-" //$NON-NLS-1$ //$NON-NLS-2$
-                        : Integer.toString(type.getCollectionElementTypes().allTypes().size())) + "]"); //$NON-NLS-1$
-            }
-            return parts.toString();
-        }
-
         /** Свойства первого типа строки, у которого они есть ({@code ЛучшийТипИзТаблицыТипов}). */
         List<Property> rowProperties(List<TypeItem> rows)
         {
@@ -1389,22 +1347,6 @@ public class BslInvocationTypeRules
         {
             String typeName = item == null ? null : McoreUtil.getTypeNameRu(item);
             return typeName == null ? "" : typeName; //$NON-NLS-1$
-        }
-
-        static List<String> typeNames(List<TypeItem> types)
-        {
-            List<String> names = new ArrayList<>();
-            for (TypeItem item : types)
-                names.add(typeNameRu(item));
-            return names;
-        }
-
-        static List<String> propertyNames(List<Property> properties)
-        {
-            List<String> names = new ArrayList<>();
-            for (Property property : properties)
-                names.add(property.getName());
-            return names;
         }
 
         /** Тип значения макета — как у штатного {@code ПолучитьМакет} ({@code GetTemplateInvocationTypesComputer}). */

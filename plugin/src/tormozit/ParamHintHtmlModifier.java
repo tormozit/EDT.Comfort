@@ -642,8 +642,7 @@ public final class ParamHintHtmlModifier
                 for (org.eclipse.swt.widgets.Listener listener
                     : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
                 {
-                    Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
-                        ? wrapper.getEventListener() : listener;
+                    Object typed = Global.unwrapTypedListener(listener);
                     if (typed == null
                         || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                         continue;
@@ -2182,8 +2181,7 @@ public final class ParamHintHtmlModifier
                 for (org.eclipse.swt.widgets.Listener listener
                     : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
                 {
-                    Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
-                        ? wrapper.getEventListener() : listener;
+                    Object typed = Global.unwrapTypedListener(listener);
                     if (typed == null
                         || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                         continue;
@@ -2268,8 +2266,7 @@ public final class ParamHintHtmlModifier
             for (org.eclipse.swt.widgets.Listener listener
                 : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
             {
-                Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
-                    ? wrapper.getEventListener() : listener;
+                Object typed = Global.unwrapTypedListener(listener);
                 if (typed == null
                     || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                     continue;
@@ -4337,8 +4334,7 @@ public final class ParamHintHtmlModifier
             for (org.eclipse.swt.widgets.Listener listener
                 : widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
             {
-                Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
-                    ? wrapper.getEventListener() : listener;
+                Object typed = Global.unwrapTypedListener(listener);
                 if (typed == null
                     || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                     continue;
@@ -7310,8 +7306,7 @@ public final class ParamHintHtmlModifier
         for (org.eclipse.swt.widgets.Listener listener
             : active.widget.getListeners(org.eclipse.swt.custom.ST.CaretMoved))
         {
-            Object typed = listener instanceof org.eclipse.swt.widgets.TypedListener wrapper
-                ? wrapper.getEventListener() : listener;
+            Object typed = Global.unwrapTypedListener(listener);
             if (typed == null || !typed.getClass().getName().endsWith("CustomCaretListener")) //$NON-NLS-1$
                 continue;
             Object info = Global.getField(typed, "info"); //$NON-NLS-1$

@@ -28,10 +28,17 @@ import org.eclipse.debug.core.model.IDebugElement;
 import org.eclipse.debug.ui.DebugUITools;
 import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.debug.internal.ui.model.elements.DebugElementLabelProvider;
+import org.eclipse.debug.internal.ui.viewers.model.ITreeModelContentProvider;
+import org.eclipse.debug.internal.ui.viewers.model.provisional.IModelDelta;
+import org.eclipse.debug.internal.ui.viewers.model.provisional.ModelDelta;
+import org.eclipse.debug.internal.ui.viewers.model.provisional.IViewerUpdate;
+import org.eclipse.debug.internal.ui.viewers.model.provisional.IViewerUpdateListener;
+import org.eclipse.debug.internal.ui.viewers.model.provisional.TreeModelViewer;
 import org.eclipse.debug.internal.ui.viewers.model.provisional.IElementLabelProvider;
 import org.eclipse.debug.internal.ui.viewers.model.provisional.IPresentationContext;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
@@ -83,6 +90,145 @@ public final class DebugViewHook implements IStartup, IAdapterFactory
     private static final Set<Class<?>> REGISTERED_SESSION_TYPES = ConcurrentHashMap.newKeySet();
     private static final AtomicBoolean DEBUG_DIAGNOSTICS_INSTALLED = new AtomicBoolean();
     private static final Set<UUID> DELETING_SESSIONS = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Штатные EXPAND (включая LaunchProxy и отложенный RuntimeDebugTargetProxy.installed)
+     * не должны раскрывать соседние ветки. SELECT сохраняем: выбор кадра остаётся штатным.
+     * Путь активного кадра раскрываем отдельно, прокрутку выполняем после обновления строк.
+     */
+    static void installStackVisibility(Viewer viewer)
+    {
+        if (!(viewer instanceof TreeModelViewer model)
+            || !(model.getContentProvider() instanceof ITreeModelContentProvider provider))
+            return;
+        Tree tree = model.getTree();
+        String key = "tormozit.comfort.debugStackVisibility"; //$NON-NLS-1$
+        if (tree.getData(key) != null)
+            return;
+        StackVisibility visibility = new StackVisibility(model);
+        tree.setData(key, visibility);
+        provider.setModelDeltaMask(provider.getModelDeltaMask()
+            & ~(IModelDelta.EXPAND | IModelDelta.COLLAPSE | IModelDelta.REVEAL));
+        model.addViewerUpdateListener(visibility);
+        model.addModelChangedListener((delta, proxy) -> delta.accept((node, depth) ->
+        {
+            if ((node.getFlags() & IModelDelta.SELECT) != 0
+                && node.getElement() instanceof IBslStackFrame frame)
+                visibility.select(frame, node);
+            return true;
+        }));
+    }
+
+    private static final class StackVisibility implements IViewerUpdateListener
+    {
+        private final TreeModelViewer viewer;
+        private IBslStackFrame pendingFrame;
+        private boolean updating;
+        private boolean scheduled;
+
+        private StackVisibility(TreeModelViewer viewer)
+        {
+            this.viewer = viewer;
+        }
+
+        private void select(IBslStackFrame frame, IModelDelta delta)
+        {
+            pendingFrame = frame;
+            Object actual = viewer.getStructuredSelection().getFirstElement();
+            // Провайдер уже обработал SELECT. EDT может отклонить запрос соседнего
+            // предмета и сохранить текущий кадр: не раскрываем отклонённую ветку.
+            if (actual != null && !frame.equals(actual))
+            {
+                schedule();
+                return;
+            }
+            List<IModelDelta> path = new ArrayList<>();
+            for (IModelDelta node = delta; node != null; node = node.getParentDelta())
+                path.add(0, node);
+            IModelDelta sourceRoot = path.get(0);
+            ModelDelta root = new ModelDelta(sourceRoot.getElement(), IModelDelta.EXPAND);
+            root.setChildCount(sourceRoot.getChildCount());
+            ModelDelta copy = root;
+            for (int i = 1; i < path.size(); i++)
+            {
+                IModelDelta source = path.get(i);
+                int flags = i == path.size() - 1
+                    ? IModelDelta.SELECT | (source.getFlags() & IModelDelta.FORCE) : IModelDelta.EXPAND;
+                copy = copy.addNode(source.getElement(), source.getIndex(), flags, source.getChildCount());
+            }
+            // handleExpand провайдера создаёт строки виртуального дерева через replace /
+            // setChildCount, сверху вниз. expandToLevel сам отсутствующие строки не создаёт.
+            // updateModel использует переданную маску и не рассылает modelChanged повторно.
+            ((ITreeModelContentProvider) viewer.getContentProvider()).updateModel(root,
+                IModelDelta.EXPAND | IModelDelta.SELECT);
+            schedule();
+        }
+
+        private void schedule()
+        {
+            Tree tree = viewer.getTree();
+            if (scheduled || pendingFrame == null || tree.isDisposed())
+                return;
+            scheduled = true;
+            tree.getDisplay().asyncExec(() ->
+            {
+                scheduled = false;
+                if (!tree.isDisposed() && !updating && pendingFrame != null)
+                    position();
+            });
+        }
+
+        private void position()
+        {
+            Tree tree = viewer.getTree();
+            TreeItem[] selection = tree.getSelection();
+            // Последний SELECT в пакете не обязательно принят EDT. Прокручиваем
+            // стек фактически выбранного кадра, а не последнего запрошенного.
+            if (selection.length != 1 || !(selection[0].getData() instanceof IBslStackFrame))
+            {
+                pendingFrame = null;
+                return;
+            }
+            TreeItem selected = selection[0];
+            TreeItem thread = selected.getParentItem();
+            if (thread == null)
+            {
+                pendingFrame = null;
+                return;
+            }
+            int height = tree.getClientArea().height - (tree.getHeaderVisible() ? tree.getHeaderHeight() : 0);
+            int rows = Math.max(1, height / Math.max(1, tree.getItemHeight()));
+            int count = thread.getItemCount();
+            int index = thread.indexOf(selected);
+            TreeItem top = count + 1 <= rows ? thread
+                : thread.getItem(Math.max(0, Math.min(index, count - rows)));
+            tree.setTopItem(top);
+            pendingFrame = null;
+        }
+
+        @Override
+        public void viewerUpdatesBegin()
+        {
+            updating = true;
+        }
+
+        @Override
+        public void viewerUpdatesComplete()
+        {
+            updating = false;
+            schedule();
+        }
+
+        @Override
+        public void updateStarted(IViewerUpdate update)
+        {
+        }
+
+        @Override
+        public void updateComplete(IViewerUpdate update)
+        {
+        }
+    }
 
     @Override
     public void earlyStartup()

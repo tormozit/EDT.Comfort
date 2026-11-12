@@ -189,6 +189,7 @@ private static final String PROCESSOR_IFACE =
         installCopyHandler(view);
         DebugViewHook.installSuffixPainting(tree);
         DebugViewHook.installSessionMenu(tree);
+        DebugViewHook.installStackVisibility(viewer);
         if (Boolean.TRUE.equals(tree.getData(VIEW_HOOKED_KEY)))
             return;
         tree.setData(VIEW_HOOKED_KEY, Boolean.TRUE);

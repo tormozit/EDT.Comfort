@@ -857,7 +857,6 @@ public final class BslDebugSourceHook implements IStartup
     /** Координаты точек принадлежат редактору; отладчику передаётся отдельное представление. */
     private static final class BreakpointMapping
     {
-        private static final String TOPIC = "breakpoint-lines-1040";
         private static final Map<IRuntimeDebugClientTarget, Map<IBslLineBreakpoint, State>> STATES =
             new WeakHashMap<>();
         // XtextDocumentProvider наследует FileDocumentProvider, а не TextFileDocumentProvider:
@@ -895,8 +894,6 @@ public final class BslDebugSourceHook implements IStartup
                 (BiFunction<Object, Object, Object>) (target, breakpoint) -> wrap(target, breakpoint, false));
             System.getProperties().put("tormozit.debug.breakpoints.lookup",
                 (BiFunction<Object, Object, Object>) (target, breakpoint) -> wrap(target, breakpoint, true));
-            Global.tempLog(TOPIC, "install weaving="
-                + System.getProperty("tormozit.debug.breakpoints.outgoing.status", "not loaded"));
             DebugPlugin.getDefault().addDebugEventListener(events ->
             {
                 for (DebugEvent event : events)
@@ -908,8 +905,6 @@ public final class BslDebugSourceHook implements IStartup
                         if (event.getKind() != DebugEvent.CREATE && event.getKind() != DebugEvent.CHANGE
                             && event.getKind() != DebugEvent.SUSPEND)
                             continue;
-                        Global.tempLog(TOPIC, "event kind=" + event.getKind() + " weaving="
-                            + System.getProperty("tormozit.debug.breakpoints.outgoing.status", "not loaded"));
                         refresh(target, null);
                     }
             });
@@ -936,7 +931,7 @@ public final class BslDebugSourceHook implements IStartup
                     if (state != null)
                         synchronized (state)
                         {
-                            if (state.version != null && state.line < 1)
+                            if (state.version != null && state.rejected)
                                 for (var subject : subjects)
                                     if (Objects.equals(state.version.generation,
                                         subject.getRuntimeDebugTarget().getConfigVersion()))
@@ -985,17 +980,18 @@ public final class BslDebugSourceHook implements IStartup
                         if (marker == null || !marker.exists() || !(marker.getResource() instanceof IFile file)
                             || (onlyFile != null && !onlyFile.equals(file)))
                             return;
-                        Version version = version(target, breakpoint, file);
+                        boolean passThrough = connectedSubjects(target).isEmpty();
+                        Version version = passThrough ? null : version(target, breakpoint, file);
                         synchronized (state)
                         {
-                            if (version.equals(state.version))
+                            if (passThrough == state.passThrough && (passThrough || version.equals(state.version)))
                                 return;
                         }
                         resend(target, breakpoint);
                     }
                     catch (Exception e)
                     {
-                        Global.tempLog(TOPIC, "refresh failed: " + e);
+                        // Подключение или маркер уже могли закрыться.
                     }
                 }));
                 return Status.OK_STATUS;
@@ -1010,21 +1006,45 @@ public final class BslDebugSourceHook implements IStartup
                 || !(value instanceof IBslLineBreakpoint breakpoint))
                 return value;
             int line = -1;
+            State state = null;
             try
             {
                 IMarker marker = breakpoint.getMarker();
                 if (marker == null || !marker.exists() || !(marker.getResource() instanceof IFile file) || !file.exists())
                     return value;
-                State state;
                 synchronized (STATES)
                 {
                     state = STATES.computeIfAbsent(target, ignored -> new WeakHashMap<>())
                         .computeIfAbsent(breakpoint, ignored -> new State());
                 }
+                if (!lookup && connectedSubjects(target).isEmpty())
+                {
+                    // До подключения предмета нет версии модуля для пересчёта. Серверу нужны
+                    // штатные точки уже сейчас, иначе остановка не подключит предмет автоматически.
+                    int originalLine = breakpoint.getLineNumber();
+                    boolean changed;
+                    synchronized (state)
+                    {
+                        changed = !state.passThrough;
+                        state.passThrough = true;
+                        state.rejected = false;
+                        state.version = null; // Отменяет применение уже запущенного расчёта.
+                        state.line = originalLine;
+                        state.sentLine = originalLine;
+                        state.reason = "Нет подключённых предметов: штатная отправка";
+                    }
+                    if (changed)
+                        BreakpointListHook.sourceMappingChanged();
+                    return value;
+                }
                 if (lookup)
                 {
                     synchronized (state)
                     {
+                        if (state.passThrough)
+                        {
+                            return value;
+                        }
                         // Именно отправленная строка, даже если редактор с тех пор изменился.
                         line = state.version == null ? breakpoint.getLineNumber() : state.sentLine;
                     }
@@ -1035,10 +1055,13 @@ public final class BslDebugSourceHook implements IStartup
                     boolean schedule = false;
                     synchronized (state)
                     {
-                        if (!version.equals(state.version))
+                        if (state.passThrough || !version.equals(state.version))
                         {
+                            state.passThrough = false;
+                            state.rejected = false;
                             state.version = version;
-                            state.line = -1;
+                            // Пока нет результата сравнения, сохраняем штатную отправку.
+                            state.line = version.markerLine;
                             state.reason = "Соответствие строки ещё рассчитывается";
                             schedule = true;
                         }
@@ -1050,16 +1073,22 @@ public final class BslDebugSourceHook implements IStartup
                         BreakpointListHook.sourceMappingChanged();
                         prepare(target, breakpoint, file, state, version);
                     }
-                    Global.tempLog(TOPIC, "outgoing file=" + file.getFullPath() + " marker="
-                        + version.markerLine + " runtime=" + line + " generation=" + version.generation
-                        + " reason=" + state.reason);
                 }
-                if (lookup)
-                    Global.tempLog(TOPIC, "lookup file=" + file.getFullPath() + " runtime=" + line);
             }
             catch (Exception e)
             {
-                Global.tempLog(TOPIC, "wrap lookup=" + lookup + " failed: " + e);
+                // Ошибка получения данных не доказывает непригодность точки.
+                if (state != null)
+                {
+                    synchronized (state)
+                    {
+                        state.passThrough = true;
+                        state.rejected = false;
+                        state.version = null;
+                    }
+                    BreakpointListHook.sourceMappingChanged();
+                }
+                return value;
             }
             int mapped = line;
             return Proxy.newProxyInstance(IBslLineBreakpoint.class.getClassLoader(),
@@ -1120,8 +1149,6 @@ public final class BslDebugSourceHook implements IStartup
             }
             if (generation == null && reason.isEmpty())
                 reason = "Не определено поколение метаданных предмета отладки";
-            Global.tempLog(TOPIC, "subjects target=" + System.identityHashCode(target)
-                + " connected=" + subjects.size() + " generation=" + generation + " reason=" + reason);
             return new Version(document, editor != null ? editor.model : null,
                 stamp, file.getModificationStamp(), breakpoint.getLineNumber(),
                 generation, reason, document != null && stamp == IDocumentExtension4.UNKNOWN_MODIFICATION_STAMP
@@ -1151,10 +1178,6 @@ public final class BslDebugSourceHook implements IStartup
                             line = expected.document.getLineOfOffset(position.offset) + 1;
                         else
                             failure = "Не найдена текущая позиция точки в редакторе модуля";
-                        Global.tempLog(TOPIC, "capture file=" + file.getFullPath() + " document="
-                            + expected.document.getClass().getName() + " stamp=" + expected.stamp
-                            + " model=" + (expected.model != null ? expected.model.getClass().getName() : "null")
-                            + " position=" + position + " marker=" + expected.markerLine + " editor=" + line);
                     }
                 }
                 catch (Exception e)
@@ -1166,7 +1189,7 @@ public final class BslDebugSourceHook implements IStartup
                 String captureFailure = failure;
                 Job job = Job.create("Комфорт: сопоставление строки точки останова", monitor ->
                 {
-                    int runtimeLine = -1;
+                    Mapping result = null;
                     String reason = captureFailure;
                     try
                     {
@@ -1183,29 +1206,18 @@ public final class BslDebugSourceHook implements IStartup
                             String original = source(target, reference, expected.generation, file,
                                 () -> target.getModuleLocator().getModule(reference, true),
                                 () -> !expected.equals(uncheckedVersion(target, breakpoint, file)));
-                            Mapping mapping = matching(target, file, expected.generation, current, original)
+                            result = matching(target, file, expected.generation, current, original)
                                 .at(editorLine - 1);
-                            if (mapping.exact)
-                                runtimeLine = mapping.line + 1;
-                            else
+                            if (!result.exact)
                                 reason = "У строки нет однозначного соответствия в модуле базы";
                         }
                     }
                     catch (Exception e)
                     {
                         reason = "Не удалось сопоставить строку с модулем базы: " + e.getMessage();
-                        Global.tempLog(TOPIC, "prepare failed file=" + file.getFullPath() + ": " + e);
                     }
-                    Global.tempLog(TOPIC, "prepared file=" + file.getFullPath() + " marker="
-                        + expected.markerLine + " editor=" + editorLine + " runtime=" + runtimeLine
-                        + " reason=" + reason);
-                    synchronized (state)
-                    {
-                        if (!expected.equals(state.version))
-                            return Status.OK_STATUS;
-                        state.line = runtimeLine;
-                        state.reason = reason;
-                    }
+                    if (!state.complete(expected, result, reason))
+                        return Status.OK_STATUS;
                     BreakpointListHook.sourceMappingChanged();
                     resend(target, breakpoint);
                     return Status.OK_STATUS;
@@ -1259,7 +1271,6 @@ public final class BslDebugSourceHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog(TOPIC, "version failed file=" + file.getFullPath() + ": " + e);
                 return null;
             }
         }
@@ -1274,13 +1285,12 @@ public final class BslDebugSourceHook implements IStartup
                     if (!target.isTerminated() && !target.isDisconnected() && marker != null
                         && marker.exists() && breakpoint.isRegistered())
                     {
-                        Global.tempLog(TOPIC, "resend marker=" + marker.getId());
                         target.breakpointChanged(breakpoint, null);
                     }
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog(TOPIC, "resend failed: " + e);
+                    // Подключение или маркер уже могли закрыться.
                 }
             });
         }
@@ -1294,10 +1304,23 @@ public final class BslDebugSourceHook implements IStartup
 
         private static final class State
         {
+            boolean passThrough;
+            boolean rejected;
             Version version;
             int line = -1;
             int sentLine = -1;
             volatile String reason = "";
+
+            /** Только выполненное сравнение может исключить точку; отсутствие данных оставляет штатную строку. */
+            synchronized boolean complete(Version expected, Mapping mapping, String reason)
+            {
+                if (!expected.equals(version))
+                    return false;
+                rejected = mapping != null && !mapping.exact;
+                line = mapping == null ? expected.markerLine : mapping.exact ? mapping.line + 1 : -1;
+                this.reason = reason;
+                return true;
+            }
         }
     }
 

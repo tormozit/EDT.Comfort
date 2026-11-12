@@ -1414,8 +1414,8 @@ public final class BslFormatterHook implements IStartup
                     for (Listener listener : control.getListeners(type))
                     {
                         Object found = providerIn(listener, 0);
-                        if (found == null && listener instanceof TypedListener typed)
-                            found = providerIn(typed.getEventListener(), 0);
+                        if (found == null && listener instanceof TypedListener)
+                            found = providerIn(Global.unwrapTypedListener(listener), 0);
                         if (found != null)
                             return found;
                     }

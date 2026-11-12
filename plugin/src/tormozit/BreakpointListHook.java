@@ -170,7 +170,6 @@ public final class BreakpointListHook implements IStartup
     private static void installSourceStatusPainting(Tree tree)
     {
         SOURCE_STATUS_TREES.add(tree);
-        Global.tempLog("breakpoint-lines-1040", "install row painting tree=" + tree.getClass().getName());
         var store = EditorsUI.getPreferenceStore();
         org.eclipse.jface.util.IPropertyChangeListener preferences = event ->
         {

@@ -343,7 +343,7 @@ public final class FilterInputBoxListNavigation
     {
         List<FocusListener> result = new ArrayList<>();
         for (Listener listener : tree.getListeners(SWT.FocusIn))
-            if (listener instanceof TypedListener typed && typed.getEventListener() instanceof FocusListener focus
+            if (listener instanceof TypedListener && Global.unwrapTypedListener(listener) instanceof FocusListener focus
                 && focus.getClass().getName().endsWith(classNameSuffix))
                 result.add(focus);
         return result;

@@ -290,6 +290,7 @@
     <startup class="tormozit.FormattedTextEditorHook"/>
     <startup class="tormozit.TextTemplateFormatPagesHook"/>
     <startup class="tormozit.FindReplaceDialogHook"/>
+    <startup class="tormozit.AvailableSoftwareDialogHook"/>
     <startup class="tormozit.AnnotationsPreferenceHook"/>
     <startup class="tormozit.BslFormatterHook"/>
     <startup class="tormozit.ThemeSwitchPreferencesHook"/>

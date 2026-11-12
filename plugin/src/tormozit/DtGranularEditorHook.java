@@ -23,6 +23,8 @@ import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
 
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.Role;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 
 /**
@@ -36,6 +38,8 @@ import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
  * {@code System.getProperties} (без зависимости {@code md.ui} → Комфорт); {@code true} — выйти,
  * ничего не меняя. Вход самого редактора ({@code createPages}) и переходы к элементу (есть свойство
  * или выделение) идут штатным путём.
+ * <p>В редакторе роли страницей по умолчанию становится «Права»; явное свойство
+ * по-прежнему выбирает соответствующую ему страницу штатным способом.
  */
 final class DtGranularEditorHook
 {
@@ -65,6 +69,7 @@ final class DtGranularEditorHook
     /** Вызов из инструментированного {@code showEditorInput}: {@code true} — страницу не трогать. */
     static boolean shouldKeepPage(Object editorObj, Object inputObj)
     {
+        configureRoleDefaultPage(editorObj);
         if (!(editorObj instanceof FormEditor editor) || !(inputObj instanceof IDtEditorInput<?> input))
             return false;
         Object current = editor.getEditorInput();
@@ -85,6 +90,22 @@ final class DtGranularEditorHook
                 return false;
         }
         return true;
+    }
+
+    /** defaultPage читается при каждом showEditorInput; поле проверено в md.ui 30.0.1.v202605050943. */
+    private static void configureRoleDefaultPage(Object editorObj)
+    {
+        if (!(editorObj instanceof DtGranularEditor<?> editor) || !(editor.getModel() instanceof Role))
+            return;
+        try
+        {
+            var page = editor.findPage("com._1c.g5.v8.dt.rights.ui.editors.page.rights");
+            if (page != null)
+                Global.setFieldForce(editor, "defaultPage", page);
+        }
+        catch (RuntimeException | LinkageError ignored)
+        {
+        }
     }
 
     /**

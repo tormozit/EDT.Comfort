@@ -283,12 +283,9 @@ public final class BslSyntaxAssist
                 if (page != null)
                     pages.add(page);
             }
-            Global.tempLog("query-syntax-assist", "keyword=" + keyword + ", paths=" + paths //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ", pages=" + pages.size()); //$NON-NLS-1$
         }
         catch (RuntimeException | LinkageError error)
         {
-            Global.tempLogException("query-syntax-assist", "страницы QL: " + keyword, error); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return pages;
     }

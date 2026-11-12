@@ -385,8 +385,6 @@ public final class BslEditorHighlighting
         static void highlight(Object nativeCalculator, EObject root, IHighlightedPositionAcceptor acceptor,
             CancelIndicator cancelIndicator)
         {
-            Global.tempLog("query-highlighting-1042", "queries.begin resource=" //$NON-NLS-1$ //$NON-NLS-2$
-                + root.eResource().getURI());
             Object lexer = null;
             java.lang.reflect.Method update = null;
             java.lang.reflect.Method start = null;
@@ -445,10 +443,7 @@ public final class BslEditorHighlighting
                     return;
                 }
                 acceptLiteral(text, offset, end, tokens, ids, acceptor);
-                Global.tempLog("query-highlighting-1042", "literal offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " end=" + end + " tokens=" + tokens.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            Global.tempLog("query-highlighting-1042", "queries.end canceled=" + isCanceled(cancelIndicator)); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /** Первое слово текста (после пробелов, «|» и комментариев) — ВЫБРАТЬ/SELECT или УНИЧТОЖИТЬ/DROP. */
@@ -512,8 +507,6 @@ public final class BslEditorHighlighting
                         BslServerCallHighlightingConfiguration.queryTokenId(OTHERS_ID));
                     acceptor.addPosition(tokenEnd - 2, 2,
                         BslServerCallHighlightingConfiguration.queryTokenId("Ql_Operators")); //$NON-NLS-1$
-                    Global.tempLog("query-highlighting-1042", "wildcard.split offset=" + tokenOffset //$NON-NLS-1$ //$NON-NLS-2$
-                        + " length=" + (tokenEnd - tokenOffset)); //$NON-NLS-1$
                     position = tokenEnd;
                     continue;
                 }
@@ -629,7 +622,6 @@ public final class BslEditorHighlighting
 
         private static void logFailure(String message, Throwable e)
         {
-            Global.tempLogException("query-highlighting-1042", message, e); //$NON-NLS-1$
             if (failureLogged)
                 return;
             failureLogged = true;

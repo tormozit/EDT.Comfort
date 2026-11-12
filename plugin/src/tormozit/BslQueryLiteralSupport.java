@@ -500,8 +500,6 @@ final class BslQueryLiteralSupport
         NativeCompletionScope scope = NATIVE_COMPLETION_SCOPE.get();
         boolean restricted = (prefix == null || ((String)prefix).isEmpty())
             && (scope == null || !scope.rootLevel);
-        Global.tempLog("query-literal-completion", "emptyPrefixRestriction prefix=" + prefix //$NON-NLS-1$ //$NON-NLS-2$
-            + " root=" + (scope == null ? "native" : scope.rootLevel) + " restricted=" + restricted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return restricted;
     }
 
@@ -1744,12 +1742,6 @@ final class BslQueryLiteralSupport
                 else
                     NATIVE_COMPLETION_SCOPE.set(previousScope);
             }
-            Global.tempLog("query-literal-completion", "compute key=" + key + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " probe=" + lit.probeIndex + " root=" + scope.rootLevel + " raw=" + (raw == null ? 0 : raw.length)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (raw != null)
-                for (ICompletionProposal proposal : raw)
-                    Global.tempLog("query-literal-completion", "proposal class=" + proposal.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " display=" + proposal.getDisplayString()); //$NON-NLS-1$
             String lineBreak = TextUtilities.getDefaultLineDelimiter(doc) + lit.indent + "|"; //$NON-NLS-1$
             List<ICompletionProposal> result = new ArrayList<>(raw != null ? raw.length : 0);
             BslXtextEditor sourceEditor = SmartContentAssistProcessor.resolveEditorForLiteralAudit(viewer);
@@ -1767,8 +1759,6 @@ final class BslQueryLiteralSupport
                 if (!scope.rootLevel && raw[i] instanceof ConfigurableCompletionProposal extension
                     && extension.getReplacementString().stripLeading().startsWith("{")) //$NON-NLS-1$
                 {
-                    Global.tempLog("query-literal-completion", "dropDcsAfterDot display=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + extension.getDisplayString());
                     continue;
                 }
                 if (raw[i] instanceof ConfigurableCompletionProposal cp
@@ -2511,12 +2501,10 @@ final class BslQueryLiteralSupport
                     .resolveElementAt(resource, probe);
                 return field instanceof DbViewElement ? null : word.getValue();
             });
-            Global.tempLog("query-syntax-assist", "offset=" + probe + ", keyword=" + keyword); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return keyword;
         }
         catch (Exception | LinkageError error)
         {
-            Global.tempLogException("query-syntax-assist", "ключевое слово QL", error); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -2747,8 +2735,6 @@ final class BslQueryLiteralSupport
                     // языка запросов: подавлять только ключевое слово, за которым нет поля.
                     if (leaf.getGrammarElement() instanceof Keyword && !(field instanceof DbViewElement))
                     {
-                        Global.tempLog("query-syntax-assist", "подсказка ключевого слова подавлена: " //$NON-NLS-1$ //$NON-NLS-2$
-                            + leaf.getText() + ", offset=" + offset); //$NON-NLS-1$
                         return null;
                     }
                     if (field == null || field.eIsProxy())
@@ -3437,9 +3423,6 @@ final class BslQueryLiteralSupport
         if (!(modelObject instanceof IAnnotationModel model) || !(additionsObject instanceof Map<?, ?> additions))
             return additionsObject;
         List<CoveredRange> ranges = PUBLISHED_COVERAGES.get(model);
-        Global.tempLog("query-marker-events-1042", "beforePublish model=" //$NON-NLS-1$ //$NON-NLS-2$
-            + Integer.toHexString(System.identityHashCode(model)) + " incoming=" + additions.size() //$NON-NLS-1$
-            + " ranges=" + (ranges == null ? 0 : ranges.size())); //$NON-NLS-1$
         if (ranges == null || ranges.isEmpty() || !ComfortSettings.isQueryLiteralHighlightingEnabled())
             return additionsObject;
         Map<Annotation, Position> filtered = new LinkedHashMap<>();
@@ -3469,8 +3452,6 @@ final class BslQueryLiteralSupport
                 suppressed++;
             }
         }
-        Global.tempLog("query-marker-events-1042", "beforePublish suppressed=" + suppressed //$NON-NLS-1$ //$NON-NLS-2$
-            + " remaining=" + filtered.size()); //$NON-NLS-1$
         return suppressed == 0 ? additionsObject : filtered;
     }
     /** Ошибки и группы операторных слов из одного готового дерева живой проверки. */
@@ -3523,8 +3504,6 @@ final class BslQueryLiteralSupport
         markersPreferenceListenerInstalled = true;
         System.getProperties().put(QUERY_ANNOTATIONS_CALLBACK,
             (java.util.function.BiFunction<Object, Object, Object>) BslQueryLiteralSupport::filterHubAnnotations);
-        Global.tempLog("query-marker-events-1042", "filter.register patch=" //$NON-NLS-1$ //$NON-NLS-2$
-            + System.getProperty(QUERY_ANNOTATIONS_CALLBACK + ".patch")); //$NON-NLS-1$
         // Хранилище, в которое пишет страница «Редактор кода»: у Activator — другой экземпляр,
         // его слушатель смену флажка не получал.
         ComfortSettings.getInstance().getPreferenceStore().addPropertyChangeListener(event ->
@@ -4152,7 +4131,6 @@ final class BslQueryLiteralSupport
                 // даже при неизменном тексте запроса — видимость пересчитывается каждый раз.
                 List<QueryProblemAnnotation> previous = new ArrayList<>(coverage.ours);
                 coverage.ours.clear();
-                int reused = 0;
                 for (Issue issue : validation.issues())
                 {
                     // Важность самой ошибки запроса решает лишь, показывать ли её (IGNORE — нет).
@@ -4193,7 +4171,6 @@ final class BslQueryLiteralSupport
                     {
                         previous.remove(retained);
                         coverage.ours.add(retained);
-                        reused++;
                         continue;
                     }
                     // Модель аннотаций сдвигает этот же экземпляр позиции вместе с текстом.
@@ -4204,8 +4181,6 @@ final class BslQueryLiteralSupport
                     add.put(annotation, position);
                 }
                 remove.addAll(previous);
-                Global.tempLog("query-markers-1042", "literal=" + start + " reused=" + reused //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " removed=" + previous.size() + " current=" + coverage.ours.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
             // Покрытие в видимой области, где литерала-запроса больше нет, снимается.
             boolean hubWasHidden = false;
@@ -4222,8 +4197,6 @@ final class BslQueryLiteralSupport
                 requestRevalidation();
             if (!remove.isEmpty() || !add.isEmpty())
             {
-                Global.tempLog("query-markers-1042", "replace removed=" + remove.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " added=" + add.size()); //$NON-NLS-1$
                 if (model instanceof IAnnotationModelExtension extension)
                     extension.replaceAnnotations(remove.toArray(new Annotation[0]), add);
                 else
@@ -4326,14 +4299,6 @@ final class BslQueryLiteralSupport
             @Override
             public void modelChanged(AnnotationModelEvent event)
             {
-                StringBuilder trace = new StringBuilder("model.event thread=") //$NON-NLS-1$
-                    .append(Thread.currentThread().getName()).append(" world=").append(event.isWorldChange()); //$NON-NLS-1$
-                traceAnnotations(trace, "added", event.getAddedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
-                traceAnnotations(trace, "removed", event.getRemovedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
-                traceAnnotations(trace, "changed", event.getChangedAnnotations(), event.getAnnotationModel()); //$NON-NLS-1$
-                for (StackTraceElement frame : Thread.currentThread().getStackTrace())
-                    trace.append('\n').append("  at ").append(frame); //$NON-NLS-1$
-                Global.tempLog("query-marker-events-1042", trace.toString()); //$NON-NLS-1$
                 List<Annotation> candidates = new ArrayList<>();
                 for (Annotation annotation : event.getAddedAnnotations())
                 {
@@ -4358,21 +4323,6 @@ final class BslQueryLiteralSupport
                     });
             }
 
-            private void traceAnnotations(StringBuilder trace, String phase, Annotation[] annotations,
-                IAnnotationModel model)
-            {
-                trace.append('\n').append(phase).append('=').append(annotations.length);
-                for (Annotation annotation : annotations)
-                {
-                    Position position = model.getPosition(annotation);
-                    trace.append('\n').append(annotation.getClass().getName()).append('@')
-                        .append(Integer.toHexString(System.identityHashCode(annotation)))
-                        .append(" type=").append(annotation.getType()) //$NON-NLS-1$
-                        .append(" position=").append(position) //$NON-NLS-1$
-                        .append(" deleted=").append(annotation.isMarkedDeleted()) //$NON-NLS-1$
-                        .append(" message=").append(annotation.getText()); //$NON-NLS-1$
-                }
-            }
         }
     }
 

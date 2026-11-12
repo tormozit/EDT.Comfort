@@ -431,6 +431,11 @@ public class GoToDefinition extends AbstractHandler
             }
         }
 
+        String directRef = stripDocRefPrefix(ref);
+        if (directRef.startsWith("ОбработкаОбъект.") //$NON-NLS-1$
+            && tryOpenDirectModuleMethodOffline(directRef, page, project))
+            return true;
+
         String stripped = stripTypeSuffix(ref);
         String mdRef = stripped != null ? stripped : ref;
 
@@ -452,6 +457,7 @@ public class GoToDefinition extends AbstractHandler
     /**
      * Offline-fallback для doc-ссылок «прямоеИмя.Метод» без подключённого ИР.
      * Общий модуль ({@code Имя.Метод}) или менеджер ({@code Справочники.Объект.Метод}).
+     * Ссылки {@code ОбработкаОбъект.Имя.Метод} открываются также при подключённом ИР.
      */
     private static boolean tryOpenDirectModuleMethodOffline(
         String ref, IWorkbenchPage page, IProject project)
@@ -486,6 +492,8 @@ public class GoToDefinition extends AbstractHandler
 
     private static String resolveOfflineModulePath(String[] segments)
     {
+        if (segments.length == 3 && "ОбработкаОбъект".equals(segments[0]) && !segments[1].isEmpty()) //$NON-NLS-1$
+            return "Обработка." + segments[1] + ".МодульОбъекта"; //$NON-NLS-1$ //$NON-NLS-2$
         if (segments.length >= 3)
         {
             String ruSingular = MdTypeMapping.ruPluralToRu(segments[0]);

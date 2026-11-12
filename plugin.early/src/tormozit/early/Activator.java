@@ -1392,30 +1392,32 @@ public final class Activator
         private static final String REQUEST = "tormozit.portalLogin.request";
         private static final String NOTIFY = "tormozit.portalLogin.notify";
         private static final String PENDING = "tormozit.portalLogin.pending";
+        private static final String ORIGINAL = "comfort$obtainAuthUser";
         private static final java.nio.file.Path LOG = java.nio.file.Path.of(
             "C:/VC/EDT.Comfort/.tmp/issue-1025/runtime.log");
 
         static void install(BundleContext context)
         {
-            System.getProperties().put(REQUEST, (Runnable) PortalLoginFacadeWeaving::request);
+            System.getProperties().put(REQUEST, (Consumer<Runnable>) PortalLoginFacadeWeaving::request);
             context.registerService(WeavingHook.class, new PortalLoginFacadeWeaving(), null);
             diagnostic("INSTALL pid=" + ProcessHandle.current().pid());
         }
 
-        private static void request()
+        @SuppressWarnings("unchecked")
+        private static void request(Runnable login)
         {
             Object callback;
             var properties = System.getProperties();
             synchronized (properties)
             {
                 callback = properties.get(NOTIFY);
-                if (!(callback instanceof Runnable))
-                    properties.put(PENDING, Boolean.TRUE);
+                if (!(callback instanceof Consumer<?>))
+                    properties.putIfAbsent(PENDING, login);
             }
             diagnostic("REQUEST thread=" + Thread.currentThread().getName()
-                + "; notificationReady=" + (callback instanceof Runnable));
-            if (callback instanceof Runnable runnable)
-                runnable.run();
+                + "; notificationReady=" + (callback instanceof Consumer<?>));
+            if (callback instanceof Consumer<?> consumer)
+                ((Consumer<Runnable>) consumer).accept(login);
         }
 
         private static synchronized void diagnostic(String text)
@@ -1450,25 +1452,36 @@ public final class Activator
                     public MethodVisitor visitMethod(int access, String name, String descriptor,
                         String signature, String[] exceptions)
                     {
-                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
                         if (!"obtainAuthUser".equals(name) || !"()Ljava/util/Optional;".equals(descriptor)
                             || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
-                            return mv;
+                            return super.visitMethod(access, name, descriptor, signature, exceptions);
                         matches[0]++;
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
                         mv.visitCode();
                         mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
                             "()Ljava/util/Properties;", false);
                         mv.visitLdcInsn(REQUEST);
                         mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
                             "(Ljava/lang/Object;)Ljava/lang/Object;", false);
-                        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Runnable");
-                        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/lang/Runnable", "run", "()V", true);
+                        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                        mv.visitVarInsn(Opcodes.ALOAD, 0);
+                        mv.visitInvokeDynamicInsn("run", "(L" + TARGET.replace('.', '/') + ";)Ljava/lang/Runnable;",
+                            new Handle(Opcodes.H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
+                                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+                                + "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;"
+                                + "Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;", false),
+                            org.objectweb.asm.Type.getMethodType("()V"),
+                            new Handle(Opcodes.H_INVOKEVIRTUAL, TARGET.replace('.', '/'), ORIGINAL, descriptor, false),
+                            org.objectweb.asm.Type.getMethodType("()V"));
+                        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept",
+                            "(Ljava/lang/Object;)V", true);
                         mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Optional", "empty",
                             "()Ljava/util/Optional;", false);
                         mv.visitInsn(Opcodes.ARETURN);
                         mv.visitMaxs(0, 0);
                         mv.visitEnd();
-                        return null; // Исходное тело с syncExec и модальным диалогом не копируем.
+                        // Штатное тело сохраняем для явного входа по ссылке уведомления.
+                        return super.visitMethod(access, ORIGINAL, descriptor, signature, exceptions);
                     }
                 }, 0);
                 if (matches[0] == 1)
