@@ -91,6 +91,7 @@
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.PreferencesDialogTransferHook"/>
     <startup class="tormozit.ProjectPropertyDialogHook"/>
+    <startup class="tormozit.ProjectCleanDialogHook"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.NavigatorDropSearchHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>

@@ -1549,7 +1549,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             {
                 branch("index"); //$NON-NLS-1$
                 addAll(structureKeyNames(types));
-                full = !values.isEmpty();
+                // Известные ключи структуры не задают закрытый список её свойств.
+                full = !hasType(types, "Structure", "FixedStructure") && !values.isEmpty(); //$NON-NLS-1$ //$NON-NLS-2$
             }
             // Таблицы менеджера временных таблиц: М.Таблицы["…"] (ИР стр. 7770, issue 889)
             else if (!validation && access.getIndex() instanceof StringLiteral literal && hasType(types, "QueryTempTables")) //$NON-NLS-1$
@@ -2710,7 +2711,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 {
                     branch("objectProperties"); //$NON-NLS-1$
                     addAll(names);
-                    full = isFullParameterRole(scope, object);
+                    // Обращение через переменную не делает набор ключей структуры полным.
+                    full = !hasType(ownerTypes, "Structure", "FixedStructure") //$NON-NLS-1$ //$NON-NLS-2$
+                        && isFullParameterRole(scope, object);
                     if (full)
                         return;
                 }
