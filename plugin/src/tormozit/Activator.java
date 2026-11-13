@@ -17,6 +17,8 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
@@ -24,6 +26,7 @@ import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.Keyword;
@@ -653,6 +656,11 @@ public class Activator extends AbstractUIPlugin
         private static final String CALLBACK = "tormozit.rightsEditDialog.objects"; //$NON-NLS-1$
         private static final String ACTION = "tormozit.rightsEditDialog.action";
         private static final String DEPENDENCIES = "tormozit.rightsEditDialog.dependencies";
+        private static final String SORT_KEY = "tormozit.rightsEditDialog.sortKey";
+        private static final String REFRESH = "tormozit.rightsEditDialog.refresh";
+        private static final String OBJECTS_SECTION = "com._1c.g5.v8.dt.rights.ui.sections.ObjectsSection";
+        private static final String RIGHTS_SORTER =
+            "com._1c.g5.v8.dt.internal.rights.cleanup.RightCollectionRuntimeOrderSorterDelegate";
         private static final String CONTROLLER =
             "com._1c.g5.v8.dt.rights.ui.editors.controllers.RightsEditorController";
         private static final String PANEL = "com._1c.g5.v8.dt.internal.rights.ui.panels.RightsPanel";
@@ -668,14 +676,17 @@ public class Activator extends AbstractUIPlugin
             System.getProperties().put(ACTION, (BiFunction<Object, Object, Object>)RightsEditDialogHook::action);
             System.getProperties().put(DEPENDENCIES,
                 (BiFunction<Object, Object, Object>)RightsEditDialogHook::dependencyDirection);
+            System.getProperties().put(SORT_KEY, (BiFunction<Object, Object, Object>)RightsEditDialogHook::sortKey);
+            System.getProperties().put(REFRESH, (BiFunction<Object, Object, Object>)RightsEditDialogHook::refreshObjects);
             RightsEditDialogHook hook = new RightsEditDialogHook();
             context.registerService(WeavingHook.class, hook, null);
             List<String> loaded = new ArrayList<>();
-            for (String target : List.of(TARGET, CONTROLLER, PANEL))
+            for (String target : List.of(TARGET, CONTROLLER, PANEL, RIGHTS_SORTER, OBJECTS_SECTION))
             {
                 try
                 {
-                    Bundle bundle = Platform.getBundle("com._1c.g5.v8.dt.rights.ui");
+                    Bundle bundle = Platform.getBundle(RIGHTS_SORTER.equals(target)
+                        ? "com._1c.g5.v8.dt.rights" : "com._1c.g5.v8.dt.rights.ui");
                     if (bundle == null)
                         throw new IllegalStateException("Бандл редактора прав EDT недоступен");
                     bundle.loadClass(target);
@@ -697,6 +708,9 @@ public class Activator extends AbstractUIPlugin
             System.getProperties().put(ACTION, (BiFunction<Object, Object, Object>)(event, dialog) ->
                 event instanceof Collection<?> ? event : Boolean.FALSE);
             System.getProperties().put(DEPENDENCIES, (BiFunction<Object, Object, Object>)(checked, panel) -> checked);
+            System.getProperties().put(SORT_KEY, (BiFunction<Object, Object, Object>)(key, object) ->
+                key == null ? Integer.valueOf(Integer.MAX_VALUE) : key);
+            System.getProperties().put(REFRESH, (BiFunction<Object, Object, Object>)(items, section) -> Boolean.FALSE);
             REMOVAL_MODES.clear();
         }
 
@@ -705,7 +719,8 @@ public class Activator extends AbstractUIPlugin
         {
             if (type.getState() != WovenClass.TRANSFORMING
                 || !TARGET.equals(type.getClassName()) && !CONTROLLER.equals(type.getClassName())
-                    && !PANEL.equals(type.getClassName()))
+                    && !PANEL.equals(type.getClassName()) && !RIGHTS_SORTER.equals(type.getClassName())
+                    && !OBJECTS_SECTION.equals(type.getClassName()))
                 return;
             byte[] rewritten = rewrite(type.getClassName(), type.getBytes());
             if (rewritten != null)
@@ -749,7 +764,8 @@ public class Activator extends AbstractUIPlugin
             ProtectionDomain domain, byte[] bytes)
         {
             String target = name == null ? "" : name.replace('/', '.');
-            if (!TARGET.equals(target) && !CONTROLLER.equals(target) && !PANEL.equals(target))
+            if (!TARGET.equals(target) && !CONTROLLER.equals(target) && !PANEL.equals(target)
+                && !RIGHTS_SORTER.equals(target) && !OBJECTS_SECTION.equals(target))
                 return null;
             return rewrite(target, bytes);
         }
@@ -821,6 +837,7 @@ public class Activator extends AbstractUIPlugin
 
         private static void configureButtons(Object dialog, Composite parent)
         {
+            configureObjectsMenu(dialog);
             Button all = (Button)Global.invoke(dialog, "getButton", IDialogConstants.OK_ID);
             all.setText("Установить все");
             if (all.getLayoutData() instanceof GridData data)
@@ -864,6 +881,33 @@ public class Activator extends AbstractUIPlugin
                 requireInvoke(dialog, "setMessage", "Выбрано строк: " + rows(dialog).size()
                     + ". Начальные состояния прав показаны по первому объекту. Действие применяется ко всем выбранным строкам.");
             }
+        }
+
+        private static void configureObjectsMenu(Object dialog)
+        {
+            Object panel = Global.getField(dialog, "objectsPanel");
+            if (panel == null)
+                return;
+            TreeViewer viewer = (TreeViewer)java.util.Objects.requireNonNull(Global.getField(panel, "viewer"));
+            Menu menu = viewer.getTree().getMenu();
+            if (menu == null)
+            {
+                menu = new Menu(viewer.getTree());
+                viewer.getTree().setMenu(menu);
+            }
+            Menu objectsMenu = menu;
+            Runnable addCollapse = () -> {
+                for (MenuItem item : objectsMenu.getItems())
+                    if (Boolean.TRUE.equals(item.getData("tormozit.rightsCollapseAll")))
+                        return;
+                MenuItem collapse = new MenuItem(objectsMenu, SWT.PUSH);
+                collapse.setText("Свернуть все");
+                collapse.setData("tormozit.rightsCollapseAll", Boolean.TRUE);
+                ComfortSubmenuHelper.setMenuItemTooltip(collapse, "Свернуть все группы дерева объектов");
+                collapse.addListener(SWT.Selection, event -> viewer.collapseAll());
+            };
+            addCollapse.run();
+            objectsMenu.addListener(SWT.Show, event -> addCollapse.run());
         }
 
         private static void changeMode(Object panel, boolean removal)
@@ -1001,6 +1045,56 @@ public class Activator extends AbstractUIPlugin
             return true;
         }
 
+        private static Object refreshObjects(Object event, Object section)
+        {
+            TreeViewer viewer = (TreeViewer)java.util.Objects.requireNonNull(Global.getField(section, "viewer"));
+            if ("init".equals(event))
+            {
+                // ObjectsSection.createViewer ещё не задаёт input. После него включать
+                // hash lookup нельзя (Assert в StructuredViewer.setUseHashlookup).
+                viewer.setUseHashlookup(true);
+                return Boolean.TRUE;
+            }
+            if (!(event instanceof Collection<?> items))
+                return Boolean.FALSE;
+            // Снимок входного списка: штатный asyncExec запускает сразу в UI,
+            // а при вызове из фона откладывает до UI-потока.
+            List<?> changedItems = new ArrayList<>(items);
+            requireInvoke(section, "asyncExec", (Runnable)() -> {
+                if (viewer.getTree().isDisposed())
+                    return;
+                LinkedHashSet<Object> targets = new LinkedHashSet<>();
+                for (Object item : changedItems)
+                {
+                    Object top = java.util.Objects.requireNonNull(Global.invoke(item, "getTopParent"));
+                    targets.add(top);
+                    Object parent = Global.invoke(item, "getParent");
+                    if (parent != null && !parent.equals(top)
+                        && Global.invoke(parent, "getAdapter") instanceof
+                            com._1c.g5.v8.dt.navigator.adapters.CollectionNavigatorAdapterBase)
+                        targets.add(parent);
+                }
+                // Тот же путь, что у StructuredViewer.refresh(Object):
+                // preservingSelection(() -> internalRefresh(element)). Для всей пачки
+                // восстановление выделения выполняется один раз, а не на каждую строку.
+                Runnable refresh = () -> {
+                    for (Object target : targets)
+                        requireInvoke(viewer, "internalRefresh", target);
+                };
+                requireInvoke(viewer, "preservingSelection", refresh);
+            });
+            return Boolean.TRUE;
+        }
+
+        private static Object sortKey(Object key, Object object)
+        {
+            // rights 14.0.200.v202605050943: getKey возвращает null для права,
+            // отсутствующего в eClassRightsOrder; базовый сортировщик вызывает compareTo без проверки.
+            // Одинаковый крайний ключ оставляет такие права в прежнем взаимном порядке
+            // (ECollections.sort стабилен), не меняя их значений и штатных ключей остальных прав.
+            return key == null ? Integer.valueOf(Integer.MAX_VALUE) : key;
+        }
+
         private static byte[] rewrite(String target, byte[] bytes)
         {
             ClassReader reader = new ClassReader(bytes);
@@ -1013,6 +1107,92 @@ public class Activator extends AbstractUIPlugin
                     String signature, String[] exceptions)
                 {
                     MethodVisitor visitor = super.visitMethod(access, method, descriptor, signature, exceptions);
+                    if (OBJECTS_SECTION.equals(target))
+                    {
+                        boolean init = method.equals("createViewer")
+                            && descriptor.equals("(Lorg/eclipse/swt/widgets/Composite;)V");
+                        boolean refresh = method.equals("refreshViewerItemsAsync")
+                            && descriptor.equals("(Ljava/util/Collection;)V");
+                        if (!init && !refresh)
+                            return visitor;
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            private void callback()
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                    "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(REFRESH);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
+                                if (init)
+                                    super.visitLdcInsn("init");
+                                else
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                returns[0]++;
+                            }
+
+                            @Override
+                            public void visitCode()
+                            {
+                                super.visitCode();
+                                if (refresh)
+                                {
+                                    callback();
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                    org.objectweb.asm.Label original = new org.objectweb.asm.Label();
+                                    super.visitJumpInsn(Opcodes.IFEQ, original);
+                                    super.visitInsn(Opcodes.RETURN);
+                                    super.visitLabel(original);
+                                    super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                                }
+                            }
+
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (init && opcode == Opcodes.RETURN)
+                                {
+                                    callback();
+                                    super.visitInsn(Opcodes.POP);
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                    if (RIGHTS_SORTER.equals(target))
+                    {
+                        if (!method.equals("getKey") || !descriptor.equals(
+                            "(Lorg/eclipse/emf/ecore/EObject;)Ljava/lang/Integer;"))
+                            return visitor;
+                        return new MethodVisitor(Opcodes.ASM9, visitor)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.ARETURN)
+                                {
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                        "()Ljava/util/Properties;", false);
+                                    super.visitLdcInsn(SORT_KEY);
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply",
+                                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Integer");
+                                    returns[0]++;
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
                     if (PANEL.equals(target))
                     {
                         if (!method.equals("getDependedRights") || !descriptor.equals(
@@ -2630,7 +2810,7 @@ public class Activator extends AbstractUIPlugin
                 for (int i = 0; i < count; i++)
                 {
                     Thread thread = threads[i];
-                    if (thread == null)
+                    if (thread == null || thread == Thread.currentThread())
                         continue;
                     String name = thread.getName();
                     String lowerName = name.toLowerCase(java.util.Locale.ROOT);
@@ -2678,6 +2858,8 @@ public class Activator extends AbstractUIPlugin
                 StringBuilder jobs = new StringBuilder();
                 for (org.eclipse.core.runtime.jobs.Job job : RUNNING)
                     jobs.append(jobs.length() == 0 ? "" : "; ").append(job.getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                if (jobs.length() == 0)
+                    return;
                 Global.tempLog(TOPIC, "sample pid=" + PID + " heapMb=" + usedMb + "/" + (runtime.maxMemory() >> 20) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " gc+=" + gcDelta + "ms jobs=[" + jobs + "] idle=" + idle + " busy:" + busy); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             }

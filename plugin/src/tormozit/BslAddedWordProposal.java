@@ -366,7 +366,16 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
             + " sourceLength=" + sourceLength + " normalizedLength=" + text.length() //$NON-NLS-1$ //$NON-NLS-2$
             + " lines=" + lines.length + " resultLength=" + result.length() + " caret=" + caretOut //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             + " paddedAfterEquals=" + paddedAfterEquals); //$NON-NLS-1$
-        document.replace(from, to - from, result.toString());
+        try
+        {
+            document.replace(from, to - from, result.toString());
+        }
+        catch (BadLocationException | RuntimeException failure)
+        {
+            ModelStateDiagnostics.failure("proposal.replace", failure, document, //$NON-NLS-1$
+                from, to, result.length());
+            throw failure;
+        }
         selection = new Point(from + caretOut, 0);
     }
 

@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.text.AbstractInformationControl;
@@ -50,6 +51,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.osgi.framework.Bundle;
 
 /**
  * Строка с предложением 1С:Напарника наверху списка автодополнения.
@@ -134,6 +136,7 @@ public final class NaparnikAssistRow
 
     public static void install(SourceViewer viewer, ContentAssistant assistant)
     {
+        Global.tempLog("naparnik-row", "install viewer=" + viewer + " assistant=" + assistant); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer == null || assistant == null)
             return;
         NaparnikAssistRow existing = INSTANCES.get(viewer);
@@ -257,11 +260,17 @@ public final class NaparnikAssistRow
     {
         viewModel = null;
         openedByCommand = byCommand;
-        if (!ComfortSettings.isNaparnikAssistRowEnabled())
+        boolean enabled = ComfortSettings.isNaparnikAssistRowEnabled();
+        Global.tempLog("naparnik-row", "start byCommand=" + byCommand + " enabled=" + enabled //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " bundles=" + naparnikBundleStates()); //$NON-NLS-1$
+        if (!enabled)
             return;
         StyledText widget = viewer.getTextWidget();
         Object vm = NaparnikManualModeHook.findViewModel(widget);
         String policy = NaparnikManualModeHook.completionPolicy();
+        Global.tempLog("naparnik-row", "start model=" + (vm == null ? "null" : vm.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " policy=" + policy + " widgetDisposed=" + (widget == null || widget.isDisposed()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " lastFailure=" + lastFailure); //$NON-NLS-1$
         if (vm == null)
             return;
         // Политика «Выключен» — завершение кода у Напарника отключено, запросов не шлём. Строки
@@ -281,6 +290,25 @@ public final class NaparnikAssistRow
         selectRowOnOpen = false;
         viewer.prependVerifyKeyListener(keyListener);
         recompute(true);
+    }
+
+    /** Временная диагностика загрузки: только состояние бандлов, без их запуска. */
+    private static String naparnikBundleStates()
+    {
+        StringBuilder states = new StringBuilder();
+        for (String id : new String[] { "com.e1c.edt.ai", NAPARNIK_UI_BUNDLE, //$NON-NLS-1$
+            "com.e1c.edt.ai.ui.common" }) //$NON-NLS-1$
+        {
+            Bundle bundle = Platform.getBundle(id);
+            if (states.length() > 0)
+                states.append(';');
+            states.append(id).append('=');
+            if (bundle == null)
+                states.append("missing"); //$NON-NLS-1$
+            else
+                states.append(bundle.getVersion()).append("/state:").append(bundle.getState()); //$NON-NLS-1$
+        }
+        return states.toString();
     }
 
     private void endSession()
@@ -309,8 +337,10 @@ public final class NaparnikAssistRow
             {
                 startSession(!event.isAutoActivated);
             }
-            catch (RuntimeException ignored)
+            catch (RuntimeException failure)
             {
+                Global.tempLog("naparnik-row", "start failed=" + failure + " cause=" + failure.getCause() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " stack=" + java.util.Arrays.toString(failure.getStackTrace())); //$NON-NLS-1$
                 // Строки в этом сеансе не будет; сам список автодополнения ломать нельзя.
             }
         }

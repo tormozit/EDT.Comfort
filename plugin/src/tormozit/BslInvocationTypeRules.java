@@ -26,6 +26,7 @@ import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IEObjectDescription;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.scoping.IScope;
+import org.eclipse.xtext.scoping.IGlobalScopeProvider;
 import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.util.Pair;
 
@@ -69,6 +70,7 @@ import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
@@ -110,7 +112,7 @@ public class BslInvocationTypeRules
     {
         COMMON_MODULE, ATTRIBUTES_VALUES, ATTRIBUTE_VALUE, COPY_RECURSIVE, ROW_TO_STRUCTURE, TABLE_TO_ARRAY,
         PRINT_FORM_TEMPLATE, OBJECT_MANAGER, COLLECTION_ADD, COPY_COLUMNS, UNLOAD_COLUMN, FORM_DATA_TO_VALUE,
-        READ_JSON, STORED_VALUE, READ_JSON_VALUE
+        READ_JSON, STORED_VALUE, READ_JSON_VALUE, STORAGE_CONTENT
     }
 
     /** Контекст правила ИР ({@code ТипКонтекста}). */
@@ -164,6 +166,7 @@ public class BslInvocationTypeRules
         rule(Rule.STORED_VALUE, Context.GLOBAL, "ПолучитьИзВременногоХранилища", "GetFromTempStorage", //$NON-NLS-1$ //$NON-NLS-2$
             "ЗначениеИзСтрокиВнутр", "ValueFromStringInternal"); //$NON-NLS-1$ //$NON-NLS-2$
         rule(Rule.READ_JSON_VALUE, Context.GLOBAL, "ПрочитатьЗначениеJSON", "ReadJSONValue"); //$NON-NLS-1$ //$NON-NLS-2$
+        rule(Rule.STORAGE_CONTENT, Context.ANY, "Получить", "Get"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -306,6 +309,34 @@ public class BslInvocationTypeRules
         }
     }
 
+    /** Общий разбор типа содержимого для вычислителя и представления реквизита. */
+    static Type metadataContentType(EObject source, String containerName, EObject context)
+    {
+        if (!(source instanceof BasicFeature attribute) || attribute.getType() == null)
+            return null;
+        var description = attribute.getType();
+        boolean eligible = description.getTypes().stream().anyMatch(type ->
+            containerName.equals(Call.typeName(Call.resolveItem(type, attribute))));
+        if ("String".equals(containerName) && description.getStringQualifiers() != null //$NON-NLS-1$
+            && description.getStringQualifiers().getLength() != 0)
+            eligible = false;
+        String comment = attribute.getComment();
+        if (!eligible || comment == null || comment.isBlank())
+            return null;
+        EObject scopeContext = context != null && context.eResource() != null ? context : attribute;
+        var services = IResourceServiceProvider.Registry.INSTANCE
+            .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
+        IScope scope = scopeContext instanceof Invocation
+            ? services.get(IScopeProvider.class).getScope(scopeContext, McorePackage.Literals.TYPE_DESCRIPTION__TYPES)
+            : services.get(IGlobalScopeProvider.class).getScope(scopeContext.eResource(),
+                McorePackage.Literals.TYPE_DESCRIPTION__TYPES, null);
+        String name = comment.strip().split("\\s+", 2)[0]; //$NON-NLS-1$
+        var element = scope.getSingleElement(QualifiedName.create(name.split("\\."))); //$NON-NLS-1$
+        EObject resolved = element == null ? null : EcoreUtil.resolve(element.getEObjectOrProxy(), scopeContext);
+        Type content = resolved instanceof Type type && !type.eIsProxy() ? type : null;
+        return content;
+    }
+
     /** Сервисы системы типов BSL: одни на всю среду, берутся при первом вызове. */
     private record Services(TypesComputer types, DynamicFeatureAccessComputer features, IScopeProvider scopes,
         IRuntimeVersionSupport versions, InvocationTypesComputerExtensionRegistry registry,
@@ -402,6 +433,7 @@ public class BslInvocationTypeRules
                 case READ_JSON -> readJson();
                 case STORED_VALUE -> storedValue();
                 case READ_JSON_VALUE -> readJsonValue();
+                case STORAGE_CONTENT -> storageContent();
             };
         }
 
@@ -728,7 +760,46 @@ public class BslInvocationTypeRules
         List<TypeItem> storedValue()
         {
             List<TypeItem> types = writtenTypes(origins(param(0)));
+            if (types.isEmpty())
+                types = annotatedContents(param(0), "String"); //$NON-NLS-1$
             return types.isEmpty() ? null : types;
+        }
+
+        /** Сам реквизит остаётся хранилищем; комментарий задаёт только результат Получить(). */
+        List<TypeItem> storageContent()
+        {
+            List<TypeItem> receivers = receiverTypes();
+            if (!(access instanceof DynamicFeatureAccess dynamic) || !params.isEmpty()
+                || receivers.stream().noneMatch(type -> "ValueStorage".equals(typeName(resolve(type))))) //$NON-NLS-1$
+                return null;
+            return annotatedContents(dynamic.getSource(), "ValueStorage"); //$NON-NLS-1$
+        }
+
+        /** ИР: первое слово комментария реквизита — имя типа содержимого. */
+        List<TypeItem> annotatedContents(Expression expression, String containerName)
+        {
+            List<TypeItem> result = new ArrayList<>();
+            List<Expression> candidates = new ArrayList<>();
+            if (expression != null)
+                candidates.add(expression);
+            for (Expression origin : origins(expression))
+                if (!candidates.contains(origin))
+                    candidates.add(origin);
+            for (Expression origin : candidates)
+            {
+                if (!(origin instanceof StaticFeatureAccess || origin instanceof DynamicFeatureAccess))
+                    continue;
+                var entries = services.features().resolveObject((FeatureAccess)origin, environments);
+                for (var entry : entries)
+                {
+                    EObject feature = entry.getFeature();
+                    EObject source = feature instanceof DerivedProperty property ? property.getSource() : feature;
+                    if (source != null)
+                        source = EcoreUtil.resolve(source, invocation);
+                    addDistinct(result, metadataContentType(source, containerName, invocation));
+                }
+            }
+            return result;
         }
 
         /**
@@ -739,6 +810,8 @@ public class BslInvocationTypeRules
         {
             List<Expression> origins = origins(param(0));
             List<TypeItem> types = writtenTypes(origins);
+            if (types.isEmpty())
+                types = annotatedContents(param(0), "String"); //$NON-NLS-1$
             if (!types.isEmpty())
                 return types;
             for (Expression origin : origins)
@@ -797,6 +870,8 @@ public class BslInvocationTypeRules
             if (assignments.isEmpty())
                 assignments = assignments(EcoreUtil2.getContainerOfType(expression, Module.class), target,
                     Integer.MAX_VALUE);
+            if (assignments.isEmpty())
+                result.add(expression);
             for (SimpleStatement statement : assignments)
                 collectOrigins(statement.getRight(), offsetOf(statement), visited, result);
         }

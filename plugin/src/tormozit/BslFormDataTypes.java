@@ -58,6 +58,7 @@ public final class BslFormDataTypes
     private static final Map<Object, String> FORM_REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, CommonModule> COMMON_MODULE_REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Property, Property> PROPERTY_DOCUMENTATION = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<TypeItem, TypeItem> CONTENT_TYPES = Collections.synchronizedMap(new WeakHashMap<>());
 
     private record Origin(String typeName, String label) {}
 
@@ -74,7 +75,8 @@ public final class BslFormDataTypes
         System.getProperties().put("tormozit.formData.html", //$NON-NLS-1$
             (java.util.function.Function<Object[], Object>) args -> afterReferenceHtml((String)args[0], args[1]));
         System.getProperties().put("tormozit.formData.property", //$NON-NLS-1$
-            (java.util.function.Function<Object[], Object>) args -> documentationProperty((Property)args[0]));
+            (java.util.function.Function<Object[], Object>) args -> documentationProperty((Property)args[0],
+                args.length > 1 ? (EObject)args[1] : null));
         if (earlyWeavingActive())
             return;
         var bundle = FrameworkUtil.getBundle(BslFormDataTypes.class);
@@ -116,10 +118,17 @@ public final class BslFormDataTypes
         try
         {
             String result = display;
+            Map<String, String> contents = contentLabels(property, null);
             for (TypeItem type : property.getTypes())
             {
                 if (type == null || type.eIsProxy())
                     continue;
+                String content = contents.get(McoreUtil.getTypeName(type));
+                if (content != null)
+                    for (String base : new String[] {McoreUtil.getTypeName(type), McoreUtil.getTypeNameRu(type)})
+                        if (base != null && !base.isBlank())
+                            result = result.replace(base + ">", base + ": " + content + ">") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                .replace(base + ",", base + ": " + content + ","); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 TypeItem shown = FormItemTypes.displayType(type);
                 if (shown != type)
                 {
@@ -241,8 +250,76 @@ public final class BslFormDataTypes
     /** Обе подсказки и синтакс-помощник строят платформенную страницу через этот Property. */
     public static Property documentationProperty(Property property)
     {
+        return documentationProperty(property, null);
+    }
+
+    /** Копии только для документации: рассчитанный тип и исходная модель не меняются. */
+    public static Property documentationProperty(Property property, EObject context)
+    {
         Property original = PROPERTY_DOCUMENTATION.getOrDefault(property, property);
-        return original;
+        Map<String, TypeItem> contents = contentTypes(original, context);
+        if (contents.isEmpty())
+            return original;
+        Property copy = org.eclipse.xtext.EcoreUtil2.cloneWithProxies(original);
+        var container = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createTypeContainerRef();
+        for (TypeItem item : original.getTypes())
+        {
+            TypeItem content = contents.get(McoreUtil.getTypeName(item));
+            if (content == null)
+                container.getTypes().add(item);
+            else
+            {
+                TypeItem shown = org.eclipse.xtext.EcoreUtil2.cloneWithProxies(item);
+                CONTENT_TYPES.put(shown, content);
+                container.getTypes().add(shown);
+            }
+        }
+        copy.setTypeContainer(container);
+        return copy;
+    }
+
+    private static Map<String, String> contentLabels(Property property, EObject context)
+    {
+        Map<String, String> labels = new java.util.HashMap<>();
+        contentTypes(property, context).forEach((name, content) -> {
+            String label = McoreUtil.getTypeNameRu(content);
+            if (label == null || label.isBlank())
+                label = McoreUtil.getTypeName(content);
+            if (label != null && !label.isBlank())
+                labels.put(name, label);
+        });
+        return labels;
+    }
+
+    private static Map<String, TypeItem> contentTypes(Property property, EObject context)
+    {
+        if (!(property instanceof DerivedProperty derived) || derived.getSource() == null)
+            return Map.of();
+        try
+        {
+            EObject source = derived.getSource();
+            if (source.eIsProxy())
+                source = EcoreUtil.resolve(source, context != null ? context : property);
+            if (!(source instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicFeature)
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(source))
+                return Map.of();
+            Map<String, TypeItem> result = new java.util.HashMap<>();
+            for (String name : List.of("ValueStorage", "String")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                var content = BslInvocationTypeRules.metadataContentType(source, name, context);
+                if (content != null)
+                    result.put(name, content);
+            }
+            return result;
+        }
+        catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return Map.of();
+        }
     }
 
     private static List<Origin> origins(TypeItem type)
@@ -273,6 +350,9 @@ public final class BslFormDataTypes
         {
             if (reference != null && type != null)
             {
+                TypeItem content = CONTENT_TYPES.get(type);
+                if (content != null)
+                    return contentReference(reference, type, content, resource);
                 TypeItem resolved = (TypeItem)EcoreUtil.resolve(type, resource);
                 // EDT здесь подменяет тип DerivedProperty общей платформенной ссылкой CommonModule.
                 // Сохраняем source до потери конкретного модуля; путь подтверждён в EDT BslDocumentationProvider.
@@ -318,6 +398,46 @@ public final class BslFormDataTypes
         {
         }
         return reference;
+    }
+
+    /** Как у массива с элементами: две штатные ссылки в PlatformReference без внешней ссылки. */
+    private static Object contentReference(Object reference, TypeItem base, TypeItem content, Resource resource)
+    {
+        try
+        {
+            // Конструктор и поля подтверждены в bsl-ui/PlatformReference.content-type.javap.txt.
+            Class<?> referenceClass = reference.getClass();
+            if (!referenceClass.getName().equals(
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PlatformReference")) //$NON-NLS-1$
+            {
+                return reference;
+            }
+            String first = (String)Global.getField(reference, "firstName"); //$NON-NLS-1$
+            Object provider = BslSyntaxAssist.documentationProvider();
+            EObject context = resource != null && !resource.getContents().isEmpty()
+                ? resource.getContents().get(0) : content;
+            Object version = Global.invoke(provider, "getVersion", context); //$NON-NLS-1$
+            boolean russian = !java.util.Objects.equals(first, McoreUtil.getTypeName(base));
+            Object nested = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                content, resource, Boolean.valueOf(russian), version, Boolean.FALSE);
+            if (nested == null)
+            {
+                return reference;
+            }
+            String shown = BslStructureInsertCommentTypes.typeReferenceHtml(reference) + ": " //$NON-NLS-1$
+                + BslStructureInsertCommentTypes.typeReferenceHtml(nested);
+            Object result = referenceClass.getConstructor(String.class, String.class, String.class)
+                .newInstance(null, shown, null);
+            return result;
+        }
+        catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (Exception failure)
+        {
+            return reference;
+        }
     }
 
     /** После штатного anchor, чтобы имя метаданного получило отдельную ссылку. */
@@ -374,7 +494,7 @@ public final class BslFormDataTypes
                     && args.length == 5 && ITEM.equals(args[0].getDescriptor());
                 boolean html = PAGE_UTIL.equals(className) && ("generateReferenceFullHtml".equals(name) //$NON-NLS-1$
                     || "generateReferenceShortHtml".equals(name)) && args.length == 2; //$NON-NLS-1$
-                boolean property = DOCUMENTATION.equals(className) && "getDocByNotDerivedProperty".equals(name) //$NON-NLS-1$
+                boolean property = DOCUMENTATION.equals(className) && "getDocByProperty".equals(name) //$NON-NLS-1$
                     && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/Property;"); //$NON-NLS-1$
                 if (visitor == null || !(convert || reference || html || property))
                     return visitor;
@@ -387,8 +507,9 @@ public final class BslFormDataTypes
                         if (property)
                         {
                             visitVarInsn(Opcodes.ALOAD, 1);
+                            visitVarInsn(Opcodes.ALOAD, 3);
                             visitMethodInsn(Opcodes.INVOKESTATIC, SELF, "documentationProperty", //$NON-NLS-1$
-                                "(Lcom/_1c/g5/v8/dt/mcore/Property;)Lcom/_1c/g5/v8/dt/mcore/Property;", false); //$NON-NLS-1$
+                                "(Lcom/_1c/g5/v8/dt/mcore/Property;Lorg/eclipse/emf/ecore/EObject;)Lcom/_1c/g5/v8/dt/mcore/Property;", false); //$NON-NLS-1$
                             visitVarInsn(Opcodes.ASTORE, 1);
                             touched.set(true);
                         }

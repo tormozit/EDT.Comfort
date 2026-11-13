@@ -1343,22 +1343,26 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
             return null;
 
         CommonViewer viewer = getCommonViewer(navigator);
-        CombinedSubsystemsFilter wrapper = viewer != null ? findWrapperFilter(viewer) : null;
         Object input = viewer != null ? viewer.getInput() : null;
-        if ((!searchScope && wrapper == null) || input == null
+        if (input == null
             || !(viewer.getContentProvider() instanceof ITreeContentProvider content))
             return null;
 
         Map<String, LinkedHashSet<String>> acc = new HashMap<>();
-        for (Object projectNode : content.getElements(input))
+        // EDT инициализирует NavigatorFilterInfo при фильтрации узла проекта,
+        // а для потомков выбирает его по первому сегменту TreePath.
+        Object[] projects = content.getElements(input);
+        for (ViewerFilter filter : viewer.getFilters())
+            projects = filter.filter(viewer, (Object)TreePath.EMPTY, projects);
+        for (Object projectNode : projects)
         {
             org.eclipse.core.resources.IResource resource =
                 NavigatorResourceResolver.resolve(projectNode);
             String projectName = resource != null && resource.getProject() != null
                 ? resource.getProject().getName()
                 : projectNode instanceof IProject p ? p.getName() : null;
-            collectVisibleRefs(viewer, wrapper, content, projectNode, projectName, acc, 0,
-                searchScope, textFilter);
+            collectVisibleRefs(viewer, content, new TreePath(new Object[] { projectNode }),
+                projectName, acc, 0, searchScope, textFilter);
         }
         Map<String, List<String>> result = new HashMap<>();
         for (Map.Entry<String, LinkedHashSet<String>> entry : acc.entrySet())
@@ -1367,16 +1371,22 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
     }
 
     private static boolean collectVisibleRefs(
-        CommonViewer viewer, CombinedSubsystemsFilter wrapper, ITreeContentProvider content,
-        Object parent, String projectName, Map<String, LinkedHashSet<String>> acc, int depth,
+        CommonViewer viewer, ITreeContentProvider content,
+        TreePath parentPath, String projectName, Map<String, LinkedHashSet<String>> acc, int depth,
         boolean searchScope, boolean textFilter)
     {
-        if (parent == null || depth > 12)
+        if (parentPath == null || parentPath.getSegmentCount() == 0 || depth > 12)
             return false;
+        Object parent = parentPath.getLastSegment();
         Object[] children;
         try
         {
-            children = content.hasChildren(parent) ? content.getChildren(parent) : null;
+            // Common Navigator передаёт путь и провайдеру содержимого:
+            // его ветка ITreePathContentProvider отличается от getChildren(Object).
+            if (content instanceof org.eclipse.jface.viewers.ITreePathContentProvider pathContent)
+                children = pathContent.hasChildren(parentPath) ? pathContent.getChildren(parentPath) : null;
+            else
+                children = content.hasChildren(parent) ? content.getChildren(parent) : null;
         }
         catch (RuntimeException e)
         {
@@ -1385,26 +1395,28 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
         if (children == null || children.length == 0)
             return false;
         Object[] visible = children;
-        if (searchScope)
+        // Повторяем всю цепочку viewer, включая фильтры групп и стандартных реквизитов.
+        for (ViewerFilter filter : viewer.getFilters())
         {
-            for (ViewerFilter filter : viewer.getFilters())
-                visible = filter.filter(viewer, parent, visible);
+            // Перегрузка filter(Viewer, TreePath, ...) в JFace вызывает getLastSegment()
+            // и теряет проект. EDT ожидает TreePath именно в Object-перегрузке.
+            visible = filter.filter(viewer, (Object)parentPath, visible);
         }
-        else
-            visible = filterVisibleChildren(viewer, wrapper, parent, children);
         boolean collected = false;
         for (Object child : visible)
         {
             // Предок виден и при совпадении только в его дочерней форме/реквизите.
             // Не добавлять его раньше дочерних элементов: это расширило бы область.
-            if (textFilter && collectVisibleRefs(viewer, wrapper, content, child,
+            if (textFilter && collectVisibleRefs(viewer, content, parentPath.createChildPath(child),
                 projectName, acc, depth + 1, searchScope, true))
             {
                 collected = true;
                 continue;
             }
             String fqn = GetRef.fullNameFromNavigatorElement(child);
-            if (fqn != null && !fqn.isBlank())
+            // Ссылка объекта содержит тип И имя. Имя одного типа («Справочник»)
+            // относится к папке коллекции: нужно обойти её детей, а не остановиться.
+            if (fqn != null && fqn.indexOf('.') > 0)
             {
                 String owner = searchScope ? searchOwnerRef(fqn) : MdTypeMapping.toOwnerMdObjectRef(fqn);
                 String ref = owner != null && !owner.isBlank() ? owner : fqn;
@@ -1415,7 +1427,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 continue;
             }
             if (!textFilter)
-                collected |= collectVisibleRefs(viewer, wrapper, content, child, projectName,
+                collected |= collectVisibleRefs(viewer, content, parentPath.createChildPath(child), projectName,
                     acc, depth + 1, searchScope, false);
         }
         return collected;

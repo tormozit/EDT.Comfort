@@ -48,6 +48,7 @@
     <computers computer="tormozit.BslQueryResultTypes" name="Select" nameRu="Выбрать"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Unload" nameRu="Выгрузить"/>
     <computers computer="tormozit.BslQueryResultTypes" name="Get" nameRu="Получить"/>
+    <computers computer="tormozit.BslInvocationTypeRules" name="Get" nameRu="Получить"/>
     <!-- Правила вычисления результата функции из ИР (#893) -->
     <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="CommonModule" nameRu="ОбщийМодуль"/>
     <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ObjectAttributesValues" nameRu="ЗначенияРеквизитовОбъекта"/>

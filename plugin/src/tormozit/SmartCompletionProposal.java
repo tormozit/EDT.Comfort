@@ -166,7 +166,7 @@ public class SmartCompletionProposal implements
         if (delegate instanceof ConfigurableCompletionProposal configurable)
         {
             Object info = Global.getField(configurable, "additionalProposalInfo"); //$NON-NLS-1$
-            localized = decorateDeclaredOwner(BslFormDataTypes.decorateProposal(localized, info), info);
+            localized = decorateDeclaredOwner(localized, info);
         }
         // Подпись совпадения с ИР несёт тип ИР — его досчитывает активация ИР.
         if (overlapDisplay == null)
@@ -175,6 +175,10 @@ public class SmartCompletionProposal implements
             ? localized : decoratePredefinedValueType(decoratePropertyType(decorateVariableType(
                 decorateFunctionType(localized, functionTarget()), variableTarget()))),
             moduleParams(), hasSeveralSignatures(sourceDisplay) ? signatureFirstParam(sourceDisplay) : null);
+        // EDT может не дать тип в исходной подписи: decoratePropertyType добавляет его только выше.
+        if (delegate instanceof ConfigurableCompletionProposal configurable)
+            collapsed = BslFormDataTypes.decorateProposal(collapsed,
+                Global.getField(configurable, "additionalProposalInfo")); //$NON-NLS-1$
         StyledString result;
         if (collapsed != localized)
         {

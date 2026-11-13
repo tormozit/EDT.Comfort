@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
@@ -106,12 +107,23 @@ final class BracketContentHintPresenter
      */
     private static int resolveVisibleWidgetLine(ITextViewerExtension5 lineMapper, int modelLine)
     {
-        int widgetLine = lineMapper.modelLine2WidgetLine(modelLine);
-        if (widgetLine < 0)
-            return -1;
-        if (lineMapper.widgetLine2ModelLine(widgetLine) != modelLine)
-            return -1; // строка скрыта — виджет вернул общую "видимую" линию сворачивания
-        return widgetLine;
+        try
+        {
+            int widgetLine = lineMapper.modelLine2WidgetLine(modelLine);
+            if (widgetLine < 0)
+                return -1;
+            if (lineMapper.widgetLine2ModelLine(widgetLine) != modelLine)
+                return -1; // строка скрыта — виджет вернул общую "видимую" линию сворачивания
+            return widgetLine;
+        }
+        catch (RuntimeException failure)
+        {
+            ITextViewer viewer = lineMapper instanceof ITextViewer textViewer ? textViewer : null;
+            ModelStateDiagnostics.failure("projection.line", failure, //$NON-NLS-1$
+                viewer != null ? viewer.getDocument() : null,
+                viewer != null ? viewer.getTextWidget() : null, lineMapper, modelLine);
+            throw failure;
+        }
     }
 
     static void paint(PaintEvent e, StyledText widget, ITextViewerExtension5 lineMapper,

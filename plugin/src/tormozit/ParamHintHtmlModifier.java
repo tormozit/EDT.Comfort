@@ -3767,6 +3767,11 @@ public final class ParamHintHtmlModifier
             setBrowserTextKeepGeometry(browser, modified);
             scheduleScrollParamNameIntoView(browser);
         }
+        catch (RuntimeException failure)
+        {
+            ModelStateDiagnostics.failure("browser.html", failure, null, browser); //$NON-NLS-1$
+            throw failure;
+        }
         finally
         {
             MODIFY_IN_PROGRESS.set(Boolean.FALSE);

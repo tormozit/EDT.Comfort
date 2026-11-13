@@ -271,15 +271,23 @@ public final class BslFormTypeContextEnrichment
 
     private static boolean refersToAttribute(Expression expression, Property property)
     {
-        if (expression instanceof StaticFeatureAccess access)
-            for (var entry : access.getFeatureEntries())
-                if (entry.getFeature() == property || entry.getFeature() != null
-                    && EcoreUtil.getURI(entry.getFeature()).equals(EcoreUtil.getURI(property)))
-                    return true;
-        // Запись через объект формы тоже отменяет ранее установленный тип.
-        return expression instanceof DynamicFeatureAccess access
-            && access.getName() != null && (access.getName().equalsIgnoreCase(property.getName())
-                || access.getName().equalsIgnoreCase(property.getNameRu()));
+        try
+        {
+            if (expression instanceof StaticFeatureAccess access)
+                for (var entry : access.getFeatureEntries())
+                    if (entry.getFeature() == property || entry.getFeature() != null
+                        && EcoreUtil.getURI(entry.getFeature()).equals(EcoreUtil.getURI(property)))
+                        return true;
+            // Запись через объект формы тоже отменяет ранее установленный тип.
+            return expression instanceof DynamicFeatureAccess access
+                && access.getName() != null && (access.getName().equalsIgnoreCase(property.getName())
+                    || access.getName().equalsIgnoreCase(property.getNameRu()));
+        }
+        catch (RuntimeException failure)
+        {
+            ModelStateDiagnostics.failure("types.formAttribute", failure, null, expression, property); //$NON-NLS-1$
+            throw failure;
+        }
     }
 
     /** Точки возврата подтверждены FormImplicitRefInferrer/TypesComputer из EDT 28.0.1.v202605050943. */

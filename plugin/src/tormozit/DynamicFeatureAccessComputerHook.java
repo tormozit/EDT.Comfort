@@ -317,29 +317,37 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
      */
     private static Object checkLastMember(Object[] args)
     {
-        var entries = (Collection<?>) args[0];
-        var access = (DynamicFeatureAccess) args[1];
-        var environments = (Environments) args[2];
-        if (!(access.eResource() instanceof XtextResource resource) || resource.getResourceServiceProvider() == null)
-            return args;
-
-        var services = resource.getResourceServiceProvider();
-        TypesComputer types = services.get(TypesComputer.class);
-        DynamicFeatureAccessComputer members = services.get(DynamicFeatureAccessComputer.class);
-        DynamicFeatureAccess missing = null;
-        for (DynamicFeatureAccess part = access; part != null; part = precedingMember(part))
+        try
         {
-            Collection<?> known = part == access ? entries : part.getFeatureEntries();
-            if (part.getSource() == null || part.getName() == null || part.getName().isEmpty()
-                || isMethodAccess(part) || hasResolvedMember(known))
-                continue;
-            var sourceTypes = types.computeTypes(part.getSource(), environments);
-            if (sourceTypes.isEmpty() || !sourceTypes.stream().allMatch(DynamicFeatureAccessComputerHook::isClosedCollection))
-                continue;
-            if (part == access || !hasResolvedMember(members.getLastObject(part, environments, true)))
-                missing = part;
+            var entries = (Collection<?>) args[0];
+            var access = (DynamicFeatureAccess) args[1];
+            var environments = (Environments) args[2];
+            if (!(access.eResource() instanceof XtextResource resource) || resource.getResourceServiceProvider() == null)
+                return args;
+
+            var services = resource.getResourceServiceProvider();
+            TypesComputer types = services.get(TypesComputer.class);
+            DynamicFeatureAccessComputer members = services.get(DynamicFeatureAccessComputer.class);
+            DynamicFeatureAccess missing = null;
+            for (DynamicFeatureAccess part = access; part != null; part = precedingMember(part))
+            {
+                Collection<?> known = part == access ? entries : part.getFeatureEntries();
+                if (part.getSource() == null || part.getName() == null || part.getName().isEmpty()
+                    || isMethodAccess(part) || hasResolvedMember(known))
+                    continue;
+                var sourceTypes = types.computeTypes(part.getSource(), environments);
+                if (sourceTypes.isEmpty() || !sourceTypes.stream().allMatch(DynamicFeatureAccessComputerHook::isClosedCollection))
+                    continue;
+                if (part == access || !hasResolvedMember(members.getLastObject(part, environments, true)))
+                    missing = part;
+            }
+            return missing == null ? args : new Object[] {java.util.List.of(), missing};
         }
-        return missing == null ? args : new Object[] {java.util.List.of(), missing};
+        catch (RuntimeException failure)
+        {
+            ModelStateDiagnostics.failure("members.last", failure, null, args[1], args[0]); //$NON-NLS-1$
+            throw failure;
+        }
     }
 
     private static boolean hasResolvedMember(Collection<?> entries)

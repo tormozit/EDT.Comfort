@@ -5066,7 +5066,7 @@ public final class Activator
                         };
                     }
                     if (visitor != null && DOCUMENTATION.equals(className)
-                        && "getDocByNotDerivedProperty".equals(name) //$NON-NLS-1$
+                        && "getDocByProperty".equals(name) //$NON-NLS-1$
                         && descriptor.startsWith("(Lcom/_1c/g5/v8/dt/mcore/Property;")) //$NON-NLS-1$
                     {
                         return new MethodVisitor(Opcodes.ASM9, visitor)
@@ -5081,11 +5081,15 @@ public final class Activator
                                 super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
                                     "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
                                 super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
-                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitInsn(Opcodes.ICONST_2);
                                 super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
                                 super.visitInsn(Opcodes.DUP);
                                 super.visitInsn(Opcodes.ICONST_0);
                                 super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitVarInsn(Opcodes.ALOAD, 3);
                                 super.visitInsn(Opcodes.AASTORE);
                                 super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
                                     "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$

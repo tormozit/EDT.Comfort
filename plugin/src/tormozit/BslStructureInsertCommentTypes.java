@@ -1864,6 +1864,9 @@ public final class BslStructureInsertCommentTypes
         boolean russian = Boolean.TRUE.equals(Global.invoke(locale, "getElementsLanguage")); //$NON-NLS-1$
         Object version = Global.invoke(page, "getVersion"); //$NON-NLS-1$
         List<Object> references = new ArrayList<>();
+        // Страница уже могла получить вложенный тип, но здесь её группы строятся заново.
+        // Применяем то же представление и к исходному свойству повторного построения.
+        property = BslFormDataTypes.documentationProperty(property, resource.getContents().get(0));
         for (TypeItem item : property.getTypes())
         {
             TypeItem resolved = (TypeItem)EcoreUtil.resolve(item, resource);
@@ -1915,7 +1918,7 @@ public final class BslStructureInsertCommentTypes
         return referenceClass.getConstructor(String.class, String.class, String.class).newInstance(null, html, null);
     }
 
-    private static String typeReferenceHtml(Object reference) throws Exception
+    static String typeReferenceHtml(Object reference) throws Exception
     {
         ClassLoader loader = reference.getClass().getClassLoader();
         Class<?> pageUtil = Class.forName(
@@ -3222,13 +3225,21 @@ public final class BslStructureInsertCommentTypes
     public static List<TypeItem> arrayVariableTypes(List<TypeItem> types, Variable variable, int offset,
         Environments environments)
     {
-        if (types == null || variable == null || offset < 0
-            || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
-            return types;
-        if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
-            types = ArrayElementTypes.infer(types, variable, offset, environments);
-        types = FormItemKinds.infer(types, variable, offset, environments);
-        return ColumnRenames.infer(types, variable, offset, environments);
+        try
+        {
+            if (types == null || variable == null || offset < 0
+                || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
+                return types;
+            if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
+                types = ArrayElementTypes.infer(types, variable, offset, environments);
+            types = FormItemKinds.infer(types, variable, offset, environments);
+            return ColumnRenames.infer(types, variable, offset, environments);
+        }
+        catch (RuntimeException failure)
+        {
+            ModelStateDiagnostics.failure("types.arrayVariable", failure, null, variable, types, offset); //$NON-NLS-1$
+            throw failure;
+        }
     }
 
     /**
