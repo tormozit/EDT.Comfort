@@ -56,6 +56,7 @@ public final class TwoSideCurrentLinesSync
     public static void hook(CompareCurrentLinesPanel panel, StyledText leftText, StyledText rightText,
         TextMergeViewer viewer, CompareConfiguration config, String semanticLeft, String semanticRight)
     {
+        ThemeAwareColors.refreshCompareMarkerColors();
         hook(panel, leftText, rightText);
         hookMirroredLabelRefresh(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
         if (panel != null)

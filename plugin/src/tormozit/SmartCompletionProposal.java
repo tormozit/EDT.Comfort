@@ -1751,20 +1751,25 @@ public class SmartCompletionProposal implements
         String parent = SmartContentAssistProcessor.extractParentType(getDisplayString());
         if (parent == null || parent.isEmpty())
             return info;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        var editor = reloader != null ? reloader.getBslEditor() : null;
+        String parentHtml = MetadataTypeMenu.parentTypesHtml(parent,
+            ContentAssistSessionReloader.getActiveViewer(), editor);
         String line = "<div class=\"" + PARENT_LINE_CLASS + "\"><b>Родитель</b>: " //$NON-NLS-1$ //$NON-NLS-2$
-            + parent.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+            + parentHtml + "</div>"; //$NON-NLS-1$
         if (info == null)
-            return IrBslHoverHtml.mergeHtml("", line); //$NON-NLS-1$
+            return MetadataTypeMenu.style(IrBslHoverHtml.mergeHtml("", line)); //$NON-NLS-1$
         boolean browserInput = IrBslHoverHtml.isBslBrowserInput(info);
         String html = browserInput ? IrBslHoverHtml.readDisplayHtml(info) : info instanceof String text ? text : null;
         if (html == null || html.contains(PARENT_LINE_CLASS))
             return info;
         if (!browserInput && !IrBslHoverHtml.isFullHtmlDocument(html))
-            return IrBslHoverHtml.mergeHtml("", line + html); //$NON-NLS-1$
+            return MetadataTypeMenu.style(IrBslHoverHtml.mergeHtml("", line + html)); //$NON-NLS-1$
         int body = html.toLowerCase(java.util.Locale.ROOT).indexOf("<body"); //$NON-NLS-1$
         int bodyEnd = body >= 0 ? html.indexOf('>', body) : -1;
         String result = bodyEnd >= 0 ? html.substring(0, bodyEnd + 1) + line + html.substring(bodyEnd + 1)
             : line + html;
+        result = MetadataTypeMenu.style(result);
         return browserInput ? IrBslHoverHtml.withHtml(info, result) : result;
     }
 

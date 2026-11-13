@@ -33,6 +33,7 @@ import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.md.resource.MdTypeUtil;
 
@@ -55,6 +56,7 @@ public final class BslFormDataTypes
     private static final Map<TypeItem, List<Origin>> ORIGINS = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, List<Origin>> REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, String> FORM_REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Object, CommonModule> COMMON_MODULE_REFERENCES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Property, Property> PROPERTY_DOCUMENTATION = Collections.synchronizedMap(new WeakHashMap<>());
 
     private record Origin(String typeName, String label) {}
@@ -272,6 +274,15 @@ public final class BslFormDataTypes
             if (reference != null && type != null)
             {
                 TypeItem resolved = (TypeItem)EcoreUtil.resolve(type, resource);
+                // EDT здесь подменяет тип DerivedProperty общей платформенной ссылкой CommonModule.
+                // Сохраняем source до потери конкретного модуля; путь подтверждён в EDT BslDocumentationProvider.
+                EObject container = resolved.eContainer();
+                if (container != null && container.eContainer() instanceof DerivedProperty property
+                    && property.getSource() instanceof CommonModule module)
+                {
+                    COMMON_MODULE_REFERENCES.put(reference, module);
+                    return reference;
+                }
                 String form = BslFormTypePresentation.html(resolved);
                 if (form != null)
                 {
@@ -312,6 +323,9 @@ public final class BslFormDataTypes
     /** После штатного anchor, чтобы имя метаданного получило отдельную ссылку. */
     public static String afterReferenceHtml(String html, Object reference)
     {
+        CommonModule module = COMMON_MODULE_REFERENCES.get(reference);
+        if (html != null && module != null)
+            return MetadataTypeMenu.commonModuleReference(module);
         String form = FORM_REFERENCES.get(reference);
         if (html != null && form != null)
             return form;

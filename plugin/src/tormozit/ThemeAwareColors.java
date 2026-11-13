@@ -4,6 +4,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.jface.resource.ColorRegistry;
+import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.RGB;
@@ -38,6 +40,12 @@ public final class ThemeAwareColors
     /** Кэш осветлённых системных FG для тёмной темы: SWT color id → owned Color. */
     private static final Map<Integer, Color> cachedEffectiveSystemColors = new HashMap<>();
     private static Boolean cachedEffectiveSystemDark;
+
+    private static final String[] COMPARE_MARKER_KEYS = { "OUTGOING_COLOR", "EDITION_COLOR" }; //$NON-NLS-1$ //$NON-NLS-2$
+    private static final RGB COMPARE_LIGHT_MARKER = new RGB(0, 0, 0);
+    private static final RGB COMPARE_DARK_MARKER = new RGB(240, 240, 240);
+    private static final Map<String, RGB> compareMarkerOverrides = new HashMap<>();
+    private static volatile boolean compareMarkersInitialized;
 
     private ThemeAwareColors() {}
 
@@ -153,6 +161,50 @@ public final class ThemeAwareColors
     public static void clearColorCache()
     {
         disposeEffectiveSystemColors();
+        if (compareMarkersInitialized)
+            refreshCompareMarkerColors();
+    }
+
+    /**
+     * Контуры соединителей и обзорные маркеры TextMergeViewer используют одну палитру.
+     * В org.eclipse.compare 3.9.300.v20231123-2204 оба ключа по умолчанию чёрные;
+     * ColorPalette смешивает их с фоном (normal: 40% цвета, fill: 10%).
+     * ColorRegistry уведомляет уже открытые вьюеры и штатно пересоздаёт палитры.
+     * Меняем только чёрный вариант; пользовательские цвета и preferences не трогаем.
+     */
+    public static void refreshCompareMarkerColors()
+    {
+        Display display = Display.getDefault();
+        if (display.isDisposed())
+            return;
+        if (Display.getCurrent() != display)
+        {
+            display.asyncExec(ThemeAwareColors::refreshCompareMarkerColors);
+            return;
+        }
+        compareMarkersInitialized = true;
+        boolean dark = isDarkTheme();
+        ColorRegistry registry = JFaceResources.getColorRegistry();
+        for (String key : COMPARE_MARKER_KEYS)
+        {
+            RGB current = registry.getRGB(key);
+            RGB original = compareMarkerOverrides.get(key);
+            RGB target = current;
+            if (original != null && !COMPARE_DARK_MARKER.equals(current))
+                compareMarkerOverrides.remove(key);
+            if (dark && COMPARE_LIGHT_MARKER.equals(current))
+            {
+                compareMarkerOverrides.put(key, current);
+                target = COMPARE_DARK_MARKER;
+            }
+            else if (!dark && original != null && COMPARE_DARK_MARKER.equals(current))
+            {
+                compareMarkerOverrides.remove(key);
+                target = original;
+            }
+            if (target != null && !target.equals(current))
+                registry.put(key, target);
+        }
     }
 
     /**

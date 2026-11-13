@@ -40,6 +40,12 @@ final class MetadataTypeMenu
 {
     private static final String FUNCTION = "comfortMetadataTypeAction"; //$NON-NLS-1$
     private static final Pattern ANCHOR = Pattern.compile("(?is)<a\\b[^>]*>(.*?)</a>"); //$NON-NLS-1$
+    private static final String COMMON_MODULE_ATTRIBUTE = "data-comfort-common-module"; //$NON-NLS-1$
+    private static final Pattern COMMON_MODULE = Pattern.compile(
+        "<a " + COMMON_MODULE_ATTRIBUTE + "=\"([^\"]+)\"[^>]*>(.*?)</a>"); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final Pattern COMMON_MODULE_RUN = Pattern.compile(
+        "<a " + COMMON_MODULE_ATTRIBUTE + "=[^>]*>[^<]*</a>(?:\\s*\\|\\s*<a " //$NON-NLS-1$ //$NON-NLS-2$
+            + COMMON_MODULE_ATTRIBUTE + "=[^>]*>[^<]*</a>)+"); //$NON-NLS-1$
     private static final Pattern FORM = Pattern.compile("<span data-comfort-form=\"([^\"]+)\">(.*?)</span>"); //$NON-NLS-1$
     private static final Pattern TYPE_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)+"); //$NON-NLS-1$
     private static final String METADATA_OBJECT_PREFIX = "ОбъектМетаданных:"; //$NON-NLS-1$
@@ -212,16 +218,17 @@ final class MetadataTypeMenu
         String decorated = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
             if (resource == null || resource.getContents().isEmpty())
                 return abbreviated;
+            String moduleHtml = decorateCommonModules(sourceHtml, source);
             var services = resource.getResourceServiceProvider();
             var scopes = services.get(IScopeProvider.class);
             var converter = services.get(IQualifiedNameConverter.class);
             if (scopes == null || converter == null)
-                return abbreviated;
+                return abbreviateMetadataObjectTypes(moduleHtml);
             var scope = scopes.getScope(resource.getContents().get(0), McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
             if (scope == null)
-                return abbreviated;
+                return abbreviateMetadataObjectTypes(moduleHtml);
             // Порядок определяется по полным именам, поэтому сортировка — до сокращения «ОМ: ».
-            String html = abbreviateMetadataObjectTypes(sortTypeRuns(sourceHtml, resource, scope, converter));
+            String html = abbreviateMetadataObjectTypes(sortTypeRuns(moduleHtml, resource, scope, converter));
             var forms = FORM.matcher(html);
             StringBuilder formMenus = new StringBuilder();
             while (forms.find())
@@ -266,6 +273,78 @@ final class MetadataTypeMenu
             return result.toString();
         });
         return decorated == null || decorated.equals(abbreviated) ? abbreviated : style(decorated);
+    }
+
+    /** Сохраняет конкретный модуль до появления контекста редактора обеих подсказок. */
+    static String commonModuleReference(com._1c.g5.v8.dt.metadata.mdclass.CommonModule module)
+    {
+        String token = register(null, module, null);
+        return "<a " + COMMON_MODULE_ATTRIBUTE + "=\"" + token + "\" href=\"#\">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + HTMLPrinter.convertToHTMLContent("ОбщийМодуль." + module.getName()) + "</a>"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String decorateCommonModules(String html, BslXtextEditor source)
+    {
+        var runs = COMMON_MODULE_RUN.matcher(html);
+        StringBuilder separated = new StringBuilder();
+        while (runs.find())
+            runs.appendReplacement(separated, java.util.regex.Matcher.quoteReplacement(
+                runs.group().replaceAll("\\s*\\|\\s*", ", "))); //$NON-NLS-1$ //$NON-NLS-2$
+        runs.appendTail(separated);
+        var modules = COMMON_MODULE.matcher(separated);
+        StringBuilder result = new StringBuilder();
+        while (modules.find())
+        {
+            Request request;
+            synchronized (REQUESTS)
+            {
+                request = REQUESTS.get(modules.group(1));
+            }
+            String replacement = request != null && request.object != null
+                ? objectLink(request.object, "ОбщийМодуль." + request.object.getName(), source) //$NON-NLS-1$
+                : modules.group();
+            modules.appendReplacement(result, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        modules.appendTail(result);
+        return result.toString();
+    }
+
+    /** Полные имена в строке «Родитель»; готовая модель, без запуска расчёта типов. */
+    static String parentTypesHtml(String parent, ITextViewer viewer, BslXtextEditor source)
+    {
+        String plain = HTMLPrinter.convertToHTMLContent(parent);
+        if (source == null || viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return plain;
+        String linked = ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> {
+            if (resource == null)
+                return plain;
+            var projects = (com._1c.g5.v8.dt.core.platform.IV8ProjectManager)Global.getServiceByClass(
+                com._1c.g5.v8.dt.core.platform.IV8ProjectManager.class);
+            var project = projects == null ? null : projects.getProject(resource.getURI());
+            var configuration = project instanceof com._1c.g5.v8.dt.core.platform.IConfigurationAware aware
+                ? aware.getConfiguration() : null;
+            var names = TYPE_NAME.matcher(parent);
+            StringBuilder result = new StringBuilder();
+            int tail = 0;
+            while (names.find())
+            {
+                result.append(HTMLPrinter.convertToHTMLContent(parent.substring(tail, names.start())));
+                String name = names.group();
+                MdObject target = null;
+                if (configuration != null && (name.startsWith("ОбщийМодуль.") || name.startsWith("CommonModule."))) //$NON-NLS-1$ //$NON-NLS-2$
+                    for (var module : configuration.getCommonModules())
+                        if (module.getName() != null && module.getName().equalsIgnoreCase(name.substring(name.indexOf('.') + 1)))
+                        {
+                            target = module;
+                            break;
+                        }
+                result.append(target == null ? HTMLPrinter.convertToHTMLContent(name) : objectLink(target, name, source));
+                tail = names.end();
+            }
+            result.append(HTMLPrinter.convertToHTMLContent(parent.substring(tail)));
+            return result.toString();
+        });
+        return linked == null ? plain : linked;
     }
 
     /**

@@ -52,6 +52,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.jface.resource.LocalResourceManager;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
@@ -2712,6 +2713,7 @@ public final class GitHistoryHook implements IStartup
         private final CellLabelProvider origProvider;
         private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
         private final ChangeStatusColors statusColors = new ChangeStatusColors();
+        private final LocalResourceManager dimmedColors = new LocalResourceManager(JFaceResources.getResources());
 
         GitHistoryFileLabelProvider(CellLabelProvider origProvider)
         {
@@ -2749,6 +2751,7 @@ public final class GitHistoryHook implements IStartup
                 Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
                 String path = pathObj instanceof String s ? s : ""; //$NON-NLS-1$
                 cell.setText(extensionOf(path));
+                copyFileColumnStyle(cell, element);
             }
             else if (col == 2)
             {
@@ -2767,6 +2770,8 @@ public final class GitHistoryHook implements IStartup
                 copyFileColumnStyle(cell, element);
             }
 
+            applyDimmedForeground(cell);
+
             // Всегда вызываем appendMatchRanges — иначе при очистке фильтра
             // старые StyleRange (SWT переиспользует TableItem) остаются висеть.
             // В «Статус» (col 3) подсветку не делаем: там фиксированные метки, не текст фильтра.
@@ -2780,6 +2785,29 @@ public final class GitHistoryHook implements IStartup
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
             if (col == 3)
                 statusColors.apply(cell);
+        }
+
+        /**
+         * FileDiffLabelProvider.getForeground возвращает цвет только для непомеченных файлов.
+         * В тёмной теме оставляем 60% обычного текста и 40% фона: сильнее приглушаем
+         * непомеченные файлы, сохраняя более светлый цвет, чем штатный тёмно-серый.
+         */
+        private void applyDimmedForeground(ViewerCell cell)
+        {
+            Control control = cell.getControl();
+            Color source = origProvider instanceof ColumnLabelProvider clp
+                ? clp.getForeground(cell.getElement()) : null;
+            boolean dark = ListSelectionThemeColors.isDarkList(control);
+            if (dark && source != null)
+            {
+                RGB foreground = control.getForeground().getRGB();
+                RGB background = ListSelectionThemeColors.listBackgroundRgb(control);
+                RGB target = new RGB(
+                    (foreground.red * 3 + background.red * 2) / 5,
+                    (foreground.green * 3 + background.green * 2) / 5,
+                    (foreground.blue * 3 + background.blue * 2) / 5);
+                cell.setForeground(dimmedColors.createColor(target));
+            }
         }
 
         /** Копирует foreground/background/font штатного {@code FileDiffLabelProvider}. */
@@ -2848,6 +2876,7 @@ public final class GitHistoryHook implements IStartup
         @Override
         public void dispose()
         {
+            dimmedColors.dispose();
             statusColors.dispose();
             if (origProvider != null)
                 origProvider.dispose();
