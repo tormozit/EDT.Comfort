@@ -78,6 +78,8 @@ public final class NaparnikPasteCompareHook implements IStartup
         + "return{__comfortPaste:true," //$NON-NLS-1$
         + "paste_code:function(code){window.__comfortLastPaste=code==null?'':String(code);return h.paste_code(code);}," //$NON-NLS-1$
         + "wink:function(a){return h.wink(a);}," //$NON-NLS-1$
+        // IdeApiHandler.reload() вызывает reload(true); boolean-перегрузка надёжно доступна через LiveConnect.
+        + "reload:function(resetSession){return h.reload(arguments.length?resetSession:true);}," //$NON-NLS-1$
         + "callTools:function(a,b,c){return h.callTools(a,b,c);}," //$NON-NLS-1$
         + "trace:function(a){return h.trace(a);}," //$NON-NLS-1$
         + "isReady:function(){return h.isReady();}," //$NON-NLS-1$
@@ -287,10 +289,16 @@ public final class NaparnikPasteCompareHook implements IStartup
             Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
             if (engine == null)
                 return;
-            Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
+            Object result = Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
+            Object state = Global.invoke(engine, "executeScript", //$NON-NLS-1$
+                "JSON.stringify({hostReload:!!window.ideApi&&typeof window.ideApi.reload==='function'," //$NON-NLS-1$
+                    + "clientReload:!!window.chatApi&&window.chatApi.ideAutomation.canReload," //$NON-NLS-1$
+                    + "clientInitialized:!!window.chatApi&&!!window.chatApi.chatClient.getToken()})"); //$NON-NLS-1$
+            Global.tempLog("naparnik-reload", "paste guard=" + result + " state=" + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
-        catch (Throwable ignored)
+        catch (Throwable error)
         {
+            Global.tempLog("naparnik-reload", "paste guard failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

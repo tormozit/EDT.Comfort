@@ -24,15 +24,32 @@ import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.events.EventTarget;
 
+import com.sun.jna.platform.win32.User32;
+
 /** Доработки панели чатов и страницы «Внешний вид» 1С:Напарника. */
 public final class NaparnikChatViewHook implements IStartup
 {
     private static final String VIEW_ID = "com.e1c.edt.ai.ui.views.ChatView"; //$NON-NLS-1$
-    private static final String LOG = "naparnik-reply"; //$NON-NLS-1$
     private static final String EVENT = "comfort-reply-state"; //$NON-NLS-1$
     private static final String MARKER = "tormozit.naparnik.replyNotification"; //$NON-NLS-1$
     private static final Set<Shell> dialogs = Collections.newSetFromMap(new WeakHashMap<>());
     private static final java.util.Map<IViewPart, ChatPanel> panels = new IdentityHashMap<>();
+
+    /* WebKit перерисовывает FXCanvas даже при opacity: 0 у вращающегося SVG.
+     * Штатный CSS Напарника останавливаем только для невидимого индикатора в заголовке.
+     */
+    private static final String FIX_HIDDEN_SPINNER = """
+        (function(){
+          var id='comfort-naparnik-hidden-spinner';
+          if(document.getElementById(id))return 'installed';
+          if(!document.head)return 'waiting';
+          var style=document.createElement('style');
+          style.id=id;
+          style.textContent='.jump-spinner:not(.visible){animation:none!important;-webkit-animation:none!important;}';
+          document.head.appendChild(style);
+          return 'installed';
+        })()
+        """;
 
     /* API проверено по ChatSessionImpl, ChatStateMachine, SessionRegistry и ChatApi
      * в .tmp/issue-804/chat.js. Подписки только наблюдают штатную модель, не заменяют её методы.
@@ -67,12 +84,7 @@ public final class NaparnikChatViewHook implements IStartup
               var values={id:String(session.id),title:String((chat&&chat.title)
                 ||session.conversation.title||'Без названия'),
                 active:!!component&&String(component.chatId)===String(session.id),
-                from:from,to:to,cancelled:!!cancelled,complete:!!complete,waiting:waiting,
-                messageSource:messages===clientMessages?'chatClient':'session',
-                messageCount:messages.length,sessionMessageCount:session.conversation.messages.length,
-                lastRole:last&&last.role,finished:last&&last.finished,
-                tools:JSON.stringify(last&&last.content&&last.content.tool_calls
-                  ?last.content.tool_calls.map(function(t){return t.function&&t.function.name;}):[])};
+                complete:!!complete,waiting:waiting};
               var root=document.documentElement;
               Object.keys(values).forEach(function(k){root.setAttribute('data-comfort-'+k,String(values[k]));});
               var event=document.createEvent('Event');
@@ -98,17 +110,6 @@ public final class NaparnikChatViewHook implements IStartup
                 if (event.widget instanceof Shell shell)
                     wirePreferences(shell, display);
             });
-            display.addFilter(SWT.FocusIn, event ->
-            {
-                for (ChatPanel panel : panels.values())
-                    panel.focused = event.widget instanceof Control control && panel.contains(control);
-            });
-            display.addFilter(SWT.FocusOut, event ->
-            {
-                for (ChatPanel panel : panels.values())
-                    if (event.widget instanceof Control control && panel.contains(control))
-                        panel.focused = false;
-            });
             for (Shell shell : display.getShells())
                 wirePreferences(shell, display);
             scan(display);
@@ -130,7 +131,6 @@ public final class NaparnikChatViewHook implements IStartup
                             continue;
                         live.add(view);
                         ChatPanel panel = panels.computeIfAbsent(view, ChatPanel::new);
-                        panel.focused = panel.contains(display.getFocusControl());
                         panel.observe(display);
                     }
         panels.keySet().retainAll(live);
@@ -146,7 +146,6 @@ public final class NaparnikChatViewHook implements IStartup
         }
         catch (ReflectiveOperationException | RuntimeException error)
         {
-            Global.tempLog(LOG, "runOnFx failed: " + error); //$NON-NLS-1$
         }
     }
 
@@ -154,9 +153,8 @@ public final class NaparnikChatViewHook implements IStartup
     {
         private final IViewPart view;
         private final AtomicBoolean pending = new AtomicBoolean();
-        private volatile boolean focused;
         private Document document;
-        private String lastStatus;
+        private Document styledDocument;
 
         ChatPanel(IViewPart view)
         {
@@ -186,24 +184,23 @@ public final class NaparnikChatViewHook implements IStartup
                     Object current = Global.invoke(engine, "getDocument"); //$NON-NLS-1$
                     if (!(current instanceof Document dom) || !(dom instanceof EventTarget target))
                         return;
+                    if (styledDocument != dom)
+                    {
+                        Object result = Global.invoke(engine, "executeScript", FIX_HIDDEN_SPINNER); //$NON-NLS-1$
+                        Global.tempLog("naparnik-idle-cpu", "hidden spinner style: " + result); //$NON-NLS-1$ //$NON-NLS-2$
+                        if ("installed".equals(result)) //$NON-NLS-1$
+                            styledDocument = dom;
+                    }
                     if (document != dom)
                     {
                         document = dom;
-                        lastStatus = null;
                         target.addEventListener(EVENT, event -> onState(dom, display), false);
-                        Global.tempLog(LOG, "document attached"); //$NON-NLS-1$
                     }
-                    Object status = Global.invoke(engine, "executeScript", OBSERVE); //$NON-NLS-1$
-                    String text = String.valueOf(status);
-                    if (!text.equals(lastStatus))
-                    {
-                        lastStatus = text;
-                        Global.tempLog(LOG, "observer=" + text); //$NON-NLS-1$
-                    }
+                    Global.invoke(engine, "executeScript", OBSERVE); //$NON-NLS-1$
                 }
                 catch (RuntimeException error)
                 {
-                    Global.tempLog(LOG, "observe failed: " + error); //$NON-NLS-1$
+                    Global.tempLog("naparnik-idle-cpu", "panel observation failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 finally
                 {
@@ -220,24 +217,48 @@ public final class NaparnikChatViewHook implements IStartup
             boolean active = "true".equals(root.getAttribute("data-comfort-active")); //$NON-NLS-1$ //$NON-NLS-2$
             boolean complete = "true".equals(root.getAttribute("data-comfort-complete")); //$NON-NLS-1$ //$NON-NLS-2$
             boolean waiting = "true".equals(root.getAttribute("data-comfort-waiting")); //$NON-NLS-1$ //$NON-NLS-2$
-            boolean inFocus = focused && active;
-            Global.tempLog(LOG, "chat=" + id + " title=" + title + " from=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + root.getAttribute("data-comfort-from") + " to=" + root.getAttribute("data-comfort-to") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " cancelled=" + root.getAttribute("data-comfort-cancelled") //$NON-NLS-1$ //$NON-NLS-2$
-                + " complete=" + complete + " active=" + active + " panelFocus=" + focused //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " messageSource=" + root.getAttribute("data-comfort-messageSource") //$NON-NLS-1$ //$NON-NLS-2$
-                + " messageCount=" + root.getAttribute("data-comfort-messageCount") //$NON-NLS-1$ //$NON-NLS-2$
-                + " sessionMessageCount=" + root.getAttribute("data-comfort-sessionMessageCount") //$NON-NLS-1$ //$NON-NLS-2$
-                + " lastRole=" + root.getAttribute("data-comfort-lastRole") //$NON-NLS-1$ //$NON-NLS-2$
-                + " finished=" + root.getAttribute("data-comfort-finished") //$NON-NLS-1$ //$NON-NLS-2$
-                + " tools=" + root.getAttribute("data-comfort-tools")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (!complete || inFocus || display.isDisposed())
+            if (display.isDisposed())
                 return;
             display.asyncExec(() ->
             {
+                // SWT может помнить активный контрол, когда EDT свёрнута или за другим приложением.
+                // Все виджеты и окно переднего плана проверяем непосредственно перед решением.
+                Control focus = display.getFocusControl();
+                boolean panelFocus = contains(focus);
+                Object canvas = Global.getField(view, "canvas"); //$NON-NLS-1$
+                Shell shell = canvas instanceof Control control && !control.isDisposed()
+                    ? control.getShell() : null;
+                boolean visible = shell != null && !shell.isDisposed() && shell.isVisible();
+                boolean minimized = shell != null && !shell.isDisposed() && shell.getMinimized();
+                boolean foreground = false;
+                if (visible && !minimized)
+                {
+                    if (WinWindowActivator.isWindows())
+                    {
+                        try
+                        {
+                            var foregroundWindow = User32.INSTANCE.GetForegroundWindow();
+                            var chatWindow = WinWindowActivator.hwndFromShell(shell);
+                            foreground = foregroundWindow != null && chatWindow != null
+                                && WinWindowActivator.hwndEquals(foregroundWindow, chatWindow);
+                        }
+                        catch (RuntimeException | LinkageError error)
+                        {
+                            Global.tempLog("naparnik-reply-focus", "foreground check failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                    }
+                    else
+                        foreground = display.getActiveShell() == shell;
+                }
+                boolean inFocus = active && panelFocus && foreground;
                 boolean enabled = ComfortSettings.getInstance().getPreferenceStore()
                     .getBoolean(ComfortSettings.PREF_NAPARNIK_REPLY_NOTIFICATION);
-                Global.tempLog(LOG, "notification chat=" + id + " enabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("naparnik-reply-focus", "chat=" + id + " complete=" + complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " active=" + active + " panelFocus=" + panelFocus + " visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " minimized=" + minimized + " foreground=" + foreground + " inFocus=" + inFocus //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " enabled=" + enabled); //$NON-NLS-1$
+                if (!complete || inFocus)
+                    return;
                 if (enabled)
                     ToastNotification.show(waiting ? "1С:Напарник ожидает вашего действия"
                         : "1С:Напарник завершил ответ", title, 10_000,
@@ -262,14 +283,12 @@ public final class NaparnikChatViewHook implements IStartup
                 runOnFx(() ->
                 {
                     Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
-                    Object result = Global.invoke(engine, "executeScript", //$NON-NLS-1$
+                    Global.invoke(engine, "executeScript", //$NON-NLS-1$
                         "window.chatApi.router.load('" + route + "')"); //$NON-NLS-1$ //$NON-NLS-2$
-                    Global.tempLog(LOG, "activate chat=" + id + " result=" + result); //$NON-NLS-1$ //$NON-NLS-2$
                 });
             }
             catch (org.eclipse.ui.PartInitException | RuntimeException error)
             {
-                Global.tempLog(LOG, "activate failed chat=" + id + " error=" + error); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -301,11 +320,9 @@ public final class NaparnikChatViewHook implements IStartup
             field.load();
             parent.setData(MARKER, Boolean.TRUE);
             parent.layout(true, true);
-            Global.tempLog(LOG, "preference added"); //$NON-NLS-1$
         }
         catch (ReflectiveOperationException | RuntimeException error)
         {
-            Global.tempLog(LOG, "preference failed: " + error); //$NON-NLS-1$
         }
     }
 
