@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -1777,6 +1778,7 @@ public class CompareConfigMenuHook implements IStartup
         CompareModuleStructureColumnHook.install(tree);
         CompareConfigMethodColors.install(tree);
         CompareConfigMultiMarkSupport.install(editor, tree);
+        CompareConfigUndoSupport.install(editor, tree);
         TreeExpander.bindCompareConfigTree(tree, editor);
         NavigatorDropSupport.install(editor, tree);
     }
@@ -2655,7 +2657,11 @@ public class CompareConfigMenuHook implements IStartup
         void applyMark(CheckboxTreeViewer ctv, boolean checked)
         {
             if (ctv == null) return;
+            CompareConfigUndoSupport.group(ctv, () -> applyMarkGroup(ctv, checked));
+        }
 
+        private void applyMarkGroup(CheckboxTreeViewer ctv, boolean checked)
+        {
             for (IPartialModelNode node : absorbDescendants())
             {
                 if (!node.isCheckable()) continue;
@@ -3134,6 +3140,632 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
+
+    /**
+     * Один шаг отмены каскада пометок. Состояние читается из BM, а не из TreeItem:
+     * свёрнутые и скрытые ветки также участвуют в штатном каскаде.
+     *
+     * <p>Проверено по compare 27.0.1.v202605050943: SetMustBeMergedExecutor
+     * меняет MergeSettings, OrderRule.orderSetByUser, три карты проблем сессии
+     * и HandleStore.nodesMarkedAsChangedByUser. Обратный вызов check(true)
+     * не восстанавливает прежний набор дочерних пометок.
+     */
+    private static final class CompareConfigUndoSupport
+    {
+        private static final String KEY = "tormozit.compareConfigUndo"; //$NON-NLS-1$
+        private static final String ACTION_ID = "tormozit.compareConfigUndo.action"; //$NON-NLS-1$
+        private final IEditorPart editor;
+        private final CheckboxTreeViewer viewer;
+        private final Action action;
+        private Operation active;
+        private Operation last;
+        private int pendingWrites;
+
+        private CompareConfigUndoSupport(IEditorPart editor, CheckboxTreeViewer viewer)
+        {
+            this.editor = editor;
+            this.viewer = viewer;
+            action = new Action("Отменить последнее действие", PlatformUI.getWorkbench()
+                    .getSharedImages().getImageDescriptor(org.eclipse.ui.ISharedImages.IMG_TOOL_UNDO))
+            {
+                @Override
+                public void run()
+                {
+                    undo();
+                }
+            };
+            action.setId(ACTION_ID);
+            action.setToolTipText(TooltipText.wrap(viewer.getTree(),
+                    "Отменить последнее действие с пометками объединения, включая дочерние пометки"
+                    + Global.pluginSignForTooltip()));
+            action.setEnabled(false);
+        }
+
+        static void install(IEditorPart editor, Tree tree)
+        {
+            if (tree.getData(KEY) != null
+                    || !(getTreeViewerFromEditor(editor) instanceof CheckboxTreeViewer viewer))
+                return;
+            CompareConfigUndoSupport support = new CompareConfigUndoSupport(editor, viewer);
+            Object listeners = Global.getField(viewer, "checkStateListeners"); //$NON-NLS-1$
+            Object raw = Global.invoke(listeners, "getListeners"); //$NON-NLS-1$
+            if (!(raw instanceof Object[] existing) || existing.length == 0)
+                return;
+            List<ICheckStateListener> delegates = new ArrayList<>();
+            for (Object listener : existing)
+            {
+                if (!(listener instanceof ICheckStateListener delegate))
+                    return;
+                delegates.add(delegate);
+            }
+            tree.setData(KEY, support);
+            for (ICheckStateListener delegate : delegates)
+                viewer.removeCheckStateListener(delegate);
+            viewer.addCheckStateListener(event ->
+            {
+                Runnable notify = () -> delegates.forEach(listener -> listener.checkStateChanged(event));
+                // После установки filter-aware хука он сам записывает фактическую BM-фазу.
+                if (Boolean.TRUE.equals(viewer.getData(
+                        SubsystemFilterFix.CorrectionViewerFilter.CHECK_HOOK_FLAG)))
+                    notify.run();
+                else
+                    record(viewer, event.getElement() instanceof IPartialModelNode node ? node : null, notify);
+            });
+            Object manager = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
+            if (manager instanceof IToolBarManager toolbar)
+            {
+                for (IContributionItem contribution : toolbar.getItems())
+                {
+                    if (!(contribution instanceof ActionContributionItem item))
+                        continue;
+                    IAction original = item.getAction();
+                    String name = original.getClass().getSimpleName();
+                    if (name.equals("SelectAllAction") || name.equals("UnselectAllAction")) //$NON-NLS-1$ //$NON-NLS-2$
+                        Global.setFieldForce(item, "action", new MarkAllAction(support, original)); //$NON-NLS-1$
+                }
+                ActionContributionItem button = new ActionContributionItem(support.action);
+                button.setMode(0); // Только иконка; текст остаётся доступным в подсказке.
+                toolbar.add(button);
+                toolbar.update(true);
+            }
+            tree.addDisposeListener(event ->
+            {
+                support.last = null;
+                support.active = null;
+            });
+        }
+
+        private static CompareConfigUndoSupport get(CheckboxTreeViewer viewer)
+        {
+            Object value = viewer.getTree().getData(KEY);
+            return value instanceof CompareConfigUndoSupport support ? support : null;
+        }
+
+        static void group(CheckboxTreeViewer viewer, Runnable body)
+        {
+            CompareConfigUndoSupport support = get(viewer);
+            if (support == null || support.active != null)
+            {
+                body.run();
+                return;
+            }
+            support.active = new Operation();
+            try
+            {
+                body.run();
+            }
+            finally
+            {
+                support.active = null;
+            }
+        }
+
+        static void record(CheckboxTreeViewer viewer, Runnable body)
+        {
+            record(viewer, null, body);
+        }
+
+        static void record(CheckboxTreeViewer viewer, IPartialModelNode target, Runnable body)
+        {
+            CompareConfigUndoSupport support = get(viewer);
+            if (support == null)
+            {
+                body.run();
+                return;
+            }
+            group(viewer, () -> support.recordActive(target, body));
+        }
+
+        private void recordActive(IPartialModelNode target, Runnable body)
+        {
+            Operation operation = active;
+            if (operation.recording || operation.failed)
+            {
+                body.run();
+                return;
+            }
+            operation.recording = true;
+            try
+            {
+                try
+                {
+                    List<SessionMarks> before = capture(target, null);
+                    if (operation.before == null)
+                        operation.before = before;
+                    else
+                        mergeBefore(operation.before, before);
+                }
+                catch (RuntimeException ex)
+                {
+                    operation.failed = true;
+                    failed();
+                    body.run();
+                    return;
+                }
+                body.run();
+            }
+            finally
+            {
+                try
+                {
+                    if (!operation.failed && operation.before != null)
+                    {
+                        operation.after = capture(null, operation.before, true);
+                        if (!operation.before.equals(operation.after))
+                        {
+                            last = operation;
+                            action.setEnabled(pendingWrites == 0);
+                        }
+                        else if (last == operation)
+                        {
+                            last = null;
+                            action.setEnabled(false);
+                        }
+                    }
+                }
+                catch (RuntimeException ex)
+                {
+                    operation.failed = true;
+                    failed();
+                }
+                finally
+                {
+                    operation.recording = false;
+                }
+            }
+        }
+
+        private void failed()
+        {
+            last = null;
+            action.setEnabled(false);
+        }
+
+        private static void mergeBefore(List<SessionMarks> baseline, List<SessionMarks> additional)
+        {
+            for (SessionMarks next : additional)
+            {
+                SessionMarks previous = baseline.stream()
+                        .filter(state -> state.session == next.session).findFirst().orElse(null);
+                if (previous == null)
+                    baseline.add(next);
+                else
+                    next.nodes.forEach(previous.nodes::putIfAbsent);
+            }
+        }
+
+        /** Неизменившаяся настройка не попадает во второй снимок и удаляется из первого. */
+        private static boolean readCurrent(Map<Long, NodeMark> destination,
+                Map.Entry<Long, NodeMark> previous, MergeSettings settings, boolean changesOnly)
+        {
+            NodeMark current = NodeMark.read(settings, previous.getValue());
+            if (changesOnly && current == previous.getValue())
+                return false;
+            destination.put(previous.getKey(), current);
+            return true;
+        }
+
+        /** Передаёт группу в уже существующую async-фазу каскада, без таймеров. */
+        static Runnable deferred(CheckboxTreeViewer viewer, IPartialModelNode target, Runnable body)
+        {
+            CompareConfigUndoSupport support = get(viewer);
+            Operation operation = support == null || support.active == null
+                    ? new Operation() : support.active;
+            if (support != null)
+            {
+                support.pendingWrites++;
+                support.action.setEnabled(false);
+            }
+            return () ->
+            {
+                if (viewer.getTree().isDisposed())
+                    return;
+                if (support == null)
+                {
+                    body.run();
+                    return;
+                }
+                Operation previous = support.active;
+                support.active = operation;
+                try
+                {
+                    support.recordActive(target, body);
+                }
+                finally
+                {
+                    support.active = previous;
+                    support.pendingWrites--;
+                    support.action.setEnabled(support.pendingWrites == 0 && support.last != null);
+                }
+            };
+        }
+
+        private List<SessionMarks> capture(IPartialModelNode target, List<SessionMarks> template)
+        {
+            return capture(target, template, false);
+        }
+
+        private List<SessionMarks> capture(IPartialModelNode target, List<SessionMarks> template,
+                boolean changesOnly)
+        {
+            List<SessionMarks> result = new ArrayList<>();
+            Object value = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
+            if (!(value instanceof List<?> artifacts))
+                throw new IllegalStateException("Comparison artifacts unavailable"); //$NON-NLS-1$
+            for (Object artifact : artifacts)
+            {
+                Object model = Global.getField(artifact, "partialModel"); //$NON-NLS-1$
+                if (!(model instanceof IPartialModel partialModel))
+                    continue;
+                IComparisonSession session = partialModel.getRoot().getComparisonSession();
+                if (session == null || !ComparisonUtils.isComparisonModelEditable(session.getStatus()))
+                    continue;
+                if (target != null && target.getComparisonSession() != null
+                        && target.getComparisonSession() != session)
+                    continue;
+                SessionMarks scope = template == null ? null : template.stream()
+                        .filter(state -> state.session == session).findFirst().orElse(null);
+                if (template != null && scope == null)
+                    continue;
+                // Тот же обход partial model, что у «Найти нижние настраиваемые».
+                // Content provider может материализовать узлы в своей транзакции,
+                // поэтому обход выполняется до открытия нашей readonly-транзакции.
+                List<IPartialModelNode> candidates = new ArrayList<>();
+                if (scope == null)
+                {
+                    if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+                        throw new IllegalStateException("Comparison tree content provider unavailable"); //$NON-NLS-1$
+                    IPartialModelNode root = target != null && target.getComparisonSession() == session
+                            ? target : partialModel.getRoot();
+                    CompareConfigLowestCheckableFinder.walkCheckable(root, provider, viewer,
+                            null, candidates::add, false);
+                }
+                result.add(session.runComparisonTreeReadonlyTask(new AbstractBmTask<SessionMarks>(
+                        "Comfort: capture merge marks") //$NON-NLS-1$
+                {
+                    @Override
+                    public SessionMarks execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        // Ключ — id самого MergeSettings: повторное чтение не загружает
+                        // ComparisonNode и не разрешает его ссылку на настройки.
+                        Map<Long, NodeMark> nodes = scope == null || changesOnly ? new HashMap<>()
+                                : new HashMap<>((int) Math.min(Integer.MAX_VALUE, scope.nodes.size() * 4L / 3 + 1));
+                        Deque<ComparisonNode> pending = new ArrayDeque<>();
+                        if (scope != null)
+                        {
+                            Iterator<Map.Entry<Long, NodeMark>> entries = scope.nodes.entrySet().iterator();
+                            while (entries.hasNext())
+                            {
+                                Map.Entry<Long, NodeMark> entry = entries.next();
+                                long id = entry.getKey();
+                                if (!(transaction.getObjectById(id) instanceof MergeSettings settings))
+                                    throw new IllegalStateException("Comparison settings disappeared: " + id); //$NON-NLS-1$
+                                if (!readCurrent(nodes, entry, settings, changesOnly))
+                                    entries.remove();
+                            }
+                        }
+                        else
+                        {
+                            Set<Long> capturedAncestors = new HashSet<>();
+                            for (IPartialModelNode candidate : candidates)
+                            {
+                                if (candidate.getNodeId() == -1L)
+                                    continue; // Виртуальная папка: её реальные дети уже в candidates.
+                                ComparisonNode node = session.getNode(candidate.getNodeId());
+                                if (node == null)
+                                    throw new IllegalStateException("Comparison candidate disappeared"); //$NON-NLS-1$
+                                // SetMustBeMergedExecutor пишет потомков с oneSideParent
+                                // даже при canBeMerged=false. У составного свойства также
+                                // сохраняем внутреннюю модель целиком (например, секции модуля).
+                                // Коллекции сюда не относятся: их доступные элементы уже в candidates.
+                                if (node.bmGetId() != session.getRootNode().bmGetId()
+                                        && node.hasChildren() && (node.isOneSideParent()
+                                        || node instanceof FeatureComparisonNode
+                                                && !(node instanceof FeatureCollectionComparisonNode)
+                                        || node instanceof TopComparisonNode top && top.isOneSideNode()
+                                        || node instanceof CollectionElementComparisonNode element
+                                                && (element.getMainObjectId() == null || element.getOtherObjectId() == null)))
+                                    pending.add(node);
+                                for (ComparisonNode parent = node; parent != null;
+                                        parent = parent.getParent())
+                                {
+                                    if (!capturedAncestors.add(parent.bmGetId()))
+                                        break;
+                                    MergeSettings settings = parent.getMergeSettings();
+                                    if (settings != null)
+                                        nodes.put(settings.bmGetId(), NodeMark.read(settings));
+                                }
+                            }
+                        }
+                        Set<Long> visited = new HashSet<>();
+                        while (!pending.isEmpty())
+                        {
+                            ComparisonNode node = pending.pop();
+                            if (!visited.add(node.bmGetId()))
+                                continue;
+                            MergeSettings settings = node.getMergeSettings();
+                            if (settings != null)
+                                nodes.put(settings.bmGetId(), NodeMark.read(settings));
+                            // getChildren() создаёт промежуточный объединённый список на каждом узле.
+                            pending.addAll(node.getContainmentChildren());
+                            pending.addAll(node.getTopChildren());
+                        }
+                        return new SessionMarks(session, partialModel, nodes,
+                                copyMap(session, "nodesWithPotentialMergeProblems"), //$NON-NLS-1$
+                                copyMap(session, "mergeValidationProblems"), //$NON-NLS-1$
+                                copyMap(session, "externalMergeToolProblems"), //$NON-NLS-1$
+                                copyMarkedNodes(session));
+                    }
+                }));
+            }
+            return result;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Map<Object, Object> map(Object owner, String field)
+        {
+            Object value = Global.getField(owner, field);
+            if (!(value instanceof Map<?, ?>))
+                throw new IllegalStateException("Missing comparison map: " + field); //$NON-NLS-1$
+            return (Map<Object, Object>) value;
+        }
+
+        private static Map<Object, Object> copyMap(Object owner, String field)
+        {
+            Map<Object, Object> copy = new HashMap<>();
+            map(owner, field).forEach((key, value) -> copy.put(key,
+                    value instanceof Set<?> set ? new HashSet<>(set)
+                    : value instanceof List<?> list ? new ArrayList<>(list) : value));
+            return copy;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Set<Long> markedNodes(IComparisonSession session)
+        {
+            Object store = Global.getField(session, "comparisonProcessStore"); //$NON-NLS-1$
+            Object handleStore = Global.invoke(store, "getHandleStore", session.getHandle()); //$NON-NLS-1$
+            Object nodes = Global.getField(handleStore, "nodesMarkedAsChangedByUser"); //$NON-NLS-1$
+            if (!(nodes instanceof Set<?>))
+                throw new IllegalStateException("Comparison changed-node set unavailable"); //$NON-NLS-1$
+            return (Set<Long>) nodes;
+        }
+
+        private static Set<Long> copyMarkedNodes(IComparisonSession session)
+        {
+            Object store = Global.getField(session, "comparisonProcessStore"); //$NON-NLS-1$
+            synchronized (Global.getField(store, "lock")) //$NON-NLS-1$
+            {
+                return new LinkedHashSet<>(markedNodes(session));
+            }
+        }
+
+        private void undo()
+        {
+            try
+            {
+                undoLast();
+            }
+            catch (RuntimeException ex)
+            {
+                failed();
+                ToastNotification.show("Отмена пометок", "Не удалось восстановить пометки: " + ex.getMessage());
+            }
+        }
+
+        private void undoLast()
+        {
+            Operation operation = last;
+            if (operation == null)
+                return;
+            // Другие изменения настроек или повторное сравнение не должны быть затёрты.
+            if (!operation.after.equals(capture(null, operation.after)))
+            {
+                last = null;
+                action.setEnabled(false);
+                ToastNotification.show("Отмена пометок", "Настройки объединения уже изменились. Отмена недоступна.");
+                return;
+            }
+            for (SessionMarks state : operation.before)
+                state.restore();
+            last = null;
+            action.setEnabled(false);
+            for (SessionMarks state : operation.before)
+            {
+                Object controller = Global.getField(editor, "partialModelController"); //$NON-NLS-1$
+                if (controller instanceof PartialModelController partialController)
+                    state.session.runComparisonTreeReadonlyTask(new AbstractBmTask<Void>(
+                            "Comfort: refresh restored merge marks") //$NON-NLS-1$
+                    {
+                        @Override
+                        public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                        {
+                            partialController.refreshNodeWithChildren(state.model,
+                                    state.model.getRoot(), state.session);
+                            return null;
+                        }
+                    });
+            }
+            Object correction = viewer.getData(SubsystemFilterFix.CORRECTION_DATA_KEY);
+            if (correction instanceof SubsystemFilterFix.CorrectionViewerFilter filter)
+            {
+                filter.clearAggregateUiCache();
+                filter.syncCheckHooksToFilterState(viewer);
+            }
+            viewer.refresh();
+        }
+
+        private static final class Operation
+        {
+            private List<SessionMarks> before;
+            private List<SessionMarks> after;
+            private boolean recording;
+            private boolean failed;
+        }
+
+        /** Скалярные значения и упорядоченный список правил без объектов списков/массивов на узел. */
+        private record NodeMark(int flags, long availableRules)
+        {
+            private static final int MUST = 1;
+            private static final int CAN = 2;
+            private static final int EXCLUDED = 4;
+            private static final int USER_RULE = 8;
+            private static final int HAS_ORDER = 16;
+            private static final int USER_ORDER = 32;
+            private static final int RULE_SHIFT = 6;
+            private static final MergeRule[] RULES = MergeRule.values();
+
+            static NodeMark read(MergeSettings settings)
+            {
+                return read(settings, null);
+            }
+
+            static NodeMark read(MergeSettings settings, NodeMark previous)
+            {
+                int flags = (settings.isMustBeMerged() ? MUST : 0)
+                        | (settings.isCanBeMerged() ? CAN : 0)
+                        | (settings.isHaveChildrenExcludedFromMerge() ? EXCLUDED : 0)
+                        | (settings.isMergeRuleSetByUser() ? USER_RULE : 0);
+                MergeRule rule = settings.getMergeRule();
+                flags |= (rule == null ? 0 : rule.ordinal() + 1) << RULE_SHIFT;
+                var order = settings.getOrderRule();
+                if (order != null)
+                    flags |= HAS_ORDER | (order.isOrderSetByUser() ? USER_ORDER : 0);
+                long available = encodeRules(settings.getAvailableMergeRules());
+                return previous != null && previous.flags == flags && previous.availableRules == available
+                        ? previous : new NodeMark(flags, available);
+            }
+
+            private static long encodeRules(List<MergeRule> rules)
+            {
+                // В проверенном API шесть уникальных правил. Ограничение проверяется,
+                // чтобы новая версия EDT не привела к тихой потере разрядов.
+                if (RULES.length > 15 || rules.size() > 15)
+                    throw new IllegalStateException("Too many merge rules for snapshot encoding"); //$NON-NLS-1$
+                long encoded = 0L;
+                for (int index = rules.size() - 1; index >= 0; index--)
+                    encoded = (encoded << 4) | (rules.get(index).ordinal() + 1);
+                return encoded;
+            }
+
+            void restore(MergeSettings settings)
+            {
+                settings.setMustBeMerged((flags & MUST) != 0);
+                settings.setCanBeMerged((flags & CAN) != 0);
+                settings.setHaveChildrenExcludedFromMerge((flags & EXCLUDED) != 0);
+                int rule = flags >>> RULE_SHIFT;
+                settings.setMergeRule(rule == 0 ? null : RULES[rule - 1]);
+                settings.setMergeRuleSetByUser((flags & USER_RULE) != 0);
+                List<MergeRule> rules = settings.getAvailableMergeRules();
+                if (encodeRules(rules) != availableRules)
+                {
+                    rules.clear();
+                    for (long encoded = availableRules; encoded != 0; encoded >>>= 4)
+                        rules.add(RULES[(int) (encoded & 15) - 1]);
+                }
+                if ((flags & HAS_ORDER) != 0)
+                    settings.getOrderRule().setOrderSetByUser((flags & USER_ORDER) != 0);
+            }
+        }
+
+        private record SessionMarks(IComparisonSession session, IPartialModel model,
+                Map<Long, NodeMark> nodes, Map<Object, Object> potentialProblems,
+                Map<Object, Object> validationProblems, Map<Object, Object> externalProblems,
+                Set<Long> marked)
+        {
+            void restore()
+            {
+                Object manager = Global.getField(session, "comparisonManager"); //$NON-NLS-1$
+                Object restored = Global.invoke(manager, "runComparisonTreeBmModelTask", session, //$NON-NLS-1$
+                        new AbstractBmTask<Boolean>("Comfort: undo merge marks") //$NON-NLS-1$
+                {
+                    @Override
+                    public Boolean execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        nodes.forEach((id, mark) ->
+                        {
+                            MergeSettings settings = (MergeSettings) transaction.getObjectById(id);
+                            if (mark != NodeMark.read(settings, mark))
+                                mark.restore(settings);
+                        });
+                        return Boolean.TRUE;
+                    }
+                });
+                if (!Boolean.TRUE.equals(restored))
+                    throw new IllegalStateException("Cannot restore comparison marks"); //$NON-NLS-1$
+                restoreMap("nodesWithPotentialMergeProblems", potentialProblems); //$NON-NLS-1$
+                restoreMap("mergeValidationProblems", validationProblems); //$NON-NLS-1$
+                restoreMap("externalMergeToolProblems", externalProblems); //$NON-NLS-1$
+                Object store = Global.getField(session, "comparisonProcessStore"); //$NON-NLS-1$
+                synchronized (Global.getField(store, "lock")) //$NON-NLS-1$
+                {
+                    Set<Long> target = markedNodes(session);
+                    target.clear();
+                    target.addAll(marked);
+                }
+            }
+
+            private void restoreMap(String field, Map<Object, Object> values)
+            {
+                Map<Object, Object> target = map(session, field);
+                target.clear();
+                target.putAll(values);
+            }
+        }
+
+        private static final class MarkAllAction extends Action
+        {
+            private final CompareConfigUndoSupport support;
+            private final IAction original;
+
+            MarkAllAction(CompareConfigUndoSupport support, IAction original)
+            {
+                super(original.getText(), original.getStyle());
+                this.support = support;
+                this.original = original;
+                setId(original.getId());
+                setImageDescriptor(original.getImageDescriptor());
+                setDisabledImageDescriptor(original.getDisabledImageDescriptor());
+                setHoverImageDescriptor(original.getHoverImageDescriptor());
+                setActionDefinitionId(original.getActionDefinitionId());
+                setAccelerator(original.getAccelerator());
+                setToolTipText(TooltipText.wrap(support.viewer.getTree(), original.getToolTipText()));
+                setEnabled(original.isEnabled());
+                org.eclipse.jface.util.IPropertyChangeListener listener = event ->
+                {
+                    if (IAction.ENABLED.equals(event.getProperty()))
+                        setEnabled(original.isEnabled());
+                };
+                original.addPropertyChangeListener(listener);
+                support.viewer.getTree().addDisposeListener(event -> original.removePropertyChangeListener(listener));
+            }
+
+            @Override
+            public void run()
+            {
+                record(support.viewer, original::run);
+            }
+        }
+    }
 
     /**
      * Коррекция EDT-фильтра по подсистемам: односторонние не-{@link SymlinkComparisonNode}
@@ -3953,7 +4585,9 @@ public class CompareConfigMenuHook implements IStartup
                     IAction action = aci.getAction();
                     if (action == null || action instanceof FilterAwareSelectAllAction)
                         continue;
-                    String cn = action.getClass().getName();
+                    IAction source = action instanceof CompareConfigUndoSupport.MarkAllAction undoAction
+                            ? undoAction.original : action;
+                    String cn = source.getClass().getName();
                     boolean selectAll = cn.contains("SelectAllAction") && !cn.contains("Unselect"); //$NON-NLS-1$ //$NON-NLS-2$
                     boolean unselect = cn.contains("UnselectAllAction"); //$NON-NLS-1$
                     if (!selectAll && !unselect)
@@ -4761,9 +5395,14 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void run()
                 {
+                    CompareConfigUndoSupport.group(ctv, this::runGroup);
+                }
+
+                private void runGroup()
+                {
                     if (!shouldRestrictChecksToVisible())
                     {
-                        original.run();
+                        CompareConfigUndoSupport.record(ctv, original::run);
                         return;
                     }
                     applyVisibleOnlyOnComparisonRoots(editor, ctv, check);
@@ -4805,6 +5444,11 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void checkStateChanged(CheckStateChangedEvent event)
                 {
+                    CompareConfigUndoSupport.group(ctv, () -> checkGroup(event));
+                }
+
+                private void checkGroup(CheckStateChangedEvent event)
+                {
                     Object el = event.getElement();
                     boolean checked = event.getChecked();
 
@@ -4821,8 +5465,12 @@ public class CompareConfigMenuHook implements IStartup
                     if (!shouldRestrictChecksToVisible())
                     {
                         syncCheckHooksToFilterState(ctv);
-                        for (ICheckStateListener delegate : delegates)
-                            delegate.checkStateChanged(event);
+                        CompareConfigUndoSupport.record(ctv,
+                                el instanceof IPartialModelNode target ? target : null, () ->
+                        {
+                            for (ICheckStateListener delegate : delegates)
+                                delegate.checkStateChanged(event);
+                        });
                         if (el instanceof IPartialModelNode node)
                             repaintAncestorAggregates(ctv, node);
                         return;
@@ -4901,7 +5549,7 @@ public class CompareConfigMenuHook implements IStartup
                     boolean wantFinal = want;
                     IPartialModelNode clickedFinal = clicked;
                     Display display = ctv.getControl().getDisplay();
-                    display.asyncExec(() ->
+                    display.asyncExec(CompareConfigUndoSupport.deferred(ctv, clickedFinal, () ->
                     {
                         if (ctv.getControl() == null || ctv.getControl().isDisposed())
                             return;
@@ -4915,7 +5563,7 @@ public class CompareConfigMenuHook implements IStartup
                         {
                             endCascadeContext();
                         }
-                    });
+                    }));
                     return targets.size();
                 }
                 finally
@@ -7921,23 +8569,39 @@ public class CompareConfigMenuHook implements IStartup
             AbstractTreeViewer viewer,
             List<Object> leaves)
         {
+            return walkCheckable(node, provider, viewer, leaves, null, true);
+        }
+
+        /** Общий отсечённый обход для поиска листьев и снимка пометок перед отменой. */
+        private static boolean walkCheckable(
+            Object node,
+            ITreeContentProvider provider,
+            AbstractTreeViewer viewer,
+            List<Object> leaves,
+            java.util.function.Consumer<IPartialModelNode> visitor,
+            boolean applyFilters)
+        {
             if (!(node instanceof IPartialModelNode partial) || !partial.isCheckable())
                 return false;
+            if (visitor != null)
+                visitor.accept(partial);
             boolean descendantCheckable = false;
-            Object[] children = CompareConfigSearchDialogHook.getChildrenSafe(provider, node);
+            Object[] children = visitor == null
+                    ? CompareConfigSearchDialogHook.getChildrenSafe(provider, node)
+                    : provider.getChildren(node);
             if (children != null)
             {
                 for (Object child : children)
                 {
                     if (!(child instanceof IPartialModelNode childNode) || !childNode.isCheckable())
                         continue;
-                    if (!CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer))
+                    if (applyFilters && !CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer))
                         continue;
-                    if (collectLeaves(child, provider, viewer, leaves))
+                    if (walkCheckable(child, provider, viewer, leaves, visitor, applyFilters))
                         descendantCheckable = true;
                 }
             }
-            if (!descendantCheckable)
+            if (!descendantCheckable && leaves != null)
                 leaves.add(node);
             return true;
         }

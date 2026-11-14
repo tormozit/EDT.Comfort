@@ -289,16 +289,10 @@ public final class NaparnikPasteCompareHook implements IStartup
             Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
             if (engine == null)
                 return;
-            Object result = Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
-            Object state = Global.invoke(engine, "executeScript", //$NON-NLS-1$
-                "JSON.stringify({hostReload:!!window.ideApi&&typeof window.ideApi.reload==='function'," //$NON-NLS-1$
-                    + "clientReload:!!window.chatApi&&window.chatApi.ideAutomation.canReload," //$NON-NLS-1$
-                    + "clientInitialized:!!window.chatApi&&!!window.chatApi.chatClient.getToken()})"); //$NON-NLS-1$
-            Global.tempLog("naparnik-reload", "paste guard=" + result + " state=" + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.invoke(engine, "executeScript", WRAP_JS); //$NON-NLS-1$
         }
-        catch (Throwable error)
+        catch (Throwable ignored)
         {
-            Global.tempLog("naparnik-reload", "paste guard failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

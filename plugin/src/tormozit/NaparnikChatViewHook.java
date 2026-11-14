@@ -187,7 +187,6 @@ public final class NaparnikChatViewHook implements IStartup
                     if (styledDocument != dom)
                     {
                         Object result = Global.invoke(engine, "executeScript", FIX_HIDDEN_SPINNER); //$NON-NLS-1$
-                        Global.tempLog("naparnik-idle-cpu", "hidden spinner style: " + result); //$NON-NLS-1$ //$NON-NLS-2$
                         if ("installed".equals(result)) //$NON-NLS-1$
                             styledDocument = dom;
                     }
@@ -200,7 +199,6 @@ public final class NaparnikChatViewHook implements IStartup
                 }
                 catch (RuntimeException error)
                 {
-                    Global.tempLog("naparnik-idle-cpu", "panel observation failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 finally
                 {
