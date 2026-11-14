@@ -1,7 +1,12 @@
 package tormozit;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
+import java.lang.ref.WeakReference;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -9,6 +14,14 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.concurrent.CompletableFuture;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
 
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
@@ -37,6 +50,8 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -136,6 +151,7 @@ public final class NaparnikManualModeHook implements IStartup
     {
         if (!booted.compareAndSet(false, true))
             return;
+        ServiceRecovery.start();
         System.getProperties().put(PROP_REPLACE,
             (Predicate<Object>) NaparnikManualModeHook::allowReplace);
         System.getProperties().put(PROP_HINT, (Predicate<Object>) NaparnikManualModeHook::allowHint);
@@ -146,6 +162,12 @@ public final class NaparnikManualModeHook implements IStartup
                 + (common != null ? common.getVersion() + " state=" + common.getState() : "нет") //$NON-NLS-1$ //$NON-NLS-2$
                 + " вплетение=" + System.getProperty(PROP_PATCH)); //$NON-NLS-1$
         }
+    }
+
+    static void stopServiceRecovery()
+    {
+        NaparnikAssistRow.stopRequestPolicy();
+        ServiceRecovery.stop();
     }
 
     @Override
@@ -174,6 +196,7 @@ public final class NaparnikManualModeHook implements IStartup
         Display display = Display.getCurrent();
         if (display == null)
             display = Display.getDefault();
+        ServiceRecovery.installStatusMenu(display);
         if (display != null && !paintLogInstalled)
         {
             paintLogInstalled = true;
@@ -1009,5 +1032,519 @@ public final class NaparnikManualModeHook implements IStartup
     {
         return STACK_WALKER.walk(
             frames -> frames.anyMatch(frame -> frame.getClassName().startsWith(NAPARNIK_PACKAGE)));
+    }
+
+    /** Временный отказ занятого ключа не должен оставлять службу выключенной до перезапуска. */
+    private static final class ServiceRecovery
+    {
+        private static final String NOTIFY = "tormozit.naparnik.tokenNotify"; //$NON-NLS-1$
+        private static final String PENDING = "tormozit.naparnik.tokenPending"; //$NON-NLS-1$
+        private static final String TOKEN_MESSAGE = "tormozit.naparnik.tokenMessage"; //$NON-NLS-1$
+        private static final String CHAT_PAGE = "tormozit.naparnik.chatPage"; //$NON-NLS-1$
+        private static final String ACCESS_RESPONSE = "tormozit.naparnik.accessResponse"; //$NON-NLS-1$
+        private static final Pattern DUPLICATE = Pattern.compile(
+            "\"error_type\"\\s*:\\s*\"duplicate_token_usage\""); //$NON-NLS-1$
+        private static final Pattern RETRY = Pattern.compile("Retry in ([0-9]+) seconds"); //$NON-NLS-1$
+        private static Job pending;
+        private static boolean running;
+        private static final String SERVICE_NOTIFY = "tormozit.naparnik.serviceNotify";
+        private static final String SERVICE_PENDING = "tormozit.naparnik.servicePending";
+        private static final Map<Object, Object> stoppedServices = new WeakHashMap<>();
+        private static final AtomicBoolean checkingAccess = new AtomicBoolean();
+        private static final String STATUS_MENU = "tormozit.naparnik.statusMenu"; //$NON-NLS-1$
+        private static final String STATUS_CHECK = "tormozit.naparnik.statusCheck"; //$NON-NLS-1$
+        private static Display menuDisplay;
+        private static final Listener STATUS_MENU_LISTENER = ServiceRecovery::statusMenuShown;
+        private static final Map<String, AccessFailure> failures = new HashMap<>();
+        private static final Map<Object, Boolean> chatListeners = Collections.synchronizedMap(new WeakHashMap<>());
+        private static final Map<Object, Boolean> chatCheckLinks = Collections.synchronizedMap(new WeakHashMap<>());
+        private static record AccessFailure(int status, boolean duplicate, long retryAt) { }
+
+        static synchronized void start()
+        {
+            running = true;
+            Object early;
+            Object earlyStates;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                properties.put(NOTIFY, (Function<Object[], Object>) ServiceRecovery::response);
+                properties.put(TOKEN_MESSAGE, (Function<Object[], String>) ServiceRecovery::validationMessage);
+                properties.put(CHAT_PAGE, (Function<Object[], String>) ServiceRecovery::loadingPage);
+                properties.put(ACCESS_RESPONSE, (Consumer<Object>) ServiceRecovery::httpResponse);
+                early = properties.remove(PENDING);
+                properties.put(SERVICE_NOTIFY, (Consumer<Object[]>) ServiceRecovery::serviceState);
+                earlyStates = properties.remove(SERVICE_PENDING);
+            }
+            if (early instanceof Object[] event)
+                response(event);
+            if (earlyStates instanceof java.util.List<?> events)
+                for (Object event : events)
+                    if (event instanceof Object[] state)
+                        serviceState(state);
+        }
+
+        static synchronized void stop()
+        {
+            running = false;
+            if (menuDisplay != null && !menuDisplay.isDisposed())
+            {
+                Display display = menuDisplay;
+                display.asyncExec(() ->
+                {
+                    if (!display.isDisposed())
+                        display.removeFilter(SWT.Show, STATUS_MENU_LISTENER);
+                });
+            }
+            menuDisplay = null;
+            System.getProperties().remove(NOTIFY);
+            System.getProperties().remove(TOKEN_MESSAGE);
+            System.getProperties().remove(CHAT_PAGE);
+            System.getProperties().remove(ACCESS_RESPONSE);
+            if (pending != null)
+                pending.cancel();
+            pending = null;
+            System.getProperties().remove(SERVICE_NOTIFY);
+            System.getProperties().remove(SERVICE_PENDING);
+            stoppedServices.clear();
+            failures.clear();
+            chatListeners.clear();
+            chatCheckLinks.clear();
+        }
+
+        /** Стадия наблюдения завершается до штатного boolean и диалога, ключ сопоставляется точно. */
+        private static Object response(Object[] event)
+        {
+            if (event == null || event.length != 3 || !(event[1] instanceof String token)
+                || !(event[2] instanceof CompletableFuture<?> future))
+                throw new IllegalArgumentException("Invalid token-check event"); //$NON-NLS-1$
+            return future.whenComplete((result, failure) ->
+            {
+                try
+                {
+                    if (result instanceof HttpResponse<?> http && http.body() instanceof String body)
+                        received(event[0], token, http.statusCode(), body, System.currentTimeMillis());
+                }
+                catch (RuntimeException problem)
+                {
+                }
+            });
+        }
+
+        private static synchronized void received(Object checker, String requestToken, int status, String body, long received)
+        {
+            boolean duplicate = DUPLICATE.matcher(body).find();
+            rememberFailure(requestToken, status, body, received);
+            if (!running || !duplicate)
+                return;
+            try
+            {
+                var retry = RETRY.matcher(body);
+                Object settings = Global.getField(checker, "settings"); //$NON-NLS-1$
+                Object currentToken = Global.invoke(settings, "getClientToken"); //$NON-NLS-1$
+                if (!retry.find() || !(currentToken instanceof String token) || token.isBlank()
+                    || !token.equals(requestToken))
+                {
+                    return;
+                }
+                long seconds = Long.parseLong(retry.group(1));
+                // Сервер сообщает целые секунды: ждём также остаток последней секунды.
+                long due = Math.addExact(received, Math.multiplyExact(Math.addExact(seconds, 1), 1_000L));
+                long delay = Math.max(0, due - System.currentTimeMillis());
+                if (pending != null)
+                    pending.cancel();
+                pending = new Job("Напарник: повторная проверка после освобождения ключа") //$NON-NLS-1$
+                {
+                    @Override
+                    protected IStatus run(IProgressMonitor monitor)
+                    {
+                        synchronized (ServiceRecovery.class)
+                        {
+                            if (!running || pending != this || monitor.isCanceled())
+                                return Status.CANCEL_STATUS;
+                            pending = null;
+                        }
+                        try
+                        {
+                            if (!Boolean.TRUE.equals(Global.invoke(settings, "isEnabled")) //$NON-NLS-1$
+                                || !token.equals(Global.invoke(settings, "getClientToken"))) //$NON-NLS-1$
+                            {
+                                return Status.OK_STATUS;
+                            }
+                            Bundle common = Platform.getBundle("com.e1c.edt.ai.ui.common"); //$NON-NLS-1$
+                            if (common == null || common.getState() != Bundle.ACTIVE)
+                            {
+                                return Status.OK_STATUS;
+                            }
+                            Class<?> activator = common.loadClass("com.e1c.edt.ai.ui.BaseActivator"); //$NON-NLS-1$
+                            Class<?> serviceType = common.loadClass("com.e1c.edt.ai.IPluginStatusService"); //$NON-NLS-1$
+                            Object service = activator.getMethod("getInstance", Class.class).invoke(null, serviceType); //$NON-NLS-1$
+                            boolean enabled = Boolean.TRUE.equals(serviceType.getMethod("isPluginEnabled").invoke(service)); //$NON-NLS-1$
+                            if (!enabled)
+                            {
+                                serviceType.getMethod("revalidate").invoke(service); //$NON-NLS-1$
+                            }
+                        }
+                        catch (Exception failure)
+                        {
+                        }
+                        return Status.OK_STATUS;
+                    }
+                };
+                pending.setSystem(true);
+                pending.schedule(delay);
+
+            }
+            catch (RuntimeException failure)
+            {
+            }
+        }
+
+        private static void httpResponse(Object event)
+        {
+            if (!(event instanceof HttpResponse<?> response))
+                return;
+            if (response.statusCode() != 403 || !(response.body() instanceof String body))
+                return;
+            String token = response.request() != null ? response.request().headers().firstValue("Authorization").orElse(null) : null; //$NON-NLS-1$
+            if (token != null)
+                rememberFailure(token, response.statusCode(), body, System.currentTimeMillis());
+        }
+
+        private static synchronized void rememberFailure(String token, int status, String body, long received)
+        {
+            if (!running)
+                return;
+            if (status >= 400)
+            {
+                boolean duplicate = DUPLICATE.matcher(body).find();
+                long retryAt = 0;
+                var interval = RETRY.matcher(body);
+                if (duplicate && interval.find())
+                    try { retryAt = Math.addExact(received, Math.multiplyExact(Math.addExact(Long.parseLong(interval.group(1)), 1), 1_000L)); }
+                    catch (ArithmeticException | NumberFormatException invalid) {  } //$NON-NLS-1$
+                failures.put(token, new AccessFailure(status, duplicate, retryAt));
+                refreshChatViews();
+            }
+            else if (status >= 200 && status < 300)
+                failures.remove(token);
+        }
+
+        private static synchronized String failureText(String token)
+        {
+            AccessFailure failure = token != null ? failures.get(token) : null;
+            if (failure == null)
+                return null;
+            if (!failure.duplicate())
+                return "Сервер вернул ошибку HTTP " + failure.status() + ". Проверьте ключ доступа и настройки сервиса."; //$NON-NLS-1$
+            long seconds = Math.max(0, (failure.retryAt() - System.currentTimeMillis() + 999) / 1_000);
+            return "Ключ доступа уже используется на другом устройстве (HTTP 403).\n" //$NON-NLS-1$
+                + "Закройте сеансы Напарника на других устройствах.\n" //$NON-NLS-1$
+                + (seconds > 0 ? "Повторите проверку через " + seconds + " с." : "Повторите проверку доступа."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static String validationMessage(Object[] event)
+        {
+            Object token = Global.invoke(event[0], "getStringValue"); //$NON-NLS-1$
+            String reason = token instanceof String s ? failureText(s) : null;
+            return reason != null ? reason : (String) event[1];
+        }
+
+        private static String chatFailure(Object chat)
+        {
+            Object settings = Global.getField(chat, "settings"); //$NON-NLS-1$
+            Object token = Global.invoke(settings, "getClientToken"); //$NON-NLS-1$
+            return token instanceof String s ? failureText(s) : null;
+        }
+
+        private static String loadingPage(Object[] event)
+        {
+            String original = (String) event[1];
+            String html = original.replace("<body>", "<body data-comfort-naparnik-loading=\"true\">"); //$NON-NLS-1$ //$NON-NLS-2$
+            String reason = chatFailure(event[0]);
+            if (reason == null)
+                return html;
+            refreshChatViews();
+            String escaped = reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            return Pattern.compile("<div class=\"message\">.*?</div>", Pattern.DOTALL).matcher(html) //$NON-NLS-1$
+                .replaceFirst(Matcher.quoteReplacement("<div class=\"message\" style=\"white-space:pre-wrap\">" + escaped + "</div>")) //$NON-NLS-1$ //$NON-NLS-2$
+                .replace("</body>", "<p><a id=\"comfort-naparnik-check\" href=\"#\">Проверить ключ доступа</a></p></body>") //$NON-NLS-1$ //$NON-NLS-2$
+                .replace("<div class=\"spinner\"></div>", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Уже открытая страница тоже обновляется, если 403 пришёл после создания WebView. */
+        private static void refreshChatViews()
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                if (!PlatformUI.isWorkbenchRunning())
+                    return;
+                for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                    for (IWorkbenchPage page : window.getPages())
+                    {
+                        Object view = page.findView("com.e1c.edt.ai.ui.views.ChatView"); //$NON-NLS-1$
+                        Object chat = view != null ? Global.getField(view, "chatDialog") : null; //$NON-NLS-1$
+                        Object webView = chat != null ? Global.getField(chat, "webView") : null; //$NON-NLS-1$
+                        if (webView != null)
+                            try
+                            {
+                                Class<?> fx = Class.forName("javafx.application.Platform"); //$NON-NLS-1$
+                                fx.getMethod("runLater", Runnable.class).invoke(null, (Runnable) () -> observeChatPage(chat, webView)); //$NON-NLS-1$
+                            }
+                            catch (Exception failure)
+                            {
+                            }
+                    }
+            });
+        }
+
+        private static void observeChatPage(Object chat, Object webView)
+        {
+            Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
+            if (engine == null)
+                return;
+            if (chatListeners.putIfAbsent(engine, Boolean.TRUE) == null)
+                try
+                {
+                    Class<?> listenerType = Class.forName("javafx.beans.value.ChangeListener"); //$NON-NLS-1$
+                    WeakReference<Object> chatRef = new WeakReference<>(chat);
+                    WeakReference<Object> engineRef = new WeakReference<>(engine);
+                    Object listener = Proxy.newProxyInstance(listenerType.getClassLoader(), new Class<?>[] { listenerType },
+                        (self, method, args) ->
+                        {
+                            if (method.getDeclaringClass() == Object.class)
+                                return switch (method.getName())
+                                {
+                                    case "hashCode" -> System.identityHashCode(self); //$NON-NLS-1$
+                                    case "equals" -> self == args[0]; //$NON-NLS-1$
+                                    default -> "NaparnikAccessStateListener"; //$NON-NLS-1$
+                                };
+                            Object currentChat = chatRef.get();
+                            Object currentEngine = engineRef.get();
+                            if (currentChat != null && currentEngine != null)
+                                updateChatPage(currentChat, currentEngine);
+                            return null;
+                        });
+                    Object worker = Global.invoke(engine, "getLoadWorker"); //$NON-NLS-1$
+                    Object property = Global.invoke(worker, "stateProperty"); //$NON-NLS-1$
+                    Global.invokeVoid(property, "addListener", listener); //$NON-NLS-1$
+                }
+                catch (Exception failure)
+                {
+                    chatListeners.remove(engine);
+                }
+            updateChatPage(chat, engine);
+        }
+
+        private static synchronized void updateChatPage(Object chat, Object engine)
+        {
+            String reason = running ? chatFailure(chat) : null;
+            if (reason == null)
+                return;
+            String text = reason.replace("\\", "\\\\").replace("'", "\\'").replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$
+            String script = "(function(text){var b=document.querySelector('body[data-comfort-naparnik-loading]');" //$NON-NLS-1$
+                + "if(!b)return false;var m=b.querySelector('.message');if(!m)return false;" //$NON-NLS-1$
+                + "m.textContent=text;m.style.whiteSpace='pre-wrap';var s=b.querySelector('.spinner');" //$NON-NLS-1$
+                + "if(s)s.style.display='none';if(!b.querySelector('#comfort-naparnik-check')){"
+                + "var p=document.createElement('p'),a=document.createElement('a');a.id='comfort-naparnik-check';"
+                + "a.href='#';a.textContent='Проверить ключ доступа';p.appendChild(a);b.appendChild(p);}"
+                + "return true;})('" + text + "')"; //$NON-NLS-1$ //$NON-NLS-2$
+            Object applied = Global.invoke(engine, "executeScript", script); //$NON-NLS-1$
+            if (Boolean.TRUE.equals(applied))
+                bindChatCheckLink(chat, engine);
+        }
+
+        /** Обработчик DOM действует только на нашей ссылке страницы недоступности. */
+        private static void bindChatCheckLink(Object chat, Object engine)
+        {
+            Object document = Global.invoke(engine, "getDocument"); //$NON-NLS-1$
+            if (!(document instanceof org.w3c.dom.Document dom))
+                return;
+            Object link = dom.getElementById("comfort-naparnik-check"); //$NON-NLS-1$
+            if (!(link instanceof org.w3c.dom.events.EventTarget target)
+                || chatCheckLinks.putIfAbsent(link, Boolean.TRUE) != null)
+                return;
+            Object service = Global.getField(chat, "pluginStatusService"); //$NON-NLS-1$
+            target.addEventListener("click", event ->
+            {
+                event.preventDefault();
+                Display display = Display.getDefault();
+                if (service != null && display != null && !display.isDisposed())
+                    display.asyncExec(() ->
+                    {
+                        if (running)
+                            checkAccess(service);
+                    });
+            }, false);
+        }
+
+        /** Один показ за период недоступности; успешное включение разрешает новый показ. */
+        private static synchronized void serviceState(Object[] event)
+        {
+            try
+            {
+                if (event == null || event.length != 3)
+                    return;
+                Object service = event[0];
+                boolean enabled = Boolean.TRUE.equals(event[1]);
+                String policy = readPolicyUncached();
+                if (enabled)
+                {
+                    stoppedServices.remove(service);
+                    return;
+                }
+                Object settings = Global.getField(service, "settings");
+                if (!running || "off".equalsIgnoreCase(policy)
+                    || Boolean.FALSE.equals(Global.invoke(settings, "isEnabled")))
+                {
+                    stoppedServices.remove(service);
+                    return;
+                }
+                if (stoppedServices.containsKey(service))
+                    return;
+                Object episode = new Object();
+                stoppedServices.put(service, episode);
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> showServiceNotice(display, service, episode, event[2]));
+            }
+            catch (RuntimeException failure)
+            {
+            }
+        }
+
+        private static synchronized void showServiceNotice(Display display, Object service, Object episode, Object failure)
+        {
+            if (!running || display.isDisposed() || stoppedServices.get(service) != episode)
+                return;
+            if (!PlatformUI.isWorkbenchRunning()
+                || PlatformUI.getWorkbench().getWorkbenchWindows().length == 0)
+            {
+                display.timerExec(500, () -> showServiceNotice(display, service, episode, failure));
+                return;
+            }
+            Object settings = Global.getField(service, "settings");
+            if (PlatformUI.getWorkbench().isClosing() || "off".equalsIgnoreCase(readPolicyUncached())
+                || Boolean.FALSE.equals(Global.invoke(settings, "isEnabled"))
+                || Boolean.TRUE.equals(Global.invoke(service, "isPluginEnabled")))
+            {
+                stoppedServices.remove(service);
+                return;
+            }
+            Object token = Global.invoke(settings, "getClientToken");
+            String reason = token instanceof String key ? failureText(key) : null;
+            if (failure instanceof Throwable problem)
+            {
+                while ((problem instanceof java.util.concurrent.CompletionException
+                    || problem instanceof java.util.concurrent.ExecutionException) && problem.getCause() != null)
+                    problem = problem.getCause();
+                reason = problem instanceof java.net.http.HttpTimeoutException
+                    ? "Сервер не ответил вовремя. Проверьте соединение и повторите проверку ключа доступа."
+                    : "Не удалось проверить доступ к серверу: " + problem.getClass().getSimpleName()
+                        + ". Проверьте соединение и настройки Напарника.";
+            }
+            if (reason == null)
+                reason = token instanceof String key && key.isBlank()
+                    ? "Не задан ключ доступа. Укажите его в параметрах 1С:Напарника."
+                    : "Служба отключилась. Причина не передана службой; выполните проверку ключа доступа в параметрах 1С:Напарника.";
+            ToastNotification.show("Служба 1С:Напарника недоступна", reason, 10_000,
+                () -> checkAccess(service), "Проверить ключ доступа");
+        }
+
+        static void installStatusMenu(Display display)
+        {
+            if (display == null || display.isDisposed() || menuDisplay == display)
+                return;
+            menuDisplay = display;
+            display.addFilter(SWT.Show, STATUS_MENU_LISTENER);
+        }
+
+        private static void statusMenuShown(Event event)
+        {
+            if (!running || !(event.widget instanceof Menu menu) || !Boolean.TRUE.equals(menu.getData(STATUS_MENU)))
+                return;
+            if (Boolean.TRUE.equals(menu.getData(STATUS_CHECK)))
+                return;
+            MenuItem check = new MenuItem(menu, SWT.PUSH, 0);
+            check.setText("Проверить");
+            ComfortSubmenuHelper.setMenuItemTooltip(check,
+                "Проверить ключ доступа 1С:Напарника без открытия параметров");
+            check.addListener(SWT.Selection, selected ->
+            {
+                try
+                {
+                    Bundle common = Platform.getBundle("com.e1c.edt.ai.ui.common"); //$NON-NLS-1$
+                    Class<?> activator = common.loadClass("com.e1c.edt.ai.ui.BaseActivator"); //$NON-NLS-1$
+                    Class<?> serviceType = common.loadClass("com.e1c.edt.ai.IPluginStatusService"); //$NON-NLS-1$
+                    Object service = activator.getMethod("getInstance", Class.class).invoke(null, serviceType); //$NON-NLS-1$
+                    checkAccess(service);
+                }
+                catch (Exception failure)
+                {
+                    ToastNotification.show("Проверка ключа 1С:Напарника", "Не удалось запустить проверку ключа доступа.", 10_000);
+                }
+            });
+            menu.setData(STATUS_CHECK, Boolean.TRUE);
+        }
+
+        /** Те же SETTINGS_CHANGED и ITokenCheck, что у кнопки «Проверить», без окна параметров. */
+        private static void checkAccess(Object service)
+        {
+            if (!PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing()
+                || !checkingAccess.compareAndSet(false, true))
+                return;
+            Display display = Display.getDefault();
+            Object settings = Global.getField(service, "settings"); //$NON-NLS-1$
+            Object checker = Global.getField(service, "tokenCheck"); //$NON-NLS-1$
+            Object token = Global.invoke(settings, "getClientToken"); //$NON-NLS-1$
+            try
+            {
+                if (!(token instanceof String key) || key.isBlank() || checker == null)
+                    throw new IllegalStateException("Не задан ключ доступа или недоступна служба проверки.");
+                Bundle common = Platform.getBundle("com.e1c.edt.ai.ui.common"); //$NON-NLS-1$
+                Class<?> activator = common.loadClass("com.e1c.edt.ai.ui.BaseActivator"); //$NON-NLS-1$
+                Class<?> stateType = common.loadClass("com.e1c.edt.ai.IStateService"); //$NON-NLS-1$
+                Class<?> stateEnum = common.loadClass("com.e1c.edt.ai.ServiceState"); //$NON-NLS-1$
+                Object stateService = activator.getMethod("getInstance", Class.class).invoke(null, stateType); //$NON-NLS-1$
+                stateType.getMethod("setState", stateEnum).invoke(stateService,
+                    stateEnum.getField("SETTINGS_CHANGED").get(null)); //$NON-NLS-1$ //$NON-NLS-2$
+                CompletableFuture.supplyAsync(() ->
+                {
+                    Object result = Global.invoke(checker, "checkTokenAsync", key); //$NON-NLS-1$
+                    if (!(result instanceof CompletableFuture<?> future))
+                        throw new IllegalStateException("Служба проверки не вернула результат.");
+                    return future;
+                }).thenCompose(future -> future).whenComplete((valid, failure) ->
+                {
+                    checkingAccess.set(false);
+                    if (!display.isDisposed())
+                        display.asyncExec(() ->
+                        {
+                            if (!running || !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing()
+                                || !key.equals(Global.invoke(settings, "getClientToken"))) //$NON-NLS-1$
+                                return;
+                            String reason = Boolean.TRUE.equals(valid) ? "Ключ доступа в порядке." : failureText(key);
+                            if (failure != null)
+                            {
+                                Throwable cause = failure;
+                                while (cause.getCause() != null && (cause instanceof java.util.concurrent.CompletionException
+                                    || cause instanceof java.util.concurrent.ExecutionException))
+                                    cause = cause.getCause();
+                                reason = "Не удалось проверить ключ доступа: " + cause.getClass().getSimpleName() + ".";
+                            }
+                            ToastNotification.show("Проверка ключа 1С:Напарника",
+                                reason != null ? reason : "Ключ доступа не принят сервером.", 10_000);
+                        });
+                });
+            }
+            catch (Exception failure)
+            {
+                checkingAccess.set(false);
+                ToastNotification.show("Проверка ключа 1С:Напарника", "Не удалось запустить проверку ключа доступа.", 10_000);
+            }
+        }
     }
 }

@@ -3,13 +3,18 @@ package tormozit;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.resource.ImageDescriptor;
@@ -70,7 +75,9 @@ public final class NaparnikAssistRow
     private static final String THINKING = "..."; //$NON-NLS-1$
     /** Ответ пустой, с ошибкой или не дал ни одной пригодной строки. */
     private static final String NO_SUGGESTION = "ИИ не знает"; //$NON-NLS-1$
-    private static final String ERROR = "<ошибка>"; //$NON-NLS-1$
+    private static final String ERROR = "<Ошибка>"; //$NON-NLS-1$
+    private static final Pattern HTTP_ERROR_CODE = Pattern.compile(
+        "\\bHTTP(?:\\s+response[^\\r\\n]*?status code is)?\\s+([1-5][0-9]{2})\\b", Pattern.CASE_INSENSITIVE); //$NON-NLS-1$
     /** Начало текста боковой подсказки, который не код: показывается без раскраски языка. */
     private static final char PLAIN_INFO_MARK = '\u0001';
 
@@ -78,6 +85,8 @@ public final class NaparnikAssistRow
     private static final int MAX_WORDS = 600;
     /** Пауза перед запросом: на серию нажатий — один запрос. */
     private static final int REQUEST_DELAY_MS = 300;
+    /** Максимальное ожидание первой пригодной строки, включая подготовку запроса. */
+    private static final int MAX_WAIT_MS = 5_000;
     private static final int WORDS_WAIT_STEP_MS = 100;
     private static final int WORDS_WAIT_ATTEMPTS = 10;
 
@@ -86,6 +95,10 @@ public final class NaparnikAssistRow
     private static final StackWalker STACK_WALKER = StackWalker.getInstance();
 
     private static final Map<SourceViewer, NaparnikAssistRow> INSTANCES = new WeakHashMap<>();
+    private static final String NO_HTTP_RETRY = "tormozit.naparnik.interactiveResponse"; //$NON-NLS-1$
+    /** Метки остаются до освобождения источника, включая поздний ответ отменённого запроса. */
+    private static final Map<Object, Boolean> INTERACTIVE_REQUESTS =
+        Collections.synchronizedMap(new WeakHashMap<>());
     /** Сеанс автодополнения, чей список сейчас открыт. */
     private static volatile NaparnikAssistRow active;
     /** Текст ошибки последнего запроса любого редактора; {@code null} — последний запрос удался. */
@@ -121,6 +134,9 @@ public final class NaparnikAssistRow
     private boolean completed;
     /** Текст ошибки последнего запроса; {@code null} — ошибки не было. */
     private String error;
+    /** Полученная ошибка имеет приоритет над таймером, даже если UI ещё не применил её. */
+    private volatile RequestFailure queuedFailure;
+    private static record RequestFailure(int generation, String text) { }
     private volatile int generation;
     private Object cancelSource;
     /** Непринятый остаток предложения целыми строками, переводы строк {@code \n}. */
@@ -136,9 +152,9 @@ public final class NaparnikAssistRow
 
     public static void install(SourceViewer viewer, ContentAssistant assistant)
     {
-        Global.tempLog("naparnik-row", "install viewer=" + viewer + " assistant=" + assistant); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer == null || assistant == null)
             return;
+        System.getProperties().put(NO_HTTP_RETRY, (Predicate<Object[]>) NaparnikAssistRow::isFinalHttpResponse);
         NaparnikAssistRow existing = INSTANCES.get(viewer);
         if (existing != null)
         {
@@ -157,6 +173,22 @@ public final class NaparnikAssistRow
         NaparnikAssistRow row = INSTANCES.remove(viewer);
         if (row != null)
             row.dispose();
+    }
+
+    static void stopRequestPolicy()
+    {
+        System.getProperties().remove(NO_HTTP_RETRY);
+        INTERACTIVE_REQUESTS.clear();
+    }
+
+    /** Ответ нашего запроса уже получен: не скрывать 4xx за штатными повторами 5/10/20 с. */
+    private static boolean isFinalHttpResponse(Object[] event)
+    {
+        boolean interactive = event != null && event.length == 3
+            && INTERACTIVE_REQUESTS.containsKey(event[0]);
+        int status = event != null && event.length == 3 && event[1] instanceof HttpResponse<?> response
+            ? response.statusCode() : -1;
+        return interactive && status >= 400 && status < 500;
     }
 
     private void dispose()
@@ -254,6 +286,15 @@ public final class NaparnikAssistRow
         return row != null && row.rowNavigated ? 0 : 1;
     }
 
+    /** Выбор наведением — такое же явное действие пользователя, как переход клавишами. */
+    static void onMouseSelection(ContentAssistant assistant, int index)
+    {
+        NaparnikAssistRow row = active;
+        boolean sameSession = row != null && row.assistant == assistant;
+        if (sameSession)
+            row.rowNavigated = index == 0;
+    }
+
     // ---- сеанс автодополнения ------------------------------------------------
 
     private void startSession(boolean byCommand)
@@ -261,16 +302,11 @@ public final class NaparnikAssistRow
         viewModel = null;
         openedByCommand = byCommand;
         boolean enabled = ComfortSettings.isNaparnikAssistRowEnabled();
-        Global.tempLog("naparnik-row", "start byCommand=" + byCommand + " enabled=" + enabled //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " bundles=" + naparnikBundleStates()); //$NON-NLS-1$
         if (!enabled)
             return;
         StyledText widget = viewer.getTextWidget();
         Object vm = NaparnikManualModeHook.findViewModel(widget);
         String policy = NaparnikManualModeHook.completionPolicy();
-        Global.tempLog("naparnik-row", "start model=" + (vm == null ? "null" : vm.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " policy=" + policy + " widgetDisposed=" + (widget == null || widget.isDisposed()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " lastFailure=" + lastFailure); //$NON-NLS-1$
         if (vm == null)
             return;
         // Политика «Выключен» — завершение кода у Напарника отключено, запросов не шлём. Строки
@@ -290,25 +326,6 @@ public final class NaparnikAssistRow
         selectRowOnOpen = false;
         viewer.prependVerifyKeyListener(keyListener);
         recompute(true);
-    }
-
-    /** Временная диагностика загрузки: только состояние бандлов, без их запуска. */
-    private static String naparnikBundleStates()
-    {
-        StringBuilder states = new StringBuilder();
-        for (String id : new String[] { "com.e1c.edt.ai", NAPARNIK_UI_BUNDLE, //$NON-NLS-1$
-            "com.e1c.edt.ai.ui.common" }) //$NON-NLS-1$
-        {
-            Bundle bundle = Platform.getBundle(id);
-            if (states.length() > 0)
-                states.append(';');
-            states.append(id).append('=');
-            if (bundle == null)
-                states.append("missing"); //$NON-NLS-1$
-            else
-                states.append(bundle.getVersion()).append("/state:").append(bundle.getState()); //$NON-NLS-1$
-        }
-        return states.toString();
     }
 
     private void endSession()
@@ -339,8 +356,6 @@ public final class NaparnikAssistRow
             }
             catch (RuntimeException failure)
             {
-                Global.tempLog("naparnik-row", "start failed=" + failure + " cause=" + failure.getCause() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " stack=" + java.util.Arrays.toString(failure.getStackTrace())); //$NON-NLS-1$
                 // Строки в этом сеансе не будет; сам список автодополнения ломать нельзя.
             }
         }
@@ -462,7 +477,9 @@ public final class NaparnikAssistRow
             }
         }
         boolean fits = typed != null;
-        if (fits && full != null)
+        // Ошибка не является предложением с пустым текстом: сравнение с набранным
+        // префиксом стирало её новым запросом ещё до показа строки.
+        if (fits && full != null && error == null)
         {
             int common = Math.min(typed.length(), full.length());
             fits = full.regionMatches(true, 0, typed, 0, common);
@@ -492,7 +509,7 @@ public final class NaparnikAssistRow
     {
         boolean thinking = value.isBlank() && !completed;
         boolean failed = value.isBlank() && completed && error != null;
-        String display = thinking ? THINKING : failed ? ERROR
+        String display = thinking ? THINKING : failed ? failureLabel(error)
             : value.isBlank() ? NO_SUGGESTION : firstLineLabel(value);
         String info = failed ? PLAIN_INFO_MARK + error : value.isBlank() ? null : stripLeadingBreaks(value);
         boolean changed = !display.equals(proposal.display)
@@ -502,6 +519,13 @@ public final class NaparnikAssistRow
         proposal.info = info;
         if (changed && sessionOpen)
             ContentAssistPopupSync.refreshProposalRow(assistant, proposal);
+    }
+
+    /** В строке только признак ошибки и HTTP-код; подробности — в боковой подсказке. */
+    private static String failureLabel(String text)
+    {
+        Matcher code = HTTP_ERROR_CODE.matcher(text);
+        return code.find() ? "<Ошибка " + code.group(1) + ">" : ERROR; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String firstLineLabel(String text)
@@ -542,6 +566,7 @@ public final class NaparnikAssistRow
     private void cancelRequest()
     {
         generation++;
+        queuedFailure = null;
         Object source = cancelSource;
         cancelSource = null;
         if (source != null)
@@ -577,8 +602,27 @@ public final class NaparnikAssistRow
         Display display = display();
         if (display == null)
             return;
+        long started = System.nanoTime();
+        display.timerExec(MAX_WAIT_MS, () -> onRequestDeadline(gen, started));
         display.timerExec(immediate ? WORDS_WAIT_STEP_MS : REQUEST_DELAY_MS,
             () -> launchRequest(gen, 0));
+    }
+
+    /** UI-поток: ограничиваем ожидание и отсекаем поздние ответы отменённого запроса. */
+    private void onRequestDeadline(int gen, long started)
+    {
+        if (gen != generation || completed || !sessionOpen || !remaining.isBlank())
+            return;
+        // cancelRequest сначала меняет generation: даже синхронный onError при cancel()
+        // относится к старому запросу и не заменит сообщение о пятисекундном ожидании.
+        RequestFailure received = queuedFailure;
+        cancelRequest();
+        full = ""; //$NON-NLS-1$
+        completed = true;
+        error = received != null && received.generation() == gen ? received.text()
+            : "Нет ответа за 5 секунд. Откройте список снова, чтобы повторить запрос."; //$NON-NLS-1$
+        lastFailure = error;
+        setRemaining(""); //$NON-NLS-1$
     }
 
     private void launchRequest(int gen, int attempt)
@@ -610,6 +654,7 @@ public final class NaparnikAssistRow
             return;
         }
         cancelSource = source;
+        INTERACTIVE_REQUESTS.put(source, Boolean.TRUE);
         Thread thread = new Thread(() -> runRequest(gen, vm, source, requestWords, display),
             "Комфорт: предложение Напарника"); //$NON-NLS-1$
         thread.setDaemon(true);
@@ -872,6 +917,8 @@ public final class NaparnikAssistRow
 
     private void finishRequest(int gen, Display display, String errorText)
     {
+        if (errorText != null && gen == generation)
+            queuedFailure = new RequestFailure(gen, errorText);
         if (display.isDisposed())
             return;
         display.asyncExec(() ->
@@ -1264,13 +1311,17 @@ public final class NaparnikAssistRow
         Global.tempLog("naparnik-prefix", "correct prefix=" + prefix + " firstWord=" + firstWord); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         for (Word word : completionWords)
         {
-            int wordEnd = 0;
+            // В литерале EDT включает открывающую кавычку в текст вставки.
+            int wordStart = word.text.startsWith("\"") ? 1 : 0; //$NON-NLS-1$
+            int wordEnd = wordStart;
             while (wordEnd < word.text.length() && isWordChar(word.text.charAt(wordEnd)))
                 wordEnd++;
-            if (wordEnd == firstWord.length() && word.text.regionMatches(true, 0, firstWord, 0, wordEnd))
+            int wordLength = wordEnd - wordStart;
+            if (wordLength == firstWord.length()
+                && word.text.regionMatches(true, wordStart, firstWord, 0, wordLength))
             {
                 Global.tempLog("naparnik-prefix", "correct matched display=" + word.display + " text=" + word.text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                return word.text.substring(0, prefix.length());
+                return word.text.substring(wordStart, wordStart + prefix.length());
             }
         }
         Global.tempLog("naparnik-prefix", "correct no matching word"); //$NON-NLS-1$ //$NON-NLS-2$

@@ -314,6 +314,7 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void stop(BundleContext context) throws Exception
     {
+        NaparnikManualModeHook.stopServiceRecovery();
         BslLiteralValues.stopTypeNameCache();
         FunctionReturnTypes.stopLocalContextInvalidation();
         CheckRecomputeNotifications.stop();

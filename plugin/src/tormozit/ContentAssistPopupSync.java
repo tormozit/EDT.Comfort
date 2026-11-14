@@ -1150,6 +1150,7 @@ if (processor != null && processor.isIrWordsResolvedForContext()
                 idx -> {
                     try
                     {
+                        NaparnikAssistRow.onMouseSelection(assistant, idx);
                         selectProposalAtIndex(popup, idx);
                     }
                     catch (Exception ignored) {}

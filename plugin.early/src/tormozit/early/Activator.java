@@ -5858,6 +5858,138 @@ public final class Activator
         private static final String VM_INTERNAL = "com/e1c/edt/ai/ui/CodeCompletionViewModel"; //$NON-NLS-1$
         private static final String CTX = "com.e1c.edt.ai.ui.CodeCompletionContext"; //$NON-NLS-1$
         private static final String PAINTER = "com.e1c.edt.ai.ui.HintPainter"; //$NON-NLS-1$
+        private static final String TOKEN_CHECK = "com.e1c.edt.ai.assistent.TokenCheck"; //$NON-NLS-1$
+        private static final String SESSION_CALL = "com.e1c.edt.ai.assistent.SessionCall"; //$NON-NLS-1$
+        private static final String INTERACTIVE_RESPONSE = "tormozit.naparnik.interactiveResponse"; //$NON-NLS-1$
+        private static final String TOKEN_RESPONSE = "tormozit.naparnik.tokenResponse"; //$NON-NLS-1$
+        private static final String TOKEN_NOTIFY = "tormozit.naparnik.tokenNotify"; //$NON-NLS-1$
+        private static final String TOKEN_PENDING = "tormozit.naparnik.tokenPending"; //$NON-NLS-1$
+        private static final String TOKEN_EDITOR = "com.e1c.edt.ai.ui.preferences.TokenFieldEditor"; //$NON-NLS-1$
+        private static final String CHAT = "com.e1c.edt.ai.ui.Chat"; //$NON-NLS-1$
+        private static final String TOKEN_MESSAGE = "tormozit.naparnik.tokenMessage"; //$NON-NLS-1$
+        private static final String CHAT_PAGE = "tormozit.naparnik.chatPage"; //$NON-NLS-1$
+        private static final String HTTP_LOG = "com.e1c.edt.ai.assistent.HttpLog"; //$NON-NLS-1$
+        private static final String ACCESS_RESPONSE = "tormozit.naparnik.accessResponse"; //$NON-NLS-1$
+        private static final String SERVICE = "com.e1c.edt.ai.ui.PluginStatusService"; //$NON-NLS-1$
+        private static final String SERVICE_EVENT = "tormozit.naparnik.serviceEvent"; //$NON-NLS-1$
+        private static final String SERVICE_NOTIFY = "tormozit.naparnik.serviceNotify"; //$NON-NLS-1$
+        private static final String SERVICE_PENDING = "tormozit.naparnik.servicePending"; //$NON-NLS-1$
+        private static final String STATUS_CONTROL = "com.e1c.edt.ai.ui.BaseStatusBarControl"; //$NON-NLS-1$
+        private static final String STATUS_MENU = "tormozit.naparnik.statusMenu"; //$NON-NLS-1$
+
+
+        NaparnikWeaving()
+        {
+            System.getProperties().put(TOKEN_RESPONSE, (Function<Object[], Object>) NaparnikWeaving::tokenResponse);
+            System.getProperties().put(SERVICE_EVENT, (Consumer<Object[]>) NaparnikWeaving::serviceEvent);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Object tokenResponse(Object[] event)
+        {
+            Object callback;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                callback = properties.get(TOKEN_NOTIFY);
+                if (!(callback instanceof Function<?, ?>))
+                {
+                    properties.put(TOKEN_PENDING, event);
+                    return event[2];
+                }
+            }
+            return ((Function<Object[], Object>) callback).apply(event);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static void serviceEvent(Object[] event)
+        {
+            Object callback;
+            var properties = System.getProperties();
+            synchronized (properties)
+            {
+                callback = properties.get(SERVICE_NOTIFY);
+                if (!(callback instanceof Consumer<?>))
+                {
+                    var events = (java.util.List<Object[]>) properties.computeIfAbsent(SERVICE_PENDING,
+                        key -> new java.util.ArrayList<Object[]>());
+                    events.add(event);
+                    return;
+                }
+            }
+            ((Consumer<Object[]>) callback).accept(event);
+        }
+
+        /** ai.ui.common 1.0.8: единая точка состояния и неудачная начальная проверка. */
+        private static byte[] transformServiceStatus(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            int[] touched = { 0 };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    boolean setter = "setEnabled".equals(name) && "(Z)V".equals(descriptor);
+                    boolean validation = "lambda$6".equals(name)
+                        && "(Ljava/time/Instant;IILjava/lang/Boolean;Ljava/lang/Throwable;)Ljava/lang/Object;".equals(descriptor);
+                    if (mv == null || (!setter && !validation))
+                        return mv;
+                    touched[0]++;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if ((setter && opcode == Opcodes.RETURN) || (validation && opcode == Opcodes.ARETURN))
+                            {
+                                Label done = new Label();
+                                if (validation)
+                                {
+                                    super.visitVarInsn(Opcodes.ALOAD, 5);
+                                    super.visitJumpInsn(Opcodes.IFNULL, done);
+                                }
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false);
+                                super.visitLdcInsn(SERVICE_EVENT);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Consumer");
+                                Label absent = new Label();
+                                super.visitJumpInsn(Opcodes.IFEQ, absent);
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+                                super.visitInsn(Opcodes.ICONST_3);
+                                super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_0);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, "com/e1c/edt/ai/ui/PluginStatusService", "enabled", "Z");
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitInsn(Opcodes.ICONST_2);
+                                if (validation) super.visitVarInsn(Opcodes.ALOAD, 5);
+                                else super.visitInsn(Opcodes.ACONST_NULL);
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                                super.visitJumpInsn(Opcodes.GOTO, done);
+                                super.visitLabel(absent);
+                                super.visitInsn(Opcodes.POP);
+                                super.visitLabel(done);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] == 2 ? writer.toByteArray() : null;
+        }
 
         private static final String CLIPBOARD_DESC = "Lcom/e1c/edt/ai/ui/IClipboard;"; //$NON-NLS-1$
         private static final String DOCUMENT_CHANGED_DESC = "(Lorg/eclipse/jface/text/DocumentEvent;)V"; //$NON-NLS-1$
@@ -5871,13 +6003,23 @@ public final class Activator
                 return;
             String name = woven.getClassName();
             String label = VM.equals(name) ? "ViewModel" : CTX.equals(name) ? "Context" //$NON-NLS-1$ //$NON-NLS-2$
-                : PAINTER.equals(name) ? "HintPainter" : null; //$NON-NLS-1$
+                : PAINTER.equals(name) ? "HintPainter" : TOKEN_CHECK.equals(name) ? "TokenCheck" //$NON-NLS-1$ //$NON-NLS-2$
+                : SESSION_CALL.equals(name) ? "SessionCall" : TOKEN_EDITOR.equals(name) ? "TokenEditor" //$NON-NLS-1$ //$NON-NLS-2$
+                : CHAT.equals(name) ? "Chat" : HTTP_LOG.equals(name) ? "HttpLog"
+                : SERVICE.equals(name) ? "ServiceStatus" : STATUS_CONTROL.equals(name) ? "StatusControl" : null; //$NON-NLS-1$ //$NON-NLS-2$
             if (label == null)
                 return;
             String result;
             try
             {
-                byte[] transformed = VM.equals(name) ? transformViewModel(woven.getBytes())
+                byte[] transformed = STATUS_CONTROL.equals(name) ? transformStatusMenu(woven.getBytes())
+                    : SERVICE.equals(name) ? transformServiceStatus(woven.getBytes())
+                    : HTTP_LOG.equals(name) ? transformAccessResponse(woven.getBytes())
+                    : TOKEN_EDITOR.equals(name) || CHAT.equals(name)
+                    ? transformAccessUi(woven.getBytes(), CHAT.equals(name))
+                    : SESSION_CALL.equals(name) ? transformInteractiveResponse(woven.getBytes())
+                    : TOKEN_CHECK.equals(name) ? transformTokenCheck(woven.getBytes())
+                    : VM.equals(name) ? transformViewModel(woven.getBytes())
                     : CTX.equals(name) ? transformPredicate(woven.getBytes(), "replace", REPLACE_DESC, PROP_REPLACE, 3) //$NON-NLS-1$
                     : transformPredicate(woven.getBytes(), "setHintAt", SET_HINT_DESC, PROP_HINT, 1); //$NON-NLS-1$
                 if (transformed != null)
@@ -5893,6 +6035,327 @@ public final class Activator
                 String previous = System.getProperty(STATUS);
                 System.setProperty(STATUS, (previous == null ? "" : previous + " ") + label + "=" + result); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
+        }
+
+        /** Отмечаем штатное контекстное меню индикатора, не меню выбора режима. */
+        private static byte[] transformStatusMenu(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"createControl".equals(name)
+                        || !"(Lorg/eclipse/swt/widgets/Composite;)Lorg/eclipse/swt/widgets/Control;".equals(descriptor))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean itf)
+                        {
+                            if (opcode == Opcodes.INVOKEVIRTUAL && "org/eclipse/swt/widgets/Canvas".equals(owner)
+                                && "setMenu".equals(name) && "(Lorg/eclipse/swt/widgets/Menu;)V".equals(descriptor))
+                            {
+                                super.visitInsn(Opcodes.DUP);
+                                super.visitLdcInsn(STATUS_MENU);
+                                super.visitInsn(Opcodes.ICONST_1);
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "org/eclipse/swt/widgets/Menu", "setData",
+                                    "(Ljava/lang/String;Ljava/lang/Object;)V", false);
+                                touched[0] = true;
+                            }
+                            super.visitMethodInsn(opcode, owner, name, descriptor, itf);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /**
+         * ai 1.0.8.v202609241142: только наш запрос из списка считает первый 4xx окончательным.
+         * Штатный обработчик сам журналирует ответ, обновляет состояние и завершает future.
+         */
+        private static byte[] transformInteractiveResponse(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            Integer[] maxRetries = { null };
+            reader.accept(new ClassVisitor(Opcodes.ASM9)
+            {
+                @Override
+                public FieldVisitor visitField(int access, String name, String descriptor, String signature, Object value)
+                {
+                    if ("MAX_RETRY_ATTEMPTS".equals(name) && "I".equals(descriptor) && value instanceof Integer i) //$NON-NLS-1$ //$NON-NLS-2$
+                        maxRetries[0] = i;
+                    return null;
+                }
+            }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            if (maxRetries[0] == null || maxRetries[0] < 0)
+                return null;
+            String expected = "(ILorg/eclipse/core/resources/IProject;Lcom/e1c/edt/ai/ICancellationToken;" //$NON-NLS-1$
+                + "Ljava/util/function/Function;Lcom/google/common/base/Stopwatch;Ljava/util/concurrent/CompletableFuture;" //$NON-NLS-1$
+                + "Ljava/net/http/HttpResponse;Ljava/lang/Throwable;)V"; //$NON-NLS-1$
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"lambda$6".equals(name) || !expected.equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            visitLdcInsn(INTERACTIVE_RESPONSE);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            Label skip = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, skip);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Predicate"); //$NON-NLS-1$
+                            visitInsn(Opcodes.ICONST_3);
+                            visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            visitInsn(Opcodes.ICONST_0);
+                            visitVarInsn(Opcodes.ALOAD, 3);
+                            visitInsn(Opcodes.AASTORE);
+                            visitInsn(Opcodes.DUP);
+                            visitInsn(Opcodes.ICONST_1);
+                            visitVarInsn(Opcodes.ALOAD, 7);
+                            visitInsn(Opcodes.AASTORE);
+                            visitInsn(Opcodes.DUP);
+                            visitInsn(Opcodes.ICONST_2);
+                            visitVarInsn(Opcodes.ILOAD, 1);
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            visitInsn(Opcodes.AASTORE);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Predicate", "test", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            Label end = new Label();
+                            visitJumpInsn(Opcodes.IFEQ, end);
+                            visitLdcInsn(maxRetries[0]);
+                            visitVarInsn(Opcodes.ISTORE, 1);
+                            visitJumpInsn(Opcodes.GOTO, end);
+                            visitLabel(skip);
+                            visitInsn(Opcodes.POP);
+                            visitLabel(end);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /**
+         * Сохраняем ответ вместе с проверяемым ключом до расчёта boolean и показа диалога.
+         * Возвращённая стадия сохраняет результат и исключение исходного HTTP future.
+         */
+        private static byte[] transformTokenCheck(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"checkTokenAsync".equals(name) //$NON-NLS-1$
+                        || !"(Ljava/lang/String;)Ljava/util/concurrent/CompletableFuture;".equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String method, String desc, boolean isInterface)
+                        {
+                            super.visitMethodInsn(opcode, owner, method, desc, isInterface);
+                            if (!"java/net/http/HttpClient".equals(owner) || !"sendAsync".equals(method)) //$NON-NLS-1$ //$NON-NLS-2$
+                                return;
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+                            visitLdcInsn(TOKEN_RESPONSE);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                            visitInsn(Opcodes.DUP);
+                            Label skip = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Function"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, skip);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+                            visitInsn(Opcodes.SWAP);
+                            visitInsn(Opcodes.ICONST_3);
+                            visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                            // Стек: callback, future, array -> callback, array.
+                            visitInsn(Opcodes.DUP_X1);
+                            visitInsn(Opcodes.SWAP);
+                            visitInsn(Opcodes.ICONST_2);
+                            visitInsn(Opcodes.SWAP);
+                            visitInsn(Opcodes.AASTORE);
+                            visitInsn(Opcodes.DUP);
+                            visitInsn(Opcodes.ICONST_0);
+                            visitVarInsn(Opcodes.ALOAD, 0);
+                            visitInsn(Opcodes.AASTORE);
+                            visitInsn(Opcodes.DUP);
+                            visitInsn(Opcodes.ICONST_1);
+                            visitVarInsn(Opcodes.ALOAD, 1);
+                            visitInsn(Opcodes.AASTORE);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/concurrent/CompletableFuture"); //$NON-NLS-1$
+                            Label end = new Label();
+                            visitJumpInsn(Opcodes.GOTO, end);
+                            visitLabel(skip);
+                            visitInsn(Opcodes.POP);
+                            visitLabel(end);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /** Тексты проверки ключа и штатной страницы загрузки; ui.common 1.0.8.v202609241142. */
+        private static byte[] transformAccessUi(byte[] bytes, boolean chat)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || (access & Opcodes.ACC_STATIC) != 0
+                        || chat && (!"createLoadingPage".equals(name) || !"()Ljava/lang/String;".equals(descriptor))) //$NON-NLS-1$ //$NON-NLS-2$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitFieldInsn(int opcode, String owner, String field, String desc)
+                        {
+                            super.visitFieldInsn(opcode, owner, field, desc);
+                            if (!chat && opcode == Opcodes.GETSTATIC
+                                && "com/e1c/edt/ai/ui/preferences/Messages".equals(owner) //$NON-NLS-1$
+                                && "TokenFieldEditor_TokenInvalid".equals(field) && "Ljava/lang/String;".equals(desc)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                wrapAccessText(this, TOKEN_MESSAGE);
+                                touched[0] = true;
+                            }
+                        }
+
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (chat && opcode == Opcodes.ARETURN)
+                            {
+                                visitLdcInsn("<body>"); //$NON-NLS-1$
+                                visitLdcInsn("<body data-comfort-naparnik-loading=\"true\">"); //$NON-NLS-1$
+                                visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "replace", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", false); //$NON-NLS-1$
+                                wrapAccessText(this, CHAT_PAGE);
+                                touched[0] = true;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /** Также видим отказ create_session при работе чата, без ручной проверки ключа. */
+        private static byte[] transformAccessResponse(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            boolean[] touched = { false };
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"response".equals(name) //$NON-NLS-1$
+                        || !"(Ljava/net/http/HttpResponse;Ljava/lang/String;Lcom/google/common/base/Stopwatch;ZZ)Ljava/net/http/HttpResponse;".equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            visitLdcInsn(ACCESS_RESPONSE);
+                            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            visitInsn(Opcodes.DUP);
+                            Label skip = new Label();
+                            visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Consumer"); //$NON-NLS-1$
+                            visitJumpInsn(Opcodes.IFEQ, skip);
+                            visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
+                            visitVarInsn(Opcodes.ALOAD, 1);
+                            visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            Label end = new Label();
+                            visitJumpInsn(Opcodes.GOTO, end);
+                            visitLabel(skip);
+                            visitInsn(Opcodes.POP);
+                            visitLabel(end);
+                            touched[0] = true;
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched[0] ? writer.toByteArray() : null;
+        }
+
+        /** Заменяет String на стеке через callback(this, исходный текст), без дополнительных локальных переменных. */
+        private static void wrapAccessText(MethodVisitor mv, String property)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitLdcInsn(property);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitInsn(Opcodes.DUP);
+            Label skip = new Label();
+            mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitJumpInsn(Opcodes.IFEQ, skip);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.ICONST_2);
+            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP_X1);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.AASTORE);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitInsn(Opcodes.AASTORE);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
+            Label end = new Label();
+            mv.visitJumpInsn(Opcodes.GOTO, end);
+            mv.visitLabel(skip);
+            mv.visitInsn(Opcodes.POP);
+            mv.visitLabel(end);
         }
 
         private static byte[] transformViewModel(byte[] bytes)
