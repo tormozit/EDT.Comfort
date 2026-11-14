@@ -106,6 +106,7 @@
     <startup class="tormozit.BslHandlerBlankLineHook"/>
     <startup class="tormozit.NaparnikManualModeHook"/>
     <startup class="tormozit.NaparnikPasteCompareHook"/>
+    <startup class="tormozit.NaparnikChatViewHook"/>
     <startup class="tormozit.BslParseTruncationMarkHook"/>
     <startup class="tormozit.GitBaselineFilterHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>    <startup class="tormozit.BslBracketJumpHistoryHook"/>

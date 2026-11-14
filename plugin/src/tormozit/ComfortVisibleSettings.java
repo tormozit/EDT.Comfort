@@ -63,6 +63,8 @@ final class ComfortVisibleSettings
             "Экономная генерация комментария к методу", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ContentAssistSettings.PREF_TIMEOUT, //$NON-NLS-1$
             "Автооткрытие: Задержка (мс)", Kind.TEXT), //$NON-NLS-1$
+        new Setting("1С:Напарник → Внешний вид", ComfortSettings.PREF_NAPARNIK_REPLY_NOTIFICATION,
+            "Уведомление об ответе", Kind.FLAG),
         new Setting("Редактор кода", ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED, //$NON-NLS-1$
             "Предложение Напарника наверху списка автодополнения", Kind.FLAG), //$NON-NLS-1$
         new Setting("Редактор кода", ComfortSettings.PREF_COLLAPSE_ASSIST_PARAMS, //$NON-NLS-1$

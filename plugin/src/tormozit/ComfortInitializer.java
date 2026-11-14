@@ -67,6 +67,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         store.setDefault(
+            ComfortSettings.PREF_NAPARNIK_REPLY_NOTIFICATION,
+            ComfortSettings.DEFAULT_NAPARNIK_REPLY_NOTIFICATION);
+        store.setDefault(
             ComfortSettings.PREF_NAPARNIK_ASSIST_ROW_ENABLED,
             ComfortSettings.DEFAULT_NAPARNIK_ASSIST_ROW_ENABLED);
         store.setDefault(

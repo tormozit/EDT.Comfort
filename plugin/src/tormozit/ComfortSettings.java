@@ -341,6 +341,10 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    /** Уведомлять о завершении ответа в чате без фокуса ввода. */
+    public static final String PREF_NAPARNIK_REPLY_NOTIFICATION = "comfort.naparnik.replyNotification"; //$NON-NLS-1$
+    public static final boolean DEFAULT_NAPARNIK_REPLY_NOTIFICATION = true;
+
     // ---- Naparnik row in content assist ----
 
     /** Ключ: строка с предложением 1С:Напарника наверху списка автодополнения. */
