@@ -3894,6 +3894,15 @@ public final class BslStructureInsertCommentTypes
         return current == null ? List.of() : current.expression(object, environments, null);
     }
 
+    /** Тип документированного поля — тот же ленивый переход по ссылке, что у выражения после точки. */
+    static List<TypeItem> interactivePropertyTypes(Property property, EObject context, Environments environments)
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        if (current == null || current.nativeRead != 0 || !BslDocCommentComputedTypes.isExtendedTypesEnabled(context))
+            return new ArrayList<>(property.getTypes());
+        return current.propertyTypes(property, context, environments == null ? Environments.ALL : environments);
+    }
+
     /** Члены вычисленного получателя без чтения/сброса закэшированных FeatureEntries обращения. */
     static List<EObject> interactiveDocumentationMembers(DynamicFeatureAccess access)
     {
@@ -3956,6 +3965,8 @@ public final class BslStructureInsertCommentTypes
         private final java.util.function.BooleanSupplier canceled;
         private final java.util.Map<ExpressionKey, List<TypeItem>> expressions = new java.util.HashMap<>();
         private final java.util.Map<VariableKey, List<TypeItem>> variables = new java.util.HashMap<>();
+        private final java.util.Map<ExpressionKey, List<TypeItem>> properties = new java.util.HashMap<>();
+        private final Set<ExpressionKey> activeProperties = new HashSet<>();
         private final Set<ExpressionKey> activeExpressions = new HashSet<>();
         private final Set<VariableKey> activeVariables = new HashSet<>();
         private final Set<Method> activeMethods = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -4027,7 +4038,7 @@ public final class BslStructureInsertCommentTypes
                 else if (object instanceof IndexAccess index)
                     inferred = elements(expression(index.getSource(), environments, null), object);
                 else if (object instanceof DynamicFeatureAccess access)
-                    inferred = members(expression(access.getSource(), environments, null), access.getName(), object, false);
+                    inferred = members(expression(access.getSource(), environments, null), access.getName(), object, false, environments);
                 else if (object instanceof Invocation call)
                     inferred = invocation(call, environments);
                 else if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
@@ -4259,7 +4270,7 @@ public final class BslStructureInsertCommentTypes
                     add(result, types);
                 }
             if (result.isEmpty() && call.getMethodAccess() instanceof DynamicFeatureAccess access)
-                add(result, members(expression(access.getSource(), environments, null), access.getName(), call, true));
+                add(result, members(expression(access.getSource(), environments, null), access.getName(), call, true, environments));
             return result;
         }
 
@@ -4272,7 +4283,9 @@ public final class BslStructureInsertCommentTypes
                 List<TypeItem> result = new ArrayList<>();
                 for (Expression expression : plans.computeIfAbsent(function, Plan::new).returns)
                     add(result, expression(expression, environments, null));
-                return result;
+                // Тело дополняет готовое документированное описание, в том числе
+                // рекурсивную схему с пока не раскрытыми ссылками на поля.
+                return merge(nativeTypes(function, environments, null), result);
             }
             finally { activeMethods.remove(function); }
         }
@@ -4346,7 +4359,8 @@ public final class BslStructureInsertCommentTypes
             return result;
         }
 
-        private List<TypeItem> members(List<TypeItem> owners, String name, EObject context, boolean methods)
+        private List<TypeItem> members(List<TypeItem> owners, String name, EObject context, boolean methods,
+            Environments environments)
         {
             List<TypeItem> result = new ArrayList<>();
             for (EObject member : memberObjects(owners, name, context, methods))
@@ -4354,9 +4368,40 @@ public final class BslStructureInsertCommentTypes
                 if (member instanceof com._1c.g5.v8.dt.mcore.Method method)
                     add(result, method.getRetValType());
                 else if (member instanceof Property property)
-                    add(result, property.getTypes());
+                    add(result, propertyTypes(property, context, environments));
             }
             return result;
+        }
+
+        private List<TypeItem> propertyTypes(Property property, EObject context, Environments environments)
+        {
+            check();
+            ExpressionKey key = new ExpressionKey(new Identity(property), frame, environments);
+            List<TypeItem> cached = properties.get(key);
+            if (cached != null)
+                return cached;
+            List<TypeItem> result = new ArrayList<>(property.getTypes());
+            if (!activeProperties.add(key))
+                return result;
+            try
+            {
+                // Раскрываем только запрошенное поле. Вложенные поля остаются
+                // ссылками, поэтому самоссылка в описании не разворачивает схему.
+                for (PropertySeeLink link : propertySeeLinks(property, context))
+                {
+                    check();
+                    EObject target = ParamHintHtmlModifier.ParameterSeeLinks.resolveTarget(link.link(), link.method());
+                    if (target != null && !target.eIsProxy() && ready(target))
+                        add(result, expression(target, environments, null));
+                }
+                List<TypeItem> computed = List.copyOf(result);
+                properties.put(key, computed);
+                return computed;
+            }
+            finally
+            {
+                activeProperties.remove(key);
+            }
         }
 
         private static void add(List<TypeItem> result, List<TypeItem> types)

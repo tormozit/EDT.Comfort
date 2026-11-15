@@ -285,7 +285,8 @@ final class BslExpressionDetails
                 ? BslStructureInsertCommentTypes.interactiveExpressionTypes(object, environments)
                 : object instanceof Variable variable
                 ? TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments)
-                : property != null ? new ArrayList<>(property.getTypes())
+                : property != null ? BslStructureInsertCommentTypes.interactivePropertyTypes(property,
+                    resource.getContents().get(0), environments)
                     : object instanceof Expression
                         ? resource.getResourceServiceProvider().get(TypesComputer.class).computeTypes(object, environments)
                         : List.of();
