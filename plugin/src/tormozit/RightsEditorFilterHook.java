@@ -77,6 +77,7 @@ import org.eclipse.ui.forms.editor.IFormPage;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.rights.model.Right;
 
 /**
  * Иерархический фильтр ({@link SmartMatcher#matchesTree}) с раскраской вхождений
@@ -1103,6 +1104,34 @@ public final class RightsEditorFilterHook implements IStartup
         }
         if (isAllRolesEditor(editor))
             return Global.getField(editor, "objectsSection"); //$NON-NLS-1$
+        return null;
+    }
+
+    /**
+     * Право текущей колонки списка объектов страницы «Права» или окна «Все роли».
+     * Колонки «Объект», «Роль» и ограничения доступа правами не являются.
+     *
+     * @return право текущей колонки или {@code null}, если колонка не является правом
+     *         либо улучшения списков выключены (текущая колонка не запоминается)
+     */
+    static Right activeColumnRight(Object section)
+    {
+        if (!(Global.getField(section, "viewer") instanceof TreeViewer viewer)) //$NON-NLS-1$
+            return null;
+        FormTreeInteraction interaction = FormTreeInteraction.of(viewer.getTree());
+        if (interaction == null)
+            return null;
+        int column = interaction.activeColumn();
+        Object right = Global.getField(section, "columnRight") instanceof Map<?, ?> columnRight //$NON-NLS-1$
+            ? columnRight.get(Integer.valueOf(column))
+            : null;
+        if (right instanceof Right value)
+        {
+            Global.tempLog("rights-activate", "activeColumnRight: column=" + column //$NON-NLS-1$ //$NON-NLS-2$
+                + ", right=" + value.getName()); //$NON-NLS-1$
+            return value;
+        }
+        Global.tempLog("rights-activate", "activeColumnRight: column=" + column + " is not a right"); //$NON-NLS-1$ //$NON-NLS-2$
         return null;
     }
 

@@ -20,12 +20,16 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
@@ -662,6 +666,7 @@ public class Activator extends AbstractUIPlugin
         private static final String DEPENDENCIES = "tormozit.rightsEditDialog.dependencies";
         private static final String SORT_KEY = "tormozit.rightsEditDialog.sortKey";
         private static final String REFRESH = "tormozit.rightsEditDialog.refresh";
+        private static final String ACTIVATE = "tormozit.rightsEditDialog.activate";
         private static final String OBJECTS_SECTION = "com._1c.g5.v8.dt.rights.ui.sections.ObjectsSection";
         private static final String RIGHTS_SORTER =
             "com._1c.g5.v8.dt.internal.rights.cleanup.RightCollectionRuntimeOrderSorterDelegate";
@@ -682,6 +687,8 @@ public class Activator extends AbstractUIPlugin
                 (BiFunction<Object, Object, Object>)RightsEditDialogHook::dependencyDirection);
             System.getProperties().put(SORT_KEY, (BiFunction<Object, Object, Object>)RightsEditDialogHook::sortKey);
             System.getProperties().put(REFRESH, (BiFunction<Object, Object, Object>)RightsEditDialogHook::refreshObjects);
+            System.getProperties().put(ACTIVATE,
+                (BiFunction<Object, Object, Object>)RightsEditDialogHook::activateRight);
             RightsEditDialogHook hook = new RightsEditDialogHook();
             context.registerService(WeavingHook.class, hook, null);
             List<String> loaded = new ArrayList<>();
@@ -715,6 +722,8 @@ public class Activator extends AbstractUIPlugin
             System.getProperties().put(SORT_KEY, (BiFunction<Object, Object, Object>)(key, object) ->
                 key == null ? Integer.valueOf(Integer.MAX_VALUE) : key);
             System.getProperties().put(REFRESH, (BiFunction<Object, Object, Object>)(items, section) -> Boolean.FALSE);
+            System.getProperties().put(ACTIVATE,
+                (BiFunction<Object, Object, Object>)(dialog, argument) -> Boolean.FALSE);
             REMOVAL_MODES.clear();
         }
 
@@ -1090,6 +1099,104 @@ public class Activator extends AbstractUIPlugin
             return Boolean.TRUE;
         }
 
+        /**
+         * Право текущей колонки таблицы прав редактора выделяется в списке «Права» при
+         * открытии диалога, а в окне «Добавить права на объект» — при пометке объектов.
+         *
+         * <p>Колбэк-{@code BiFunction}: первым аргументом идут данные, вторым —
+         * сам диалог (как и у остальных колбэков этого хука).
+         *
+         * @param argument не используется
+         * @param dialog диалог {@code RightsEditDialog}
+         */
+        private static Object activateRight(Object argument, Object dialog)
+        {
+            try
+            {
+                Object controller = Global.getField(dialog, "controller"); //$NON-NLS-1$
+                Object section = Global.getField(controller, "objectsSection"); //$NON-NLS-1$
+                Right right = RightsEditorFilterHook.activeColumnRight(section);
+                Object panel = Global.getField(dialog, "rightsPanel"); //$NON-NLS-1$
+                if (right == null
+                    || !(Global.getField(panel, "viewer") instanceof CheckboxTreeViewer viewer)) //$NON-NLS-1$
+                    return Boolean.FALSE;
+                scheduleSelectRight(viewer, right);
+                return Boolean.TRUE;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                Global.logError("RightsEditDialog", "activateRight", failure);
+                return Boolean.FALSE;
+            }
+        }
+
+        /**
+         * Строку выделяем после показа диалога: до первого показа {@code showSelection()}
+         * не прокручивает список. Фокус ввода не перехватывается.
+         */
+        private static void scheduleSelectRight(CheckboxTreeViewer viewer, Right right)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            Shell shell = tree.getShell();
+            if (shell == null || shell.isDisposed())
+                return;
+            Runnable select = () -> selectRight(viewer, right);
+            if (shell.isVisible())
+            {
+                Display display = shell.getDisplay();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(select);
+                return;
+            }
+            Listener onShow = new Listener()
+            {
+                @Override
+                public void handleEvent(Event event)
+                {
+                    shell.removeListener(SWT.Show, this);
+                    Display display = shell.getDisplay();
+                    if (display != null && !display.isDisposed())
+                        display.asyncExec(select);
+                }
+            };
+            shell.addListener(SWT.Show, onShow);
+        }
+
+        private static void selectRight(CheckboxTreeViewer viewer, Right right)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed() || !(viewer.getInput() instanceof Object[] elements))
+                return;
+            Object element = null;
+            for (Object candidate : elements)
+                if (candidate == right)
+                {
+                    element = candidate;
+                    break;
+                }
+            if (element == null)
+                for (Object candidate : elements)
+                    if (candidate instanceof Right other && sameRightName(right, other))
+                    {
+                        element = candidate;
+                        break;
+                    }
+            if (element == null)
+                return;
+            viewer.setSelection(new StructuredSelection(element), true);
+            if (!tree.isDisposed())
+                tree.showSelection();
+        }
+
+        /** Элемент списка — тот же экземпляр модели, но сверяем и по имени. */
+        private static boolean sameRightName(Right left, Right right)
+        {
+            return left.getName() != null && left.getName().equals(right.getName())
+                || left.getNameRu() != null && left.getNameRu().equals(right.getNameRu());
+        }
+
         private static Object sortKey(Object key, Object object)
         {
             // rights 14.0.200.v202605050943: getKey возвращает null для права,
@@ -1272,6 +1379,12 @@ public class Activator extends AbstractUIPlugin
                             super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
                         }
 
+                        /**
+                         * Вызывает колбэк-{@code BiFunction}: на стеке уже должны лежать
+                         * {@code BiFunction} и первый аргумент, второй — {@code this}.
+                         * Без первого аргумента {@code invokeinterface} даёт
+                         * {@code VerifyError: Operand stack underflow} на загрузке класса.
+                         */
                         private void applyCallback()
                         {
                             super.visitVarInsn(Opcodes.ALOAD, 0);
@@ -1322,6 +1435,14 @@ public class Activator extends AbstractUIPlugin
                                 super.visitInsn(Opcodes.SWAP);
                                 applyCallback();
                                 super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection");
+                                returns[0]++;
+                            }
+                            else if (inputs && opcode == Opcodes.RETURN)
+                            {
+                                callback(ACTIVATE);
+                                super.visitInsn(Opcodes.ACONST_NULL);
+                                applyCallback();
+                                super.visitInsn(Opcodes.POP);
                                 returns[0]++;
                             }
                             else if ((buttons || update) && opcode == Opcodes.RETURN)

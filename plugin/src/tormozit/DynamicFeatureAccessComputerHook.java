@@ -133,7 +133,8 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             (Function<Object[], Object>) SystemEnumEnvironments::extend);
         System.getProperties().put("tormozit.dynamicFeatureAccess.allMembers", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.byOwner(
-                SpecialMemberTemplates.withoutGenericFormItems(args[0])));
+                SpecialMemberTemplates.withoutMetadataNameTemplate(
+                    SpecialMemberTemplates.withoutGenericFormItems(args[0]))));
         System.getProperties().put("tormozit.dynamicFeatureAccess.formItemTypes", //$NON-NLS-1$
             (Function<Object[], Object>) FormItemTypes::expand);
         System.getProperties().put("tormozit.dynamicFeatureAccess.methodTypes", //$NON-NLS-1$
@@ -1072,6 +1073,43 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                 }
             }
             return changed ? output : result;
+        }
+
+        /** Платформенный образец имени не является свойством конкретной коллекции метаданных. */
+        static Object withoutMetadataNameTemplate(Object result)
+        {
+            if (!(result instanceof Collection<?> triples))
+                return result;
+            java.util.List<Object> output = new java.util.ArrayList<>();
+            int removed = 0;
+            for (Object raw : triples)
+            {
+                if (!(raw instanceof org.eclipse.xtext.util.Triple<?, ?, ?> triple)
+                    || !(triple.getSecond() instanceof Collection<?> properties))
+                {
+                    output.add(raw);
+                    continue;
+                }
+                java.util.List<Object> kept = new java.util.ArrayList<>();
+                for (Object item : properties)
+                {
+                    if (item instanceof Property property
+                        && "MetadataDescriptionObjectName".equals(property.getName())
+                        && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef context
+                        && context.eContainer() instanceof Type declaration
+                        && "MetadataObjectCollection".equals(declaration.getName())
+                        && EcoreUtil.getURI(declaration).isPlatformPlugin())
+                    {
+                        removed++;
+                        continue;
+                    }
+                    kept.add(item);
+                }
+                output.add(kept.size() == properties.size() ? raw
+                    : org.eclipse.xtext.util.Tuples.create(triple.getFirst(), kept, triple.getThird()));
+            }
+            Global.tempLog("metadata-completion-template", "groups=" + triples.size() + " removed=" + removed);
+            return removed == 0 ? result : output;
         }
 
         private static boolean isFormItemCollection(String name)

@@ -3913,7 +3913,7 @@ public final class BslStructureInsertCommentTypes
         Environments environments = method == null || method.environments() == null ? Environments.ALL : method.environments();
         boolean invocation = access.eContainer() instanceof Invocation call && call.getMethodAccess() == access;
         List<EObject> members = current.memberObjects(current.expression(access.getSource(), environments, null),
-            access.getName(), access, invocation);
+            access.getName(), access, invocation, environments);
         return members;
     }
 
@@ -4036,16 +4036,36 @@ public final class BslStructureInsertCommentTypes
                 if (object instanceof StaticFeatureAccess access && sourceVariable(access) != null)
                     inferred = variable(sourceVariable(access), position(access), environments, provided);
                 else if (object instanceof IndexAccess index)
-                    inferred = elements(expression(index.getSource(), environments, null), object);
+                    inferred = indexed(index, environments);
                 else if (object instanceof DynamicFeatureAccess access)
                     inferred = members(expression(access.getSource(), environments, null), access.getName(), object, false, environments);
                 else if (object instanceof Invocation call)
                     inferred = invocation(call, environments);
                 else if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
                     inferred = methodReturns(function, environments);
-                List<TypeItem> result = inferred.isEmpty() ? nativeTypes(object, environments, provided) : inferred;
+                // Свойство, вызов и индекс имеют специальные правила EDT. Наш
+                // расчёт дополняет их результат, сохраняя контекст и типы аргументов.
+                boolean preserveNative = object instanceof DynamicFeatureAccess
+                    || object instanceof Invocation || object instanceof IndexAccess;
+                List<TypeItem> nativeResult = preserveNative || inferred.isEmpty()
+                    ? nativeTypes(object, environments, provided) : List.of();
+                List<TypeItem> result = preserveNative ? merge(nativeResult, inferred)
+                    : inferred.isEmpty() ? nativeResult : inferred;
+                if (object instanceof Invocation || object instanceof IndexAccess)
+                    Global.tempLog("interactive-expression-types", "kind=" + object.eClass().getName()
+                        + " offset=" + position(object)
+                        + " native=" + nativeResult.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
+                        + " inferred=" + inferred.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
+                        + " merged=" + result.size());
                 if (object instanceof DynamicFeatureAccess access)
+                {
+                    Global.tempLog("interactive-member-types", "access=" + access.getName()
+                        + " offset=" + position(access)
+                        + " native=" + nativeResult.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
+                        + " inferred=" + inferred.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
+                        + " merged=" + result.size());
                     result = TypeOfBranchNarrowing.narrow(result, access);
+                }
                 result = List.copyOf(result);
                 expressions.put(key, result);
                 return result;
@@ -4319,6 +4339,33 @@ public final class BslStructureInsertCommentTypes
             return result;
         }
 
+        /** Индекс соответствия — значение Get, строковый литерал — поле, число — элемент. */
+        private List<TypeItem> indexed(IndexAccess access, Environments environments)
+        {
+            Expression index = access.getIndex();
+            if (index == null)
+                return List.of();
+            List<TypeItem> owners = expression(access.getSource(), environments, null);
+            List<TypeItem> maps = new ArrayList<>();
+            for (TypeItem owner : owners)
+            {
+                String name = McoreUtil.getTypeName(owner);
+                if ("Map".equals(name) || "FixedMap".equals(name))
+                    maps.add(owner);
+            }
+            // Как в TypesComputer EDT: при наличии соответствия индекс любого
+            // типа обозначает ключ, а не пару из перечисления коллекции.
+            if (!maps.isEmpty())
+                return members(maps, "Get", access, true, environments);
+            if (index instanceof StringLiteral literal)
+                return literal.getLines().size() == 1
+                    ? members(owners, new DefaultStringLiteralTextProvider(literal).getText(), access, false, environments)
+                    : List.of();
+            List<TypeItem> indexTypes = expression(index, environments, null);
+            return indexTypes.stream().anyMatch(type -> "Number".equals(McoreUtil.getTypeName(type)))
+                ? elements(owners, access) : List.of();
+        }
+
         private List<TypeItem> elements(List<TypeItem> owners, EObject context)
         {
             List<TypeItem> result = new ArrayList<>();
@@ -4332,7 +4379,8 @@ public final class BslStructureInsertCommentTypes
             return result;
         }
 
-        private List<EObject> memberObjects(List<TypeItem> owners, String name, EObject context, boolean methods)
+        private List<EObject> memberObjects(List<TypeItem> owners, String name, EObject context, boolean methods,
+            Environments environments)
         {
             if (name == null || name.isEmpty())
                 return List.of();
@@ -4352,8 +4400,16 @@ public final class BslStructureInsertCommentTypes
                         matches = name.equalsIgnoreCase(method.getName()) || name.equalsIgnoreCase(method.getNameRu());
                     else if (candidate instanceof Property property)
                         matches = name.equalsIgnoreCase(property.getName()) || name.equalsIgnoreCase(property.getNameRu());
-                    if (matches && result.stream().noneMatch(existing -> existing == candidate))
-                        result.add(candidate);
+                    if (matches)
+                    {
+                        Environments declared = candidate instanceof com._1c.g5.v8.dt.mcore.Environmental environmental
+                            ? environmental.environments() : null;
+                        boolean available = declared == null || declared.containsAny(environments);
+                        Global.tempLog("interactive-member-environments", "name=" + name
+                            + " requested=" + environments + " declared=" + declared + " available=" + available);
+                        if (available && result.stream().noneMatch(existing -> existing == candidate))
+                            result.add(candidate);
+                    }
                 }
             }
             return result;
@@ -4363,7 +4419,7 @@ public final class BslStructureInsertCommentTypes
             Environments environments)
         {
             List<TypeItem> result = new ArrayList<>();
-            for (EObject member : memberObjects(owners, name, context, methods))
+            for (EObject member : memberObjects(owners, name, context, methods, environments))
             {
                 if (member instanceof com._1c.g5.v8.dt.mcore.Method method)
                     add(result, method.getRetValType());

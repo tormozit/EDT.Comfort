@@ -1563,12 +1563,10 @@ public final class ParamHintHtmlModifier
             if (access instanceof DynamicFeatureAccess dynamic && BslStructureInsertCommentTypes.interactiveTypesActive())
             {
                 List<EObject> computed = BslStructureInsertCommentTypes.interactiveDocumentationMembers(dynamic);
-                if (!computed.isEmpty())
-                {
-                    for (EObject member : computed)
-                        collectDocumentationMembers(member, members);
-                    return;
-                }
+                for (EObject member : computed)
+                    collectDocumentationMembers(member, members);
+                Global.tempLog("interactive-documentation-members", "access=" + access.getName()
+                    + " computed=" + computed.size() + " collected=" + members.size());
             }
             Environmental owner = EcoreUtil2.getContainerOfType(access, Environmental.class);
             IResourceServiceProvider rsp = resource.getURI() != null
@@ -1576,11 +1574,14 @@ public final class ParamHintHtmlModifier
             DynamicFeatureAccessComputer computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
             if (owner != null && computer != null)
             {
+                int beforeNative = members.size();
                 for (FeatureEntry entry : computer.resolveObject(access, owner.environments()))
                 {
                     if (entry.getFeature() instanceof Method || entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Property)
                         collectDocumentationMembers(entry.getFeature(), members);
                 }
+                Global.tempLog("interactive-documentation-members", "access=" + access.getName()
+                    + " beforeNative=" + beforeNative + " merged=" + members.size());
             }
         }
         else if (source instanceof Invocation invocation && invocation.getMethodAccess() != null)
