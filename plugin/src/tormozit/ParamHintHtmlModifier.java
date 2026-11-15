@@ -1389,7 +1389,10 @@ public final class ParamHintHtmlModifier
         if (!IrBslHoverHtml.isBslBrowserInput(input))
             return false;
         Object group = Global.getField(input, "pageGroup"); //$NON-NLS-1$
-        for (Object page : BslSyntaxAssist.pagesOf(group))
+        List<?> pages = BslSyntaxAssist.pagesOf(group);
+        if (group != null && pages.isEmpty())
+            return true;
+        for (Object page : pages)
         {
             Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
             if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
@@ -1415,8 +1418,6 @@ public final class ParamHintHtmlModifier
             if (contextResource == null)
                 contextResource = source instanceof ProposalElement proposal && proposal.getModel() != null
                     ? proposal.getModel().eResource() : source.eResource();
-            Global.tempLog("property-documentation", "error page source=" + source.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-                + " members=" + members.size()); //$NON-NLS-1$
             for (EObject member : members)
             {
                 List<Object> memberPages = new ArrayList<>();
@@ -1448,7 +1449,6 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception | LinkageError ex)
         {
-            Global.tempLogException("property-documentation", "member recovery failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return input;
     }
@@ -1458,10 +1458,6 @@ public final class ParamHintHtmlModifier
         com._1c.g5.v8.dt.mcore.Property property, Resource contextResource, String language)
     {
         Type owner = EcoreUtil2.getContainerOfType(property, Type.class);
-        Global.tempLog("property-documentation", "recover property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " code=" + property.getCode() + " owner=" + (owner == null ? null : owner.getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " ownerCode=" + (owner == null ? null : owner.getCode()) //$NON-NLS-1$
-            + " context=" + (contextResource == null ? null : contextResource.getURI())); //$NON-NLS-1$
         ProposalElement column = documentationColumn(property, contextResource);
         if (column != null)
         {
@@ -1490,7 +1486,6 @@ public final class ParamHintHtmlModifier
             if (!(item instanceof Type platformType) || platformType.getCode() <= 0
                 || platformType.getContextDef() == null)
             {
-                Global.tempLog("property-documentation", "platform type unavailable"); //$NON-NLS-1$ //$NON-NLS-2$
                 return List.of();
             }
             for (com._1c.g5.v8.dt.mcore.Property candidate : platformType.getContextDef().allProperties())
@@ -1506,21 +1501,15 @@ public final class ParamHintHtmlModifier
                     if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
                         || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
                     {
-                        Global.tempLog("property-documentation", "canonical documentation failed typeCode=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + platformType.getCode() + " propertyCode=" + candidate.getCode()); //$NON-NLS-1$
                         return List.of();
                     }
                     pages.add(page);
                 }
-                Global.tempLog("property-documentation", "canonical typeCode=" + platformType.getCode() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " propertyCode=" + candidate.getCode() + " pages=" + pages.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 return pages;
             }
-            Global.tempLog("property-documentation", "canonical property not found"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError ex)
         {
-            Global.tempLogException("property-documentation", "recovery failed", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return List.of();
     }
@@ -1571,6 +1560,16 @@ public final class ParamHintHtmlModifier
         }
         else if (source instanceof FeatureAccess access && source.eResource() instanceof XtextResource resource)
         {
+            if (access instanceof DynamicFeatureAccess dynamic && BslStructureInsertCommentTypes.interactiveTypesActive())
+            {
+                List<EObject> computed = BslStructureInsertCommentTypes.interactiveDocumentationMembers(dynamic);
+                if (!computed.isEmpty())
+                {
+                    for (EObject member : computed)
+                        collectDocumentationMembers(member, members);
+                    return;
+                }
+            }
             Environmental owner = EcoreUtil2.getContainerOfType(access, Environmental.class);
             IResourceServiceProvider rsp = resource.getURI() != null
                 ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resource.getURI()) : null;
@@ -6305,7 +6304,7 @@ public final class ParamHintHtmlModifier
             return resolveTarget(link, documentedMethod(ctx));
         }
 
-        private static EObject resolveTarget(LinkPart link, com._1c.g5.v8.dt.bsl.model.Method method)
+        static EObject resolveTarget(LinkPart link, com._1c.g5.v8.dt.bsl.model.Method method)
         {
             if (method == null || method.eResource() == null)
                 return null;

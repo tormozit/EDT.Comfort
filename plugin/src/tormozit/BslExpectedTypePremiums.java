@@ -1066,7 +1066,8 @@ final class BslExpectedTypePremiums
         Scene[] scene = new Scene[1];
         Map<String, List<String>> variableTypes = new HashMap<>();
         Boolean read;
-        try
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = Display.getCurrent() != null ? null
+            : BslStructureInsertCommentTypes.interactiveTypes("completion-context", () -> !context.sameAs(requested)))
         {
             read = ContentAssistSessionReloader.readOnlyForContentAssist((IXtextDocument)context.document(),
                 resource -> BslNodeLookup.read(state ->
@@ -1797,6 +1798,13 @@ final class BslExpectedTypePremiums
     /** Типы выражения AST: переменная — по состоянию в точке {@code offset}, иначе — тип узла. */
     private static List<TypeItem> expressionTypeItems(XtextResource resource, Expression expression, int offset)
     {
+        if (BslStructureInsertCommentTypes.interactiveTypesActive())
+        {
+            List<TypeItem> deep = BslStructureInsertCommentTypes.interactiveExpressionTypes(expression,
+                environmentsOf(resource, expression));
+            if (!deep.isEmpty())
+                return deep;
+        }
         if (expression instanceof StaticFeatureAccess access)
         {
             for (FeatureEntry entry : access.getFeatureEntries())
@@ -1963,7 +1971,7 @@ final class BslExpectedTypePremiums
         return null;
     }
 
-    private static Environments environmentsOf(XtextResource resource, Variable variable)
+    private static Environments environmentsOf(XtextResource resource, EObject variable)
     {
         com._1c.g5.v8.dt.bsl.model.Method method = EcoreUtil2.getContainerOfType(variable,
             com._1c.g5.v8.dt.bsl.model.Method.class);
@@ -3142,7 +3150,8 @@ final class BslExpectedTypePremiums
         if (!(document instanceof IXtextDocument xtextDocument) || wordEnd < 0 || Display.getCurrent() != null
             || SmartContentAssistProcessor.isCommentAssistContext(document, wordEnd))
             return null;
-        try
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored =
+            BslStructureInsertCommentTypes.interactiveTypes("hint-receiver", null))
         {
             Context context = contextAt(document, wordEnd);
             if (context == null)

@@ -2324,10 +2324,7 @@ public class SmartCompletionProposal implements
                 if (!ParamHintHtmlModifier.needsMemberDocumentationRecovery(info))
                     return info;
                 SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-                if (viewer != null && viewer.getDocument() instanceof IXtextDocument document)
-                    return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                        ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource));
-                return ParamHintHtmlModifier.recoverMemberDocumentation(info, source, null);
+                return BslEditorHoverHook.recoverMemberDocumentation(viewer, source, -1, info);
             }
             return info;
         }

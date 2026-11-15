@@ -1512,6 +1512,11 @@ public final class BslStructureInsertCommentTypes
         Invocation invocation = invocationAtSource(source, method);
         if (invocation == null || !property.getName().equalsIgnoreCase(insertedKey(invocation)))
             return null;
+        return sideCommentReturnSection(invocation, module);
+    }
+
+    private static BslDocumentationComment.ReturnSection sideCommentReturnSection(Invocation invocation, Module module)
+    {
         Statement statement = EcoreUtil2.getContainerOfType(invocation, Statement.class);
         Block block = statement == null ? null : EcoreUtil2.getContainerOfType(statement, Block.class);
         ICompositeNode blockNode = block == null ? null : NodeModelUtils.findActualNodeFor(block);
@@ -3211,6 +3216,10 @@ public final class BslStructureInsertCommentTypes
     /** Позиция обращения, переданная штатному вычислителю; используется и проверками закрытых модулей. */
     public static List<TypeItem> arrayExpressionTypes(List<TypeItem> types, EObject object, Environments environments)
     {
+        InteractiveTypes interactive = INTERACTIVE_TYPES.get();
+        if (interactive != null && interactive.nativeRead == 0 && types != null
+            && (object instanceof Expression || object instanceof com._1c.g5.v8.dt.bsl.model.Function))
+            return interactive.expression(object, environments, types);
         if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
             return ColumnRenames.inferReturn(types, function, environments);
         if (object instanceof DynamicFeatureAccess dynamic)
@@ -3225,6 +3234,15 @@ public final class BslStructureInsertCommentTypes
 
     /** Общий вход для TypesComputer и прямых читателей состояний переменной EDT. */
     public static List<TypeItem> arrayVariableTypes(List<TypeItem> types, Variable variable, int offset,
+        Environments environments)
+    {
+        InteractiveTypes interactive = INTERACTIVE_TYPES.get();
+        if (interactive != null && interactive.nativeRead == 0 && types != null && variable != null && offset >= 0)
+            return interactive.variable(variable, offset, environments, types);
+        return localVariableTypes(types, variable, offset, environments);
+    }
+
+    private static List<TypeItem> localVariableTypes(List<TypeItem> types, Variable variable, int offset,
         Environments environments)
     {
         try
@@ -3849,6 +3867,577 @@ public final class BslStructureInsertCommentTypes
         {
             ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
             return node == null ? Integer.MAX_VALUE : node.getEndOffset();
+        }
+    }
+
+    /** Область запроса редактора; потоки проверки модуля её не наследуют. */
+    private static final ThreadLocal<InteractiveTypes> INTERACTIVE_TYPES = new ThreadLocal<>();
+
+    /** Только фоновый запрос редактора. Обычные читатели типов эту область не открывают. */
+    static InteractiveTypesScope interactiveTypes(String purpose, java.util.function.BooleanSupplier canceled)
+    {
+        InteractiveTypes previous = INTERACTIVE_TYPES.get();
+        InteractiveTypes current = previous != null ? previous : new InteractiveTypes(canceled);
+        INTERACTIVE_TYPES.set(current);
+        return new InteractiveTypesScope(previous);
+    }
+
+    static boolean interactiveTypesActive()
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        return current != null && current.nativeRead == 0;
+    }
+
+    static List<TypeItem> interactiveExpressionTypes(EObject object, Environments environments)
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        return current == null ? List.of() : current.expression(object, environments, null);
+    }
+
+    /** Члены вычисленного получателя без чтения/сброса закэшированных FeatureEntries обращения. */
+    static List<EObject> interactiveDocumentationMembers(DynamicFeatureAccess access)
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        if (current == null || current.nativeRead != 0)
+            return List.of();
+        Method method = EcoreUtil2.getContainerOfType(access, Method.class);
+        Environments environments = method == null || method.environments() == null ? Environments.ALL : method.environments();
+        boolean invocation = access.eContainer() instanceof Invocation call && call.getMethodAccess() == access;
+        List<EObject> members = current.memberObjects(current.expression(access.getSource(), environments, null),
+            access.getName(), access, invocation);
+        return members;
+    }
+
+    private static InteractiveTypesScope suspendInteractiveTypes()
+    {
+        InteractiveTypes previous = INTERACTIVE_TYPES.get();
+        INTERACTIVE_TYPES.remove();
+        return new InteractiveTypesScope(previous);
+    }
+
+    static final class InteractiveTypesScope implements AutoCloseable
+    {
+        private final InteractiveTypes previous;
+
+        InteractiveTypesScope(InteractiveTypes previous)
+        {
+            this.previous = previous;
+        }
+
+        @Override
+        public void close()
+        {
+            if (previous == null)
+                INTERACTIVE_TYPES.remove();
+            else
+                INTERACTIVE_TYPES.set(previous);
+        }
+    }
+
+    /** Уточняет только запрошенное выражение; состояния проверки и модель AST не изменяет. */
+    private static final class InteractiveTypes
+    {
+        private record Identity(EObject object)
+        {
+            @Override public int hashCode() { return System.identityHashCode(object); }
+            @Override public boolean equals(Object other) { return other instanceof Identity key && object == key.object; }
+        }
+        private record ExpressionKey(Identity expression, Frame frame, Environments environments) {}
+        private record VariableKey(Identity variable, int offset, Frame frame, Environments environments) {}
+        private record CallKey(Identity method, List<List<Identity>> arguments, Environments environments) {}
+        private record Assignment(int end, Expression value) {}
+        private record Loop(Variable variable, Expression collection, int start, int end) {}
+
+        private static final class Frame
+        {
+            final java.util.Map<Variable, List<TypeItem>> parameters = new java.util.IdentityHashMap<>();
+        }
+
+        private final java.util.function.BooleanSupplier canceled;
+        private final java.util.Map<ExpressionKey, List<TypeItem>> expressions = new java.util.HashMap<>();
+        private final java.util.Map<VariableKey, List<TypeItem>> variables = new java.util.HashMap<>();
+        private final Set<ExpressionKey> activeExpressions = new HashSet<>();
+        private final Set<VariableKey> activeVariables = new HashSet<>();
+        private final Set<Method> activeMethods = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        private final java.util.Map<CallKey, List<TypeItem>> returns = new java.util.HashMap<>();
+        private final java.util.Map<Method, Plan> plans = new java.util.IdentityHashMap<>();
+        private final java.util.Map<Module, List<Invocation>> calls = new java.util.IdentityHashMap<>();
+        private Frame frame = new Frame();
+        private int nativeRead;
+
+        InteractiveTypes(java.util.function.BooleanSupplier canceled)
+        {
+            this.canceled = canceled;
+        }
+
+        private void check()
+        {
+            BslNodeLookup.checkCanceled();
+            if (Thread.currentThread().isInterrupted() || canceled != null && canceled.getAsBoolean())
+                throw new org.eclipse.core.runtime.OperationCanceledException();
+        }
+
+        private static boolean ready(EObject object)
+        {
+            return object != null && (!(object.eResource() instanceof com._1c.g5.v8.dt.bsl.resource.BslResource resource)
+                || resource.isLinkedBatch() || resource.getContextHolder() != null);
+        }
+
+        private List<TypeItem> nativeTypes(EObject object, Environments environments, List<TypeItem> provided)
+        {
+            if (provided != null)
+                return provided;
+            if (!ready(object) || !(object.eResource() instanceof XtextResource resource))
+                return object instanceof Expression expression ? new ArrayList<>(expression.getTypes()) : List.of();
+            nativeRead++;
+            try
+            {
+                List<TypeItem> result = resource.getResourceServiceProvider().get(TypesComputer.class)
+                    .computeTypes(object, environments);
+                return result == null ? List.of() : result;
+            }
+            finally
+            {
+                nativeRead--;
+            }
+        }
+
+        List<TypeItem> expression(EObject object, Environments environments, List<TypeItem> provided)
+        {
+            check();
+            // Штатный TypesComputer допускает null (без ограничения сред),
+            // локальные сборщики используют containsAny и требуют явный ALL.
+            if (environments == null)
+            {
+                environments = Environments.ALL;
+            }
+            if (!ready(object) || !BslDocCommentComputedTypes.isExtendedTypesEnabled(object))
+                return nativeTypes(object, environments, provided);
+            ExpressionKey key = new ExpressionKey(new Identity(object), frame, environments);
+            List<TypeItem> cached = expressions.get(key);
+            if (cached != null)
+                return cached;
+            if (!activeExpressions.add(key))
+                return nativeTypes(object, environments, provided);
+            try
+            {
+                List<TypeItem> inferred = List.of();
+                if (object instanceof StaticFeatureAccess access && sourceVariable(access) != null)
+                    inferred = variable(sourceVariable(access), position(access), environments, provided);
+                else if (object instanceof IndexAccess index)
+                    inferred = elements(expression(index.getSource(), environments, null), object);
+                else if (object instanceof DynamicFeatureAccess access)
+                    inferred = members(expression(access.getSource(), environments, null), access.getName(), object, false);
+                else if (object instanceof Invocation call)
+                    inferred = invocation(call, environments);
+                else if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
+                    inferred = methodReturns(function, environments);
+                List<TypeItem> result = inferred.isEmpty() ? nativeTypes(object, environments, provided) : inferred;
+                if (object instanceof DynamicFeatureAccess access)
+                    result = TypeOfBranchNarrowing.narrow(result, access);
+                result = List.copyOf(result);
+                expressions.put(key, result);
+                return result;
+            }
+            finally
+            {
+                activeExpressions.remove(key);
+            }
+        }
+
+        List<TypeItem> variable(Variable variable, int offset, Environments environments, List<TypeItem> provided)
+        {
+            check();
+            if (environments == null)
+            {
+                environments = Environments.ALL;
+            }
+            VariableKey key = new VariableKey(new Identity(variable), offset, frame, environments);
+            List<TypeItem> cached = variables.get(key);
+            if (cached != null)
+                return cached;
+            if (!activeVariables.add(key))
+                return variableNative(variable, offset, environments, provided);
+            try
+            {
+                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+                if (method == null || !ready(variable))
+                    return variableNative(variable, offset, environments, provided);
+                Plan plan = plans.computeIfAbsent(method, Plan::new);
+                Assignment assignment = null;
+                for (Assignment candidate : plan.assignments.getOrDefault(variable, List.of()))
+                    if (candidate.end <= offset && (assignment == null || candidate.end > assignment.end))
+                        assignment = candidate;
+                List<TypeItem> inferred = List.of();
+                if (assignment != null)
+                    inferred = expression(assignment.value, environments, null);
+                else if (frame.parameters.containsKey(variable))
+                    inferred = frame.parameters.get(variable);
+                else
+                    for (Loop loop : plan.loops)
+                        if (loop.variable == variable && offset >= loop.start && offset <= loop.end)
+                        {
+                            inferred = elements(expression(loop.collection, environments, null), variable);
+                            break;
+                        }
+                if (inferred.isEmpty() && variable instanceof com._1c.g5.v8.dt.bsl.model.FormalParam param)
+                    inferred = incoming(param, method, environments);
+                int from = assignment == null ? -1 : assignment.end;
+                boolean changed = plan.changes.getOrDefault(variable, List.of()).stream()
+                    .anyMatch(position -> position > from && position <= offset);
+                List<TypeItem> result;
+                if (inferred.isEmpty())
+                    result = variableNative(variable, offset, environments, provided);
+                else if (!changed && frame.parameters.containsKey(variable))
+                    result = inferred;
+                else
+                {
+                    // Уточняем объединённую основу: переименование должно перенести тип
+                    // готовой колонки EDT, а не создать пустую колонку у типа из «Новый».
+                    List<TypeItem> nativeBasis = variableNative(variable, offset, environments, provided);
+                    List<TypeItem> basis = merge(nativeBasis, inferred);
+                    basis = annotatedProperties(basis, variable, offset, from, environments, plan);
+                    result = localVariableTypes(basis, variable, offset, environments);
+                }
+                result = List.copyOf(result);
+                variables.put(key, result);
+                return result;
+            }
+            finally
+            {
+                activeVariables.remove(key);
+            }
+        }
+
+        private final java.util.Map<ExpressionKey, List<TypeItem>> annotationTypes = new java.util.HashMap<>();
+
+        /** Ссылки бокового комментария считаются только в текущем фоновом запросе редактора. */
+        private List<TypeItem> annotatedProperties(List<TypeItem> types, Variable variable, int offset, int from,
+            Environments environments, Plan plan)
+        {
+            List<TypeItem> result = types;
+            for (Invocation call : plan.annotations.getOrDefault(variable, List.of()))
+            {
+                check();
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(call);
+                if (node == null || node.getOffset() < from || node.getEndOffset() > offset)
+                    continue;
+                String key = insertedKey(call);
+                if (key == null)
+                    continue;
+                ExpressionKey cacheKey = new ExpressionKey(new Identity(call), frame, environments);
+                List<TypeItem> values = annotationTypes.get(cacheKey);
+                if (values == null)
+                {
+                    Method method = EcoreUtil2.getContainerOfType(call, Method.class);
+                    Module module = EcoreUtil2.getContainerOfType(call, Module.class);
+                    List<PropertySeeLink> links = new ArrayList<>();
+                    collectReturnSeeLinks(sideCommentReturnSection(call, module), method,
+                        new java.util.LinkedHashSet<>(), links);
+                    values = new ArrayList<>();
+                    for (PropertySeeLink link : links)
+                    {
+                        check();
+                        EObject target = ParamHintHtmlModifier.ParameterSeeLinks.resolveTarget(link.link(), link.method());
+                        if (target != null && !target.eIsProxy() && ready(target))
+                            add(values, expression(target, environments, null));
+                    }
+                    values = List.copyOf(values);
+                    annotationTypes.put(cacheKey, values);
+                }
+                if (values.isEmpty())
+                    continue;
+                List<TypeItem> updated = new ArrayList<>();
+                for (TypeItem item : result)
+                {
+                    check();
+                    updated.add(withAnnotatedProperty(item, key, values));
+                }
+                result = updated;
+            }
+            return result;
+        }
+
+        private static TypeItem withAnnotatedProperty(TypeItem item, String key, List<TypeItem> values)
+        {
+            if (!(item instanceof Type type) || type.eIsProxy())
+                return item;
+            boolean own = hasProperty(type, key);
+            boolean rows = type.getCollectionElementTypes() != null
+                && type.getCollectionElementTypes().allTypes().stream()
+                    .anyMatch(element -> element instanceof Type row && !row.eIsProxy() && hasProperty(row, key));
+            if (!own && !rows)
+                return item;
+            Type copy = EcoreUtil2.cloneWithProxies(type);
+            if (own)
+                fillAnnotatedProperty(copy, copy, key, values);
+            if (rows)
+            {
+                TypeContainer elements = ColumnRenames.ownTypes(copy, copy.getCollectionElementTypes(),
+                    copy::setCollectionElementTypes);
+                if (elements != null)
+                    for (TypeItem element : elements.allTypes())
+                        if (element instanceof Type row)
+                            fillAnnotatedProperty(copy, row, key, values);
+            }
+            return copy;
+        }
+
+        private static boolean hasProperty(Type type, String key)
+        {
+            return type.getContextDef() != null && type.getContextDef().allProperties().stream()
+                .anyMatch(property -> key.equalsIgnoreCase(property.getName()) || key.equalsIgnoreCase(property.getNameRu()));
+        }
+
+        private static void fillAnnotatedProperty(Type owner, Type type, String key, List<TypeItem> values)
+        {
+            if (type.getContextDef() == null)
+                return;
+            for (Property property : new ArrayList<>(type.getContextDef().allProperties()))
+                if (key.equalsIgnoreCase(property.getName()) || key.equalsIgnoreCase(property.getNameRu()))
+                {
+                    Property copy = property;
+                    if (!EcoreUtil.isAncestor(owner, property))
+                    {
+                        copy = EcoreUtil2.cloneWithProxies(property);
+                        type.getContextDef().getProperties().add(copy);
+                    }
+                    List<TypeItem> combined = new ArrayList<>(copy.getTypes());
+                    add(combined, values);
+                    TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+                    container.getTypes().addAll(combined);
+                    copy.setTypeContainer(container);
+                }
+        }
+
+        private List<TypeItem> variableNative(Variable variable, int offset, Environments environments, List<TypeItem> provided)
+        {
+            if (provided != null)
+                return provided;
+            nativeRead++;
+            try
+            {
+                return TypeSystemUtil.getVariableTypesAtOffset(variable, offset, environments);
+            }
+            finally
+            {
+                nativeRead--;
+            }
+        }
+
+        private List<TypeItem> invocation(Invocation call, Environments environments)
+        {
+            List<FeatureEntry> entries = List.of();
+            if (call.getMethodAccess() instanceof StaticFeatureAccess access)
+                entries = access.getFeatureEntries();
+            else if (call.getMethodAccess() instanceof DynamicFeatureAccess access)
+                entries = access.getFeatureEntries();
+            List<TypeItem> result = new ArrayList<>();
+            for (FeatureEntry entry : entries)
+                if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Function function && ready(function)
+                    && !activeMethods.contains(function))
+                {
+                    Frame arguments = new Frame();
+                    List<List<Identity>> identities = new ArrayList<>();
+                    for (int index = 0; index < function.getFormalParams().size(); index++)
+                    {
+                        List<TypeItem> types = index < call.getParams().size()
+                            ? expression(call.getParams().get(index), environments, null) : List.of();
+                        arguments.parameters.put(function.getFormalParams().get(index), types);
+                        identities.add(types.stream().map(Identity::new).toList());
+                    }
+                    CallKey key = new CallKey(new Identity(function), identities, environments);
+                    List<TypeItem> types = returns.get(key);
+                    if (types == null)
+                    {
+                        Frame previous = frame;
+                        frame = arguments;
+                        try { types = methodReturns(function, environments); }
+                        finally { frame = previous; }
+                        returns.put(key, types);
+                    }
+                    add(result, types);
+                }
+            if (result.isEmpty() && call.getMethodAccess() instanceof DynamicFeatureAccess access)
+                add(result, members(expression(access.getSource(), environments, null), access.getName(), call, true));
+            return result;
+        }
+
+        private List<TypeItem> methodReturns(com._1c.g5.v8.dt.bsl.model.Function function, Environments environments)
+        {
+            if (!activeMethods.add(function))
+                return List.of();
+            try
+            {
+                List<TypeItem> result = new ArrayList<>();
+                for (Expression expression : plans.computeIfAbsent(function, Plan::new).returns)
+                    add(result, expression(expression, environments, null));
+                return result;
+            }
+            finally { activeMethods.remove(function); }
+        }
+
+        private List<TypeItem> incoming(com._1c.g5.v8.dt.bsl.model.FormalParam parameter, Method method, Environments environments)
+        {
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            int index = method.getFormalParams().indexOf(parameter);
+            if (module == null || index < 0)
+                return List.of();
+            List<Invocation> found = calls.get(module);
+            if (found == null)
+            {
+                found = new ArrayList<>();
+                for (var iterator = module.eAllContents(); iterator.hasNext();)
+                {
+                    check();
+                    if (iterator.next() instanceof Invocation call)
+                        found.add(call);
+                }
+                calls.put(module, found);
+            }
+            List<TypeItem> result = new ArrayList<>();
+            for (Invocation call : found)
+            {
+                check();
+                if (call.getParams().size() > index && call.getMethodAccess() instanceof StaticFeatureAccess access
+                    && access.getFeatureEntries().stream().anyMatch(entry -> entry.getFeature() == method))
+                    add(result, expression(call.getParams().get(index), environments, null));
+            }
+            return result;
+        }
+
+        private List<TypeItem> elements(List<TypeItem> owners, EObject context)
+        {
+            List<TypeItem> result = new ArrayList<>();
+            for (TypeItem owner : owners)
+            {
+                check();
+                EObject resolved = owner.eIsProxy() ? EcoreUtil.resolve(owner, context) : owner;
+                if (resolved instanceof Type type && type.getCollectionElementTypes() != null)
+                    add(result, type.getCollectionElementTypes().allTypes());
+            }
+            return result;
+        }
+
+        private List<EObject> memberObjects(List<TypeItem> owners, String name, EObject context, boolean methods)
+        {
+            if (name == null || name.isEmpty())
+                return List.of();
+            List<EObject> result = new ArrayList<>();
+            for (TypeItem owner : owners)
+            {
+                check();
+                EObject resolved = owner.eIsProxy() ? EcoreUtil.resolve(owner, context) : owner;
+                if (!(resolved instanceof Type type) || type.getContextDef() == null)
+                    continue;
+                List<? extends EObject> candidates = methods ? type.getContextDef().allMethods()
+                    : type.getContextDef().allProperties();
+                for (EObject candidate : candidates)
+                {
+                    boolean matches = false;
+                    if (candidate instanceof com._1c.g5.v8.dt.mcore.Method method)
+                        matches = name.equalsIgnoreCase(method.getName()) || name.equalsIgnoreCase(method.getNameRu());
+                    else if (candidate instanceof Property property)
+                        matches = name.equalsIgnoreCase(property.getName()) || name.equalsIgnoreCase(property.getNameRu());
+                    if (matches && result.stream().noneMatch(existing -> existing == candidate))
+                        result.add(candidate);
+                }
+            }
+            return result;
+        }
+
+        private List<TypeItem> members(List<TypeItem> owners, String name, EObject context, boolean methods)
+        {
+            List<TypeItem> result = new ArrayList<>();
+            for (EObject member : memberObjects(owners, name, context, methods))
+            {
+                if (member instanceof com._1c.g5.v8.dt.mcore.Method method)
+                    add(result, method.getRetValType());
+                else if (member instanceof Property property)
+                    add(result, property.getTypes());
+            }
+            return result;
+        }
+
+        private static void add(List<TypeItem> result, List<TypeItem> types)
+        {
+            if (types != null)
+                for (TypeItem type : types)
+                    if (type != null && result.stream().noneMatch(existing -> existing == type))
+                        result.add(type);
+        }
+
+
+
+        private static List<TypeItem> merge(List<TypeItem> original, List<TypeItem> inferred)
+        {
+            List<TypeItem> result = new ArrayList<>(inferred);
+            // Одинаковое имя не означает одинаковый контекст: состояние EDT уже
+            // содержит колонки таблицы и их типы из комментариев, которых нет у «Новый».
+            // Сохраняем готовые альтернативы без рекурсивного сравнения или копирования.
+            add(result, original);
+            return result;
+        }
+
+        private static int position(EObject object)
+        {
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
+            return node == null ? -1 : node.getOffset();
+        }
+
+        private final class Plan
+        {
+            final java.util.Map<Variable, List<Assignment>> assignments = new java.util.IdentityHashMap<>();
+            final java.util.Map<Variable, List<Integer>> changes = new java.util.IdentityHashMap<>();
+            final java.util.Map<Variable, List<Invocation>> annotations = new java.util.IdentityHashMap<>();
+            final List<Loop> loops = new ArrayList<>();
+            final List<Expression> returns = new ArrayList<>();
+
+            Plan(Method method)
+            {
+                for (var iterator = method.eAllContents(); iterator.hasNext();)
+                {
+                    check();
+                    EObject object = iterator.next();
+                    ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
+                    if (node == null)
+                        continue;
+                    if (object instanceof SimpleStatement statement && statement.getRight() != null)
+                    {
+                        if (statement.getLeft() instanceof StaticFeatureAccess access && sourceVariable(access) != null)
+                            assignments.computeIfAbsent(sourceVariable(access), ignored -> new ArrayList<>()).add(new Assignment(node.getEndOffset(), statement.getRight()));
+                        else
+                        {
+                            Expression left = statement.getLeft();
+                            Expression owner = left instanceof IndexAccess index ? index.getSource()
+                                : left instanceof DynamicFeatureAccess access ? access.getSource() : null;
+                            changed(owner, node.getEndOffset());
+                        }
+                    }
+                    else if (object instanceof Invocation call && call.getMethodAccess() instanceof DynamicFeatureAccess access)
+                    {
+                        changed(access.getSource(), node.getEndOffset());
+                        Variable variable = sourceVariable(access.getSource());
+                        if (variable != null && insertedKey(call) != null)
+                            annotations.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(call);
+                    }
+                    else if (object instanceof com._1c.g5.v8.dt.bsl.model.ReturnStatement statement && statement.getExpression() != null)
+                        returns.add(statement.getExpression());
+                    else if (object instanceof com._1c.g5.v8.dt.bsl.model.ForEachStatement loop)
+                    {
+                        ICompositeNode collection = NodeModelUtils.findActualNodeFor(loop.getCollection());
+                        if (collection != null)
+                            loops.add(new Loop(sourceVariable(loop.getVariableAccess()), loop.getCollection(), collection.getEndOffset(), node.getEndOffset()));
+                    }
+                }
+            }
+
+            private void changed(Expression source, int offset)
+            {
+                Variable variable = sourceVariable(source);
+                if (variable != null)
+                    changes.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(offset);
+            }
         }
     }
 
@@ -4498,7 +5087,7 @@ public final class BslStructureInsertCommentTypes
             Resource resource = module == null ? null : module.eResource();
             boolean complete = false;
             boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
-            try
+            try (InteractiveTypesScope ignored = suspendInteractiveTypes())
             {
                 if (isWorkbenchClosing())
                     throw new org.eclipse.core.runtime.OperationCanceledException();
@@ -5145,7 +5734,7 @@ public final class BslStructureInsertCommentTypes
         {
             boolean scopeOwner = beginExportVarsScope();
             boolean queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(module);
-            try
+            try (InteractiveTypesScope ignored = suspendInteractiveTypes())
             {
                 lightInstallingTypeSystemInScope(module, method, variable, statement, offset, context);
             }

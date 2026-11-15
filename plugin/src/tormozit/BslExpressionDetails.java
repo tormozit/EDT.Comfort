@@ -67,12 +67,17 @@ final class BslExpressionDetails
         return !REQUESTS.isEmpty();
     }
 
+    private record Details(String type, String footer)
+    {
+        boolean isEmpty() { return type.isEmpty() && footer.isEmpty(); }
+    }
+
     private static final class Request
     {
         final Object index;
         final long stamp;
         final java.lang.ref.WeakReference<IXtextDocument> document;
-        volatile String html = ""; //$NON-NLS-1$
+        volatile Details details = new Details("", ""); //$NON-NLS-1$
 
         Request(Object index, long stamp, IXtextDocument document)
         {
@@ -98,32 +103,33 @@ final class BslExpressionDetails
             request = new Request(index, stamp, document);
             REQUESTS.put(input, request);
         }
-        Global.tempLog("expression-details", "request offset=" + offset + " member=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (member == null ? null : member.eClass().getName()) + " stamp=" + stamp); //$NON-NLS-1$
         Display display = viewer.getTextWidget().getDisplay();
         Job job = new Job("Comfort: индексы и подсказка выражения") //$NON-NLS-1$
         {
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
-                try
+                try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored =
+                    BslStructureInsertCommentTypes.interactiveTypes("hint",
+                        () -> monitor.isCanceled() || stamp(document) != stamp))
                 {
-                    String html = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                    Details details = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
                         stamp(document) == stamp ? describe(resource, member, offset) : null);
-                    Global.tempLog("expression-details", "result offset=" + offset + " htmlLength=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + (html == null ? null : html.length()) + " currentStamp=" + stamp(document)); //$NON-NLS-1$
-                    if (html == null || stamp(document) != stamp || REQUESTS.get(input) != request)
+                    if (details == null || stamp(document) != stamp || REQUESTS.get(input) != request)
                         return Status.OK_STATUS;
-                    request.html = html;
-                    if (!html.isEmpty() && !display.isDisposed())
+                    request.details = details;
+                    if (!details.isEmpty() && !display.isDisposed())
                         display.asyncExec(() -> {
                             if (stamp(document) == stamp && REQUESTS.get(input) == request)
                                 IrBslHoverHtml.refreshExpressionDetails(input);
                         });
                 }
+                catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+                {
+                    return Status.CANCEL_STATUS;
+                }
                 catch (Throwable failure)
                 {
-                    Global.tempLogException("expression-details", "request failed", failure); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 return Status.OK_STATUS;
             }
@@ -142,7 +148,7 @@ final class BslExpressionDetails
     {
         Request request = REQUESTS.get(input);
         IXtextDocument document = request == null ? null : request.document.get();
-        if (request == null || request.html.isEmpty()
+        if (request == null || request.details.isEmpty()
             || document == null || stamp(document) != request.stamp
             || !java.util.Objects.equals(request.index, Global.invoke(input, "getIndex"))) //$NON-NLS-1$
             return html;
@@ -150,12 +156,91 @@ final class BslExpressionDetails
             html = IrBslHoverHtml.readHtml(input);
         if (html == null || html.contains(MARK))
             return html;
-        String block = "<div " + MARK + ">" + request.html + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        Details details = request.details;
+        if (!details.type().isEmpty())
+            html = withComputedType(html, details.type());
+        if (details.footer().isEmpty())
+            return html;
+        String block = "<div " + MARK + ">" + details.footer() + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         int end = html.toLowerCase(java.util.Locale.ROOT).lastIndexOf("</body>"); //$NON-NLS-1$
         return end < 0 ? html + block : html.substring(0, end) + block + html.substring(end);
     }
 
-    private static String describe(XtextResource resource, EObject member, int offset)
+    /** Одна разметка типа для обеих подсказок: штатный префикс перед именем члена. */
+    private static String withComputedType(String html, String typeHtml)
+    {
+        String type = "<div " + MARK + "-type><b>Тип</b>: " + typeHtml + "</div>";
+        // Те же заголовки EDT, что использует IrBslHoverHtml.findHeadingTextInsertOffset.
+        var heading = java.util.regex.Pattern.compile(
+            "(?is)<div\\b[^>]*\\bclass\\s*=\\s*['\"][^'\"]*\\b(?:infocontrol-heading|contentassist-heading-content)\\b[^'\"]*['\"][^>]*>")
+            .matcher(html);
+        int insert = -1;
+        int prefixStart = -1;
+        int prefixEnd = -1;
+        if (heading.find())
+        {
+            int end = html.toLowerCase(java.util.Locale.ROOT).indexOf("</div>", heading.end());
+            if (end >= 0)
+            {
+                insert = end + "</div>".length();
+                // PageUtil.generatePrefixTypesString обрамляет тип в &lt;…&gt;.
+                // Меняем этот префикс, сохраняя заголовок, сноски и описание EDT.
+                prefixStart = html.indexOf("&lt;", heading.end());
+                if (prefixStart >= 0 && prefixStart < end)
+                {
+                    int depth = 1;
+                    int cursor = prefixStart + "&lt;".length();
+                    while (cursor < end && depth > 0)
+                    {
+                        int open = html.indexOf("&lt;", cursor);
+                        int close = html.indexOf("&gt;", cursor);
+                        if (close < 0 || close >= end)
+                            break;
+                        if (open >= 0 && open < close)
+                        {
+                            depth++;
+                            cursor = open + "&lt;".length();
+                        }
+                        else
+                        {
+                            depth--;
+                            cursor = close + "&gt;".length();
+                            if (depth == 0)
+                                prefixEnd = cursor;
+                        }
+                    }
+                }
+            }
+        }
+        if (prefixEnd < 0 && insert >= 0)
+        {
+            var title = java.util.regex.Pattern.compile(
+                "(?is)<span\\b[^>]*\\bclass\\s*=\\s*['\"][^'\"]*\\btitle\\b[^'\"]*['\"][^>]*>")
+                .matcher(html);
+            if (title.find(heading.end()) && title.start() < insert)
+            {
+                prefixStart = title.start();
+                prefixEnd = prefixStart;
+            }
+        }
+        if (insert < 0)
+        {
+            int body = html.toLowerCase(java.util.Locale.ROOT).indexOf("<body");
+            insert = body < 0 ? 0 : html.indexOf('>', body) + 1;
+        }
+        if (prefixEnd >= 0)
+        {
+            html = html.substring(0, prefixStart) + "<span " + MARK + "-type>" + typeHtml
+                + "</span>" + (prefixStart == prefixEnd ? " " : "") + html.substring(prefixEnd);
+        }
+        else
+        {
+            html = html.substring(0, insert) + type + html.substring(insert);
+        }
+        return html;
+    }
+
+    private static Details describe(XtextResource resource, EObject member, int offset)
     {
         if (resource == null || resource.getContents().isEmpty())
             return null;
@@ -173,6 +258,7 @@ final class BslExpressionDetails
             : member == null ? List.of() : List.of(member);
         Set<String> indexes = new LinkedHashSet<>();
         Set<String> hints = new LinkedHashSet<>();
+        List<TypeItem> describedTypes = new ArrayList<>();
         for (EObject object : members)
         {
             int position = offset;
@@ -195,25 +281,27 @@ final class BslExpressionDetails
                 if (hint != null && !hint.isBlank())
                     hints.add(hint);
             }
-            List<TypeItem> types = object instanceof Variable variable
+            List<TypeItem> types = object instanceof Expression && BslStructureInsertCommentTypes.interactiveTypesActive()
+                ? BslStructureInsertCommentTypes.interactiveExpressionTypes(object, environments)
+                : object instanceof Variable variable
                 ? TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments)
                 : property != null ? new ArrayList<>(property.getTypes())
                     : object instanceof Expression
                         ? resource.getResourceServiceProvider().get(TypesComputer.class).computeTypes(object, environments)
                         : List.of();
+            if (types != null)
+                describedTypes.addAll(types);
             if (types != null && types.stream().anyMatch(type -> "ValueTable".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
                 indexes.addAll(new Indexes(environments).collect(object, position));
-            Global.tempLog("expression-details", "member=" + object.eClass().getName() + " offset=" + position //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " property=" + (property == null ? null : property.getName()) + " types=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (types == null ? null : types.stream().map(McoreUtil::getTypeName).toList())
-                + " indexes=" + indexes + " hint=" + (hints.isEmpty() ? "empty" : "present")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         }
         StringBuilder html = new StringBuilder();
+        String typeHtml = BslExpectedTypePremiums.typeItemsHtml(resource, describedTypes);
+        String type = typeHtml == null || typeHtml.isBlank() ? "" : typeHtml;
         if (!indexes.isEmpty())
             attribute(html, "Индексы", String.join(" ", indexes.stream().map(value -> "[" + value + "]").toList())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (!hints.isEmpty())
             attribute(html, "Подсказка", String.join("\n", hints)); //$NON-NLS-1$ //$NON-NLS-2$
-        return html.toString();
+        return new Details(type, html.toString());
     }
 
     private static void attribute(StringBuilder html, String title, String text)
@@ -250,8 +338,6 @@ final class BslExpressionDetails
         var configuration = project instanceof IConfigurationAware aware ? aware.getConfiguration() : null;
         var language = configuration == null ? null : configuration.getDefaultLanguage();
         Object text = language == null ? null : map.get(language.getLanguageCode());
-        Global.tempLog("expression-details", "source=" + source.eClass().getName() + " language=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (language == null ? null : language.getLanguageCode()) + " found=" + (text instanceof String)); //$NON-NLS-1$
         return text instanceof String value ? value : null;
     }
 
@@ -337,8 +423,6 @@ final class BslExpressionDetails
                         continue;
                     String value = call.getParams().isEmpty() ? null
                         : string(call.getParams().get(0), statements, Collections.newSetFromMap(new IdentityHashMap<>()));
-                    Global.tempLog("expression-details", "indexCall=" + action.getName() + " offset=" + start(call) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        + " variable=" + variable.getName() + " value=" + value); //$NON-NLS-1$ //$NON-NLS-2$
                     if (named(action.getName(), "Добавить", "Add") && value != null) //$NON-NLS-1$ //$NON-NLS-2$
                     {
                         String normalized = normalize(value);

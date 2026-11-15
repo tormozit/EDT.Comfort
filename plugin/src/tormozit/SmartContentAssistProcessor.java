@@ -9718,7 +9718,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         boolean delegateCompleted = false;
         // Провайдер значений литерала (issue 888) отвечает только внутри этого расчёта.
         BslLiteralValues.beginAssist(Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()));
-        try
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = onUi ? null
+            : BslStructureInsertCommentTypes.interactiveTypes("completion", DELEGATE_STALE_CHECK.get()))
         {
             raw = dropTemplateTypesInLiteral(viewer, off, delegate.computeCompletionProposals(viewer, off));
             FunctionReturnTypes.rememberVariableTargets(raw);

@@ -593,9 +593,11 @@ public final class BslEditorHoverHook implements IStartup
             // Провайдер предложения может вернуть EObject только здесь, после первой проверки строки.
             if (!SmartCompletionProposal.isEdtDocumentationObjectReady(object))
                 return null;
-            Object info = delegate.getHoverInfo(object, viewer, region);
+            Object info = interactiveDocumentation("side-documentation", null,
+                () -> delegate.getHoverInfo(object, viewer, region));
             // EDT не всегда задаёт viewer предложения; используем контекст общего чтения описания.
             ITextViewer context = viewer != null ? viewer : proposalViewer;
+            info = recoverMemberDocumentation(context, object, -1, info);
             BslStructureInsertCommentTypes.completePropertyHover(info, object, context);
             return PlatformTemplateTypes.withNote(decorateSideHint(info, object, context), object);
         }
@@ -763,18 +765,38 @@ public final class BslEditorHoverHook implements IStartup
         return new IrBslTextHoverWrapper(hover, editor, suppressPointerHover);
     }
 
-    /** Подмена страницы ошибки описания члена — общая для наведения и кнопки аннотации. */
-    static Object recoverMemberDocumentation(ITextViewer textViewer, int offset, Object info)
+    /** Общая область расчёта штатной документации для наведения и боковой подсказки. */
+    private static Object interactiveDocumentation(String purpose, java.util.function.BooleanSupplier canceled,
+        java.util.function.Supplier<Object> work)
     {
-        if (!ParamHintHtmlModifier.needsMemberDocumentationRecovery(info)
-            || !(textViewer.getDocument() instanceof IXtextDocument document))
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = Display.getCurrent() == null
+            ? BslStructureInsertCommentTypes.interactiveTypes(purpose, canceled) : null)
+        {
+            return work.get();
+        }
+    }
+
+    /** Восстановление пустой/ошибочной страницы — общее для всех источников подсказки. */
+    static Object recoverMemberDocumentation(ITextViewer viewer, int offset, Object info)
+    {
+        return recoverMemberDocumentation(viewer, null, offset, info);
+    }
+
+    static Object recoverMemberDocumentation(ITextViewer viewer, EObject member, int offset, Object info)
+    {
+        if (!ParamHintHtmlModifier.needsMemberDocumentationRecovery(info))
             return info;
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return member == null ? info : interactiveDocumentation("member-documentation-recovery", null,
+                () -> ParamHintHtmlModifier.recoverMemberDocumentation(info, member, null));
         Object recovered = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
         {
             if (resource == null)
                 return info;
-            EObject source = BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, offset);
-            return ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource);
+            EObject source = member != null ? member
+                : BslNodeLookup.containedAt(new EObjectAtOffsetHelper(), resource, offset);
+            return interactiveDocumentation("member-documentation-recovery", null,
+                () -> ParamHintHtmlModifier.recoverMemberDocumentation(info, source, resource));
         });
         return recovered != null ? recovered : info;
     }
@@ -1009,7 +1031,10 @@ public final class BslEditorHoverHook implements IStartup
                 if (cancellation.isCanceled())
                     return null;
                 EObject source = leaf == null ? null : NodeModelUtils.findActualSemanticObjectFor(leaf);
-                return hover.getHoverInfo(source, viewer, region);
+                // Получатель метода нужен при создании штатной страницы, а не только
+                // позднее для строки результата. UI читает прежнюю готовую модель.
+                return interactiveDocumentation("hover-documentation", cancellation::isCanceled,
+                    () -> hover.getHoverInfo(source, viewer, region));
             });
         }
 
