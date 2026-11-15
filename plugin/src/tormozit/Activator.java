@@ -124,7 +124,6 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         Global.clearTempLogs();
-        Global.tempLog("validation-run", "plugin start"); //$NON-NLS-1$ //$NON-NLS-2$
         Global.cleanOrphanedFormNativeTempDirs();
 
         super.start(context);
@@ -172,8 +171,6 @@ public class Activator extends AbstractUIPlugin
         try { AvailableSoftwareDialogHook.installUpdateRefreshHook(); }
         catch (Throwable failure)
         {
-            try { Global.tempLogException("available-software", "install update refresh hook", failure); } //$NON-NLS-1$ //$NON-NLS-2$
-            catch (Throwable ignored) { }
         }
         WorkbenchTabsHook.installWeavingHook();
         ProblemViewHook.installWeavingHook();
@@ -369,7 +366,6 @@ public class Activator extends AbstractUIPlugin
                 properties.put(NOTIFY, (Consumer<Runnable>) PortalLoginNotifications::request);
                 pending = properties.remove(PENDING);
             }
-            Global.tempLog("portal-login", "INSTALL pending=" + (pending instanceof Runnable)); //$NON-NLS-1$ //$NON-NLS-2$
             if (pending instanceof Runnable login)
                 request(login);
         }
@@ -377,7 +373,6 @@ public class Activator extends AbstractUIPlugin
         private static void request(Runnable login)
         {
             boolean first = running && notified.compareAndSet(false, true);
-            Global.tempLog("portal-login", "REQUEST first=" + first); //$NON-NLS-1$ //$NON-NLS-2$
             if (!first)
                 return;
             Display display = Display.getDefault();
@@ -395,26 +390,22 @@ public class Activator extends AbstractUIPlugin
                 display.timerExec(500, () -> showPending(display, login));
                 return;
             }
-            Shell toast = ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
+            ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
                 "Для доступа к этому ресурсу требуется вход через Портал 1С:ИТС. После входа повторите операцию.", //$NON-NLS-1$
                 5_000, () -> login(login), "Войти через Портал 1С:ИТС"); //$NON-NLS-1$
-            Global.tempLog("portal-login", "SHOW created=" + (toast != null)); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static void login(Runnable action)
         {
             boolean start = running && authenticating.compareAndSet(false, true);
-            Global.tempLog("portal-login", "LOGIN start=" + start); //$NON-NLS-1$ //$NON-NLS-2$
             if (!start)
                 return;
             try
             {
                 action.run();
-                Global.tempLog("portal-login", "LOGIN returned"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (RuntimeException failure)
             {
-                Global.tempLog("portal-login", "LOGIN failed=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
                 ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
                     "Не удалось открыть авторизацию: " + failure.getMessage(), 8_000); //$NON-NLS-1$
             }

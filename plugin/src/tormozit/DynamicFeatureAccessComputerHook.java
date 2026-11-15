@@ -346,7 +346,6 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         }
         catch (RuntimeException failure)
         {
-            ModelStateDiagnostics.failure("members.last", failure, null, args[1], args[0]); //$NON-NLS-1$
             throw failure;
         }
     }

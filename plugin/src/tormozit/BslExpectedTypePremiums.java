@@ -814,8 +814,6 @@ final class BslExpectedTypePremiums
         var reloader = ContentAssistSessionReloader.forDocument(context != null ? context.document() : null);
         var assistant = reloader != null ? reloader.getAssistant() : null;
         ITextViewer viewer = reloader != null ? reloader.getViewer() : null;
-        Global.tempLog("boolean-default-ranking", "foreignReady session=" + (reloader != null) //$NON-NLS-1$ //$NON-NLS-2$
-            + " visible=" + (assistant != null && ContentAssistPopupSync.isPopupVisible(assistant))); //$NON-NLS-1$
         if (assistant == null || viewer == null || !ContentAssistPopupSync.isPopupVisible(assistant))
             return;
         List<ICompletionProposal> proposals = ContentAssistPopupSync.computedProposals(assistant);
@@ -3427,10 +3425,6 @@ final class BslExpectedTypePremiums
                 : lastLower.equals("загрузка") || lastLower.equals("использование") //$NON-NLS-1$ //$NON-NLS-2$
                     || lastLower.equals("отказ"); //$NON-NLS-1$
             add(result, words, "истина", truePreferred ? 5 : 3, true); //$NON-NLS-1$
-            Global.tempLog("boolean-default-ranking", "ranking method=" + expectation.callMethod() //$NON-NLS-1$ //$NON-NLS-2$
-                + " index=" + expectation.parameterIndex() + " receiver=" + receiver //$NON-NLS-1$ //$NON-NLS-2$
-                + " default=" + booleanDefault + " falsePreferred=" + falsePreferred //$NON-NLS-1$ //$NON-NLS-2$
-                + " truePreferred=" + truePreferred + " premiums=" + result.values()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // По совпадению слова и типа
         String receiverParent = withoutLastFragment(receiver);

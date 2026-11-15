@@ -45,7 +45,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
 {
     private static final String PAGE_CLASS = "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUsPage"; //$NON-NLS-1$
     private static final String SESSION_KEY = "tormozit.availableSoftware.session"; //$NON-NLS-1$
-    private static final String LOG = "available-software"; //$NON-NLS-1$
     private static volatile boolean disabled;
 
     /** Граница чужого вызова: в том числе Error от PDE при неполной компиляции метода. */
@@ -62,9 +61,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
     private static void disable(String phase, Throwable failure)
     {
         disabled = true;
-        // Даже отказ диагностического канала не должен выходить в штатный обработчик EDT.
-        try { Global.tempLogException(LOG, phase + "; extension disabled until restart", failure); } //$NON-NLS-1$
-        catch (Throwable ignored) { }
     }
 
     /** До загрузки классов p2; вызывается из Activator. */
@@ -100,7 +96,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
             {
                 Display.getDefault().addFilter(SWT.Show,
                     event -> runSafely("Show", () -> onShow(event))); //$NON-NLS-1$
-                Global.tempLog(LOG, "Show filter installed"); //$NON-NLS-1$
             }));
         });
     }
@@ -111,8 +106,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
             || !(shell.getData() instanceof WizardDialog dialog))
             return;
         IWizardPage currentPage = dialog.getCurrentPage();
-        Global.tempLog(LOG, "wizard shown: dialog=" + dialog.getClass().getName() //$NON-NLS-1$
-            + ", currentPage=" + (currentPage == null ? null : currentPage.getClass().getName())); //$NON-NLS-1$
         if (currentPage == null || currentPage.getWizard() == null)
             return;
         // WizardDialog.getWizard() защищён; публичный доступ к мастеру предоставляет страница.
@@ -124,7 +117,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
             Object control = Global.call(selector, "getDefaultFocusControl"); //$NON-NLS-1$
             if (!(control instanceof Combo combo) || combo.isDisposed())
             {
-                Global.tempLog(LOG, "attach failed: selector=" + selector + ", control=" + control); //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
             }
             if (combo.getData(SESSION_KEY) != null)
@@ -133,7 +125,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
             combo.setData(SESSION_KEY, session);
             combo.addListener(SWT.Selection, e -> runSafely("Selection", session::selected)); //$NON-NLS-1$
             combo.addListener(SWT.DefaultSelection, e -> runSafely("DefaultSelection", session::selected)); //$NON-NLS-1$
-            Global.tempLog(LOG, "attached: page=" + page.getClass().getName()); //$NON-NLS-1$
         }
     }
 
@@ -156,7 +147,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
         void selected()
         {
             int request = ++generation;
-            Global.tempLog(LOG, "selection: request=" + request + ", text=" + combo.getText()); //$NON-NLS-1$ //$NON-NLS-2$
             // После штатных слушателей: они применяют фильтр сайта. Объединяем Selection/DefaultSelection.
             combo.getDisplay().asyncExec(() -> runSafely("refresh selected site", () -> //$NON-NLS-1$
             {
@@ -168,17 +158,14 @@ public final class AvailableSoftwareDialogHook implements IStartup
                 if (!(locations instanceof URI[] sites) || index < 0 || index >= sites.length
                     || sites[index] == null)
                 {
-                    Global.tempLog(LOG, "skip: index=" + index + ", locations=" + locations); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
-                Global.tempLog(LOG, "selected location: index=" + index + ", uri=" + sites[index]); //$NON-NLS-1$ //$NON-NLS-2$
                 refresh(sites[index]);
             }));
         }
 
         void refresh(URI location)
         {
-            Global.tempLog(LOG, "refresh start: " + location); //$NON-NLS-1$
             try
             {
                 Object ui = Global.getField(selector, "ui"); //$NON-NLS-1$
@@ -203,7 +190,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
                         catch (RuntimeException e)
                         {
                             // Как у штатной кнопки: отсутствие отдельного artifact-репозитория допустимо.
-                            Global.tempLog(LOG, "artifact refresh failed: " + e); //$NON-NLS-1$
                         }
                         if (monitor.isCanceled())
                             throw new OperationCanceledException();
@@ -216,12 +202,10 @@ public final class AvailableSoftwareDialogHook implements IStartup
                 {
                     Object group = Global.getField(page, "availableIUGroup"); //$NON-NLS-1$
                     boolean updated = Global.invokeVoid(group, "updateAvailableViewState"); //$NON-NLS-1$
-                    Global.tempLog(LOG, "refresh complete: " + location + ", viewerUpdated=" + updated); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
             catch (InterruptedException e)
             {
-                Global.tempLog(LOG, "refresh canceled: " + location); //$NON-NLS-1$
             }
             catch (Throwable e)
             {
@@ -232,11 +216,9 @@ public final class AvailableSoftwareDialogHook implements IStartup
 
     private static void refreshRepository(Object manager, URI location, IProgressMonitor monitor)
     {
-        Global.tempLog(LOG, "refreshRepository: manager=" + manager + ", location=" + location); //$NON-NLS-1$ //$NON-NLS-2$
         Object repository = Global.invoke(manager, "refreshRepository", location, monitor); //$NON-NLS-1$
         if (repository == null)
             throw new IllegalStateException("Обновление сайта не вернуло результат: " + location);
-        Global.tempLog(LOG, "repository loaded: " + repository); //$NON-NLS-1$
     }
 
     /**
@@ -264,17 +246,14 @@ public final class AvailableSoftwareDialogHook implements IStartup
             FrameworkUtil.getBundle(AvailableSoftwareDialogHook.class).getBundleContext()
                 .registerService(WeavingHook.class,
                     target -> runSafely("weaving callback", () -> new UpdateSitesRefresh().weave(target)), null); //$NON-NLS-1$
-            Global.tempLog(LOG, "update search weaving hook installed"); //$NON-NLS-1$
         }
 
         private static void beforeSearch(Object operation, Object progress)
         {
-            Global.tempLog(LOG, "before update search: operation=" + System.identityHashCode(operation)); //$NON-NLS-1$
             synchronized (refreshed)
             {
                 if (refreshed.contains(operation))
                 {
-                    Global.tempLog(LOG, "update sites already refreshed for this operation"); //$NON-NLS-1$
                     return;
                 }
             }
@@ -296,7 +275,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
                     .loadClass("org.eclipse.equinox.internal.p2.ui.ProvUI"); //$NON-NLS-1$
                 Object metadata = Global.invoke(provUI, "getMetadataRepositoryManager", session); //$NON-NLS-1$
                 Object artifacts = Global.invoke(provUI, "getArtifactRepositoryManager", session); //$NON-NLS-1$
-                Global.tempLog(LOG, "update sites: " + java.util.Arrays.toString(sites)); //$NON-NLS-1$
                 for (URI site : sites)
                 {
                     if (monitor.isCanceled())
@@ -321,7 +299,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
                         catch (RuntimeException e)
                         {
                             // Штатный поиск затем сообщает о недоступных сайтах своим механизмом.
-                            Global.tempLogException(LOG, "update refresh failed: " + site, e); //$NON-NLS-1$
                         }
                     }
                 }
@@ -331,11 +308,9 @@ public final class AvailableSoftwareDialogHook implements IStartup
                 {
                     refreshed.add(operation);
                 }
-                Global.tempLog(LOG, "update sites refreshed; starting native update search"); //$NON-NLS-1$
             }
             catch (OperationCanceledException e)
             {
-                Global.tempLog(LOG, "update sites refresh canceled"); //$NON-NLS-1$
                 throw e;
             }
             catch (Throwable e)
@@ -413,7 +388,6 @@ public final class AvailableSoftwareDialogHook implements IStartup
                     };
                 }
             }, 0);
-            Global.tempLog(LOG, "patch UpdateOperation: methodFound=" + patched.get()); //$NON-NLS-1$
             return patched.get() ? writer.toByteArray() : null;
         }
 

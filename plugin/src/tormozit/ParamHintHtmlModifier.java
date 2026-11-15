@@ -1565,8 +1565,6 @@ public final class ParamHintHtmlModifier
                 List<EObject> computed = BslStructureInsertCommentTypes.interactiveDocumentationMembers(dynamic);
                 for (EObject member : computed)
                     collectDocumentationMembers(member, members);
-                Global.tempLog("interactive-documentation-members", "access=" + access.getName()
-                    + " computed=" + computed.size() + " collected=" + members.size());
             }
             Environmental owner = EcoreUtil2.getContainerOfType(access, Environmental.class);
             IResourceServiceProvider rsp = resource.getURI() != null
@@ -1574,14 +1572,11 @@ public final class ParamHintHtmlModifier
             DynamicFeatureAccessComputer computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
             if (owner != null && computer != null)
             {
-                int beforeNative = members.size();
                 for (FeatureEntry entry : computer.resolveObject(access, owner.environments()))
                 {
                     if (entry.getFeature() instanceof Method || entry.getFeature() instanceof com._1c.g5.v8.dt.mcore.Property)
                         collectDocumentationMembers(entry.getFeature(), members);
                 }
-                Global.tempLog("interactive-documentation-members", "access=" + access.getName()
-                    + " beforeNative=" + beforeNative + " merged=" + members.size());
             }
         }
         else if (source instanceof Invocation invocation && invocation.getMethodAccess() != null)
@@ -3769,7 +3764,6 @@ public final class ParamHintHtmlModifier
         }
         catch (RuntimeException failure)
         {
-            ModelStateDiagnostics.failure("browser.html", failure, null, browser); //$NON-NLS-1$
             throw failure;
         }
         finally
@@ -6637,8 +6631,6 @@ public final class ParamHintHtmlModifier
             Object parameter = page != null ? Global.invoke(page, "getParameter", Integer.valueOf(index)) : null; //$NON-NLS-1$
             text = parameter != null ? asString(Global.invoke(parameter, "getDefaultDescription")) : null; //$NON-NLS-1$
         }
-        Global.tempLog("boolean-default-ranking", "default method=" + method + " index=" + index //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " name=" + name + " foreign=" + foreign + " text=" + text); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (text == null)
             return null;
         String value = formatDefaultValue(text);
@@ -8690,8 +8682,6 @@ public final class ParamHintHtmlModifier
                 else
                     info = ready.get(parameter.toLowerCase(Locale.ROOT));
             }
-            Global.tempLog("boolean-default-ranking", "lookup target=" + target + " index=" + index //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " parameter=" + parameter + " ready=" + (ready != null) + " info=" + info); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return info;
         }
 
@@ -8914,7 +8904,6 @@ public final class ParamHintHtmlModifier
         /** Временный лог (снять после подтверждения). */
         private static void log(String text)
         {
-            Global.tempLog(LOG, text);
         }
     }
 

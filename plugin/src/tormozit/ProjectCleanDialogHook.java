@@ -23,11 +23,9 @@ public final class ProjectCleanDialogHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog("project-clean", "earlyStartup"); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() ->
         {
             Display.getDefault().addFilter(SWT.Show, ProjectCleanDialogHook::handleShow);
-            Global.tempLog("project-clean", "Show filter installed"); //$NON-NLS-1$ //$NON-NLS-2$
         });
     }
 
@@ -53,7 +51,6 @@ public final class ProjectCleanDialogHook implements IStartup
                     data.widthHint = Math.max(data.widthHint, button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true).x);
                 button.getParent().layout(true, true);
             }
-            Global.tempLog("project-clean", "dialog renamed: defaultButton=" + button); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -70,7 +67,6 @@ public final class ProjectCleanDialogHook implements IStartup
             int shortcut = previous.indexOf('\t');
             action.setText(LABEL + "..."); //$NON-NLS-1$
             item.setText(LABEL + "..." + (shortcut < 0 ? "" : previous.substring(shortcut))); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("project-clean", "menu renamed: " + previous + " -> " + item.getText()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
     }
 }

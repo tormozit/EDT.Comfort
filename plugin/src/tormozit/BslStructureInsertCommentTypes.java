@@ -3258,7 +3258,6 @@ public final class BslStructureInsertCommentTypes
         }
         catch (RuntimeException failure)
         {
-            ModelStateDiagnostics.failure("types.arrayVariable", failure, null, variable, types, offset); //$NON-NLS-1$
             throw failure;
         }
     }
@@ -4051,19 +4050,8 @@ public final class BslStructureInsertCommentTypes
                     ? nativeTypes(object, environments, provided) : List.of();
                 List<TypeItem> result = preserveNative ? merge(nativeResult, inferred)
                     : inferred.isEmpty() ? nativeResult : inferred;
-                if (object instanceof Invocation || object instanceof IndexAccess)
-                    Global.tempLog("interactive-expression-types", "kind=" + object.eClass().getName()
-                        + " offset=" + position(object)
-                        + " native=" + nativeResult.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
-                        + " inferred=" + inferred.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
-                        + " merged=" + result.size());
                 if (object instanceof DynamicFeatureAccess access)
                 {
-                    Global.tempLog("interactive-member-types", "access=" + access.getName()
-                        + " offset=" + position(access)
-                        + " native=" + nativeResult.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
-                        + " inferred=" + inferred.stream().map(type -> EcoreUtil.getURI(type).toString()).toList()
-                        + " merged=" + result.size());
                     result = TypeOfBranchNarrowing.narrow(result, access);
                 }
                 result = List.copyOf(result);
@@ -4405,8 +4393,6 @@ public final class BslStructureInsertCommentTypes
                         Environments declared = candidate instanceof com._1c.g5.v8.dt.mcore.Environmental environmental
                             ? environmental.environments() : null;
                         boolean available = declared == null || declared.containsAny(environments);
-                        Global.tempLog("interactive-member-environments", "name=" + name
-                            + " requested=" + environments + " declared=" + declared + " available=" + available);
                         if (available && result.stream().noneMatch(existing -> existing == candidate))
                             result.add(candidate);
                     }

@@ -102,7 +102,6 @@ public final class BslEditorHighlightingHook implements IStartup
             });
 
         PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
-            ModelStateDiagnostics.install(Display.getCurrent());
             Display.getCurrent().addFilter(SWT.Paint, event -> {
                 if (Global.isLogEnabled() && event.widget instanceof StyledText text
                     && text.getData(EditorPaintDebug.KEY) instanceof EditorPaintDebug debug)
@@ -379,7 +378,6 @@ public final class BslEditorHighlightingHook implements IStartup
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
-            ModelStateDiagnostics.failure("highlight.apply", cause, document, hr); //$NON-NLS-1$
             Global.log(TAG, "runFullHighlightingApply failed: " //$NON-NLS-1$
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
         }
@@ -577,13 +575,11 @@ public final class BslEditorHighlightingHook implements IStartup
         @Override
         public void documentAboutToBeChanged(DocumentEvent event)
         {
-            ModelStateDiagnostics.documentEvent(event, "before"); //$NON-NLS-1$
         }
 
         @Override
         public void documentChanged(DocumentEvent event)
         {
-            ModelStateDiagnostics.documentEvent(event, "after"); //$NON-NLS-1$
             if (ComfortSettings.isQueryLiteralHighlightingEnabled())
                 applyHighlightingNow(reconciler);
         }
@@ -836,8 +832,6 @@ public final class BslEditorHighlightingHook implements IStartup
             }
             catch (RuntimeException failure)
             {
-                ModelStateDiagnostics.failure("highlight.recolor", failure, viewer.getDocument(), //$NON-NLS-1$
-                    text, line, widgetLine, start, end);
                 throw failure;
             }
         }

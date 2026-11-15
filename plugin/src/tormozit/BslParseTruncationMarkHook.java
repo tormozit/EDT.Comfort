@@ -546,18 +546,9 @@ public final class BslParseTruncationMarkHook implements IStartup
          */
         private Mark readParseMark()
         {
-            long started = System.nanoTime();
-            try
-            {
-                // Только результат синтаксического разбора. Обычный readOnly попутно
-                // устанавливает типы EDT и держит блокировку, нужную автодополнению.
-                return ContentAssistSessionReloader.readOnlyPeekAst(document, this::computeByModel);
-            }
-            finally
-            {
-                Global.tempLog("parse-truncation-read", "peekAst ms=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ((System.nanoTime() - started) / 1_000_000.0));
-            }
+            // Только результат синтаксического разбора. Обычный readOnly попутно
+            // устанавливает типы EDT и держит блокировку, нужную автодополнению.
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, this::computeByModel);
         }
 
         private Mark computeByModel(XtextResource resource)

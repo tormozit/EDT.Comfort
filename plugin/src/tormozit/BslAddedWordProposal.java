@@ -372,8 +372,6 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         }
         catch (BadLocationException | RuntimeException failure)
         {
-            ModelStateDiagnostics.failure("proposal.replace", failure, document, //$NON-NLS-1$
-                from, to, result.length());
             throw failure;
         }
         selection = new Point(from + caretOut, 0);

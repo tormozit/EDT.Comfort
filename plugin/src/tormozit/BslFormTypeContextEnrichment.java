@@ -285,7 +285,6 @@ public final class BslFormTypeContextEnrichment
         }
         catch (RuntimeException failure)
         {
-            ModelStateDiagnostics.failure("types.formAttribute", failure, null, expression, property); //$NON-NLS-1$
             throw failure;
         }
     }

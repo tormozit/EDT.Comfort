@@ -118,10 +118,6 @@ final class BracketContentHintPresenter
         }
         catch (RuntimeException failure)
         {
-            ITextViewer viewer = lineMapper instanceof ITextViewer textViewer ? textViewer : null;
-            ModelStateDiagnostics.failure("projection.line", failure, //$NON-NLS-1$
-                viewer != null ? viewer.getDocument() : null,
-                viewer != null ? viewer.getTextWidget() : null, lineMapper, modelLine);
             throw failure;
         }
     }

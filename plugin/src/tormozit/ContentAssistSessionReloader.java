@@ -2533,8 +2533,6 @@ boolean inLiteral = endCaret >= 0
     static <T> T readOnlyForContentAssist(IXtextDocument doc, IUnitOfWork<T, XtextResource> work)
     {
         IUnitOfWork<T, XtextResource> queryWork = withQueryCalculationScope(work);
-        DeferTrace.log("assistRead.enter", doc, null, 0, //$NON-NLS-1$
-            "ui=" + (Display.getCurrent() != null)); //$NON-NLS-1$
         // Без удержания перепарсинга штатное чтение идёт одновременно с ним
         // (withModelSyncHeld): так упало «Unhandled event loop exception: StackOverflowError»
         // из подсказки параметров сразу после вставки УстановитьТекстЗапроса(Текст)
@@ -2544,14 +2542,11 @@ boolean inLiteral = endCaret >= 0
         // повторит или обойдётся без ответа.
         if (Display.getCurrent() != null && isModelSyncBusy(doc))
         {
-            DeferTrace.log("assistRead.uiSkip", doc, null, 0, ""); //$NON-NLS-1$ //$NON-NLS-2$
             SmartContentAssistProcessor.uiBlockLog("modelSync.uiSkip", "read"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         Object result = withModelSyncHeld(doc, null,
             () -> invokeBslRead(doc, "readOnlyForContentAssist", queryWork)); //$NON-NLS-1$
-        DeferTrace.log("assistRead.exit", doc, null, 0, //$NON-NLS-1$
-            result == BSL_READ_MISSING ? "missing" : "read"); //$NON-NLS-1$ //$NON-NLS-2$
         if (result != BSL_READ_MISSING)
         {
             // Прямой тип BslXtextDocument тянет отсутствующий в build path
@@ -2585,22 +2580,18 @@ boolean inLiteral = endCaret >= 0
         if (!(candidate instanceof org.eclipse.core.runtime.jobs.Job job))
             return;
         long started = System.nanoTime();
-        String why = "idle"; //$NON-NLS-1$
         while (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
         {
             if (monitor != null && monitor.isCanceled())
             {
-                why = "canceled"; //$NON-NLS-1$
                 break;
             }
             if (AssistPriority.isPending(doc))
             {
-                why = "assist"; //$NON-NLS-1$
                 break;
             }
             if ((System.nanoTime() - started) / 1_000_000L >= VALIDATION_WAIT_CAP_MS)
             {
-                why = "cap"; //$NON-NLS-1$
                 break;
             }
             try
@@ -2610,17 +2601,13 @@ boolean inLiteral = endCaret >= 0
             catch (InterruptedException e)
             {
                 Thread.currentThread().interrupt();
-                why = "interrupted"; //$NON-NLS-1$
                 break;
             }
             catch (org.eclipse.core.runtime.OperationCanceledException e)
             {
-                why = "canceled"; //$NON-NLS-1$
                 break;
             }
         }
-        DeferTrace.log("validation.wait", doc, job, 0, //$NON-NLS-1$
-            "waitedMs=" + (System.nanoTime() - started) / 1_000_000L + " why=" + why); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Защищённый фоновый читатель уступает подсказкам, не отменяя собственный монитор вложенным assist. */
@@ -2640,7 +2627,6 @@ boolean inLiteral = endCaret >= 0
     private static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
         IUnitOfWork<T, XtextResource> work, boolean peekOnly)
     {
-        DeferTrace.log(peekOnly ? "low.enter.peek" : "low.enter", doc, null, 0, ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!peekOnly)
             awaitIdleValidation(doc, monitor);
         boolean invoked = false;
@@ -2696,12 +2682,8 @@ boolean inLiteral = endCaret >= 0
                         restartNeeded = !isValidatedAndIdle(doc);
                         stamp = modificationStamp(doc);
                     }
-                    DeferTrace.log(peekOnly ? "low.invoke.peek" : "low.invoke", doc, null, 0, //$NON-NLS-1$ //$NON-NLS-2$
-                        "before restartNeeded=" + restartNeeded); //$NON-NLS-1$
                     Object result = invokeBslRead(doc,
                         peekOnly ? "readOnlyDataModelWithoutSync" : "readOnlyForContentAssist", work); //$NON-NLS-1$ //$NON-NLS-2$
-                    DeferTrace.log(peekOnly ? "low.invoke.peek" : "low.invoke", doc, null, 0, //$NON-NLS-1$ //$NON-NLS-2$
-                        result == BSL_READ_MISSING ? "missing" : "read"); //$NON-NLS-1$ //$NON-NLS-2$
                     if (result == BSL_READ_MISSING)
                     {
                         return null;
@@ -2724,12 +2706,6 @@ boolean inLiteral = endCaret >= 0
             if (invoked && !peekOnly)
             {
                 boolean changed = stamp == -1 || modificationStamp(doc) != stamp;
-                DeferTrace.log("low.restart", doc, null, 0, //$NON-NLS-1$
-                    "restartNeeded=" + restartNeeded + " changed=" + changed); //$NON-NLS-1$ //$NON-NLS-2$
-                Object validation = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
-                traceValidationRun("low.restart", VALIDATION_WATCHES.get(doc), //$NON-NLS-1$
-                    validation instanceof org.eclipse.core.runtime.jobs.Job job ? job : null,
-                    "call=" + (restartNeeded || changed)); //$NON-NLS-1$
                 if (restartNeeded || changed)
                     Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
             }
@@ -3166,47 +3142,6 @@ boolean inLiteral = endCaret >= 0
         java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
-     * Временная диагностика отмен проверки модуля: кто снимает {@code BslValidationJob}
-     * и в каком окне. Отдельный файл {@code .tmp/temp-logs/validation-defer.log};
-     * пишем каждый вызов, без порогов.
-     */
-    private static final class DeferTrace
-    {
-        private static final String TOPIC = "validation-defer"; //$NON-NLS-1$
-
-        private DeferTrace()
-        {
-        }
-
-        static void log(String phase, Object document, Object job, int users, String detail)
-        {
-            String length = document instanceof IDocument doc ? Integer.toString(doc.getLength()) : "?"; //$NON-NLS-1$
-            String jobId = job == null ? "null" //$NON-NLS-1$
-                : job.getClass().getSimpleName() + "@" + Integer.toHexString(System.identityHashCode(job)); //$NON-NLS-1$
-            Global.tempLog(TOPIC, phase + " len=" + length + " user=" + users //$NON-NLS-1$ //$NON-NLS-2$
-                + " job=" + jobId + " state=" + state(job) //$NON-NLS-1$ //$NON-NLS-2$
-                + " thread=" + Thread.currentThread().getName() //$NON-NLS-1$
-                + (detail == null || detail.isEmpty() ? "" : " " + detail)); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        private static String state(Object job)
-        {
-            if (!(job instanceof org.eclipse.core.runtime.jobs.Job typed))
-                return "?"; //$NON-NLS-1$
-            int state = typed.getState();
-            if (state == org.eclipse.core.runtime.jobs.Job.NONE)
-                return "NONE"; //$NON-NLS-1$
-            if (state == org.eclipse.core.runtime.jobs.Job.SLEEPING)
-                return "SLEEPING"; //$NON-NLS-1$
-            if (state == org.eclipse.core.runtime.jobs.Job.WAITING)
-                return "WAITING"; //$NON-NLS-1$
-            if (state == org.eclipse.core.runtime.jobs.Job.RUNNING)
-                return "RUNNING"; //$NON-NLS-1$
-            return Integer.toString(state);
-        }
-    }
-
-    /**
      * Проверка уступает ещё ДО входа в монитор документа. Штатное чтение отменяет её
      * уже внутри монитора — слишком поздно, если проверка удерживает его сама.
      * Отмена кооперативная: BslValidationJob передаёт свой монитор в CancelIndicator.
@@ -3267,7 +3202,6 @@ boolean inLiteral = endCaret >= 0
 
         private void deferValidation(org.eclipse.core.runtime.jobs.Job job, String phase)
         {
-            DeferTrace.log("cancel." + phase, document.get(), job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (job.getState() != org.eclipse.core.runtime.jobs.Job.NONE)
                 interrupted.set(true);
             job.cancel();
@@ -3295,8 +3229,6 @@ boolean inLiteral = endCaret >= 0
             if (users.get() == 0 && interrupted.getAndSet(false)
                 && (event.getResult() == null || !event.getResult().isOK()))
             {
-                DeferTrace.log("resume.afterDone", document.get(), event.getJob(), users.get(), //$NON-NLS-1$
-                    "result=" + event.getResult()); //$NON-NLS-1$
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
             }
         }
@@ -3305,7 +3237,6 @@ boolean inLiteral = endCaret >= 0
         public void close()
         {
             int remaining = users.decrementAndGet();
-            DeferTrace.log("close", document.get(), validation.get(), remaining, ""); //$NON-NLS-1$ //$NON-NLS-2$
             if (remaining == 0)
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
         }
@@ -3316,31 +3247,24 @@ boolean inLiteral = endCaret >= 0
             org.eclipse.core.runtime.jobs.Job job = validation.get();
             if (doc == null || job == null || Global.getField(doc, "resource") == null) //$NON-NLS-1$
             {
-                DeferTrace.log("resume.skip", doc, job, users.get(), "noDocument"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             boolean pending = isPending(doc);
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
             if (pending)
             {
-                DeferTrace.log("resume.pending", doc, job, users.get(), "skip=" + skip); //$NON-NLS-1$ //$NON-NLS-2$
                 return; // последний close() снова запланирует возобновление
             }
             boolean busy = isModelSyncBusy(doc);
             if (skip || busy)
             {
-                DeferTrace.log("resume.defer", doc, job, users.get(), //$NON-NLS-1$
-                    "skip=" + skip + " busy=" + busy); //$NON-NLS-1$ //$NON-NLS-2$
                 resume.schedule(VALIDATION_GUARD_DELAY_MS);
                 return;
             }
             if (job.getState() == org.eclipse.core.runtime.jobs.Job.NONE)
             {
-                DeferTrace.log("resume.restart", doc, job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
             }
-            else
-                DeferTrace.log("resume.busy", doc, job, users.get(), ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -3905,7 +3829,6 @@ boolean inLiteral = endCaret >= 0
             && cancel.isCanceled();
         boolean restart = !skip && !outdated
             && watch.guardRestarts.get() < VALIDATION_GUARD_MAX_RESTARTS;
-        traceValidationRun("guard", watch, job, "outdated=" + outdated + " restart=" + restart); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (restart)
         {
             watch.guardRestarts.incrementAndGet();
@@ -3968,23 +3891,14 @@ boolean inLiteral = endCaret >= 0
             watch.job = job;
             watch.document = new java.lang.ref.WeakReference<>(doc);
         }
-        traceValidationRun("attach", watch, job, ""); //$NON-NLS-1$ //$NON-NLS-2$
         job.addJobChangeListener(new org.eclipse.core.runtime.jobs.JobChangeAdapter()
         {
-            @Override
-            public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
-            {
-                traceValidationRun("scheduled", watch, event.getJob(), //$NON-NLS-1$
-                    "delay=" + event.getDelay()); //$NON-NLS-1$
-            }
-
             @Override
             public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
             {
                 IDocument watched = watch.document == null ? null : watch.document.get();
                 watch.runStamp = watched == null ? -1 : modificationStamp(watched);
                 watch.runSkip = Boolean.TRUE.equals(Global.invoke(event.getJob(), "isSkip")); //$NON-NLS-1$
-                traceValidationRun("running", watch, event.getJob(), ""); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             @Override
@@ -4000,32 +3914,12 @@ boolean inLiteral = endCaret >= 0
                 boolean skipNow = Boolean.TRUE.equals(Global.invoke(done.getJob(), "isSkip")); //$NON-NLS-1$
                 boolean sameText = watch.runStamp != -1 && watch.runStamp == stampNow;
                 boolean counted = ok && !watch.runSkip && !skipNow && sameText;
-                traceValidationRun("done", watch, done.getJob(), "ok=" + ok + " skipNow=" + skipNow //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " stampNow=" + stampNow + " counted=" + counted); //$NON-NLS-1$ //$NON-NLS-2$
                 if (counted)
                     watch.validatedAt = System.nanoTime();
                 else
                     armValidationGuard(watch);
             }
         });
-    }
-
-    /** Временный лог прогонов проверки модуля: {@code .tmp/temp-logs/validation-run.log}. */
-    private static void traceValidationRun(String phase, ValidationWatch watch,
-                                           org.eclipse.core.runtime.jobs.Job job, String detail)
-    {
-        IDocument doc = watch == null || watch.document == null ? null : watch.document.get();
-        Global.tempLog("validation-run", phase //$NON-NLS-1$
-            + " job=" + (job == null ? "null" : Integer.toHexString(System.identityHashCode(job))) //$NON-NLS-1$ //$NON-NLS-2$
-            + " state=" + (job == null ? -1 : job.getState()) //$NON-NLS-1$
-            + " skip=" + (job != null && Boolean.TRUE.equals(Global.invoke(job, "isSkip"))) //$NON-NLS-1$ //$NON-NLS-2$
-            + " len=" + (doc == null ? -1 : doc.getLength()) //$NON-NLS-1$
-            + " stamp=" + (doc == null ? -1 : modificationStamp(doc)) //$NON-NLS-1$
-            + (watch == null ? "" : " runStamp=" + watch.runStamp + " runSkip=" + watch.runSkip //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " validated=" + (watch.validatedAt >= watch.changedAt) //$NON-NLS-1$
-                + " checks=" + watch.guardChecks.get() + " restarts=" + watch.guardRestarts.get()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " " + detail //$NON-NLS-1$
-            + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
     }
 
     private static void restartMissedValidations()
@@ -4046,7 +3940,6 @@ boolean inLiteral = endCaret >= 0
                 continue;
             boolean idle = job.getState() == org.eclipse.core.runtime.jobs.Job.NONE;
             boolean skip = Boolean.TRUE.equals(Global.invoke(job, "isSkip")); //$NON-NLS-1$
-            traceValidationRun("assistSync.done", watch, job, "restart=" + (idle && !skip)); //$NON-NLS-1$ //$NON-NLS-2$
             // Задание уже запланировано или идёт — оно отработает само
             if (idle && !skip)
                 Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
@@ -5831,7 +5724,6 @@ if (!inLiteral)
     static void refreshContextPremiums(IDocument document)
     {
         ContentAssistSessionReloader reloader = forDocument(document);
-        Global.tempLog("boolean-default-ranking", "refreshDocument found=" + (reloader != null)); //$NON-NLS-1$ //$NON-NLS-2$
         if (reloader == null)
             return;
         ContentAssistPopupUi.updateContextTypeLabel(reloader.viewer);
@@ -5841,7 +5733,6 @@ if (!inLiteral)
         boolean refreshed = ContentAssistPopupSync.recomputePopupList(reloader.assistant, reloader.viewer,
             reloader.processor);
         ContentAssistPopupSync.refreshAdditionalInfo(reloader.assistant);
-        Global.tempLog("boolean-default-ranking", "refreshDocument recomputed=" + refreshed); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Сессия редактора, которому принадлежит процессор (только UI-поток). */
@@ -7218,10 +7109,6 @@ processor.applyIrCompletion(snapshot);
         ContentAssistant ca = reloader != null ? reloader.assistant : null;
         SourceViewer viewer = reloader != null ? reloader.viewer : null;
         SmartContentAssistProcessor processor = reloader != null ? reloader.processor : null;
-        Global.tempLog("boolean-default-ranking", "popupRefresh irOnly=" + irOnly //$NON-NLS-1$ //$NON-NLS-2$
-            + " threadContext=" + (ACTIVE_RELOADER.get() != null) + " session=" + (reloader != null) //$NON-NLS-1$ //$NON-NLS-2$
-            + " visible=" + (ca != null && ContentAssistPopupSync.isPopupVisible(ca)) //$NON-NLS-1$
-            + " recomputing=" + ContentAssistPopupSync.isRecomputeInProgress()); //$NON-NLS-1$
         if (ca == null || viewer == null || processor == null || reloader == null)
             return;
         if (irOnly && !processor.shouldRefreshIrPopup())
