@@ -22,6 +22,10 @@ public class SmartCodeProposalSorter implements ICompletionProposalSorter
         if (row1 || row2)
             return row1 == row2 ? 0 : row1 ? -1 : 1;
 
+        Integer directionOrder = SmartContentAssistProcessor.compareSortDirections(p1, p2);
+        if (directionOrder != null)
+            return directionOrder.intValue();
+
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return compareDisplay(p1, p2);
 

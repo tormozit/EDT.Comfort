@@ -5165,6 +5165,14 @@ boolean inLiteral = endCaret >= 0
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
         {
+            if (processor != null && SmartContentAssistProcessor.sortDirectionKeyAt(
+                viewer.getDocument(), caret) >= 0)
+            {
+                Global.tempLog("literal-auto-open", "sortDirections.refresh caret=" + caret);
+                processor.scheduleLiteralArgListInBackground(viewer, caret, "sortDirections",
+                    () -> ContentAssistSessionReloader.refreshPopupIfOpen(caret));
+                return;
+            }
             if (processor != null && isMemberAccessAtCaret(caret))
             {
                 SmartContentAssistProcessor.uiBlockLog("autoOpen.begin.memberRefresh", //$NON-NLS-1$
@@ -5425,6 +5433,12 @@ boolean inLiteral = endCaret >= 0
         catch (BadLocationException e)
         {
             // Нет точки — решает префикс ниже.
+        }
+        if (SmartContentAssistProcessor.sortDirectionKeyAt(doc, caret) >= 0)
+        {
+            contextPremiumAutoOpenCaret = -1;
+            Global.tempLog("literal-auto-open", "sortDirections.openGate caret=" + caret + " allowed=true");
+            return true;
         }
         if (!prefix.isEmpty() || memberDot)
         {

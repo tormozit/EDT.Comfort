@@ -68,6 +68,7 @@ import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.model.Variable;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.stringliteral.contenttypes.TypeUtil;
 import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
@@ -701,6 +702,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         Expression literal = index >= 0 && index < args.size() ? args.get(index) : null;
         Analysis analysis = new Analysis(resource, request.manual, russian, typed,
             literal != null ? offsetOf(literal) : offsetOf(target));
+        Global.tempLog("literal-auto-open", "provider.begin position=" + analysis.position
+            + " typed=[" + typed + "] target=" + target.eClass().getName() + " index=" + index
+            + " manual=" + request.manual);
         try
         {
             analysis.call(target, args, index, ""); //$NON-NLS-1$
@@ -708,8 +712,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
         catch (RuntimeException | StackOverflowError e)
         {
+            Global.tempLog("literal-auto-open", "provider.error typed=[" + typed + "] error=" + e
+                + " stack=" + java.util.Arrays.toString(e.getStackTrace()));
             return List.of();
         }
+        Global.tempLog("literal-auto-open", "provider.result typed=[" + typed + "] branches="
+            + analysis.branches + " full=" + analysis.full + " values=" + analysis.values.values());
         Segment segment = Segment.of(typed);
         request.rememberFull(analysis, typed.substring(0, segment.start));
         String before = "\"" + typed.substring(0, segment.start); //$NON-NLS-1$
@@ -1614,11 +1622,36 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             }
             if (!(target instanceof Invocation invocation) || invocation.getMethodAccess() == null)
                 return NO_CALL_TARGET;
-            for (FeatureEntry entry : featureEntries(invocation.getMethodAccess()))
+            FeatureAccess access = invocation.getMethodAccess();
+            List<FeatureEntry> entries = featureEntries(access);
+            // При наборе готовых записей метода в AST ещё может не быть. Как в
+            // BslExpectedTypePremiums.featureTypes, разрешаем динамическое обращение
+            // штатным вычислителем EDT. Проверки модулей сохраняют прежний путь.
+            if (REQUEST.get() != null && !validation && entries.isEmpty()
+                && access instanceof DynamicFeatureAccess)
+            {
+                var services = resource.getResourceServiceProvider();
+                DynamicFeatureAccessComputer computer = services != null
+                    ? services.get(DynamicFeatureAccessComputer.class) : null;
+                Global.tempLog("literal-auto-open", "method.resolve name=" + access.getName()
+                    + " position=" + position + " computer=" + (computer != null));
+                if (computer != null)
+                    entries = DynamicFeatureAccessComputer.resolveDynamicFeatureAccess(access, computer);
+                Global.tempLog("literal-auto-open", "method.resolved name=" + access.getName()
+                    + " position=" + position + " entries=" + entries.size());
+            }
+            if (REQUEST.get() != null)
+                Global.tempLog("literal-auto-open", "method.entries name=" + access.getName()
+                    + " position=" + position + " count=" + entries.size());
+            for (FeatureEntry entry : entries)
             {
                 EObject feature = entry != null ? entry.getFeature() : null;
                 if (feature != null && feature.eIsProxy())
                     feature = EcoreUtil.resolve(feature, resource);
+                if (REQUEST.get() != null)
+                    Global.tempLog("literal-auto-open", "method.feature name=" + access.getName()
+                        + " feature=" + (feature != null ? feature.eClass().getName() : "null")
+                        + " proxy=" + (feature != null && feature.eIsProxy()));
                 // Экспортный метод общего модуля приходит методом его контекста — нужен исходный метод модуля
                 // (как ParamHintHtmlModifier.sourceMethod).
                 if (feature instanceof com._1c.g5.v8.dt.bsl.model.BslContextDefMethod exported

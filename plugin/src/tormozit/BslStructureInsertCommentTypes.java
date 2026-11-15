@@ -1748,6 +1748,7 @@ public final class BslStructureInsertCommentTypes
     /** Дополняет именно страницу штатной подсказки; описание уже прочитано в Pass. */
     static void completePropertyHover(Object info, EObject object, ITextViewer viewer)
     {
+        BslExpressionDetails.request(info, object, viewer, -1);
         if (object == null || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
@@ -2167,6 +2168,7 @@ public final class BslStructureInsertCommentTypes
     /** Слово под указателем: свойство обращения под указателем, см. {@link #propertyAt}. */
     static void completePropertyHover(Object info, ITextViewer viewer, int offset)
     {
+        BslExpressionDetails.request(info, null, viewer, offset);
         if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
             return;
         try
@@ -3232,6 +3234,7 @@ public final class BslStructureInsertCommentTypes
                 return types;
             if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
                 types = ArrayElementTypes.infer(types, variable, offset, environments);
+            types = CollectionValueTypes.infer(types, variable, offset, environments);
             types = FormItemKinds.infer(types, variable, offset, environments);
             return ColumnRenames.infer(types, variable, offset, environments);
         }
@@ -3846,6 +3849,241 @@ public final class BslStructureInsertCommentTypes
         {
             ICompositeNode node = NodeModelUtils.findActualNodeFor(object);
             return node == null ? Integer.MAX_VALUE : node.getEndOffset();
+        }
+    }
+
+    /** ИР: СобратьДинамическиеСвойстваОбъекта — ключи соответствия и значения двух первых добавлений. */
+    private static final class CollectionValueTypes
+    {
+        private static final ThreadLocal<Set<Variable>> RESOLVING = ThreadLocal.withInitial(
+            () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+
+        static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
+        {
+            Set<Variable> resolving = RESOLVING.get();
+            if (!resolving.add(variable))
+                return types;
+            try
+            {
+                if (!(variable.eResource() instanceof XtextResource resource))
+                    return types;
+                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+                if (method == null && !resource.getContents().isEmpty()
+                    && resource.getContents().get(0) instanceof Module module)
+                    for (Method candidate : module.allMethods())
+                    {
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
+                        if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
+                        {
+                            method = candidate;
+                            break;
+                        }
+                    }
+                if (method == null)
+                    return types;
+                Plan plan = Plan.of(method);
+                TypesComputer computer = resource.getResourceServiceProvider().get(TypesComputer.class);
+                types = loopTypes(types, variable, offset, environments, plan, computer);
+                List<TypeItem> result = new ArrayList<>();
+                for (TypeItem item : types)
+                {
+                    String name = McoreUtil.getTypeName(item);
+                    if (!(item instanceof Type collection) || !("Map".equals(name) || "ValueList".equals(name))) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        result.add(item);
+                        continue;
+                    }
+                    boolean map = "Map".equals(name); //$NON-NLS-1$
+                    int from = plan.assignments.getOrDefault(variable, List.of()).stream()
+                        .filter(position -> position <= offset).mapToInt(Integer::intValue).max().orElse(0);
+                    List<TypeItem> keys = new ArrayList<>();
+                    List<TypeItem> values = new ArrayList<>();
+                    int count = 0;
+                    for (Addition addition : plan.additions.getOrDefault(variable, List.of()))
+                    {
+                        if (addition.start < from || addition.end > offset || addition.map != map
+                            || !addition.environments.containsAny(environments))
+                            continue;
+                        if (++count > 2)
+                            break;
+                        if (map && addition.key != null)
+                            for (TypeItem key : computer.computeTypes(addition.key, environments))
+                                ArrayElementTypes.addElement(keys, key);
+                        if (addition.value != null)
+                            for (TypeItem value : computer.computeTypes(addition.value, environments))
+                                ArrayElementTypes.addElement(values, value);
+                    }
+                    result.add(keys.isEmpty() && values.isEmpty() ? item
+                        : specialize(collection, keys, values, variable, map));
+                }
+                return result;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                return types;
+            }
+            finally
+            {
+                resolving.remove(variable);
+                if (resolving.isEmpty())
+                    RESOLVING.remove();
+            }
+        }
+
+        private static List<TypeItem> loopTypes(List<TypeItem> types, Variable variable, int offset,
+            Environments environments, Plan plan, TypesComputer computer)
+        {
+            for (var loop : plan.loops)
+            {
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(loop);
+                ICompositeNode collectionNode = NodeModelUtils.findActualNodeFor(loop.getCollection());
+                Environmental owner = EcoreUtil2.getContainerOfType(loop, Environmental.class);
+                if (node == null || collectionNode == null || offset < collectionNode.getEndOffset()
+                    || offset > node.getEndOffset() || sourceVariable(loop.getVariableAccess()) != variable
+                    || owner == null || !owner.environments().containsAny(environments)
+                    || plan.assignments.getOrDefault(variable, List.of()).stream()
+                        .anyMatch(position -> position > collectionNode.getEndOffset() && position <= offset))
+                    continue;
+                List<TypeItem> elements = new ArrayList<>();
+                for (TypeItem item : computer.computeTypes(loop.getCollection(), environments))
+                    if (item instanceof Type collection
+                        && ("Map".equals(McoreUtil.getTypeName(item)) || "ValueList".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$ //$NON-NLS-2$
+                        && collection.getCollectionElementTypes() != null)
+                        elements.addAll(collection.getCollectionElementTypes().allTypes());
+                if (!elements.isEmpty())
+                    return elements;
+            }
+            return types;
+        }
+
+        /** Копируем только экземпляр типа; платформенные свойства и методы не меняем. */
+        private static Type specialize(Type source, List<TypeItem> keys, List<TypeItem> values,
+            EObject context, boolean map)
+        {
+            Type result = EcoreUtil2.cloneWithProxies(source);
+            if (source.getCollectionElementTypes() == null)
+                return source;
+            var elements = McoreFactory.eINSTANCE.createTypeContainerDef();
+            Type element = null;
+            for (TypeItem item : source.getCollectionElementTypes().allTypes())
+            {
+                EObject resolved = EcoreUtil.resolve(item, context);
+                if (!(resolved instanceof Type type))
+                    continue;
+                Type copy = EcoreUtil2.cloneWithProxies(type);
+                for (Property property : copy.getContextDef().getProperties())
+                {
+                    List<TypeItem> inferred = "Value".equals(property.getName()) ? values //$NON-NLS-1$
+                        : map && "Key".equals(property.getName()) ? keys : List.of(); //$NON-NLS-1$
+                    if (inferred.isEmpty())
+                        continue;
+                    List<TypeItem> combined = new ArrayList<>(inferred);
+                    for (TypeItem existing : property.getTypes())
+                        if (!"Arbitrary".equals(McoreUtil.getTypeName(existing))) //$NON-NLS-1$
+                            ArrayElementTypes.addElement(combined, existing);
+                    TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+                    container.getTypes().addAll(combined);
+                    property.setTypeContainer(container);
+                }
+                elements.getTypes().add(copy);
+                element = copy;
+            }
+            if (element == null)
+                return source;
+            result.setCollectionElementTypes(elements);
+            for (com._1c.g5.v8.dt.mcore.Method method : result.getContextDef().getMethods())
+            {
+                if (map && "Get".equals(method.getName()) && !values.isEmpty()) //$NON-NLS-1$
+                {
+                    method.getRetValType().removeIf(type -> "Arbitrary".equals(McoreUtil.getTypeName(type))); //$NON-NLS-1$
+                    for (TypeItem value : values)
+                        if (!method.getRetValType().contains(value))
+                            method.getRetValType().add(value);
+                }
+                else if (!map)
+                    for (int index = 0; index < method.getRetValType().size(); index++)
+                        if ("ValueListItem".equals(McoreUtil.getTypeName(method.getRetValType().get(index)))) //$NON-NLS-1$
+                            method.getRetValType().set(index, element);
+            }
+            return result;
+        }
+
+        private static record Addition(int start, int end, Expression key, Expression value,
+            boolean map, Environments environments) {}
+
+        private static final class Plan extends org.eclipse.emf.common.notify.impl.AdapterImpl
+        {
+            final ICompositeNode node;
+            final java.util.Map<Variable, List<Addition>> additions = new java.util.IdentityHashMap<>();
+            final java.util.Map<Variable, List<Integer>> assignments = new java.util.IdentityHashMap<>();
+            final List<com._1c.g5.v8.dt.bsl.model.ForEachStatement> loops;
+
+            Plan(Method method, ICompositeNode node)
+            {
+                this.node = node;
+                loops = EcoreUtil2.getAllContentsOfType(method, com._1c.g5.v8.dt.bsl.model.ForEachStatement.class);
+                loops.sort(java.util.Comparator.comparingInt((com._1c.g5.v8.dt.bsl.model.ForEachStatement loop) -> {
+                    ICompositeNode position = NodeModelUtils.findActualNodeFor(loop);
+                    return position == null ? -1 : position.getOffset();
+                }).reversed());
+                for (SimpleStatement statement : EcoreUtil2.getAllContentsOfType(method, SimpleStatement.class))
+                {
+                    if (statement.getRight() == null)
+                        continue;
+                    ICompositeNode position = NodeModelUtils.findActualNodeFor(statement);
+                    if (statement.getLeft() instanceof StaticFeatureAccess access)
+                    {
+                        Variable variable = sourceVariable(access);
+                        if (variable != null && position != null)
+                            assignments.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(position.getEndOffset());
+                    }
+                    else if (statement.getLeft() instanceof IndexAccess index)
+                        add(index.getSource(), index.getIndex(), statement.getRight(), true, statement);
+                }
+                for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+                {
+                    if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access))
+                        continue;
+                    List<Expression> params = invocation.getParams();
+                    String name = access.getName();
+                    if (("Вставить".equalsIgnoreCase(name) || "Insert".equalsIgnoreCase(name)) && params.size() >= 2) //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                        add(access.getSource(), params.get(0), params.get(1), true, invocation);
+                        add(access.getSource(), null, params.get(1), false, invocation);
+                    }
+                    else if (("Добавить".equalsIgnoreCase(name) || "Add".equalsIgnoreCase(name)) && !params.isEmpty()) //$NON-NLS-1$ //$NON-NLS-2$
+                        add(access.getSource(), null, params.get(0), false, invocation);
+                }
+                additions.values().forEach(entries -> entries.sort(java.util.Comparator.comparingInt(Addition::start)));
+            }
+
+            private void add(Expression source, Expression key, Expression value, boolean map, EObject expression)
+            {
+                // Изменение вложенной коллекции не является добавлением в корневую переменную.
+                if (!(source instanceof StaticFeatureAccess))
+                    return;
+                Variable variable = sourceVariable(source);
+                ICompositeNode position = NodeModelUtils.findActualNodeFor(expression);
+                Environmental owner = EcoreUtil2.getContainerOfType(expression, Environmental.class);
+                if (variable != null && position != null && owner != null)
+                    additions.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(new Addition(
+                        position.getOffset(), position.getEndOffset(), key, value, map, owner.environments()));
+            }
+
+            static Plan of(Method method)
+            {
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+                for (var iterator = method.eAdapters().iterator(); iterator.hasNext();)
+                    if (iterator.next() instanceof Plan existing)
+                    {
+                        if (existing.node == node)
+                            return existing;
+                        iterator.remove();
+                    }
+                Plan plan = new Plan(method, node);
+                method.eAdapters().add(plan);
+                return plan;
+            }
         }
     }
 

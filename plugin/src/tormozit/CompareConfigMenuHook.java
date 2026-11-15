@@ -3212,20 +3212,24 @@ public class CompareConfigMenuHook implements IStartup
                     record(viewer, event.getElement() instanceof IPartialModelNode node ? node : null, notify);
             });
             Object manager = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
-            if (manager instanceof IToolBarManager toolbar)
+            if (manager instanceof ToolBarManager toolbar)
             {
-                for (IContributionItem contribution : toolbar.getItems())
+                IContributionItem[] contributions = toolbar.getItems();
+                int undoIndex = contributions.length;
+                for (int i = 0; i < contributions.length; i++)
                 {
-                    if (!(contribution instanceof ActionContributionItem item))
+                    if (!(contributions[i] instanceof ActionContributionItem item))
                         continue;
                     IAction original = item.getAction();
                     String name = original.getClass().getSimpleName();
+                    if (name.equals("SelectAllAction")) //$NON-NLS-1$
+                        undoIndex = i;
                     if (name.equals("SelectAllAction") || name.equals("UnselectAllAction")) //$NON-NLS-1$ //$NON-NLS-2$
                         Global.setFieldForce(item, "action", new MarkAllAction(support, original)); //$NON-NLS-1$
                 }
                 ActionContributionItem button = new ActionContributionItem(support.action);
                 button.setMode(0); // Только иконка; текст остаётся доступным в подсказке.
-                toolbar.add(button);
+                toolbar.insert(undoIndex, button);
                 toolbar.update(true);
             }
             tree.addDisposeListener(event ->

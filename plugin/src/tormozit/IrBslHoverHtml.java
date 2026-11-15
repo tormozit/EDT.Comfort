@@ -53,7 +53,7 @@ public final class IrBslHoverHtml
     public static String readDisplayHtml(Object input)
     {
         String html = decoratedHtml(input);
-        return html != null ? html : readHtml(input);
+        return BslExpressionDetails.append(input, html != null ? html : readHtml(input));
     }
 
     private static String decoratedHtml(Object input)
@@ -148,7 +148,7 @@ public final class IrBslHoverHtml
         if (browser.isDisposed() || control.getInput() != input)
             return;
         FunctionReturnTypes.refreshBoundFunctionType(input);
-        String html = decoratedHtml(input);
+        String html = BslExpressionDetails.append(input, decoratedHtml(input));
         if (html != null)
         {
             browser.setText(html);
@@ -176,10 +176,27 @@ public final class IrBslHoverHtml
         }
     }
 
+    /** Фоновое описание выражения готово: обновляем только контролы с этим input. */
+    static void refreshExpressionDetails(Object input)
+    {
+        java.util.List<BrowserInformationControl> controls;
+        synchronized (DECORATED_CONTROLS)
+        {
+            controls = new java.util.ArrayList<>(DECORATED_CONTROLS.keySet());
+        }
+        for (BrowserInformationControl control : controls)
+        {
+            Browser browser = findControlBrowser(control);
+            if (browser != null && !browser.isDisposed() && control.getInput() == input)
+                applyHtmlDecoration(control, browser, input);
+        }
+    }
+
     /** Также охватывает штатный фокусируемый control, созданный самим JFace. */
     static void installHtmlDecorationForBrowser(Browser browser)
     {
-        if (HTML_DECORATIONS.isEmpty() || browser == null || browser.isDisposed())
+        if ((HTML_DECORATIONS.isEmpty() && !BslExpressionDetails.hasRequests())
+            || browser == null || browser.isDisposed())
             return;
         Object webBrowser = Global.getField(browser, "webBrowser"); //$NON-NLS-1$
         Object listeners = Global.getField(webBrowser, "locationListeners"); //$NON-NLS-1$

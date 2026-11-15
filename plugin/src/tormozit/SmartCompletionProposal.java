@@ -1979,7 +1979,8 @@ public class SmartCompletionProposal implements
     }
 
     /**
-     * Временно добавляет ведущий пробел в {@code replacementString} EDT-предложения.
+     * Временно добавляет ведущий пробел после равенства и сохраняет текущие пробелы
+     * после запятой в литерале при вставке EDT-предложения из кэша.
      * Восстанавливает поля после {@code apply}, чтобы объект из кэша списка не остался
      * с изменённой строкой.
      */
@@ -1987,42 +1988,61 @@ public class SmartCompletionProposal implements
     {
         private final ConfigurableCompletionProposal proposal;
         private final String original;
-        private final boolean padded;
+        private final int cursorDelta;
 
         static EqualsSpacePad install(IDocument document, int caret, ICompletionProposal delegate)
         {
             ConfigurableCompletionProposal cp = asConfigurable(delegate);
             if (cp == null)
-                return new EqualsSpacePad(null, null, false);
+                return new EqualsSpacePad(null, null, 0);
             String repl = readInsertText(cp);
             int start = cp.getReplacementOffset();
             int insertAt = start >= 0 ? start : caret;
-            if (!needsSpaceAfterEquals(document, insertAt, repl))
-                return new EqualsSpacePad(null, null, false);
-            SmartContentAssistProcessor.writeReplacementContent(cp, " " + repl); //$NON-NLS-1$
-            cp.setCursorPosition(cp.getCursorPosition() + 1);
-            return new EqualsSpacePad(cp, repl, true);
+            String adjusted = repl;
+            if (needsSpaceAfterEquals(document, insertAt, repl))
+                adjusted = " " + repl; //$NON-NLS-1$
+            else if (document != null && start >= 0 && start <= caret && caret <= document.getLength()
+                && SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
+            {
+                try
+                {
+                    String prefix = document.get(start, caret - start);
+                    adjusted = preserveLiteralListWhitespace(prefix, repl);
+                    Global.tempLog("literal-auto-open", "apply.whitespace start=" + start + " caret=" + caret
+                        + " prefix=[" + prefix + "] before=[" + repl + "] after=[" + adjusted + "]");
+                }
+                catch (BadLocationException e)
+                {
+                    Global.tempLog("literal-auto-open", "apply.whitespace error=" + e);
+                }
+            }
+            if (repl == null || repl.equals(adjusted))
+                return new EqualsSpacePad(null, null, 0);
+            int delta = adjusted.length() - repl.length();
+            SmartContentAssistProcessor.writeReplacementContent(cp, adjusted);
+            cp.setCursorPosition(cp.getCursorPosition() + delta);
+            return new EqualsSpacePad(cp, repl, delta);
         }
 
         private EqualsSpacePad(ConfigurableCompletionProposal proposal, String original,
-            boolean padded)
+            int cursorDelta)
         {
             this.proposal = proposal;
             this.original = original;
-            this.padded = padded;
+            this.cursorDelta = cursorDelta;
         }
 
         void restore()
         {
-            if (!padded || proposal == null || original == null)
+            if (proposal == null || original == null)
                 return;
-            proposal.setCursorPosition(Math.max(0, proposal.getCursorPosition() - 1));
+            proposal.setCursorPosition(Math.max(0, proposal.getCursorPosition() - cursorDelta));
             SmartContentAssistProcessor.writeReplacementContent(proposal, original);
         }
 
         void scheduleRestore()
         {
-            if (!padded)
+            if (proposal == null)
                 return;
             Display display = Display.getCurrent();
             if (display == null || display.isDisposed())
@@ -2040,6 +2060,26 @@ public class SmartCompletionProposal implements
                 return s;
             return cp.getReplacementString();
         }
+    }
+
+    /** Пробелы текущего элемента списка берутся из документа, а не из зонда сразу после запятой. */
+    static String preserveLiteralListWhitespace(String prefix, String replacement)
+    {
+        if (prefix == null || replacement == null)
+            return replacement;
+        int comma = prefix.lastIndexOf(',');
+        if (comma < 0 || replacement.length() <= comma
+            || !replacement.startsWith(prefix.substring(0, comma + 1)))
+            return replacement;
+        int currentStart = comma + 1;
+        while (currentStart < prefix.length()
+            && (prefix.charAt(currentStart) == ' ' || prefix.charAt(currentStart) == '\t'))
+            currentStart++;
+        int cachedStart = comma + 1;
+        while (cachedStart < replacement.length()
+            && (replacement.charAt(cachedStart) == ' ' || replacement.charAt(cachedStart) == '\t'))
+            cachedStart++;
+        return prefix.substring(0, currentStart) + replacement.substring(cachedStart);
     }
 
     /** Модельная каретка для чтения документа; {@code fallbackOffset} — аргумент JFace {@code apply}. */

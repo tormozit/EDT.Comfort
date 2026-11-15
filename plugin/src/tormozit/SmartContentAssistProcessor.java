@@ -2552,6 +2552,8 @@ return result;
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ICompletionProposal[] literalArg = literalArgListForCaret(doc, caret);
+        if (isSortDirectionList(literalArg))
+            return literalArg;
         // В литерале с запросом списки EDT к делу не относятся (issue 837).
         if (isQueryLiteralSegment(doc, caret))
             return literalArg != null ? literalArg : EMPTY;
@@ -4468,6 +4470,8 @@ return EMPTY;
 
     private ICompletionProposal[] applyLiteralSmartFilter(ICompletionProposal[] merged, String filter)
     {
+        if (isSortDirectionList(merged))
+            return filterSortDirections(merged, filter);
         if (!SmartAssistFilterState.isSmartFilterEnabled() || filter == null || filter.isEmpty())
             return finalizeListForIrAssistDisplay(merged);
         return filterAndSort(merged, filter);
@@ -4977,6 +4981,112 @@ return EMPTY;
     // (набранное пусто — список годен всему сегменту); разовый Ctrl+Space считает на каретке,
     // EDT сужает по набранному — годен его продолжениям. Поля *Quote хранят эту границу.
 
+    /** Начало направления после имени колонки в текущем элементе списка сортировки. */
+    static int sortDirectionWordStart(String typed)
+    {
+        int start = typed.lastIndexOf(',') + 1;
+        while (start < typed.length() && (typed.charAt(start) == ' ' || typed.charAt(start) == '\t'))
+            start++;
+        int nameStart = start;
+        while (start < typed.length())
+        {
+            char c = typed.charAt(start);
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '.')
+                break;
+            start++;
+        }
+        if (start == nameStart || start == typed.length()
+            || (typed.charAt(start) != ' ' && typed.charAt(start) != '\t'))
+            return -1;
+        while (start < typed.length() && (typed.charAt(start) == ' ' || typed.charAt(start) == '\t'))
+            start++;
+        for (int i = start; i < typed.length(); i++)
+            if (!Character.isLetter(typed.charAt(i)))
+                return -1;
+        return start;
+    }
+
+    static boolean isSortCall(String method)
+    {
+        return "Сортировать".equalsIgnoreCase(method) || "Sort".equalsIgnoreCase(method);
+    }
+
+    static int sortDirectionKeyAt(IDocument doc, int caret)
+    {
+        if (!isSortCall(BslAssistSourceHeuristics.literalCallMethodName(doc, caret)))
+            return -1;
+        int quote = BslAssistSourceHeuristics.literalCallOpenQuote(doc, caret);
+        try
+        {
+            int start = quote >= 0 ? sortDirectionWordStart(doc.get(quote + 1, caret - quote - 1)) : -1;
+            return start >= 0 ? quote + start : -1;
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            return -1;
+        }
+    }
+
+    /** Отдельный тип сохраняет заданный порядок без колонок и генераторов. */
+    private static final class SortDirectionProposal extends ConfigurableCompletionProposal
+    {
+        SortDirectionProposal(String word, int offset)
+        {
+            super(word, offset, 0, word.length(), null, new StyledString(word), null, null);
+        }
+    }
+
+    private static boolean isSortDirectionList(ICompletionProposal[] list)
+    {
+        return list != null && list.length > 0 && unwrapProposal(list[0]) instanceof SortDirectionProposal;
+    }
+
+    /** Направления имеют фиксированный порядок и при выключенном умном фильтре. */
+    static Integer compareSortDirections(ICompletionProposal first, ICompletionProposal second)
+    {
+        ICompletionProposal left = unwrapProposal(first);
+        ICompletionProposal right = unwrapProposal(second);
+        boolean leftDirection = left instanceof SortDirectionProposal;
+        boolean rightDirection = right instanceof SortDirectionProposal;
+        if (!leftDirection && !rightDirection)
+            return null;
+        int result = leftDirection && rightDirection
+            ? Integer.compare("Убыв".equals(left.getDisplayString()) ? 0 : 1,
+                "Убыв".equals(right.getDisplayString()) ? 0 : 1)
+            : leftDirection ? -1 : 1;
+        Global.tempLog("literal-auto-open", "sortDirections.compare first=[" + displayString(left)
+            + "] second=[" + displayString(right) + "] result=" + result);
+        return result;
+    }
+
+    private ICompletionProposal[] filterSortDirections(ICompletionProposal[] list, String filter)
+    {
+        SmartCodeMatcher matcher = new SmartCodeMatcher(filter != null ? filter : "");
+        List<ICompletionProposal> result = new ArrayList<>();
+        for (int i = 0; i < list.length; i++)
+            if (filter == null || filter.isEmpty() || matcher.computeNamePremium(displayString(list[i])) > 0)
+                result.add(wrapProposal(unwrapProposal(list[i]), i));
+        return result.toArray(ICompletionProposal[]::new);
+    }
+
+    private void prepareSortDirections(IDocument doc, int caret, int key)
+    {
+        if (literalArgListForCaret(doc, caret) != null && isSortDirectionList(literalArgList))
+            return;
+        // Старый расчёт колонок не должен опубликоваться поверх нового контекста.
+        if (literalArgJob != null)
+            literalArgJob.cancel();
+        literalArgEpoch++;
+        literalArgBusy = false;
+        literalArgJobOnReady = null;
+        storeLiteralArgList(doc, key + 1, new ICompletionProposal[] {
+            new SortDirectionProposal("Убыв", key + 1), new SortDirectionProposal("Возр", key + 1) });
+        literalArgTyped = "";
+        literalArgListConfirmed = true;
+        Global.tempLog("literal-auto-open", "sortDirections caret=" + caret + " key=" + key
+            + " order=[Убыв, Возр]");
+    }
+
     /**
      * Граница текущего сегмента литерала-аргумента: последняя точка между открывающей
      * кавычкой и кареткой, иначе сама кавычка; {@code -1} — не литерал-аргумент вызова.
@@ -4992,6 +5102,9 @@ return EMPTY;
         int queryKey = BslQueryLiteralSupport.segmentKeyAt(doc, caret);
         if (queryKey >= 0)
             return queryKey;
+        int directionKey = sortDirectionKeyAt(doc, caret);
+        if (directionKey >= 0)
+            return directionKey;
         int quote = BslAssistSourceHeuristics.literalCallOpenQuote(doc, caret);
         if (quote < 0)
         {
@@ -5046,7 +5159,7 @@ return EMPTY;
      * зависят от кода вокруг (issue 888: ключи структуры по месту её передачи), поэтому правка снаружи делает
      * список устаревшим. Набор внутри литерала отпечаток не меняет.
      */
-    private record LiteralOutside(String before, String after)
+    private record LiteralOutside(String before, String after, char delimiter)
     {
         static LiteralOutside of(IDocument doc, int key)
         {
@@ -5059,7 +5172,8 @@ return EMPTY;
                     .STRING_LITERAL_PARTITION.equals(partition.getType()))
                     return null;
                 int end = partition.getOffset() + partition.getLength();
-                return new LiteralOutside(doc.get(0, partition.getOffset()), doc.get(end, doc.getLength() - end));
+                return new LiteralOutside(doc.get(0, partition.getOffset()),
+                    doc.get(end, doc.getLength() - end), doc.getChar(key));
             }
             catch (org.eclipse.jface.text.BadLocationException e)
             {
@@ -5072,7 +5186,12 @@ return EMPTY;
             if (recorded == null)
                 return true;
             LiteralOutside now = of(doc, key);
-            return now != null && recorded.before.equals(now.before) && recorded.after.equals(now.after);
+            boolean current = now != null && recorded.before.equals(now.before)
+                && recorded.after.equals(now.after) && recorded.delimiter == now.delimiter;
+            Global.tempLog("literal-auto-open", "cache.context key=" + key + " current=" + current
+                + " delimiterBefore=" + (int)recorded.delimiter
+                + " delimiterNow=" + (now != null ? (int)now.delimiter : -1));
+            return current;
         }
     }
 
@@ -5230,6 +5349,8 @@ return EMPTY;
         int count = list != null ? TextNameProposals.countNativeVariants(list, 51) : 0;
         boolean premium = list != null && BslExpectedTypePremiums.hasAutoOpenWord(doc, caret);
         boolean allowed = count > 0 && count <= 50 || premium;
+        Global.tempLog("literal-auto-open", "quoteGate caret=" + caret + " count=" + count
+            + " premium=" + premium + " allowed=" + allowed);
         return allowed;
     }
 
@@ -5294,8 +5415,16 @@ return EMPTY;
         int quote = literalArgKeyAt(doc, caret);
         String method = BslAssistSourceHeuristics.literalCallMethodName(doc, caret);
         String typed = quote >= 0 ? literalTyped(doc, quote, caret) : null;
+        Global.tempLog("literal-auto-open", "request why=" + why + " caret=" + caret
+            + " key=" + quote + " method=" + method + " typed=[" + typed + "]"
+            + " busy=" + literalArgBusy + " epoch=" + literalArgEpoch);
         if (quote < 0 || typed == null)
+        {
+            Global.tempLog("literal-auto-open", "skip reason=noSegment caret=" + caret);
             return false;
+        }
+        if (sortDirectionKeyAt(doc, caret) == quote)
+            prepareSortDirections(doc, caret, quote);
         if (literalArgPopupBaseForCaret(viewer, caret) != null)
         {
             if (onReady != null && !ContentAssistSessionReloader.requestGatedShow(viewer,
@@ -5326,6 +5455,8 @@ return EMPTY;
         }
         if (isLiteralArgKnownEmpty(doc, quote, typed))
         {
+            Global.tempLog("literal-auto-open", "skip reason=knownEmpty key=" + quote
+                + " typed=[" + typed + "] emptyTyped=[" + literalArgEmptyTyped + "]");
             return false;
         }
         if (BslQueryLiteralSupport.segmentKeyAt(doc, caret) == quote)
@@ -5335,6 +5466,7 @@ return EMPTY;
         warmBslDocumentListener(viewer);
         if (!BslDataEventGuard.install(doc))
         {
+            Global.tempLog("literal-auto-open", "skip reason=noGuard key=" + quote);
             return false;
         }
         if (literalArgJob != null)
@@ -5399,6 +5531,10 @@ return EMPTY;
                         error = e.getClass().getSimpleName() + ": " + e.getMessage(); //$NON-NLS-1$
                         raw = EMPTY;
                     }
+                    Global.tempLog("literal-auto-open", "computed epoch=" + epoch + " key=" + quote
+                        + " probe=" + (quote + 1) + " error=" + error
+                        + " count=" + (raw != null ? raw.length : -1)
+                        + " sample=" + literalArgSample(raw));
                     if (error != null)
                     {
                         return Status.CANCEL_STATUS;
@@ -5414,6 +5550,19 @@ return EMPTY;
                         // неизвестен — само окно не открываем (ф = "" давал «ВЫБРАТЬ»). Пустоту не
                         // публикуем: она заслонила бы список Ctrl+Space в этом литерале.
                         boolean known = TextNameProposals.hasNativeVariants(list) && list.length > 0;
+                        Global.tempLog("literal-auto-open", "result epoch=" + epoch + " key=" + quote
+                            + " currentEpoch=" + literalArgEpoch + " known=" + known
+                            + " count=" + list.length + " sample=" + literalArgSample(list));
+                        for (ICompletionProposal proposal : list)
+                        {
+                            ICompletionProposal rawProposal = unwrapProposal(proposal);
+                            Global.tempLog("literal-auto-open", "row key=" + quote
+                                + " class=" + (rawProposal != null ? rawProposal.getClass().getName() : "null")
+                                + " template=" + isTemplateProposal(rawProposal)
+                                + " templateImage=" + (rawProposal != null && rawProposal.getImage()
+                                    == BslSharedImages.getImage("com._1c.g5.v8.dt.bsl.ui/obj16/templateprop_co.png"))
+                                + " display=[" + (rawProposal != null ? rawProposal.getDisplayString() : "null") + "]");
+                        }
                         if (known)
                         {
                             publishLiteralArgList(viewer, epoch, quote, doc, list, dataEvents, tSchedule);
@@ -5689,6 +5838,9 @@ return EMPTY;
             literalArgEmptyTyped = literalArgJobTyped;
             literalArgEmptyOutside = literalArgJobOutside;
         }
+        Global.tempLog("literal-auto-open", "publish epoch=" + epoch + " key=" + quote
+            + " liveCaret=" + liveCaret + " drop=" + drop + " count=" + list.length
+            + " onReady=" + (onReady != null));
         if (drop != null)
         {
             return;
@@ -5720,6 +5872,12 @@ return EMPTY;
     private ICompletionProposal[] computeLiteralPassthroughImpl(ITextViewer viewer, int offset, int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int directionKey = sortDirectionKeyAt(doc, caret);
+        if (directionKey >= 0)
+        {
+            prepareSortDirections(doc, caret, directionKey);
+            return filterSortDirections(literalArgList, literalArgFilter(doc, caret, ""));
+        }
         ensureFullListForContext(viewer, doc, caret, false);
         rebindIrSnapshotContext();
         String filter = literalArgFilter(doc, caret, SmartFilterTracker.getCurrentFilter());
@@ -11340,6 +11498,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      */
     private ICompletionProposal[] buildDelegateOrderedList(ICompletionProposal[] raw)
     {
+        if (isSortDirectionList(raw))
+            return filterSortDirections(raw, "");
         {
         if (raw == null || raw.length == 0)
             return EMPTY;
@@ -11649,6 +11809,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        if (isSortDirectionList(raw))
+            return filterSortDirections(raw, filter);
         if (raw == null || raw.length == 0)
         return EMPTY;
 
@@ -12195,6 +12357,9 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                        ICompletionProposal p1,
                                        ICompletionProposal p2)
     {
+        Integer directionOrder = compareSortDirections(p1, p2);
+        if (directionOrder != null)
+            return directionOrder.intValue();
         int n1 = computeNameScore(matcher, p1);
         int n2 = computeNameScore(matcher, p2);
         if (n1 != n2)

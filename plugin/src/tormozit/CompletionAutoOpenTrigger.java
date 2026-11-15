@@ -72,6 +72,14 @@ public final class CompletionAutoOpenTrigger
             && BslQueryLiteralSupport.isInsideQueryComment(doc, insertOffset))
             return null;
 
+        // Пробел после колонки переключает уже открытый список на направления сортировки.
+        if (insertedChar == ' ' && BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix)
+            && SmartContentAssistProcessor.isSortCall(
+                BslAssistSourceHeuristics.literalCallMethodName(doc, insertOffset))
+            && SmartContentAssistProcessor.sortDirectionWordStart(
+                linePrefix.substring(linePrefix.lastIndexOf('"') + 1)) >= 0)
+            return "space"; //$NON-NLS-1$
+
         if (popupWasOpen && insertedChar != '.')
             return null;
         if (isPrintableKey(stateMask, insertedChar))
