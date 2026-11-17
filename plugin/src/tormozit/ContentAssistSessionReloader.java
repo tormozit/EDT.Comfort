@@ -366,11 +366,6 @@ this.completionListener = new CompletionListenerAdapter() {
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
-                BslEditorHighlightingHook.logAssistPaintState(viewer, "sessionStarted auto=" + event.isAutoActivated); //$NON-NLS-1$
-                if (Global.isLogEnabled() && viewer != null && viewer.getTextWidget() != null)
-                    viewer.getTextWidget().getDisplay().asyncExec(() ->
-                        BslEditorHighlightingHook.logAssistPaintState(viewer,
-                            "sessionStarted.afterDispatch popup=" + ContentAssistPopupSync.isPopupVisible(assistant))); //$NON-NLS-1$
                 assistSessionStartedImpl(event);
             }
 
@@ -498,7 +493,6 @@ lastCaretDocumentStamp = -1;
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
-                BslEditorHighlightingHook.logAssistPaintState(viewer, "sessionEnded"); //$NON-NLS-1$
                 assistSessionEndedImpl(event);
             }
 
@@ -3390,9 +3384,6 @@ boolean inLiteral = endCaret >= 0
         }
     }
 
-    /** С какого ожидания удержания пишем строку в лог: это порог наблюдения, не задержка. */
-    private static final long MODEL_SYNC_HOLD_REPORT_MS = 5;
-
     /**
      * Начать удержание разбора {@code job} ({@link #syncHoldRule}); парный вызов —
      * {@link #endModelSyncHold()}, только если вернулось {@code TRUE}. Зовётся и из
@@ -3462,10 +3453,9 @@ boolean inLiteral = endCaret >= 0
             SmartContentAssistProcessor.uiBlockLogThrowable("modelSync.hold.err", e); //$NON-NLS-1$
         }
         long waitMs = (System.nanoTime() - t0) / 1_000_000L;
-        if (waitMs >= MODEL_SYNC_HOLD_REPORT_MS || !held)
-            SmartContentAssistProcessor.uiBlockLog("modelSync.hold", //$NON-NLS-1$
-                "held=" + held + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
-                    + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        SmartContentAssistProcessor.uiBlockLog("modelSync.hold", //$NON-NLS-1$
+            "held=" + held + " waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
+                + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         return Boolean.valueOf(held);
     }
 
@@ -7585,10 +7575,18 @@ return;
                 return;
             }
             lastGateWhy = ""; //$NON-NLS-1$
-            BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeUpdate"); //$NON-NLS-1$
             // Таймер Windows приходит после WM_PAINT, но на GTK порядок другой: добираем
             // недорисованное синхронно, чтобы показ не замер на неполном кадре.
-            text.update();
+            long beforeUpdateNs = System.nanoTime();
+            try
+            {
+                text.update();
+            }
+            finally
+            {
+                SmartContentAssistProcessor.uiBlockLog("show.paint.before", //$NON-NLS-1$
+                    "elapsedNs=" + (System.nanoTime() - beforeUpdateNs)); //$NON-NLS-1$
+            }
             java.util.List<java.util.Map.Entry<String, Runnable>> batch;
             synchronized (actions)
             {
@@ -7605,14 +7603,16 @@ return;
                 kinds.append(entry.getKey());
                 try
                 {
-                    BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.beforeAction " + entry.getKey()); //$NON-NLS-1$
+                    long actionStartedNs = System.nanoTime();
                     try
                     {
                         entry.getValue().run();
                     }
                     finally
                     {
-                        BslEditorHighlightingHook.logAssistPaintState(host.viewer, "gate.afterAction " + entry.getKey()); //$NON-NLS-1$
+                        SmartContentAssistProcessor.uiBlockLog("show.action", //$NON-NLS-1$
+                            "kind=" + entry.getKey() + " elapsedNs=" //$NON-NLS-1$ //$NON-NLS-2$
+                                + (System.nanoTime() - actionStartedNs));
                     }
 
                 }
@@ -7621,8 +7621,19 @@ return;
                     SmartContentAssistProcessor.uiBlockLogThrowable("show.action.err", e); //$NON-NLS-1$
                 }
             }
-            if (!text.isDisposed())
-                text.update();
+            long afterUpdateNs = System.nanoTime();
+            boolean paintSkipped = text.isDisposed();
+            try
+            {
+                if (!paintSkipped)
+                    text.update();
+            }
+            finally
+            {
+                SmartContentAssistProcessor.uiBlockLog("show.paint.after", //$NON-NLS-1$
+                    "elapsedNs=" + (System.nanoTime() - afterUpdateNs) //$NON-NLS-1$
+                        + " skipped=" + paintSkipped); //$NON-NLS-1$
+            }
             SmartContentAssistProcessor.uiBlockLog("show.open", "kinds=" + kinds //$NON-NLS-1$ //$NON-NLS-2$
                 + " waitMs=" + waitMs //$NON-NLS-1$
                 + " gate=" + (why == null ? "ok" : "capRun:" + why) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

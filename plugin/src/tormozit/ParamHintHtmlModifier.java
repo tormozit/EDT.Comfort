@@ -8658,7 +8658,7 @@ public final class ParamHintHtmlModifier
         {
             Resource resource = method.eResource();
             if (resource == null || resource.getURI() == null || method.getName() == null
-                || resource instanceof BslResource bsl && bsl.isLinkedBatch())
+                || resource instanceof BslResource bsl && bsl.isLinkedBatch() && BslCallingModules.names(method).isEmpty())
                 return null;
             URI uri = resource.getURI().trimFragment();
             String methodName = method.getName();
@@ -8672,7 +8672,7 @@ public final class ParamHintHtmlModifier
                         if (file == null)
                             return;
                         IXtextDocument document = ForeignModuleModel.openDocument(file);
-                        String stamp = ForeignModuleModel.stamp(file, document);
+                        String stamp = ForeignModuleModel.stamp(file, document) + BslCallingModules.dependencyStamp(uri);
                         String key = uri + "#" + stamp + "#" + methodName.toLowerCase(Locale.ROOT); //$NON-NLS-1$ //$NON-NLS-2$
                         ExpectedRequest previous = EXPECTED_REQUESTS.put(target,
                             new ExpectedRequest(file, document, stamp, key));
@@ -8688,7 +8688,8 @@ public final class ParamHintHtmlModifier
                 });
             ExpectedRequest request = EXPECTED_REQUESTS.get(target);
             Map<String, ParamInfo> ready = request != null
-                && request.stamp().equals(ForeignModuleModel.stamp(request.file(), request.document()))
+                && request.stamp().equals(ForeignModuleModel.stamp(request.file(), request.document())
+                    + BslCallingModules.dependencyStamp(uri))
                 ? RESULTS.get(request.key()) : null;
             ParamInfo info = null;
             if (ready != null)
@@ -8727,7 +8728,7 @@ public final class ParamHintHtmlModifier
             }
             URI uri = resource.getURI().trimFragment();
             // Пакетно связанный ресурс — модель самого редактора: типы уже рассчитаны штатно.
-            if (resource instanceof BslResource bsl && bsl.isLinkedBatch())
+            if (resource instanceof BslResource bsl && bsl.isLinkedBatch() && BslCallingModules.names(source).isEmpty())
             {
                 log("skip linkedBatch uri=" + uri + " method=" + source.getName() + " param=" + paramName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
@@ -8740,7 +8741,7 @@ public final class ParamHintHtmlModifier
             }
             String methodName = source.getName();
             IXtextDocument document = ForeignModuleModel.openDocument(file);
-            String stamp = ForeignModuleModel.stamp(file, document);
+            String stamp = ForeignModuleModel.stamp(file, document) + BslCallingModules.dependencyStamp(uri);
             String key = uri + "#" + stamp + "#" + methodName.toLowerCase(Locale.ROOT); //$NON-NLS-1$ //$NON-NLS-2$
             keepKey(ctx, key);
             Map<String, ParamInfo> ready = RESULTS.get(key);
@@ -8827,6 +8828,22 @@ public final class ParamHintHtmlModifier
 
         private static Map<String, ParamInfo> typesOf(Resource resource, String methodName)
         {
+            boolean hasCallingModules = resource != null && !resource.getContents().isEmpty()
+                && resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module module
+                && module.allMethods().stream().anyMatch(method -> methodName.equalsIgnoreCase(method.getName())
+                    && !BslCallingModules.names(method).isEmpty()
+                    && BslDocCommentComputedTypes.isExtendedTypesEnabled(method));
+            if (!hasCallingModules)
+                return typesOfInScope(resource, methodName);
+            try (var scope = BslStructureInsertCommentTypes.interactiveTypes("foreignParamTypes",
+                () -> Thread.currentThread().isInterrupted()))
+            {
+                return typesOfInScope(resource, methodName);
+            }
+        }
+
+        private static Map<String, ParamInfo> typesOfInScope(Resource resource, String methodName)
+        {
             if (!(resource instanceof XtextResource xtext) || resource.getContents().isEmpty()
                 || !(resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module module))
                 return null;
@@ -8853,6 +8870,8 @@ public final class ParamHintHtmlModifier
                         if (name != null)
                         {
                             List<ParameterType> expected = new ArrayList<>();
+                            List<TypeItem> callingTypes = List.of();
+                            Set<String> nativeTypeNames = new java.util.HashSet<>();
                             int index = -1;
                             for (FormalParam formal : method.getFormalParams())
                                 if (name.equalsIgnoreCase(formal.getName()))
@@ -8862,6 +8881,13 @@ public final class ParamHintHtmlModifier
                                     if (items == null || items.isEmpty())
                                         items = TypeSystemUtil.getVariableTypesAfterModelObject(formal, formal);
                                     for (TypeItem item : items)
+                                        nativeTypeNames.add(McoreUtil.getTypeName(item));
+                                    callingTypes = BslStructureInsertCommentTypes.callingModuleParameterTypes(method, index);
+                                    items = new ArrayList<>(items);
+                                    for (TypeItem item : callingTypes)
+                                        if (!items.contains(item))
+                                            items.add(item);
+                                    for (TypeItem item : items)
                                     {
                                         URI uri = EcoreUtil.getURI(item);
                                         expected.add(new ParameterType(uri != null && !uri.isRelative() ? uri : null,
@@ -8869,8 +8895,18 @@ public final class ParamHintHtmlModifier
                                     }
                                     break;
                                 }
+                            String typesHtml = formatParamContentTypesHtml(parameter);
+                            if (!callingTypes.isEmpty())
+                            {
+                                String extra = callingTypes.stream().map(McoreUtil::getTypeName)
+                                    .filter(java.util.Objects::nonNull).filter(type -> !nativeTypeNames.contains(type))
+                                    .distinct().map(ParamHintHtmlModifier::escapeHtml)
+                                    .collect(java.util.stream.Collectors.joining(", "));
+                                if (!extra.isEmpty())
+                                    typesHtml = typesHtml == null || typesHtml.isEmpty() ? extra : typesHtml + ", " + extra;
+                            }
                             types.put(name.toLowerCase(Locale.ROOT), new ParamInfo(
-                                formatParamContentTypesHtml(parameter),
+                                typesHtml,
                                 ParameterSeeLinks.defaultValueText(method, name), List.copyOf(expected), index));
                         }
                     }

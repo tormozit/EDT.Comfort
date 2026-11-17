@@ -343,46 +343,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static void uiBlockLog(String where, String data)
     {
-        if (uiBlockLogQuiet(where))
-            return;
         boolean onUi = org.eclipse.swt.widgets.Display.getCurrent() != null;
         String body = data == null || data.isEmpty() ? "" : " " + clipUiBlockCaller(data); //$NON-NLS-1$ //$NON-NLS-2$
         Global.tempLog(UI_BLOCK_LOG, where + " ui=" + onUi //$NON-NLS-1$
             + " th=" + Thread.currentThread().getName() //$NON-NLS-1$
             + body);
-    }
-
-    /**
-     * Служебный шум (каждый символ / пересчёт / зонд). Решения автооткрытия
-     * ({@code autoOpen.begin.*}, {@code show.open}, сбои) остаются слышны.
-     */
-    private static boolean uiBlockLogQuiet(String where)
-    {
-        if (where == null || where.isEmpty())
-            return true;
-        return switch (where)
-        {
-            case "autoOpen.verify", "autoOpen.verify.skip", "autoOpen.doc", "autoOpen.doc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "autoOpen.schedule", "autoOpen.suppress.clear", "autoOpen.timer.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "doc.chg", "doc.chg.exit", "wordList.kickDoc", "wordList.kickDoc.skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "filterAndSort", "filterAndSort.enter", "filterAndSort.progress", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "filterAndSort.item", "filterAndSort.empty", //$NON-NLS-1$ //$NON-NLS-2$
-                "recomputePopupList", "recomputePopupList.enter", "applyPopupListSync", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "resolveExit", "resolveProposalList", "resolveDelegateOrderedList.fetch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "resolveDelegateOrderedList.skipFetch", "prepareWordListAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "scheduleWordListInBackground", "wordListBackground.run", //$NON-NLS-1$ //$NON-NLS-2$
-                "wordListBackground.filter", "wordListBackground.publish.enter", //$NON-NLS-1$ //$NON-NLS-2$
-                "fetchDelegateList", "probeDelegateOnce", "computeCompletionProposals", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "compute.literal", "computeLiteralPassthrough.enter", //$NON-NLS-1$ //$NON-NLS-2$
-                "computeLiteralPassthrough.exit", "computeLiteralPassthrough.noDelegateUi", //$NON-NLS-1$ //$NON-NLS-2$
-                "computeLiteralPassthrough.formLiteralProbe", //$NON-NLS-1$
-                "cacheOnly.ready", "show.req", "showPossibleCompletions", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "openCompletionAutoEdtPopup.beforeShow", "openCompletionAutoEdtPopup.afterShow", //$NON-NLS-1$ //$NON-NLS-2$
-                "envRanges.build", "envRanges.install", "memberStock.bg.run", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "memberAccessDefer", "memberStock.publish.open", "openPopup.memberBg", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "assistImages.warm", "contextRestore.keepBg" -> true; //$NON-NLS-1$ //$NON-NLS-2$
-            default -> false;
-        };
     }
 
     private static String clipUiBlockCaller(String data)
@@ -2192,9 +2157,17 @@ return result;
         {
             try
             {
-                String type = TextUtilities.getContentType(doc, partitioning, caret, false);
+                var region = TextUtilities.getPartition(doc, partitioning, caret, false);
+                String type = region.getType();
                 if (type != null && type.endsWith("_comment")) //$NON-NLS-1$
-                    return true;
+                {
+                    // SL_COMMENT в Bsl.xtext включает перевод строки. Область предыдущей
+                    // строки не означает, что каретка в начале следующей тоже в комментарии.
+                    boolean sameLine = doc.getLineOfOffset(region.getOffset()) == doc.getLineOfOffset(caret);
+                    boolean comment = !"__sl_comment".equals(type) || sameLine; //$NON-NLS-1$
+                    if (comment)
+                        return true;
+                }
             }
             catch (Exception e)
             {
@@ -6358,9 +6331,19 @@ return EMPTY;
 
     private boolean isCacheValidForCaret(IDocument doc, int caret)
     {
-        return fullListReady && fullListCache.length > 0
+        boolean valid = fullListReady && fullListCache.length > 0
             && doc != null && caret >= 0
             && computeFullListContextKey(doc, caret) == fullListContextKey;
+        // Временно: проверка готовой базы при старте сессии и показе из кэша.
+        Global.tempLog("assist-cache-lifecycle", "check processor=" + System.identityHashCode(this)
+            + " thread=" + Thread.currentThread().getName() + " caret=" + caret
+            + " valid=" + valid + " ready=" + fullListReady + " n=" + fullListCache.length
+            + " key=" + fullListContextKey + " liveKey="
+            + (doc != null && caret >= 0 ? computeFullListContextKey(doc, caret) : Integer.MIN_VALUE)
+            + " cachedTypes=" + fullListCacheTypesGeneration
+            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration()
+            + " stack=" + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
+        return valid;
     }
 
     private void absorbInterimIntoCache(ITextViewer viewer, int caret, ICompletionProposal[] raw)
@@ -6530,6 +6513,14 @@ return EMPTY;
 
     private void assignFullListCache(ICompletionProposal[] cache)
     {
+        // Временно: кто записал или очистил базу между фоновым расчётом и показом.
+        Global.tempLog("assist-cache-lifecycle", "assign.before processor=" + System.identityHashCode(this)
+            + " thread=" + Thread.currentThread().getName()
+            + " old=" + fullListCache.length + " incoming=" + (cache == null ? -1 : cache.length)
+            + " key=" + fullListContextKey + " ready=" + fullListReady
+            + " cachedTypes=" + fullListCacheTypesGeneration
+            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration()
+            + " stack=" + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
         fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
         fullListCachePrefix = ""; //$NON-NLS-1$
         ICompletionProposal[] stock = stripIrProposals(cache != null ? cache : EMPTY);
@@ -6543,6 +6534,12 @@ return EMPTY;
         // счётчик нельзя использовать для инвалидации синхронного пути без разбора каждого
         // caller'а assignFullListCache(EMPTY). Не повторять без раздельного счётчика/анализа.
         rebuildMergedFullListCache();
+        Global.tempLog("assist-cache-lifecycle", "assign.after processor=" + System.identityHashCode(this)
+            + " thread=" + Thread.currentThread().getName()
+            + " n=" + fullListCache.length + " delegate=" + delegateListCache.length
+            + " key=" + fullListContextKey + " ready=" + fullListReady
+            + " cachedTypes=" + fullListCacheTypesGeneration
+            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration());
     }
 
     private void rebuildMergedFullListCache()
@@ -9606,12 +9603,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         new ThreadLocal<>();
 
     /**
-     * С какого ожидания замка на UI-потоке пишем строку в лог. Это порог наблюдения, а не
-     * задержка: ко времени расчёта он не добавляет ничего.
-     */
-    private static final long DELEGATE_LOCK_UI_REPORT_MS = 5;
-
-    /**
      * Штатный расчёт по текущей модели с удержанием догоняющего разбора EDT
      * ({@link ContentAssistSessionReloader#withModelSyncHeld}). Правило берётся раньше
      * {@link #DELEGATE_LOCK} и всегда в этом порядке: штатный показ из ворот берёт его
@@ -9700,9 +9691,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             + " staleAfterLock waitMs=" + waitMs); //$NON-NLS-1$
         return null;
         }
-        if (onUi && waitMs >= DELEGATE_LOCK_UI_REPORT_MS)
-        {
-        }
+        uiBlockLog("probeDelegateOnce.lockAcquired", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
+            + " waitMs=" + waitMs + " onUi=" + onUi); //$NON-NLS-1$ //$NON-NLS-2$
         long tCompute = System.nanoTime();
         ICompletionProposal[] raw = null;
         int modeBefore = delegateAssistMode();

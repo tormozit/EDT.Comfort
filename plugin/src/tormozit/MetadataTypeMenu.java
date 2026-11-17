@@ -151,8 +151,39 @@ final class MetadataTypeMenu
 
     static void installBrowser(Browser browser)
     {
+        String browserId = Integer.toHexString(System.identityHashCode(browser));
+        Global.tempLog("metadata-type-browser", "request browser=" + browserId //$NON-NLS-1$ //$NON-NLS-2$
+            + " disposed=" + (browser == null || browser.isDisposed())); //$NON-NLS-1$
         if (browser == null || browser.isDisposed() || browser.getData(FUNCTION) != null)
             return;
+        // Создание подсказки может идти из события WebView2 другого Browser.
+        // BrowserFunction синхронно ждёт новый WebView: сначала возвращаем управление SWT.
+        // Маркер защищает от повторной постановки и повторного входа при ожидании WebView.
+        browser.setData(FUNCTION, Boolean.TRUE);
+        browser.getDisplay().asyncExec(() -> {
+            if (browser.isDisposed())
+            {
+                Global.tempLog("metadata-type-browser", "cancel disposed browser=" + browserId); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Global.tempLog("metadata-type-browser", "register begin browser=" + browserId); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+                registerBrowserFunction(browser);
+                Global.tempLog("metadata-type-browser", "register end browser=" + browserId); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | Error error)
+            {
+                Global.tempLogException("metadata-type-browser", "register failed browser=" + browserId, error); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!browser.isDisposed())
+                    browser.setData(FUNCTION, null);
+                throw error;
+            }
+        });
+    }
+
+    private static void registerBrowserFunction(Browser browser)
+    {
         Display display = browser.getDisplay();
         browser.setData(FUNCTION, new BrowserFunction(browser, FUNCTION)
             {

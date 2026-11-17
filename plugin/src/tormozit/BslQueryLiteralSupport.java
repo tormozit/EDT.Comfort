@@ -4479,10 +4479,16 @@ final class BslQueryLiteralSupport
      */
     private static QueryValidation validateSchema(PendingValidation pending)
     {
+        Global.tempLog("query-schema-validation", "begin; schema=" + System.identityHashCode(pending.schema()) //$NON-NLS-1$ //$NON-NLS-2$
+            + "; quote=" + pending.openQuote() + "; thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         try
         {
             if (!(pending.schema().eResource() instanceof XtextResource resource))
+            {
+                Global.tempLog("query-schema-validation", "unavailable-resource; schema=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + System.identityHashCode(pending.schema()));
                 return null;
+            }
             BslTempTableSessions.enrich(resource, pending.session());
             if (resource instanceof com._1c.g5.v8.dt.ql.dcs.resource.QlDcsResource dcs)
                 dcs.addOptions(DCS_VALIDATION_MODE_OPTION, Boolean.FALSE);
@@ -4492,11 +4498,15 @@ final class BslQueryLiteralSupport
             issues.addAll(BslTempTableSessions.validateFields(resource));
             var parsed = resource.getParseResult();
             var root = parsed == null ? null : parsed.getRootNode();
+            Global.tempLog("query-schema-validation", "validated; schema=" + System.identityHashCode(pending.schema()) //$NON-NLS-1$ //$NON-NLS-2$
+                + "; resource=" + System.identityHashCode(resource) + "; issues=" + issues.size()); //$NON-NLS-1$ //$NON-NLS-2$
             return new QueryValidation(root == null ? pending.text() : root.getText(), List.copyOf(issues),
                 QueryBracketSupport.collect(root), QueryBracketSupport.collectPairs(root));
         }
         catch (RuntimeException | LinkageError e)
         {
+            Global.tempLogException("query-schema-validation", "failed; schema=" //$NON-NLS-1$ //$NON-NLS-2$
+                + System.identityHashCode(pending.schema()), e);
             return null;
         }
     }

@@ -2138,9 +2138,18 @@ public final class BslStructureInsertCommentTypes
         try
         {
             BslDocumentationComment comment = parseMethodComment(method, module);
-            if (comment != null && comment.getReturnSection() != null)
-                for (TypeSection section : comment.getReturnSection().getReturnTypes())
-                    currentCommentSources(section, comment.getLineGlobalOffsets(), node, target, result);
+            if (comment != null)
+            {
+                if (comment.getParametersSection() != null)
+                    for (TypeSection.FieldDefinition parameter : comment.getParametersSection().getParameterDefinitions())
+                        for (TypeSection section : parameter.getTypeSections())
+                            currentCommentSources(section, comment.getLineGlobalOffsets(), node, target, result);
+                if (comment.getReturnSection() != null)
+                    for (TypeSection section : comment.getReturnSection().getReturnTypes())
+                        currentCommentSources(section, comment.getLineGlobalOffsets(), node, target, result);
+            }
+            Global.tempLog("structure-property-definition", "comment property=" + target.propertyName()
+                + " method=" + method.getName() + " places=" + result);
         }
         finally
         {
@@ -4050,6 +4059,7 @@ public final class BslStructureInsertCommentTypes
         {
             types = new InteractiveTypes(canceled);
             types.observe = observe;
+            types.computingCallingModules = true;
         }
 
         InteractiveTypesScope open(String purpose)
@@ -4070,6 +4080,28 @@ public final class BslStructureInsertCommentTypes
     {
         InteractiveTypes current = INTERACTIVE_TYPES.get();
         return current == null ? List.of() : current.expression(object, environments, null);
+    }
+
+    /** Вызывается фоновым расчётом сведений о параметрах; UI читает только его готовый кэш. */
+    static List<TypeItem> callingModuleParameterTypes(Method method, int index)
+    {
+        if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(method) || BslCallingModules.names(method).isEmpty())
+            return List.of();
+        try (var scope = interactiveTypes("callingModules", () -> Thread.currentThread().isInterrupted()))
+        {
+            InteractiveTypes current = INTERACTIVE_TYPES.get();
+            boolean previous = current.computingCallingModules;
+            current.computingCallingModules = true;
+            try
+            {
+                return current.incomingFromCallingModules(method, index,
+                    method.environments() == null ? Environments.ALL : method.environments());
+            }
+            finally
+            {
+                current.computingCallingModules = previous;
+            }
+        }
     }
 
     /** Тип документированного поля — тот же ленивый переход по ссылке, что у выражения после точки. */
@@ -4162,6 +4194,11 @@ public final class BslStructureInsertCommentTypes
         private final java.util.Map<Method, Plan> plans = new java.util.IdentityHashMap<>();
         /** Индекс только завершённых обходов; порядок вызовов каждого метода совпадает с AST. */
         private final java.util.Map<Module, java.util.Map<Method, List<Invocation>>> calls = new java.util.IdentityHashMap<>();
+        private final java.util.Map<Method, List<org.eclipse.core.resources.IFile>> callingModules =
+            new java.util.IdentityHashMap<>();
+        private final java.util.Map<String, List<List<TypeItem>>> callingModuleTypes = new java.util.HashMap<>();
+        private final Set<String> activeCallingModules = new HashSet<>();
+        private boolean computingCallingModules;
         private final long started = System.nanoTime();
         private long expressionRequests;
         private long expressionHits;
@@ -4541,7 +4578,93 @@ public final class BslStructureInsertCommentTypes
                 if (call.getParams().size() > index)
                     add(result, expression(call.getParams().get(index), environments, null));
             }
+            add(result, incomingFromCallingModules(method, index, environments));
             return result;
+        }
+
+        /** Только область фонового расчёта редактора/проверки; показ подсказки её не открывает. */
+        private List<TypeItem> incomingFromCallingModules(Method method, int index, Environments environments)
+        {
+            if (BslCallingModules.names(method).isEmpty())
+                return List.of();
+            if (!computingCallingModules)
+                return BslCallingModules.readyTypes(method, index);
+            String key = EcoreUtil.getURI(method) + "|" + environments;
+            List<List<TypeItem>> cached = callingModuleTypes.get(key);
+            if (cached != null)
+                return cached.get(index);
+            if (!activeCallingModules.add(key))
+                return List.of();
+            try
+            {
+                List<org.eclipse.core.resources.IFile> files = callingModules.computeIfAbsent(method,
+                    target -> BslCallingModules.files(target, BslCallingModules.names(target)));
+                String stamp = BslCallingModules.typesStamp(method);
+                List<List<TypeItem>> result = new ArrayList<>();
+                for (int parameter = 0; parameter < method.getFormalParams().size(); parameter++)
+                    result.add(new ArrayList<>());
+                for (var file : files)
+                {
+                    check();
+                    URI uri = URI.createPlatformResourceURI(file.getFullPath().toPortableString(), true);
+                    var buffer = org.eclipse.core.filebuffers.FileBuffers.getTextFileBufferManager()
+                        .getTextFileBuffer(file.getFullPath(), org.eclipse.core.filebuffers.LocationKind.IFILE);
+                    var document = buffer != null && buffer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument live
+                        ? live : null;
+                    var read = ForeignModuleModel.read(uri, file, document, resource -> {
+                        List<List<TypeItem>> found = new ArrayList<>();
+                        for (int parameter = 0; parameter < method.getFormalParams().size(); parameter++)
+                            found.add(new ArrayList<>());
+                        if (resource == null || resource.getContents().isEmpty())
+                            return found;
+                        observe.accept(resource.getContents().get(0));
+                        for (var iterator = resource.getAllContents(); iterator.hasNext();)
+                        {
+                            check();
+                            if (!(iterator.next() instanceof Invocation call) || call.getParams().isEmpty())
+                                continue;
+                            List<FeatureEntry> entries = call.getMethodAccess() instanceof StaticFeatureAccess access
+                                ? access.getFeatureEntries() : call.getMethodAccess() instanceof DynamicFeatureAccess access
+                                    ? access.getFeatureEntries() : List.of();
+                            boolean matches = entries.stream().anyMatch(entry -> BslCallingModules.sameMethod(entry.getFeature(), method));
+                            if (!matches)
+                                continue;
+                            incomingCandidates++;
+                            Frame previous = frame;
+                            frame = new Frame();
+                            try
+                            {
+                                for (int parameter = 0; parameter < Math.min(found.size(), call.getParams().size()); parameter++)
+                                    add(found.get(parameter), expression(call.getParams().get(parameter), environments, null));
+                            }
+                            finally
+                            {
+                                frame = previous;
+                            }
+                            Global.tempLog(BslCallingModules.LOG, "call target=" + key + " caller=" + uri
+                                + " offset=" + position(call) + " types=" + found);
+                        }
+                        return found;
+                    });
+                    if (read.value() != null)
+                        for (int parameter = 0; parameter < result.size(); parameter++)
+                            add(result.get(parameter), read.value().get(parameter));
+                    Global.tempLog(BslCallingModules.LOG, "incoming target=" + key + " caller=" + uri
+                        + " source=" + read.source() + " types=" + read.value());
+                }
+                callingModuleTypes.put(key, result.stream().map(List::copyOf).toList());
+                BslCallingModules.rememberTypes(method, stamp, result);
+                return result.get(index);
+            }
+            catch (RuntimeException error)
+            {
+                Global.tempLog(BslCallingModules.LOG, "incoming.error target=" + key + " error=" + error);
+                throw error;
+            }
+            finally
+            {
+                activeCallingModules.remove(key);
+            }
         }
 
         /** Индекс соответствия — значение Get, строковый литерал — поле, число — элемент. */

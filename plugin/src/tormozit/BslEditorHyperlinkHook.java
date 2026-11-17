@@ -375,6 +375,65 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
     }
 
+    /** Описание формального параметра доступно и из объявления, и из обращения в теле метода. */
+    private static IHyperlink parameterDescriptionLink(BslXtextEditor editor, IWorkbenchPage page,
+        ITextViewer viewer, int offset)
+    {
+        if (!(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        Global.tempLog("parameter-description-link", "detect offset=" + offset);
+        try
+        {
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                EObject target = new org.eclipse.xtext.resource.EObjectAtOffsetHelper()
+                    .resolveElementAt(resource, offset);
+                if (target instanceof StaticFeatureAccess access)
+                {
+                    target = null;
+                    for (var entry : access.getFeatureEntries())
+                        if (entry != null && entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.FormalParam)
+                        {
+                            target = entry.getFeature();
+                            break;
+                        }
+                }
+                if (!(target instanceof com._1c.g5.v8.dt.bsl.model.FormalParam parameter)
+                    || !(parameter.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Method method)
+                    || !(method.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.Module module)
+                    || resource.getParseResult() == null)
+                    return null;
+                ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(resource.getParseResult().getRootNode(), offset);
+                if (leaf == null || leaf.isHidden() || !parameter.getName().equalsIgnoreCase(leaf.getText()))
+                    return null;
+                var comment = BslStructureInsertCommentTypes.parseMethodComment(method, module);
+                var definition = comment == null || comment.getParametersSection() == null ? null
+                    : comment.getParametersSection().getParameterByName(parameter.getName());
+                INode node = NodeModelUtils.findActualNodeFor(method);
+                int[] lines = comment == null ? null : comment.getLineGlobalOffsets();
+                int line = definition == null ? -1 : definition.getLineNumber();
+                if (node == null || lines == null || line < 0 || line >= lines.length)
+                    return null;
+                int start = node.getTotalOffset() + lines[line] + definition.getNameOffset();
+                String text = node.getRootNode().getText();
+                boolean matches = text.regionMatches(true, start, parameter.getName(), 0, parameter.getName().length());
+                Global.tempLog("parameter-description-link", "parameter=" + parameter.getName()
+                    + " method=" + method.getName() + " offset=" + start + " matches=" + matches);
+                if (!matches)
+                    return null;
+                var place = new BslStructureInsertCommentTypes.PropertySourceTarget(EcoreUtil.getURI(method),
+                    start, parameter.getName().length());
+                return new PropertyHyperlink(new Region(leaf.getOffset(), leaf.getLength()), place, editor, page,
+                    "Описание");
+            });
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            Global.tempLog("parameter-description-link", "failed offset=" + offset + " error=" + failure);
+            return null;
+        }
+    }
+
     /** Первый переход также запускает общий досчёт; UI-поток не разбирает запрос. */
     private static final class DeferredQueryPropertyHyperlink implements IHyperlink
     {
@@ -443,19 +502,27 @@ public final class BslEditorHyperlinkHook implements IStartup
         private final BslStructureInsertCommentTypes.PropertySourceTarget target;
         private final BslXtextEditor source;
         private final IWorkbenchPage page;
+        private final String text;
 
         PropertyHyperlink(IRegion region, BslStructureInsertCommentTypes.PropertySourceTarget target,
             BslXtextEditor source, IWorkbenchPage page)
+        {
+            this(region, target, source, page, "Перейти к определению свойства");
+        }
+
+        PropertyHyperlink(IRegion region, BslStructureInsertCommentTypes.PropertySourceTarget target,
+            BslXtextEditor source, IWorkbenchPage page, String text)
         {
             this.region = region;
             this.target = target;
             this.source = source;
             this.page = page;
+            this.text = text;
         }
 
         @Override public IRegion getHyperlinkRegion() { return region; }
         @Override public String getTypeLabel() { return null; }
-        @Override public String getHyperlinkText() { return "Перейти к определению свойства"; }
+        @Override public String getHyperlinkText() { return text; }
 
         @Override
         public void open()
@@ -1166,6 +1233,113 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
     }
 
+    private static IHyperlink[] callingModuleLinks(ITextViewer viewer, IHyperlink[] links,
+        BslXtextEditor source, IWorkbenchPage page)
+    {
+        IFile caller = source.getEditorInput().getAdapter(IFile.class);
+        String name = BslCallingModules.moduleName(caller);
+        Global.tempLog(BslCallingModules.LOG, "menu.detect file=" + caller + " name=" + name + " links=" + links.length);
+        if (name == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return links;
+        IHyperlink[] extended = readModel(document, true, resource -> {
+            if (resource == null || resource.getResourceSet() == null)
+                return links;
+            List<IHyperlink> result = new ArrayList<>(List.of(links));
+            java.util.Set<String> added = new java.util.HashSet<>();
+            for (IHyperlink link : links)
+            {
+                if (!(link instanceof XtextHyperlink xtext) || xtext.getURI() == null
+                    || xtext.getURI().trimFragment().equals(resource.getURI().trimFragment()))
+                    continue;
+                // Команда предлагается только на самом вызове, а не на имени в комментарии.
+                EObject at = BslNodeLookup.resolveContainedElementAt(resource, link.getHyperlinkRegion().getOffset());
+                var call = org.eclipse.xtext.EcoreUtil2.getContainerOfType(at,
+                    com._1c.g5.v8.dt.bsl.model.Invocation.class);
+                Global.tempLog(BslCallingModules.LOG, "menu.link uri=" + xtext.getURI() + " invocation=" + (call != null));
+                if (call == null)
+                    continue;
+                EObject target = resource.getResourceSet().getEObject(xtext.getURI(), true);
+                var method = ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(target);
+                Global.tempLog(BslCallingModules.LOG, "menu.resolve uri=" + xtext.getURI()
+                    + " target=" + (target == null ? null : target.eClass().getName())
+                    + " method=" + (method == null ? null : method.getName()));
+                if (method == null || method.eIsProxy() || method.eResource() == null)
+                    continue;
+                boolean eligible = BslCallingModules.canAdd(method);
+                boolean exists = BslCallingModules.names(method).stream().anyMatch(name::equalsIgnoreCase);
+                Global.tempLog(BslCallingModules.LOG, "menu target=" + EcoreUtil.getURI(method)
+                    + " caller=" + name + " eligible=" + eligible + " exists=" + exists);
+                if (eligible && !exists && added.add(EcoreUtil.getURI(method).toString()))
+                    result.add(new AddCallingModuleHyperlink(link.getHyperlinkRegion(),
+                        EcoreUtil.getURI(method), method.getName(), name, source, page));
+            }
+            return result.toArray(IHyperlink[]::new);
+        });
+        return extended == null ? links : extended;
+    }
+
+    private static final class AddCallingModuleHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final org.eclipse.emf.common.util.URI target;
+        private final String methodName;
+        private final String caller;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        AddCallingModuleHyperlink(IRegion region, org.eclipse.emf.common.util.URI target, String methodName,
+            String caller, BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.target = target;
+            this.methodName = methodName;
+            this.caller = caller;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Добавить в вызывающие модули"; }
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope history = new HistoryScope(page, source))
+            {
+                IFile file = ForeignModuleModel.fileOf(target.trimFragment());
+                if (file == null)
+                    return;
+                IEditorPart part = org.eclipse.ui.ide.IDE.openEditor(page, file);
+                history.opened = part != null;
+                BslXtextEditor editor = part != null ? GetRef.getActiveBslEditor(part) : null;
+                if (editor == null || !editor.isEditable())
+                    return;
+                IXtextDocument document = editor.getDocument();
+                BslCallingModules.Edit edit = document.readOnly(resource -> {
+                    if (resource == null || resource.getContents().isEmpty()
+                        || !(resource.getContents().get(0) instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                        return null;
+                    for (var method : module.allMethods())
+                        if (methodName.equalsIgnoreCase(method.getName()))
+                            return BslCallingModules.addition(method, document, caller);
+                    return null;
+                });
+                Global.tempLog(BslCallingModules.LOG, "add target=" + target + " caller=" + caller + " edit=" + edit);
+                if (edit != null)
+                {
+                    document.replace(edit.offset(), 0, edit.text());
+                    editor.selectAndReveal(edit.offset(), edit.text().length());
+                }
+            }
+            catch (Exception error)
+            {
+                Global.tempLog(BslCallingModules.LOG, "add.error target=" + target + " error=" + error);
+                ToastNotification.show("Вызывающие модули", "Не удалось изменить комментарий: " + error.getMessage(), 5000);
+            }
+        }
+    }
+
     /**
      * Метод модуля менеджера по тексту «Справочники.Имя.Метод» или общего модуля «Модуль.Метод» —
      * тот же переход, что Ctrl+F12.
@@ -1464,14 +1638,24 @@ public final class BslEditorHyperlinkHook implements IStartup
                 + (links == null ? "null" : "[" + linksLog + "]")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             // #endregion
             BslNodeLookup.checkCanceled();
+            IHyperlink description = multiple && region != null
+                ? parameterDescriptionLink(source, page, viewer, region.getOffset()) : null;
             if (links == null || links.length == 0)
             {
                 IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());
                 if (type == null)
-                    return links;
+                    return description == null ? links : new IHyperlink[] { description };
                 links = new IHyperlink[] { type };
             }
             IHyperlink[] result = multiple ? metadataLinks(viewer, links, source, page) : links.clone();
+            if (multiple)
+                result = callingModuleLinks(viewer, result, source, page);
+            if (description != null)
+            {
+                IHyperlink[] extended = java.util.Arrays.copyOf(result, result.length + 1);
+                extended[result.length] = description;
+                result = extended;
+            }
             BslNodeLookup.checkCanceled();
             if (multiple)
                 compactVariableLinks(viewer, result);
@@ -1539,6 +1723,11 @@ public final class BslEditorHyperlinkHook implements IStartup
                         || !resource.getURI().equals(link.getURI().trimFragment()))
                         continue;
                     EObject target = resource.getEObject(link.getURI().fragment());
+                    if (target instanceof com._1c.g5.v8.dt.bsl.model.FormalParam)
+                    {
+                        links[i] = new VariableHyperlink(link, "Объявление");
+                        continue;
+                    }
                     if (!(target instanceof StaticFeatureAccess access))
                         continue;
                     Statement statement = org.eclipse.xtext.EcoreUtil2.getContainerOfType(access, Statement.class);

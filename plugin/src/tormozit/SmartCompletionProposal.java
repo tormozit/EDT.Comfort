@@ -2339,6 +2339,9 @@ public class SmartCompletionProposal implements
     static boolean isEdtDocumentationObjectReady(EObject object)
     {
         String problem = edtDocumentationObjectProblem(object);
+        Global.tempLog("documentation-object-readiness", "object=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (object == null ? "null" : object.getClass().getName()) //$NON-NLS-1$
+            + "; identity=" + System.identityHashCode(object) + "; problem=" + problem); //$NON-NLS-1$ //$NON-NLS-2$
         return problem == null;
     }
 
@@ -2460,6 +2463,7 @@ public class SmartCompletionProposal implements
             new java.util.IdentityHashMap<>());
         boolean bsl = false;
         boolean module = false;
+        boolean method = false;
         InternalEObject current = object instanceof InternalEObject internal ? internal : null;
         while (current != null)
         {
@@ -2467,6 +2471,7 @@ public class SmartCompletionProposal implements
                 return "containerCycle";
             bsl |= BslPackage.eNS_URI.equals(current.eClass().getEPackage().getNsURI());
             module |= current instanceof com._1c.g5.v8.dt.bsl.model.Module;
+            method |= current instanceof com._1c.g5.v8.dt.bsl.model.Method;
             if (current.eIsProxy())
                 return bsl ? "bslProxy" : null;
             org.eclipse.emf.ecore.resource.Resource direct = current.eDirectResource();
@@ -2482,10 +2487,10 @@ public class SmartCompletionProposal implements
             }
             current = current.eInternalContainer();
         }
-        // Безресурсные объекты сами по себе допустимы. Ошибка EDT подтверждена
-        // для метода внутри отсоединённого Module: getEventsFromModelMethod
-        // вызывает module.eResource().installDerivedState без проверки на null.
-        return module ? "detachedBslModule" : null;
+        // Безресурсные объекты сами по себе допустимы, кроме отсоединённых Module/Method:
+        // getEventsFromModelMethod требует ресурс модуля, getDocByNotEventFormalParam —
+        // ресурс метода (BslDocumentationProvider, подтверждено в бандле bsl-ui).
+        return module ? "detachedBslModule" : method ? "detachedBslMethod" : null;
     }
 
     /**

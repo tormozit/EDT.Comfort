@@ -444,6 +444,7 @@ final class BslExpectedTypePremiums
      * @param structureConstructor аргумент {@code Новый Структура(…)}
      * @param locals               переменные метода и модуля ({@code АнализаторСПолнойТаблицейСловМетода})
      * @param receiverProperties   свойства объекта слева от {@code =} ({@code ИмяЛевогоОбъекта})
+     * @param selectionExpression  выделение точно совпадает с выражением AST (без внешних пробелов)
      * @param selectionTypes       типы выделенного выражения
      * @param queryTotals          родитель — {@code РезультатЗапроса}: колонки {@code ИТОГИ ПО} его запроса
      *                             ({@code Построитель.Измерения} ИР); {@code null} — текст запроса не определён
@@ -459,7 +460,8 @@ final class BslExpectedTypePremiums
     private record Facts(int bodyStartLine, List<String> parentTypes, boolean parentCollection, boolean parentIndexed,
         boolean parentSystemEnum, Set<String> constructorTypes, List<String> nestedTypes,
         Set<String> objectPropertyEnums, boolean formClient, boolean structureConstructor, List<Local> locals,
-        List<Local> receiverProperties, List<String> selectionTypes, List<String> queryTotals, boolean betweenMethods,
+        List<Local> receiverProperties, boolean selectionExpression, List<String> selectionTypes,
+        List<String> queryTotals, boolean betweenMethods,
         ModuleType moduleType, Map<String, String> commonModuleGroups, List<String> methodParameters,
         List<String> tempTableColumns, boolean queryAllowed)
     {
@@ -910,7 +912,7 @@ final class BslExpectedTypePremiums
         Context context = contextAt(document, selection.getOffset(), selection.getText());
         ICompletionProposal[] list = new ICompletionProposal[0];
         Scene scene = scene(resource, context, list);
-        if (scene.facts() == null)
+        if (scene.facts() == null || !scene.facts().selectionExpression())
             return null;
         AddedWords adder = new AddedWords(Premiums.empty(), new HashMap<>(), new HashMap<>(), context,
             scene, list);
@@ -2251,6 +2253,7 @@ final class BslExpectedTypePremiums
     private static Facts facts(XtextResource resource, Context context, Expectation expectation,
         ParamHintHtmlModifier.CallSiteInfo site, List<TypeItem> parentItems)
     {
+        Expression selectionExpression = selectedExpression(resource, context);
         String preceding = stripEnd(context.preceding());
         IDocument document = context.document();
         Module module = !resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module m
@@ -2262,7 +2265,8 @@ final class BslExpectedTypePremiums
         // После «Новый» нужны только занятые имена, остальные премии здесь не рассчитываются.
         if (endsWithWord(preceding, "Новый")) //$NON-NLS-1$
             return new Facts(-1, List.of(), false, false, false, Set.of(), List.of(), Set.of(), false, false,
-                locals(resource, module, method, context.start(), false), List.of(), List.of(), null, method == null,
+                locals(resource, module, method, context.start(), false), List.of(), selectionExpression != null,
+                List.of(), null, method == null,
                 module != null ? module.getModuleType() : null, Map.of(), List.of(), null, queryAllowed);
         Type parentType = parentItems.isEmpty() ? null : resolveType(resource, parentItems.get(0));
         String parentName = parentType != null ? lower(typeName(parentType)) : ""; //$NON-NLS-1$
@@ -2316,7 +2320,7 @@ final class BslExpectedTypePremiums
             && !context.parent().isEmpty())
             receiverProperties = receiverProperties(resource, context, expectation);
         List<String> selectionTypes = new ArrayList<>();
-        if (!context.selected().isBlank())
+        if (selectionExpression != null)
         {
             String text = context.selected();
             int lead = text.length() - text.stripLeading().length();
@@ -2338,9 +2342,21 @@ final class BslExpectedTypePremiums
         return new Facts(method != null ? bodyStartLine(document, method) : -1, typeNames(parentItems),
             elements != null && !elements.allTypes().isEmpty(), parentIndexed, parentSystemEnum, constructorTypes,
             nestedTypes, objectPropertyEnums, formClient, structureConstructor, locals, receiverProperties,
-            selectionTypes, queryTotals, method == null, module != null ? module.getModuleType() : null,
+            selectionExpression != null, selectionTypes, queryTotals, method == null,
+            module != null ? module.getModuleType() : null,
             context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : Map.of(),
             methodParameters, tempTableColumns, queryAllowed);
+    }
+
+    /** Выделение выражения, а не инструкции: границы без внешних пробелов должны совпасть с узлом AST. */
+    private static Expression selectedExpression(XtextResource resource, Context context)
+    {
+        String selected = context.selected();
+        if (selected.isBlank())
+            return null;
+        int start = context.caret() + selected.length() - selected.stripLeading().length();
+        int end = context.caret() + selected.stripTrailing().length();
+        return findExpression(resource, start, end);
     }
 
     /** {@code мНомерПервойСтрокиТелаМетода}: строка после закрывающей скобки параметров (с 0); {@code -1} — нет. */
@@ -3771,7 +3787,8 @@ final class BslExpectedTypePremiums
                 && !receiver.isEmpty() && !types.isEmpty()
                 && facts.constructorTypes().contains(lower(firstFragment(types.get(0), '('))))
             {
-                createVariable(selected, types);
+                if (selected.isBlank() || facts.selectionExpression())
+                    createVariable(selected, types);
                 if (!selected.isBlank())
                     return false;
             }
@@ -4060,8 +4077,7 @@ final class BslExpectedTypePremiums
 
         void surroundingConstructions()
         {
-            if (line < 0 || SmartContentAssistProcessor.isCommentAssistContext(document, context.caret()))
-                return;
+            boolean comment = SmartContentAssistProcessor.isCommentAssistContext(document, context.caret());
             String selected = context.selected();
             // СокрЛ(мТекущаяСтрокаНачало) = мНачалоКонтекста И ПустаяСтрока(мТекущаяСтрокаКонец)
             // Зонд расчёта может стоять перед уже набранным словом: мТекущаяСтрокаКонец — после слова,
@@ -4071,6 +4087,8 @@ final class BslExpectedTypePremiums
             // мНачальнаяСтрока < мКонечнаяСтрока И мНачальнаяКолонка = 1 И мКонечнаяКолонка = 1
             boolean wholeLines = !selected.isEmpty() && context.caret() == lineOffset
                 && selected.indexOf('\n') >= 0 && selected.endsWith("\n"); //$NON-NLS-1$
+            if (line < 0 || comment)
+                return;
             if (!emptyLine && !wholeLines)
                 return;
             boolean between = facts.betweenMethods();

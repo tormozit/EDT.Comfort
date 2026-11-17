@@ -77,17 +77,29 @@ final class BslExpressionDetails
         final Object index;
         final long stamp;
         final java.lang.ref.WeakReference<IXtextDocument> document;
+        final java.lang.ref.WeakReference<ITextViewer> viewer;
+        final java.lang.ref.WeakReference<EObject> member;
+        final int offset;
+        final Set<org.eclipse.emf.common.util.URI> callingTargets = java.util.concurrent.ConcurrentHashMap.newKeySet();
         volatile Details details = new Details("", ""); //$NON-NLS-1$
 
-        Request(Object index, long stamp, IXtextDocument document)
+        Request(Object index, long stamp, IXtextDocument document, ITextViewer viewer, EObject member, int offset)
         {
             this.index = index;
             this.stamp = stamp;
             this.document = new java.lang.ref.WeakReference<>(document);
+            this.viewer = new java.lang.ref.WeakReference<>(viewer);
+            this.member = new java.lang.ref.WeakReference<>(member);
+            this.offset = offset;
         }
     }
 
     static void request(Object input, EObject member, ITextViewer viewer, int offset)
+    {
+        request(input, member, viewer, offset, false);
+    }
+
+    private static void request(Object input, EObject member, ITextViewer viewer, int offset, boolean refresh)
     {
         if (!IrBslHoverHtml.isBslBrowserInput(input) || viewer == null
             || !(viewer.getDocument() instanceof IXtextDocument document))
@@ -98,11 +110,13 @@ final class BslExpressionDetails
         synchronized (REQUESTS)
         {
             Request old = REQUESTS.get(input);
-            if (old != null && old.stamp == stamp && java.util.Objects.equals(old.index, index))
+            if (!refresh && old != null && old.stamp == stamp && java.util.Objects.equals(old.index, index))
                 return;
-            request = new Request(index, stamp, document);
+            request = new Request(index, stamp, document, viewer, member, offset);
             REQUESTS.put(input, request);
         }
+        Global.tempLog(BslCallingModules.LOG, "hint.request input=" + System.identityHashCode(input)
+            + " offset=" + offset + " refresh=" + refresh + " stamp=" + stamp);
         Display display = viewer.getTextWidget().getDisplay();
         Job job = new Job("Comfort: индексы и подсказка выражения") //$NON-NLS-1$
         {
@@ -114,10 +128,12 @@ final class BslExpressionDetails
                         () -> monitor.isCanceled() || stamp(document) != stamp))
                 {
                     Details details = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
-                        stamp(document) == stamp ? describe(resource, member, offset) : null);
+                        stamp(document) == stamp ? describe(resource, member, offset, request) : null);
                     if (details == null || stamp(document) != stamp || REQUESTS.get(input) != request)
                         return Status.OK_STATUS;
                     request.details = details;
+                    Global.tempLog(BslCallingModules.LOG, "hint.done input=" + System.identityHashCode(input)
+                        + " offset=" + offset + " targets=" + request.callingTargets + " type=" + details.type());
                     if (!details.isEmpty() && !display.isDisposed())
                         display.asyncExec(() -> {
                             if (stamp(document) == stamp && REQUESTS.get(input) == request)
@@ -130,12 +146,44 @@ final class BslExpressionDetails
                 }
                 catch (Throwable failure)
                 {
+                    Global.tempLog(BslCallingModules.LOG, "hint.error input=" + System.identityHashCode(input)
+                        + " offset=" + offset + " error=" + failure);
                 }
                 return Status.OK_STATUS;
             }
         };
         job.setSystem(true);
         job.schedule();
+    }
+
+    /** Готовые типы повторно оформляют тот же экземпляр обеих подсказок, без ожидания расчёта. */
+    static void callingModuleTypesReady(org.eclipse.emf.common.util.URI target)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            Map<Object, Request> requests;
+            synchronized (REQUESTS)
+            {
+                requests = new java.util.LinkedHashMap<>(REQUESTS);
+            }
+            for (var entry : requests.entrySet())
+            {
+                Object input = entry.getKey();
+                Request previous = entry.getValue();
+                ITextViewer viewer = previous.viewer.get();
+                IXtextDocument document = previous.document.get();
+                if (input == null || !previous.callingTargets.contains(target)
+                    || viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed()
+                    || document == null || stamp(document) != previous.stamp || REQUESTS.get(input) != previous
+                    || !java.util.Objects.equals(previous.index, Global.invoke(input, "getIndex")))
+                    continue;
+                Global.tempLog(BslCallingModules.LOG, "hint.ready input=" + System.identityHashCode(input)
+                    + " target=" + target + " offset=" + previous.offset);
+                request(input, previous.member.get(), viewer, previous.offset, true);
+            }
+        });
     }
 
     private static long stamp(IXtextDocument document)
@@ -240,13 +288,14 @@ final class BslExpressionDetails
         return html;
     }
 
-    private static Details describe(XtextResource resource, EObject member, int offset)
+    private static Details describe(XtextResource resource, EObject member, int offset, Request request)
     {
         if (resource == null || resource.getContents().isEmpty())
             return null;
         if (offset >= 0)
         {
             EObject object = BslNodeLookup.resolveContainedElementAt(resource, offset);
+            member = object;
             for (EObject current = object; current != null; current = current.eContainer())
                 if (current instanceof Expression)
                 {
@@ -268,6 +317,9 @@ final class BslExpressionDetails
                 object = occurrence.getVariable();
             }
             Method method = EcoreUtil2.getContainerOfType(object, Method.class);
+            if (method != null && !BslCallingModules.names(method).isEmpty()
+                && BslDocCommentComputedTypes.isExtendedTypesEnabled(method))
+                request.callingTargets.add(EcoreUtil.getURI(method));
             Environments environments = method == null ? Environments.ALL : method.environments();
             if (position < 0)
                 position = start(object);

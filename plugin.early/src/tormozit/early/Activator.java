@@ -9441,9 +9441,6 @@ public final class Activator
             private static final java.util.Map<Class<?>,
                 java.util.Map<String, java.util.Optional<java.lang.reflect.Method>>> METHODS =
                     new java.util.concurrent.ConcurrentHashMap<>();
-            /** С какого ожидания сообщать наблюдателю: порог наблюдения, не задержка. */
-            private static final long REPORT_MS = 5;
-
             // #region agent log
             private static final java.util.concurrent.ScheduledThreadPoolExecutor LOCK_PROBES = createLockProbes();
 
@@ -9603,8 +9600,7 @@ public final class Activator
                 logLockStage(entry, "readAcquired readLocked=" + entry.readLocked, readAcquiredNs - readStartedNs); //$NON-NLS-1$
                 // #endregion
                 long waitMs = (System.nanoTime() - entry.startNs) / 1_000_000L;
-                if (waitMs >= REPORT_MS || !entry.readLocked)
-                    observe("readLock readLocked=" + entry.readLocked + " depth=" + STACK.get().size(), waitMs); //$NON-NLS-1$ //$NON-NLS-2$
+                observe("readLock readLocked=" + entry.readLocked + " depth=" + STACK.get().size(), waitMs); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             static Object end()
