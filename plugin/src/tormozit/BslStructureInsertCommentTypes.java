@@ -2002,7 +2002,13 @@ public final class BslStructureInsertCommentTypes
         try
         {
             PropertySourceTarget exact = exactSourceTarget(property, source, module, new java.util.HashSet<>());
-            return exact != null ? exact : new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0);
+            Global.tempLog("structure-property-definition", "resolve property=" + property.getName()
+                + " method=" + source.getMethodName() + " localOffset=" + source.getLocalOffset()
+                + " target=" + exact);
+            if (exact == null)
+                return new PropertySourceTarget(EcoreUtil.getURI(method), -1, 0, property.getName());
+            return exact.uri().equals(EcoreUtil.getURI(method))
+                ? new PropertySourceTarget(exact.uri(), exact.offset(), exact.length(), property.getName()) : exact;
         }
         catch (Throwable ignored)
         {
@@ -2076,26 +2082,166 @@ public final class BslStructureInsertCommentTypes
     /** Общее открытие места создания свойства из команды и обеих подсказок. */
     static void openPropertySource(PropertySourceTarget target)
     {
+        Global.tempLog("structure-property-definition", "open target=" + target);
         IResourceServiceProvider provider = IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(target.uri().trimFragment());
         org.eclipse.xtext.ui.editor.IURIEditorOpener opener = provider == null ? null
             : provider.get(org.eclipse.xtext.ui.editor.IURIEditorOpener.class);
         if (opener == null)
             return;
-        if (target.offset() < 0)
+        if (target.offset() < 0 && target.propertyName() == null)
         {
             opener.open(target.uri(), true);
             return;
         }
-        // Без выделения метода: иначе в историю попадёт и его имя, хотя переход — на свойство.
-        org.eclipse.ui.IEditorPart part = opener.open(target.uri(), false);
-        if (part instanceof org.eclipse.ui.texteditor.ITextEditor textEditor)
-            textEditor.selectAndReveal(target.offset(), target.length());
+        // Открываем модуль без адреса метода, затем выделяем само свойство.
+        // EDT возвращает также составные редакторы: получаем текстовую страницу как в CustomURIEditorOpener.
+        org.eclipse.ui.IEditorPart part = opener.open(target.uri().trimFragment(), true);
+        org.eclipse.xtext.ui.editor.XtextEditor textEditor =
+            org.eclipse.xtext.ui.editor.utils.EditorUtils.getXtextEditor(part);
+        if (textEditor != null)
+        {
+            PropertySourceTarget current = target;
+            if (target.propertyName() != null)
+            {
+                List<PropertySourceTarget> places = ContentAssistSessionReloader.readOnlyPeekAst(
+                    textEditor.getDocument(), resource -> currentPropertySources(resource, target));
+                Global.tempLog("structure-property-definition", "current places=" + places + " target=" + target);
+                if (places == null)
+                    return;
+                if (places.isEmpty())
+                {
+                    opener.open(target.uri(), true);
+                    return;
+                }
+                current = choosePropertySource(textEditor, places, target.propertyName());
+                if (current == null)
+                    return;
+            }
+            textEditor.selectAndReveal(current.offset(), current.length());
+            Global.tempLog("structure-property-definition", "selected="
+                + textEditor.getSelectionProvider().getSelection() + " target=" + target);
+        }
+    }
+
+    /** Читаем текущий AST открытого модуля, а не смещение из сохранённой ссылки потребителя. */
+    private static List<PropertySourceTarget> currentPropertySources(Resource resource, PropertySourceTarget target)
+    {
+        EObject object = resource.getEObject(target.uri().fragment());
+        Method method = EcoreUtil2.getContainerOfType(object, Method.class);
+        Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+        ICompositeNode node = method == null ? null : NodeModelUtils.findActualNodeFor(method);
+        if (module == null || node == null)
+            return null;
+        List<PropertySourceTarget> result = new ArrayList<>();
+        COMMENT_FIELD_PARSE.set(Boolean.TRUE);
+        try
+        {
+            BslDocumentationComment comment = parseMethodComment(method, module);
+            if (comment != null && comment.getReturnSection() != null)
+                for (TypeSection section : comment.getReturnSection().getReturnTypes())
+                    currentCommentSources(section, comment.getLineGlobalOffsets(), node, target, result);
+        }
+        finally
+        {
+            COMMENT_FIELD_PARSE.remove();
+        }
+        if (!result.isEmpty())
+            return result;
+        Set<Variable> returned = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (com._1c.g5.v8.dt.bsl.model.ReturnStatement exit : EcoreUtil2.getAllContentsOfType(method,
+            com._1c.g5.v8.dt.bsl.model.ReturnStatement.class))
+            if (exit.getExpression() instanceof StaticFeatureAccess access)
+            {
+                Variable variable = sourceVariable(access);
+                if (variable != null)
+                    returned.add(variable);
+            }
+        for (Invocation call : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+            if (target.propertyName().equalsIgnoreCase(insertedKey(call))
+                && call.getMethodAccess() instanceof DynamicFeatureAccess access
+                && access.getSource() instanceof StaticFeatureAccess receiver
+                && returned.contains(sourceVariable(receiver)))
+            {
+                ICompositeNode key = NodeModelUtils.findActualNodeFor(call.getParams().get(0));
+                if (key != null)
+                {
+                    int start = key.getText().toLowerCase(Locale.ROOT)
+                        .indexOf(target.propertyName().toLowerCase(Locale.ROOT));
+                    if (start >= 0)
+                        result.add(new PropertySourceTarget(target.uri(), key.getTotalOffset() + start,
+                            target.propertyName().length()));
+                }
+            }
+        Global.tempLog("structure-property-definition", "body property=" + target.propertyName()
+            + " method=" + method.getName() + " returnedVariables=" + returned.size() + " places=" + result);
+        return result;
+    }
+
+    private static void currentCommentSources(TypeSection section, int[] lines, ICompositeNode methodNode,
+        PropertySourceTarget target, List<PropertySourceTarget> result)
+    {
+        for (var definition : section.getTypeDefinitions())
+            for (TypeSection.FieldDefinition field : definition.getFieldDefinitionExtension())
+            {
+                int line = field.getLineNumber();
+                if (target.propertyName().equalsIgnoreCase(field.getName())
+                    && lines != null && line >= 0 && line < lines.length)
+                {
+                    int offset = methodNode.getTotalOffset() + lines[line] + field.getNameOffset();
+                    if (methodNode.getRootNode().getText().regionMatches(true, offset, target.propertyName(),
+                        0, target.propertyName().length()))
+                        result.add(new PropertySourceTarget(target.uri(), offset, target.propertyName().length()));
+                }
+                for (TypeSection nested : field.getTypeSections())
+                    currentCommentSources(nested, lines, methodNode, target, result);
+            }
+    }
+
+    private static PropertySourceTarget choosePropertySource(org.eclipse.xtext.ui.editor.XtextEditor editor,
+        List<PropertySourceTarget> places, String name)
+    {
+        if (places.size() == 1)
+            return places.get(0);
+        org.eclipse.ui.dialogs.ElementListSelectionDialog dialog =
+            new org.eclipse.ui.dialogs.ElementListSelectionDialog(editor.getSite().getShell(),
+                new org.eclipse.jface.viewers.LabelProvider()
+                {
+                    @Override
+                    public String getText(Object element)
+                    {
+                        PropertySourceTarget place = (PropertySourceTarget)element;
+                        try
+                        {
+                            var document = editor.getDocument();
+                            int line = document.getLineOfOffset(place.offset());
+                            var region = document.getLineInformation(line);
+                            return "Строка " + (line + 1) + ": "
+                                + document.get(region.getOffset(), region.getLength()).trim();
+                        }
+                        catch (org.eclipse.jface.text.BadLocationException failure)
+                        {
+                            Global.tempLog("structure-property-definition", "choice failed=" + failure);
+                            return "Смещение " + place.offset();
+                        }
+                    }
+                });
+        dialog.setTitle(Global.withPluginWindowTitle("Определение свойства"));
+        dialog.setMessage("Выберите место определения свойства «" + name + "»:");
+        dialog.setElements(places.toArray());
+        dialog.setMultipleSelection(false);
+        if (dialog.open() != org.eclipse.jface.window.Window.OK)
+            return null;
+        return dialog.getFirstResult() instanceof PropertySourceTarget selected ? selected : null;
     }
 
     /** Куда вести ссылку на имя свойства; {@code offset < 0} — выделить сам объект по URI. */
-    record PropertySourceTarget(URI uri, int offset, int length)
+    record PropertySourceTarget(URI uri, int offset, int length, String propertyName)
     {
+        PropertySourceTarget(URI uri, int offset, int length)
+        {
+            this(uri, offset, length, null);
+        }
     }
 
     /** Флажок «Расширенный расчёт типов» проекта модуля, открытого в редакторе. */
@@ -3269,7 +3415,8 @@ public final class BslStructureInsertCommentTypes
      */
     private static final class ColumnRenames
     {
-        private static final OnChangeEvictingCache PLANS = new OnChangeEvictingCache();
+        private static final BslSourceModelCache PLANS = new BslSourceModelCache();
+        private static final BslSourceModelCache BOUND_PLANS = new BslSourceModelCache(true);
         private static final ThreadLocal<Set<EObject>> RETURNING = ThreadLocal.withInitial(
             () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
@@ -3412,7 +3559,7 @@ public final class BslStructureInsertCommentTypes
             Method owner = method;
             List<SimpleStatement> statements = PLANS.get(owner, owner.eResource(),
                 () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class));
-            StatementPlan plan = PLANS.get(new StatementPlanKey(owner), owner.eResource(),
+            StatementPlan plan = BOUND_PLANS.get(new StatementPlanKey(owner), owner.eResource(),
                 () -> new StatementPlan(statements));
             int from = 0;
             SimpleStatement assignment = null;
@@ -3495,12 +3642,21 @@ public final class BslStructureInsertCommentTypes
                 || !("Имя".equalsIgnoreCase(name.getName()) || "Name".equalsIgnoreCase(name.getName()))) //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             Expression collection = name.getSource() instanceof DynamicFeatureAccess column ? column.getSource()
-                : name.getSource() instanceof IndexAccess index ? index.getSource() : null;
+                : name.getSource() instanceof IndexAccess index ? index.getSource()
+                : name.getSource() instanceof Invocation call && isColumnFind(call)
+                    ? ((DynamicFeatureAccess)call.getMethodAccess()).getSource() : null;
             if (!(collection instanceof DynamicFeatureAccess columns)
                 || !("Колонки".equalsIgnoreCase(columns.getName()) || "Columns".equalsIgnoreCase(columns.getName())) //$NON-NLS-1$ //$NON-NLS-2$
                 || !(columns.getSource() instanceof StaticFeatureAccess))
                 return null;
             return sourceVariable(columns.getSource());
+        }
+
+        private static boolean isColumnFind(Invocation call)
+        {
+            return call.getMethodAccess() instanceof DynamicFeatureAccess access
+                && ("Найти".equalsIgnoreCase(access.getName()) || "Find".equalsIgnoreCase(access.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                && call.getParams().size() == 1;
         }
 
         /** Грубо и быстро: не вложено ни в ветвление, ни в цикл, ни в Попытку, ни в #Если. */
@@ -3523,6 +3679,9 @@ public final class BslStructureInsertCommentTypes
                 return null;
             if (name.getSource() instanceof DynamicFeatureAccess column)
                 return column.getName();
+            if (name.getSource() instanceof Invocation call && isColumnFind(call))
+                return call.getParams().get(0) instanceof StringLiteral literal
+                    ? new DefaultStringLiteralTextProvider(literal).getText() : null;
             return name.getSource() instanceof IndexAccess index && index.getIndex() instanceof StringLiteral literal
                 ? new DefaultStringLiteralTextProvider(literal).getText() : null;
         }
@@ -3679,7 +3838,7 @@ public final class BslStructureInsertCommentTypes
      */
     private static final class FormItemKinds
     {
-        private static final OnChangeEvictingCache PLANS = new OnChangeEvictingCache();
+        private static final BslSourceModelCache PLANS = new BslSourceModelCache();
         /** Базовый тип → {русское имя перечисления, английское}. */
         private static final java.util.Map<String, String[]> ENUMS = java.util.Map.of(
             "FormField", new String[] {"ВидПоляФормы", "FormFieldType"}, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -3878,7 +4037,27 @@ public final class BslStructureInsertCommentTypes
         InteractiveTypes previous = INTERACTIVE_TYPES.get();
         InteractiveTypes current = previous != null ? previous : new InteractiveTypes(canceled);
         INTERACTIVE_TYPES.set(current);
-        return new InteractiveTypesScope(previous);
+        return new InteractiveTypesScope(previous, previous == null ? current : null, purpose);
+    }
+
+    /** Последовательные проверки одной модели используют один вычислитель, без сохранения монитора проверки. */
+    static final class InteractiveTypesSession
+    {
+        private final InteractiveTypes types;
+
+        InteractiveTypesSession(java.util.function.BooleanSupplier canceled,
+            java.util.function.Consumer<EObject> observe)
+        {
+            types = new InteractiveTypes(canceled);
+            types.observe = observe;
+        }
+
+        InteractiveTypesScope open(String purpose)
+        {
+            InteractiveTypes previous = INTERACTIVE_TYPES.get();
+            INTERACTIVE_TYPES.set(types);
+            return new InteractiveTypesScope(previous, types, purpose);
+        }
     }
 
     static boolean interactiveTypesActive()
@@ -3926,10 +4105,19 @@ public final class BslStructureInsertCommentTypes
     static final class InteractiveTypesScope implements AutoCloseable
     {
         private final InteractiveTypes previous;
+        private final InteractiveTypes observed;
+        private final String purpose;
 
         InteractiveTypesScope(InteractiveTypes previous)
         {
+            this(previous, null, null);
+        }
+
+        InteractiveTypesScope(InteractiveTypes previous, InteractiveTypes observed, String purpose)
+        {
             this.previous = previous;
+            this.observed = observed;
+            this.purpose = purpose;
         }
 
         @Override
@@ -3962,6 +4150,7 @@ public final class BslStructureInsertCommentTypes
         }
 
         private final java.util.function.BooleanSupplier canceled;
+        private java.util.function.Consumer<EObject> observe = object -> {};
         private final java.util.Map<ExpressionKey, List<TypeItem>> expressions = new java.util.HashMap<>();
         private final java.util.Map<VariableKey, List<TypeItem>> variables = new java.util.HashMap<>();
         private final java.util.Map<ExpressionKey, List<TypeItem>> properties = new java.util.HashMap<>();
@@ -3971,7 +4160,15 @@ public final class BslStructureInsertCommentTypes
         private final Set<Method> activeMethods = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
         private final java.util.Map<CallKey, List<TypeItem>> returns = new java.util.HashMap<>();
         private final java.util.Map<Method, Plan> plans = new java.util.IdentityHashMap<>();
-        private final java.util.Map<Module, List<Invocation>> calls = new java.util.IdentityHashMap<>();
+        /** Индекс только завершённых обходов; порядок вызовов каждого метода совпадает с AST. */
+        private final java.util.Map<Module, java.util.Map<Method, List<Invocation>>> calls = new java.util.IdentityHashMap<>();
+        private final long started = System.nanoTime();
+        private long expressionRequests;
+        private long expressionHits;
+        private long incomingRequests;
+        private long incomingCandidates;
+        private long callIndexNodes;
+        private long callIndexEntries;
         private Frame frame = new Frame();
         private int nativeRead;
 
@@ -3995,6 +4192,7 @@ public final class BslStructureInsertCommentTypes
 
         private List<TypeItem> nativeTypes(EObject object, Environments environments, List<TypeItem> provided)
         {
+            observe.accept(object);
             if (provided != null)
                 return provided;
             if (!ready(object) || !(object.eResource() instanceof XtextResource resource))
@@ -4014,7 +4212,9 @@ public final class BslStructureInsertCommentTypes
 
         List<TypeItem> expression(EObject object, Environments environments, List<TypeItem> provided)
         {
+            expressionRequests++;
             check();
+            observe.accept(object);
             // Штатный TypesComputer допускает null (без ограничения сред),
             // локальные сборщики используют containsAny и требуют явный ALL.
             if (environments == null)
@@ -4026,7 +4226,10 @@ public final class BslStructureInsertCommentTypes
             ExpressionKey key = new ExpressionKey(new Identity(object), frame, environments);
             List<TypeItem> cached = expressions.get(key);
             if (cached != null)
+            {
+                expressionHits++;
                 return cached;
+            }
             if (!activeExpressions.add(key))
                 return nativeTypes(object, environments, provided);
             try
@@ -4067,6 +4270,7 @@ public final class BslStructureInsertCommentTypes
         List<TypeItem> variable(Variable variable, int offset, Environments environments, List<TypeItem> provided)
         {
             check();
+            observe.accept(variable);
             if (environments == null)
             {
                 environments = Environments.ALL;
@@ -4284,6 +4488,7 @@ public final class BslStructureInsertCommentTypes
 
         private List<TypeItem> methodReturns(com._1c.g5.v8.dt.bsl.model.Function function, Environments environments)
         {
+            observe.accept(function);
             if (!activeMethods.add(function))
                 return List.of();
             try
@@ -4300,28 +4505,40 @@ public final class BslStructureInsertCommentTypes
 
         private List<TypeItem> incoming(com._1c.g5.v8.dt.bsl.model.FormalParam parameter, Method method, Environments environments)
         {
+            incomingRequests++;
             Module module = EcoreUtil2.getContainerOfType(method, Module.class);
             int index = method.getFormalParams().indexOf(parameter);
             if (module == null || index < 0)
                 return List.of();
-            List<Invocation> found = calls.get(module);
-            if (found == null)
+            java.util.Map<Method, List<Invocation>> indexed = calls.get(module);
+            if (indexed == null)
             {
-                found = new ArrayList<>();
+                indexed = new java.util.IdentityHashMap<>();
                 for (var iterator = module.eAllContents(); iterator.hasNext();)
                 {
                     check();
-                    if (iterator.next() instanceof Invocation call)
-                        found.add(call);
+                    callIndexNodes++;
+                    if (!(iterator.next() instanceof Invocation call)
+                        || !(call.getMethodAccess() instanceof StaticFeatureAccess access)
+                        || call.getParams().isEmpty())
+                        continue;
+                    Set<Method> targets = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                    for (FeatureEntry entry : access.getFeatureEntries())
+                    {
+                        check();
+                        callIndexEntries++;
+                        if (entry.getFeature() instanceof Method target && targets.add(target))
+                            indexed.computeIfAbsent(target, ignored -> new ArrayList<>()).add(call);
+                    }
                 }
-                calls.put(module, found);
+                calls.put(module, indexed);
             }
             List<TypeItem> result = new ArrayList<>();
-            for (Invocation call : found)
+            for (Invocation call : indexed.getOrDefault(method, List.of()))
             {
                 check();
-                if (call.getParams().size() > index && call.getMethodAccess() instanceof StaticFeatureAccess access
-                    && access.getFeatureEntries().stream().anyMatch(entry -> entry.getFeature() == method))
+                incomingCandidates++;
+                if (call.getParams().size() > index)
                     add(result, expression(call.getParams().get(index), environments, null));
             }
             return result;
@@ -4539,6 +4756,7 @@ public final class BslStructureInsertCommentTypes
             Set<Variable> resolving = RESOLVING.get();
             if (!resolving.add(variable))
                 return types;
+            long started = System.nanoTime();
             try
             {
                 if (!(variable.eResource() instanceof XtextResource resource))
@@ -4558,6 +4776,10 @@ public final class BslStructureInsertCommentTypes
                 if (method == null)
                     return types;
                 Plan plan = Plan.of(method);
+                if (!plan.loopsByVariable.containsKey(variable) && types.stream().noneMatch(item ->
+                    item instanceof Type && ("Map".equals(McoreUtil.getTypeName(item))
+                        || "ValueList".equals(McoreUtil.getTypeName(item)))))
+                    return types;
                 TypesComputer computer = resource.getResourceServiceProvider().get(TypesComputer.class);
                 types = loopTypes(types, variable, offset, environments, plan, computer);
                 List<TypeItem> result = new ArrayList<>();
@@ -4603,13 +4825,14 @@ public final class BslStructureInsertCommentTypes
                 resolving.remove(variable);
                 if (resolving.isEmpty())
                     RESOLVING.remove();
+                BslDocCommentTypeMerge.recordTypeSystemTiming("collection.infer", started);
             }
         }
 
         private static List<TypeItem> loopTypes(List<TypeItem> types, Variable variable, int offset,
             Environments environments, Plan plan, TypesComputer computer)
         {
-            for (var loop : plan.loops)
+            for (var loop : plan.loopsByVariable.getOrDefault(variable, List.of()))
             {
                 ICompositeNode node = NodeModelUtils.findActualNodeFor(loop);
                 ICompositeNode collectionNode = NodeModelUtils.findActualNodeFor(loop.getCollection());
@@ -4692,17 +4915,34 @@ public final class BslStructureInsertCommentTypes
             final ICompositeNode node;
             final java.util.Map<Variable, List<Addition>> additions = new java.util.IdentityHashMap<>();
             final java.util.Map<Variable, List<Integer>> assignments = new java.util.IdentityHashMap<>();
-            final List<com._1c.g5.v8.dt.bsl.model.ForEachStatement> loops;
+            final java.util.Map<Variable, List<com._1c.g5.v8.dt.bsl.model.ForEachStatement>> loopsByVariable =
+                new java.util.IdentityHashMap<>();
 
             Plan(Method method, ICompositeNode node)
             {
+                long started = System.nanoTime();
                 this.node = node;
-                loops = EcoreUtil2.getAllContentsOfType(method, com._1c.g5.v8.dt.bsl.model.ForEachStatement.class);
+                List<com._1c.g5.v8.dt.bsl.model.ForEachStatement> loops = new ArrayList<>();
+                List<SimpleStatement> statements = new ArrayList<>();
+                List<Invocation> invocations = new ArrayList<>();
+                int visited = 0;
+                // Один обход AST; обработка присвоений и вызовов остаётся в прежнем порядке.
+                for (var iterator = method.eAllContents(); iterator.hasNext();)
+                {
+                    EObject object = iterator.next();
+                    visited++;
+                    if (object instanceof com._1c.g5.v8.dt.bsl.model.ForEachStatement loop)
+                        loops.add(loop);
+                    if (object instanceof SimpleStatement statement)
+                        statements.add(statement);
+                    if (object instanceof Invocation invocation)
+                        invocations.add(invocation);
+                }
                 loops.sort(java.util.Comparator.comparingInt((com._1c.g5.v8.dt.bsl.model.ForEachStatement loop) -> {
                     ICompositeNode position = NodeModelUtils.findActualNodeFor(loop);
                     return position == null ? -1 : position.getOffset();
                 }).reversed());
-                for (SimpleStatement statement : EcoreUtil2.getAllContentsOfType(method, SimpleStatement.class))
+                for (SimpleStatement statement : statements)
                 {
                     if (statement.getRight() == null)
                         continue;
@@ -4716,7 +4956,7 @@ public final class BslStructureInsertCommentTypes
                     else if (statement.getLeft() instanceof IndexAccess index)
                         add(index.getSource(), index.getIndex(), statement.getRight(), true, statement);
                 }
-                for (Invocation invocation : EcoreUtil2.getAllContentsOfType(method, Invocation.class))
+                for (Invocation invocation : invocations)
                 {
                     if (!(invocation.getMethodAccess() instanceof DynamicFeatureAccess access))
                         continue;
@@ -4731,6 +4971,12 @@ public final class BslStructureInsertCommentTypes
                         add(access.getSource(), null, params.get(0), false, invocation);
                 }
                 additions.values().forEach(entries -> entries.sort(java.util.Comparator.comparingInt(Addition::start)));
+                for (var loop : loops)
+                {
+                    Variable variable = sourceVariable(loop.getVariableAccess());
+                    if (variable != null)
+                        loopsByVariable.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(loop);
+                }
             }
 
             private void add(Expression source, Expression key, Expression value, boolean map, EObject expression)
@@ -5728,16 +5974,27 @@ public final class BslStructureInsertCommentTypes
          */
         private void stockInstall(Module module, CancelIndicator cancelIndicator)
         {
-            java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
+            Runnable finishTiming = BslDocCommentTypeMerge.beginTypeSystemTiming(module);
             try
             {
-                resetPartialMethodStates(module, cancelIndicator);
-                super.installTypeSystem(module, cancelIndicator);
+                long started = System.nanoTime();
+                java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
+                BslDocCommentTypeMerge.recordTypeSystemTiming("captureCalleeReturns", started);
+                try
+                {
+                    started = System.nanoTime();
+                    resetPartialMethodStates(module, cancelIndicator);
+                    BslDocCommentTypeMerge.recordTypeSystemTiming("resetPartialMethodStates", started);
+                    started = System.nanoTime();
+                    try { super.installTypeSystem(module, cancelIndicator); }
+                    finally { BslDocCommentTypeMerge.recordTypeSystemTiming("edt.installTypeSystem", started); }
+                }
+                finally
+                {
+                    BslDocCommentComputedTypes.releaseCalleeReturns(previous);
+                }
             }
-            finally
-            {
-                BslDocCommentComputedTypes.releaseCalleeReturns(previous);
-            }
+            finally { finishTiming.run(); }
         }
 
         /**
@@ -5861,3 +6118,4 @@ public final class BslStructureInsertCommentTypes
         }
     }
 }
+

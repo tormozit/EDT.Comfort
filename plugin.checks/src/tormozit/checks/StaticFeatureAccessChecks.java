@@ -624,3 +624,4 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         @Override protected Group group() { return Group.UNKNOWN_MEMBER; }
     }
 }
+

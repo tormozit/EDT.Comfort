@@ -711,7 +711,7 @@ public final class ComfortCheckRecompute
 
         String objectsLabel = describeObjects(sources);
         toast("Запустить проверки", //$NON-NLS-1$
-            "Запущен пересчет всех проверок объекта " + objectsLabel
+            "Запущен пересчет всех проверок " + objectsLabel
                 + " с вложенными. По окончании будет показано уведомление.");
 
         // Проверки текста модулей живут в языковых сегментах и заводятся не на BM-объект, а на
@@ -758,7 +758,7 @@ public final class ComfortCheckRecompute
         }, 0L, "comfort-recompute-checks"); //$NON-NLS-1$
         if (!scheduled)
         {
-            toast("Запустить проверки", "Не удалось запланировать перепроверку объекта " + objectsLabel + "."); //$NON-NLS-1$
+            toast("Запустить проверки", "Не удалось запланировать перепроверку " + objectsLabel + "."); //$NON-NLS-1$
             return;
         }
         if (targets.isEmpty())
@@ -854,7 +854,7 @@ public final class ComfortCheckRecompute
                     long durationMs = System.currentTimeMillis() - startMs;
                     Set<Object> topIds = checkedTopIds(project, targets, objects);
                     int[] counts = countProblems(project, targets, objects, topIds);
-                    toastWithAction("Запустить проверки", "Завершен пересчет всех проверок объекта " + objectsLabel //$NON-NLS-1$
+                    toastWithAction("Запустить проверки", "Завершен пересчет всех проверок " + objectsLabel //$NON-NLS-1$
                         + " с вложенными за " + LongOperationNotifyHook.formatDuration(durationMs) //$NON-NLS-1$
                         + ". Ошибок: " + counts[0] //$NON-NLS-1$
                         + ", Предупреждений: " + counts[1] //$NON-NLS-1$
@@ -863,7 +863,7 @@ public final class ComfortCheckRecompute
                 }
                 else
                 {
-                    toast("Запустить проверки", "Перепроверка объекта " + objectsLabel //$NON-NLS-1$
+                    toast("Запустить проверки", "Перепроверка " + objectsLabel //$NON-NLS-1$
                         + " с вложенными не завершилась за " //$NON-NLS-1$
                         + (WAIT_COMPLETION_TIMEOUT_MS / 1000) + " с.");
                 }
@@ -959,21 +959,18 @@ public final class ComfortCheckRecompute
 
     /**
      * Человекочитаемое имя объектов для тостов запуска/завершения перепроверки, например
-     * {@code ОбщаяФорма.Форма1} или {@code 3 объекта: ..., ..., ...} для нескольких.
+     * {@code объекта ОбщаяФорма.Форма1} или {@code объектов: 3} для нескольких.
      * <p>
      * Для {@link BasicForm} не вызываем {@code bmGetFqn()} — на форме он тянет модель Form
      * до сессии DD и срывает последующий {@code updateDerivedData}.
      */
     private static String describeObjects(Collection<? extends EObject> objects)
     {
-        List<String> names = new ArrayList<>();
-        for (EObject object : objects)
-            names.add(describeOneSafe(object));
-        if (names.isEmpty())
-            return "?"; //$NON-NLS-1$
-        if (names.size() == 1)
-            return names.get(0);
-        return names.size() + " объекта: " + String.join(", ", names); //$NON-NLS-1$ //$NON-NLS-2$
+        if (objects.isEmpty())
+            return "объекта ?"; //$NON-NLS-1$
+        if (objects.size() == 1)
+            return "объекта " + describeOneSafe(objects.iterator().next()); //$NON-NLS-1$
+        return "объектов: " + objects.size(); //$NON-NLS-1$
     }
 
     private static String describeOneSafe(EObject object)

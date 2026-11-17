@@ -403,7 +403,7 @@ final class BslExpectedTypePremiums
     /** @param added слова, которых нет у EDT ({@link AddedWords}) */
     private record Snapshot(Context context, Scene scene, IProject project, Map<String, List<String>> variableTypes,
         Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added, boolean complete,
-        Set<ICompletionProposal> knownProposals)
+        Set<ICompletionProposal> knownProposals, Map<ICompletionProposal, Boolean> assignmentAllowed)
     {
         /** Только ссылки: getDisplayString может запускать дорогое построение StyledString EDT. */
         boolean covers(ICompletionProposal[] list)
@@ -1036,7 +1036,7 @@ final class BslExpectedTypePremiums
         if (!unseen)
             return new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(), snapshot.variableTypes(),
                 snapshot.premiums(), snapshot.evaluated(), snapshot.added(), snapshot.complete(),
-                proposalIdentities(list, snapshot));
+                proposalIdentities(list, snapshot), snapshot.assignmentAllowed());
         // Новые слова среза не нужны: они уже в снимке (премии считаются и для них)
         Premiums added = premiums(snapshot.context(), snapshot.scene(), snapshot.project(), list,
             snapshot.variableTypes(), new LinkedHashMap<>());
@@ -1049,7 +1049,7 @@ final class BslExpectedTypePremiums
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
         Snapshot extended = new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(),
             snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(), snapshot.complete(),
-            proposalIdentities(list, snapshot));
+            proposalIdentities(list, snapshot), snapshot.assignmentAllowed());
         return extended;
     }
 
@@ -1063,6 +1063,7 @@ final class BslExpectedTypePremiums
         long parameterRevision = foreignParameterRevision;
         Scene[] scene = new Scene[1];
         Map<String, List<String>> variableTypes = new HashMap<>();
+        Map<ICompletionProposal, Boolean> assignmentAllowed = new java.util.IdentityHashMap<>();
         Boolean read;
         try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = Display.getCurrent() != null ? null
             : BslStructureInsertCommentTypes.interactiveTypes("completion-context", () -> !context.sameAs(requested)))
@@ -1078,6 +1079,7 @@ final class BslExpectedTypePremiums
                         scene[0] = scene(resource, context, list, complete);
                         if (scene[0].expectation() != null)
                             collectVariableTypes(resource, context, list, variableTypes);
+                        prepareAssignmentDecisions(context, list, resource, assignmentAllowed);
                     }
                     finally
                     {
@@ -1101,7 +1103,8 @@ final class BslExpectedTypePremiums
         if (parameterRevision != foreignParameterRevision)
             return null;
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
-            List.copyOf(added.values()), complete, proposalIdentities(list, null));
+            List.copyOf(added.values()), complete, proposalIdentities(list, null),
+            Collections.unmodifiableMap(assignmentAllowed));
     }
 
     private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list)
@@ -1154,6 +1157,7 @@ final class BslExpectedTypePremiums
         Map<String, String> memberNames = new LinkedHashMap<>();
         Map<String, Integer> frequencies = comment || typeName || context.parent().isEmpty()
             ? Collections.emptyMap() : memberFrequencies(resource, context, memberNames);
+        excludeKnownProcedures(resource, parentTypes, memberNames);
         Map<String, List<String>> memberTypes = complete && !memberNames.isEmpty()
             ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
         String receiverLine = comment ? null : receiverTypeLine(expectation, resource, context);
@@ -2129,6 +2133,38 @@ final class BslExpectedTypePremiums
         {
             return new ArrayList<>();
         }
+    }
+
+    /** Известную процедуру поставляет только EDT: её отсутствие не делает метод неизвестным. */
+    private static void excludeKnownProcedures(XtextResource resource, List<TypeItem> parentTypes,
+        Map<String, String> names)
+    {
+        if (names.isEmpty())
+            return;
+        Set<String> procedures = new HashSet<>();
+        Set<String> functions = new HashSet<>();
+        for (TypeItem item : parentTypes)
+        {
+            Type type = resolveType(resource, item);
+            ContextDef def = type != null && !type.eIsProxy() ? type.getContextDef() : null;
+            if (def == null || def.eIsProxy())
+                continue;
+            for (com._1c.g5.v8.dt.mcore.Method method : def.allMethods())
+            {
+                if (method.eIsProxy())
+                    continue;
+                Set<String> target = method.isRetVal() ? functions : procedures;
+                if (method.getName() != null)
+                    target.add("m:" + lower(method.getName())); //$NON-NLS-1$
+                if (method.getNameRu() != null)
+                    target.add("m:" + lower(method.getNameRu())); //$NON-NLS-1$
+            }
+        }
+        // У другого возможного типа родителя одноимённый метод может возвращать значение.
+        procedures.removeAll(functions);
+        Set<String> excluded = new LinkedHashSet<>(names.keySet());
+        excluded.retainAll(procedures);
+        names.keySet().removeAll(excluded);
     }
 
     /** Типы добавленных членов: тот же вычислитель выражений и состояния переменных, что у слов EDT. */
@@ -5042,57 +5078,111 @@ final class BslExpectedTypePremiums
     static boolean canInsertAssignment(IDocument document, int caret, ICompletionProposal proposal)
         throws Exception
     {
-        Context context = contextAt(document, caret);
-        if (context == null || insideExpression(context, null)
-            || SmartContentAssistProcessor.isCommentAssistContext(document, caret)
-            || SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
-            return false;
-        if (proposal instanceof BslAddedWordProposal added)
-            return added.isGhostMember() && !added.isMethod()
-                && assignmentValueType(added.getInferredTypes());
-        if (!(document instanceof IXtextDocument xtextDocument))
-            return false;
+        long started = System.nanoTime();
+        String source = "context";
+        boolean allowed = false;
+        try
+        {
+            Context context = contextAt(document, caret);
+            if (context == null || insideExpression(context, null)
+                || SmartContentAssistProcessor.isCommentAssistContext(document, caret)
+                || SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
+                return false;
+            if (proposal instanceof BslAddedWordProposal added)
+            {
+                source = "added-word";
+                allowed = added.isGhostMember() && !added.isMethod()
+                    && assignmentValueType(added.getInferredTypes());
+                return allowed;
+            }
+            Snapshot snapshot = active;
+            if (snapshot == null || !snapshot.context().sameAs(context))
+            {
+                source = "snapshot-missing";
+                return false;
+            }
+            Boolean ready = snapshot.assignmentAllowed().get(SmartContentAssistProcessor.unwrapProposal(proposal));
+            source = ready == null ? "proposal-not-prepared" : "snapshot";
+            allowed = Boolean.TRUE.equals(ready);
+            return allowed;
+        }
+        finally
+        {
+            Global.tempLog("assist-assignment-apply", "source=" + source + " allowed=" + allowed
+                + " elapsedNs=" + (System.nanoTime() - started) + " caret=" + caret
+                + " thread=" + Thread.currentThread().getName());
+        }
+    }
+
+    /** Решения для вставки готовятся в уже открытом фоновом чтении, вместе с премиями. */
+    private static void prepareAssignmentDecisions(Context context, ICompletionProposal[] list,
+        XtextResource resource, Map<ICompletionProposal, Boolean> result)
+    {
+        long started = System.nanoTime();
+        try
+        {
+            if (Display.getCurrent() != null || insideExpression(context, null)
+                || SmartContentAssistProcessor.isCommentAssistContext(context.document(), context.caret())
+                || SmartContentAssistProcessor.isStringLiteralAssistContext(context.document(), context.caret()))
+                return;
+            for (ICompletionProposal proposal : list)
+            {
+                if (!context.sameAs(requested))
+                    return;
+                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                result.put(raw, assignmentAllowedInModel(context, raw, resource));
+            }
+        }
+        finally
+        {
+            Global.tempLog("assist-assignment-apply", "prepare count=" + result.size()
+                + " elapsedNs=" + (System.nanoTime() - started)
+                + " thread=" + Thread.currentThread().getName());
+        }
+    }
+
+    private static boolean assignmentAllowedInModel(Context context, ICompletionProposal proposal,
+        XtextResource resource)
+    {
+        int caret = context.caret();
         Object info = statisticsFeature(proposalInfo(proposal));
         FunctionReturnTypes.VariableTarget target = FunctionReturnTypes.variableTargetOf(info);
-        return Boolean.TRUE.equals(ContentAssistSessionReloader.readOnlyForContentAssist(xtextDocument, resource ->
-        {
-            if (resource == null)
-                return false;
-            Object feature = target != null && target.fragment() != null
-                && resource.getURI().trimFragment().equals(target.module())
-                    ? resource.getEObject(target.fragment()) : info;
-            List<TypeItem> types;
-            if (feature instanceof Property property && !property.eIsProxy())
-            {
-                if (!property.isWritable())
-                    return false;
-                types = new ArrayList<>(property.getTypes());
-            }
-            else if (feature instanceof Variable variable && !variable.eIsProxy())
-                types = variableTypeItemsAt(variable, caret, environmentsOf(resource, variable));
-            else
-                return false;
-            List<String> names = matchingTypeNames(types);
-            if (names.size() == 1 && "Неопределено".equalsIgnoreCase(names.get(0))) //$NON-NLS-1$
-            {
-                List<TypeItem> parents = context.parent().isEmpty() ? List.of()
-                    : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
-                Set<String> dynamicRows = Set.of("строкатаблицызначений", "строкадеревазначений", //$NON-NLS-1$ //$NON-NLS-2$
-                    "данныеформыэлементдерева", "данныеформыэлементколлекции", //$NON-NLS-1$ //$NON-NLS-2$
-                    "данныеформыструктура", "данныеформыструктурасколлекцией"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (matchingTypeNames(parents).stream().noneMatch(name -> dynamicRows.contains(lower(name))))
-                    return false;
-            }
-            if (assignmentValueType(names))
-                return true;
-            for (TypeItem item : types)
-            {
-                Type type = resolveType(resource, item);
-                if (type != null && type.isSysEnum())
-                    return true;
-            }
+        if (resource == null)
             return false;
-        }));
+        Object feature = target != null && target.fragment() != null
+            && resource.getURI().trimFragment().equals(target.module())
+                ? resource.getEObject(target.fragment()) : info;
+        List<TypeItem> types;
+        if (feature instanceof Property property && !property.eIsProxy())
+        {
+            if (!property.isWritable())
+                return false;
+            types = new ArrayList<>(property.getTypes());
+        }
+        else if (feature instanceof Variable variable && !variable.eIsProxy())
+            types = variableTypeItemsAt(variable, caret, environmentsOf(resource, variable));
+        else
+            return false;
+        List<String> names = matchingTypeNames(types);
+        if (names.size() == 1 && "Неопределено".equalsIgnoreCase(names.get(0))) //$NON-NLS-1$
+        {
+            List<TypeItem> parents = context.parent().isEmpty() ? List.of()
+                : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
+            Set<String> dynamicRows = Set.of("строкатаблицызначений", "строкадеревазначений", //$NON-NLS-1$ //$NON-NLS-2$
+                "данныеформыэлементдерева", "данныеформыэлементколлекции", //$NON-NLS-1$ //$NON-NLS-2$
+                "данныеформыструктура", "данныеформыструктурасколлекцией"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (matchingTypeNames(parents).stream().noneMatch(name -> dynamicRows.contains(lower(name))))
+                return false;
+        }
+        if (assignmentValueType(names))
+            return true;
+        for (TypeItem item : types)
+        {
+            Type type = resolveType(resource, item);
+            if (type != null && type.isSysEnum())
+                return true;
+        }
+        return false;
     }
 
     private static boolean assignmentValueType(List<String> types)

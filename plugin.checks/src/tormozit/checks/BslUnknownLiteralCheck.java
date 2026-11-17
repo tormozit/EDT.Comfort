@@ -64,21 +64,25 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
             return;
         if (OpenModulesOnly.skip(module, parameters))
             return;
-        BslLiteralValues.Pass pass = new BslLiteralValues.Pass();
-        TreeIterator<EObject> all = module.eAllContents();
-        while (all.hasNext() && !monitor.isCanceled() && TypeUtil.isStringLiteralContentTypesEnabled())
+        try (var analysis = BslLiteralValues.validationPass(module,
+            () -> monitor.isCanceled() || !TypeUtil.isStringLiteralContentTypesEnabled(), getCheckId()))
         {
-            EObject next = all.next();
-            if (!(next instanceof StringLiteral literal))
-                continue;
-            for (String value : BslLiteralValues.unknownLiteralValues(literal,
-                () -> monitor.isCanceled() || !TypeUtil.isStringLiteralContentTypesEnabled(), pass))
+            TreeIterator<EObject> all = module.eAllContents();
+            while (all.hasNext() && !monitor.isCanceled() && TypeUtil.isStringLiteralContentTypesEnabled())
             {
-                String message = "Литерал «" + value + "» отсутствует в списке допустимых значений";
-                acceptor.addIssue(message, literal);
+                EObject next = all.next();
+                if (!(next instanceof StringLiteral literal))
+                    continue;
+                for (String value : BslLiteralValues.unknownLiteralValues(literal,
+                    () -> monitor.isCanceled() || !TypeUtil.isStringLiteralContentTypesEnabled(), analysis.pass()))
+                {
+                    String message = "Литерал «" + value + "» отсутствует в списке допустимых значений";
+                    acceptor.addIssue(message, literal);
+                }
+                for (String message : BslLiteralValues.stockOutsideMessages(literal))
+                    acceptor.addIssue(message, literal);
             }
-            for (String message : BslLiteralValues.stockOutsideMessages(literal))
-                acceptor.addIssue(message, literal);
+            analysis.complete();
         }
     }
 

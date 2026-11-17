@@ -44,6 +44,9 @@ public final class ComfortCheckIds
     /** Неизвестное поле выборки с достоверно рассчитанной схемой запроса. */
     public static final String BSL_QUERY_RESULT_FIELD = "comfort-bsl-query-result-field"; //$NON-NLS-1$
 
+    /** Неизвестное динамическое свойство строки таблицы значений. */
+    public static final String BSL_DYNAMIC_PROPERTY = "comfort-bsl-dynamic-property"; //$NON-NLS-1$
+
     /** Несовместимость типов выражений, аргументов и значений свойств платформы. */
     public static final String BSL_VALUE_TYPE = "comfort-bsl-value-type"; //$NON-NLS-1$
 

@@ -109,7 +109,9 @@ public final class BslMethodParameterTypes
      * (вне ресурса) отдаются копиями, как штатный расчёт создаёт их заново.
      *
      * <p>Область — вызов {@code ICheck.check} этой проверки (колбэки {@code tormozit.checkDuration.begin/end}
-     * раннего бандла): модуль и модель в ней неизменны.
+     * раннего бандла) либо один корневой {@code computeReturnTypes} с пустым множеством посещённых.
+     * Во втором случае результаты не переживают даже один расчёт комментария: соседние шаги
+     * установки системы типов могут изменить модель.
      */
     private static final class ReturnTypesMemo
     {
@@ -124,7 +126,14 @@ public final class BslMethodParameterTypes
         private static final class Scope
         {
             int depth;
+            Object[] rootCall;
+            long requests;
+            long hits;
+            long computed;
+            long conflicts;
+            long recursiveFallbacks;
             final java.util.Map<String, Entry> memo = new java.util.HashMap<>();
+            final java.util.Set<String> computing = new java.util.HashSet<>();
             /** Множество, с которым идёт корневой вызов свежего расчёта: его пропускаем к штатному. */
             java.util.Set<?> bypass;
             /** Затронутые ключи идущих свежих расчётов, от внешнего к внутреннему. */
@@ -202,10 +211,31 @@ public final class BslMethodParameterTypes
         @SuppressWarnings("unchecked")
         private static Object apply(Object[] args)
         {
-            Scope scope = SCOPE.get();
-            if (scope == null || args == null || args.length != 10
+            if (args == null || args.length != 10
                 || !(args[8] instanceof java.util.Set<?> visited))
                 return null;
+            Scope scope = SCOPE.get();
+            if (scope == null)
+            {
+                // Публичный computeReturnTypes EDT начинает обход с пустого HashSet
+                // (BslDocumentationComment.javap-c.txt). Вложенные вызовы используют
+                // тот же существующий алгоритм memo; за границы корневого вызова он не выходит.
+                if (!visited.isEmpty())
+                    return null;
+                Scope root = new Scope();
+                root.depth = 1;
+                root.rootCall = args;
+                SCOPE.set(root);
+                try
+                {
+                    return apply(args);
+                }
+                finally
+                {
+                    SCOPE.remove();
+                }
+            }
+            scope.requests++;
             if (visited == scope.bypass)
             {
                 scope.bypass = null;
@@ -223,7 +253,15 @@ public final class BslMethodParameterTypes
                 java.lang.reflect.Method method = computeMethod(args[0]);
                 if (method == null)
                     return null;
+                // Свежий обход обнуляет visited. Если тот же ключ уже считается,
+                // штатный вызов с исходным visited сохраняет остановку на цикле.
+                if (!scope.computing.add(key))
+                {
+                    scope.recursiveFallbacks++;
+                    return null;
+                }
                 java.util.Set<String> fresh = new java.util.HashSet<>();
+                scope.computed++;
                 java.util.Set<String> touched = new java.util.HashSet<>();
                 Object[] call = java.util.Arrays.copyOfRange(args, 1, args.length);
                 call[7] = fresh;
@@ -250,6 +288,14 @@ public final class BslMethodParameterTypes
                 {
                     scope.bypass = null;
                     scope.touched.pop();
+                    scope.computing.remove(key);
+                }
+                // Корневой результат сразу уходит вызывающему, а область закрывается:
+                // снимок его дерева типов не будет прочитан ни одним следующим вызовом.
+                if (args == scope.rootCall && computed != null)
+                {
+                    ((java.util.Set<Object>) visited).addAll(fresh);
+                    return computed;
                 }
                 touched.addAll(fresh);
                 entry = new Entry(snapshot(computed), java.util.Set.copyOf(fresh), java.util.Set.copyOf(touched));
@@ -257,12 +303,16 @@ public final class BslMethodParameterTypes
             }
             for (String reached : entry.touched)
                 if (visited.contains(reached))
+                {
+                    scope.conflicts++;
                     return null;
+                }
             for (java.util.Set<String> outer : scope.touched)
                 outer.addAll(entry.touched);
             ((java.util.Set<Object>) visited).addAll(entry.added);
             if (computed != null)
                 return computed;
+            scope.hits++;
             List<Object> result = new ArrayList<>(entry.types.size());
             for (Item item : entry.types)
                 result.add(item.free ? org.eclipse.emf.ecore.util.EcoreUtil.copy((org.eclipse.emf.ecore.EObject) item.value)
@@ -307,3 +357,4 @@ public final class BslMethodParameterTypes
         }
     }
 }
+

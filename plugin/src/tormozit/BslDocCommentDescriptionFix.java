@@ -145,25 +145,30 @@ public final class BslDocCommentDescriptionFix
 
     public static void afterParse(Object commentObj)
     {
-        if (commentObj == null)
-            return;
-        String cn = commentObj.getClass().getName();
-        if (!TARGET_COMMENT.equals(cn))
-            return;
+        long started = System.nanoTime();
         try
         {
-            normalize(commentObj);
+            if (commentObj == null)
+                return;
+            String cn = commentObj.getClass().getName();
+            if (!TARGET_COMMENT.equals(cn))
+                return;
+            try
+            {
+                normalize(commentObj);
+            }
+            catch (Throwable t)
+            {
+            }
+            try
+            {
+                TypeSectionLinkRepair.repair(commentObj);
+            }
+            catch (Throwable t)
+            {
+            }
         }
-        catch (Throwable t)
-        {
-        }
-        try
-        {
-            TypeSectionLinkRepair.repair(commentObj);
-        }
-        catch (Throwable t)
-        {
-        }
+        finally { BslDocCommentTypeMerge.recordTypeSystemTiming("description.afterParse", started); }
     }
 
     /**

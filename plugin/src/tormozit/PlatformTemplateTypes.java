@@ -173,6 +173,12 @@ final class PlatformTemplateTypes
         if (result != null)
             return result;
         Set<String> templates = new HashSet<>();
+        // Объекты обработок и отчётов не имеют набора в mdTypeSets.xml, но методы Создать возвращают
+        // эти анонимные типы напрямую. Их реквизиты и экспортные методы зависят от конкретного объекта.
+        templates.add("dataprocessorobjectdataprocessorname"); //$NON-NLS-1$
+        templates.add("обработкаобъектимяобработки"); //$NON-NLS-1$
+        templates.add("reportobjectreportname"); //$NON-NLS-1$
+        templates.add("отчетобъектимяотчета"); //$NON-NLS-1$
         Map<String, String> sets = new HashMap<>();
         try
         {

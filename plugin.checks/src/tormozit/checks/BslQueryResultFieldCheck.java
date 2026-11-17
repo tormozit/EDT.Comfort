@@ -25,10 +25,9 @@ public final class BslQueryResultFieldCheck extends BasicCheck<Object>
     @Override
     protected void configureCheck(CheckConfigurer builder)
     {
-        builder.title("Неизвестное поле результата запроса") //$NON-NLS-1$
-            .description("Проверяет имена полей выборки по рассчитанному тексту запроса. " //$NON-NLS-1$
-                + "Неоднозначный текст запроса и изменяемые строки" //$NON-NLS-1$
-                + " таблиц значений не проверяются.") //$NON-NLS-1$
+        builder.title("Неизвестное поле выборки запроса") //$NON-NLS-1$
+            .description("Проверяет поля выборки из результата запроса по достоверно рассчитанной схеме. " //$NON-NLS-1$
+                + "При неоднозначном тексте запроса поля не проверяются.") //$NON-NLS-1$
             .complexity(CheckComplexity.NORMAL)
             .severity(IssueSeverity.MAJOR)
             .issueType(IssueType.WARNING)

@@ -1975,7 +1975,8 @@ public final class ProblemViewHook implements IStartup
             Object field = column.getColumn().getData();
             boolean creationDate = field != null && CreationDateSorting.FIELD_CLASS.equals(field.getClass().getName());
             TypeRenameLabelProvider wrapper = new TypeRenameLabelProvider(lp, loader, viewer, creationDate,
-                field != null && AnchorLocation.FIELD_CLASS.equals(field.getClass().getName()));
+                field != null && AnchorLocation.FIELD_CLASS.equals(field.getClass().getName()),
+                field != null && "com._1c.g5.v8.dt.internal.ui.validation.TitleField".equals(field.getClass().getName())); //$NON-NLS-1$
             if (!Global.invokeVoid(column, "setLabelProvider", wrapper, Boolean.FALSE)) //$NON-NLS-1$
             {
                 Debug.log("installTypeRename: 2-arg setLabelProvider not found"); //$NON-NLS-1$
@@ -2166,14 +2167,18 @@ public final class ProblemViewHook implements IStartup
         /** Колонка «Положение» ({@code LocationField}). */
         private final boolean location;
 
+        /** Колонка «Описание»: переносы допустимы в подсказке, но не в строке дерева. */
+        private final boolean description;
+
         private TypeRenameLabelProvider(CellLabelProvider delegate, ClassLoader loader, TreeViewer viewer,
-            boolean creationDate, boolean location)
+            boolean creationDate, boolean location, boolean description)
         {
             this.delegate = delegate;
             this.loader = loader;
             this.viewer = viewer;
             this.creationDate = creationDate;
             this.location = location;
+            this.description = description;
         }
 
         @Override
@@ -2191,6 +2196,8 @@ public final class ProblemViewHook implements IStartup
             if (location)
                 return;
             String rewritten = rewrite(cell.getElement(), cell.getText());
+            if (description && rewritten != null)
+                rewritten = rewritten.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' '); //$NON-NLS-1$ //$NON-NLS-2$
             if (rewritten != null && !rewritten.equals(cell.getText()))
                 cell.setText(rewritten);
         }

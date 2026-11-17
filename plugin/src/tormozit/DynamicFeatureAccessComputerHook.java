@@ -130,7 +130,7 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         System.getProperties().put("tormozit.platform.contextMethods", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.methods(args[0], args[1]));
         System.getProperties().put("tormozit.platform.environments", //$NON-NLS-1$
-            (Function<Object[], Object>) SystemEnumEnvironments::extend);
+            (Function<Object[], Object>) MemberEnvironments::extend);
         System.getProperties().put("tormozit.dynamicFeatureAccess.allMembers", //$NON-NLS-1$
             (Function<Object[], Object>) args -> AbstractTypeMembers.byOwner(
                 SpecialMemberTemplates.withoutMetadataNameTemplate(
@@ -470,15 +470,27 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             && "String".equals(com._1c.g5.v8.dt.mcore.util.McoreUtil.getTypeName(property.getTypes().get(0))); //$NON-NLS-1$
     }
 
-    /** Окружение значения системного перечисления не уже окружения самого перечисления. */
-    private static final class SystemEnumEnvironments
+    /** Окружения членов перечислений и преобразованных данных формы. */
+    private static final class MemberEnvironments
     {
-        /** {@code {окружение, член}} — окружение члена, штатное или расширенное до окружения перечисления. */
+        /** {@code {окружение, элемент}} — штатное окружение или окружение типа-владельца. */
         static Object extend(Object[] args)
         {
             Object result = args[0];
             try
             {
+                // AbstractUObjectConverterForDynamicTypes.changeEnvironmentsForCreatingType
+                // сбрасывает Property.environments, но сохраняет ContextDef.environments исходного объекта.
+                // Для клона данных формы наследуем окружение преобразованного типа, как задумано конвертером.
+                if (result instanceof Environments environments
+                    && args[1] instanceof com._1c.g5.v8.dt.mcore.ContextDef context
+                    && context.eContainer() instanceof Type owner && owner.getCode() == -1
+                    && owner.getName() != null && owner.getName().startsWith("FormData")) //$NON-NLS-1$
+                {
+                    Environments converted = owner.environments();
+                    if (converted != null && !converted.isEmpty())
+                        return converted;
+                }
                 if (result instanceof Environments environments && args[1] instanceof Property property
                     && property.eContainer() instanceof com._1c.g5.v8.dt.mcore.ContextDef context
                     && context.eContainer() instanceof Type owner && owner.isSysEnum())
@@ -1368,3 +1380,4 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
         mv.visitInsn(Opcodes.AASTORE);
     }
 }
+

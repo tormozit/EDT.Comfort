@@ -3544,7 +3544,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                     ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
                     CheckUid uid = project == null || repository == null || code == null ? null
                         : repository.getUidForShortUid(code, project);
-                    if (new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
+                    if (new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid) //$NON-NLS-1$
+                        || new CheckUid(ComfortCheckIds.BSL_DYNAMIC_PROPERTY, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
                         return 1;
                     if (new CheckUid(ComfortCheckIds.BSL_UNKNOWN_LITERAL, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
                         return 2;

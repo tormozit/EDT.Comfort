@@ -2882,11 +2882,62 @@ public class Activator extends AbstractUIPlugin
                     return thread;
                 }).scheduleWithFixedDelay(DeepCheckTrace::sample, PERIOD_MS, PERIOD_MS,
                     java.util.concurrent.TimeUnit.MILLISECONDS);
+                // Временно отключён лог module-input-wait.
+//                 java.util.concurrent.Executors.newSingleThreadScheduledExecutor(runnable ->
+//                 {
+//                     Thread thread = new Thread(runnable, "Комфорт: временный лог блокировки ввода"); //$NON-NLS-1$
+//                     thread.setDaemon(true);
+//                     return thread;
+//                 }).scheduleWithFixedDelay(DeepCheckTrace::sampleInputWait, 0, 1,
+//                     java.util.concurrent.TimeUnit.SECONDS);
                 Global.tempLog(TOPIC, "start pid=" + PID); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
                 Global.tempLogException(TOPIC, "start", t); //$NON-NLS-1$
+            }
+        }
+
+        /** Каждый опрос записывается, включая свободный UI и отсутствие владельца блокировки. */
+        private static void sampleInputWait()
+        {
+            String topic = "module-input-wait"; //$NON-NLS-1$
+            try
+            {
+                StringBuilder text = new StringBuilder("sample pid=").append(PID); //$NON-NLS-1$
+                Display display = org.eclipse.ui.PlatformUI.isWorkbenchRunning()
+                    ? org.eclipse.ui.PlatformUI.getWorkbench().getDisplay() : null;
+                Thread ui = display == null || display.isDisposed() ? null : display.getThread();
+                if (ui == null)
+                    text.append(" ui=absent"); //$NON-NLS-1$
+                else
+                {
+                    java.lang.management.ThreadMXBean mx = java.lang.management.ManagementFactory.getThreadMXBean();
+                    java.util.Set<Long> visited = new java.util.HashSet<>();
+                    long id = ui.getId();
+                    for (int depth = 0; id > 0 && depth < 8 && visited.add(id); depth++)
+                    {
+                        java.lang.management.ThreadInfo info = mx.getThreadInfo(id, 160);
+                        if (info == null)
+                        {
+                            text.append("\n    missing thread=").append(id); //$NON-NLS-1$
+                            break;
+                        }
+                        text.append("\n    thread=").append(id).append(' ').append(info.getThreadName()) //$NON-NLS-1$
+                            .append(" state=").append(info.getThreadState()) //$NON-NLS-1$
+                            .append(" lock=").append(info.getLockName()) //$NON-NLS-1$
+                            .append(" ownerId=").append(info.getLockOwnerId()) //$NON-NLS-1$
+                            .append(" owner=").append(info.getLockOwnerName()); //$NON-NLS-1$
+                        for (StackTraceElement frame : info.getStackTrace())
+                            text.append("\n        at ").append(frame); //$NON-NLS-1$
+                        id = info.getLockOwnerId();
+                    }
+                }
+                Global.tempLog(topic, text.toString());
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException(topic, "sample", t); //$NON-NLS-1$
             }
         }
 
@@ -3039,3 +3090,4 @@ public class Activator extends AbstractUIPlugin
     }
     // #endregion
 }
+

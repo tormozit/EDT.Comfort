@@ -257,6 +257,8 @@ public final class BslFormDataTypes
     public static Property documentationProperty(Property property, EObject context)
     {
         Property original = PROPERTY_DOCUMENTATION.getOrDefault(property, property);
+        if (original == property && property.getCode() == -1)
+            original = formAttributeDocumentationProperty(property, context);
         Map<String, TypeItem> contents = contentTypes(original, context);
         if (contents.isEmpty())
             return original;
@@ -276,6 +278,76 @@ public final class BslFormDataTypes
         }
         copy.setTypeContainer(container);
         return copy;
+    }
+
+    /** Сохранённый контекст настоящей формы мог быть рассчитан до установки хука конвертера. */
+    private static Property formAttributeDocumentationProperty(Property property, EObject context)
+    {
+        var owner = org.eclipse.xtext.EcoreUtil2.getContainerOfType(property,
+            com._1c.g5.v8.dt.mcore.Type.class);
+        Global.tempLog("member-documentation", "form lookup=" + EcoreUtil.getURI(property) //$NON-NLS-1$ //$NON-NLS-2$
+            + " owner=" + (owner != null ? McoreUtil.getTypeName(owner) : null) //$NON-NLS-1$
+            + " container=" + (owner != null ? owner.eContainer() : null)); //$NON-NLS-1$
+        if (!isFormData(owner))
+            return property;
+        EObject container = owner.eContainer();
+        if (container == null || !(container.eContainer() instanceof DerivedProperty formProperty))
+            return property;
+        EObject source = formProperty.getSource();
+        if (source != null && source.eIsProxy())
+            source = EcoreUtil.resolve(source, formProperty);
+        Global.tempLog("member-documentation", "form property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " source=" + source); //$NON-NLS-1$
+        if (!(source instanceof FormAttribute attribute) || attribute.getValueType() == null)
+            return property;
+        Property original = null;
+        for (TypeItem declared : attribute.getValueType().getTypes())
+        {
+            TypeItem resolved = (TypeItem)EcoreUtil.resolve(declared, attribute);
+            List<? extends TypeItem> types = resolved instanceof com._1c.g5.v8.dt.mcore.TypeSet set
+                ? set.getBaseTypes() : List.of(resolved);
+            for (TypeItem item : types)
+            {
+                TypeItem resolvedType = (TypeItem)EcoreUtil.resolve(item, attribute);
+                // ReportObject.type не содержит кодов документации; они в ReportObjectReportName.type
+                // той же версии платформы (проверено в platform-v8327).
+                if (resolvedType instanceof com._1c.g5.v8.dt.mcore.Type base
+                    && base.getCode() == -1 && "ReportObject".equals(base.getName())) //$NON-NLS-1$
+                {
+                    Object template = Global.invoke(BslSyntaxAssist.documentationProvider(),
+                        "getTypeItemByName", "ReportObjectReportName", //$NON-NLS-1$ //$NON-NLS-2$
+                        context != null && context.eResource() != null ? context.eResource() : attribute.eResource());
+                    if (template instanceof TypeItem templateType)
+                        resolvedType = (TypeItem)EcoreUtil.resolve(templateType, attribute);
+                    Global.tempLog("member-documentation", "report template=" + resolvedType //$NON-NLS-1$ //$NON-NLS-2$
+                        + " proxy=" + resolvedType.eIsProxy()); //$NON-NLS-1$
+                }
+                Global.tempLog("member-documentation", "form declaredType=" + EcoreUtil.getURI(resolvedType)); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!(resolvedType instanceof com._1c.g5.v8.dt.mcore.Type type)
+                    || type.eIsProxy() || type.getContextDef() == null)
+                    continue;
+                for (Property candidate : type.getContextDef().allProperties())
+                {
+                    if (candidate.getCode() == -1 || !java.util.Objects.equals(property.getName(), candidate.getName()))
+                        continue;
+                    Global.tempLog("member-documentation", "form original=" + EcoreUtil.getURI(candidate) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " code=" + candidate.getCode()); //$NON-NLS-1$
+                    if (original != null && original != candidate)
+                    {
+                        Global.tempLog("member-documentation", "form ambiguous originals"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return property;
+                    }
+                    original = candidate;
+                }
+            }
+        }
+        if (original == null)
+        {
+            Global.tempLog("member-documentation", "form original not found"); //$NON-NLS-1$ //$NON-NLS-2$
+            return property;
+        }
+        PROPERTY_DOCUMENTATION.put(property, original);
+        return original;
     }
 
     private static Map<String, String> contentLabels(Property property, EObject context)

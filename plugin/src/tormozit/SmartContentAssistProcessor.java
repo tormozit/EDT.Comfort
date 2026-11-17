@@ -9718,10 +9718,32 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         boolean delegateCompleted = false;
         // Провайдер значений литерала (issue 888) отвечает только внутри этого расчёта.
         BslLiteralValues.beginAssist(Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()));
-        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = onUi ? null
-            : BslStructureInsertCommentTypes.interactiveTypes("completion", DELEGATE_STALE_CHECK.get()))
+        IDocument completionDocument = viewer != null ? viewer.getDocument() : null;
+        // В общем словаре EDT спрашивает типы сотен ещё не выбранных слов.
+        // Уточнение каждого из них обходило тела почти всего модуля (471 метод,
+        // 725–799 мс в логе). Здесь нужен тот же штатный словарь, что в 1.0.9.
+        // Уточняем конкретного получателя после точки и аргумент внутри литерала;
+        // сведения выбранной строки и ожидаемый тип считаются своими фоновыми путями.
+        boolean expressionTypes = !onUi && completionDocument != null
+            && (ReceiverTypeLabel.findMemberAccessDot(completionDocument, off) >= 0
+                || isStringLiteralAssistContext(completionDocument, off));
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = expressionTypes
+            ? BslStructureInsertCommentTypes.interactiveTypes("completion", DELEGATE_STALE_CHECK.get()) : null)
         {
-            raw = dropTemplateTypesInLiteral(viewer, off, delegate.computeCompletionProposals(viewer, off));
+            long nativeStarted = System.nanoTime();
+            try
+            {
+                raw = delegate.computeCompletionProposals(viewer, off);
+            }
+            finally
+            {
+                Global.tempLog("assist-native-phase", "offset=" + off + " expressionTypes=" + expressionTypes
+                    + " elapsedNs=" + (System.nanoTime() - nativeStarted)
+                    + " count=" + (raw == null ? -1 : raw.length)
+                    + " mode=" + delegateAssistMode() + " thread=" + Thread.currentThread().getName());
+            }
+            logWordListComposition("delegate", off, "", raw);
+            raw = dropTemplateTypesInLiteral(viewer, off, raw);
             FunctionReturnTypes.rememberVariableTargets(raw);
             delegateCompleted = true;
         }
@@ -9761,6 +9783,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         DELEGATE_LOCK.unlock();
         IDocument d = viewer != null ? viewer.getDocument() : null;
         long computeMs = (System.nanoTime() - tCompute) / 1_000_000L;
+        logWordListComposition("probe.result mode=" + modeBefore + "/" + delegateAssistMode()
+            + " around=" + uiBlockAround(d, off), off, "", raw);
         // #region agent log
         uiBlockLog("probeDelegateOnce", "off=" + off //$NON-NLS-1$ //$NON-NLS-2$
             + " waitMs=" + waitMs //$NON-NLS-1$
@@ -10350,6 +10374,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 try
                 {
                     uiBlockLog("memberStock.bg.run", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.tempLog("member-stock-empty", "begin dot=" + dotContextKey
+                        + " receiver=" + contextReceiver + " gen=" + contextGen);
                     ICompletionProposal[] raw = EMPTY;
                     java.util.Map<Object, Object> dataEvents = java.util.Collections.emptyMap();
                     // «База_.» — группа общих модулей (issue 891): у EDT такого имени нет, члены — свои
@@ -10386,6 +10412,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                     linkModuleIfNeeded(viewer, doc, stale);
                                     ICompletionProposal[] list = BslDataEventGuard.runIsolated(
                                         () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
+                                    Global.tempLog("member-stock-empty", "delegate dot=" + dotContextKey
+                                        + " receiver=" + contextReceiver + " count=" + (list == null ? -1 : list.length)
+                                        + " templatesOnly=" + containsOnlyTemplateProposals(list)
+                                        + " mode=" + delegateAssistMode() + " stale=" + stale.getAsBoolean());
                                     if (list != null && list.length > 0 && !containsOnlyTemplateProposals(list)
                                         && !stale.getAsBoolean()
                                         && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
@@ -10402,10 +10432,13 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                             // это не «пусто», повторять нечего: расчёт уже не нужен.
                             if (isCanceledByNewerRequest(e))
                             {
+                                Global.tempLog("member-stock-empty", "canceled dot=" + dotContextKey + " error=" + e);
                                 uiBlockLog("memberStock.bg.canceled", "dot=" + dotContextKey //$NON-NLS-1$ //$NON-NLS-2$
                                     + " attempt=" + attempts); //$NON-NLS-1$
                                 return Status.CANCEL_STATUS;
                             }
+                            Global.tempLog("member-stock-empty", "failure dot=" + dotContextKey + " error=" + e
+                                + " stack=" + java.util.Arrays.toString(e.getStackTrace()));
                             raw = EMPTY;
                         }
                         finally
@@ -10454,6 +10487,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         uiBlockLog("memberStock.bg.lockBusyGiveUp", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
                         return Status.CANCEL_STATUS;
                     }
+                    Global.tempLog("member-stock-empty", "result dot=" + dotContextKey
+                        + " receiver=" + contextReceiver + " attempts=" + attempts + " count=" + raw.length);
                     if (raw.length == 0)
                     {
                         runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
@@ -11257,6 +11292,43 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         return false;
     }
 
+    /** Временная диагностика потери глобального свойства на границах расчёта и фильтрации. */
+    private static void logWordListComposition(String stage, int offset, String filter,
+        ICompletionProposal[] proposals)
+    {
+        try
+        {
+            Map<String, Integer> classes = new LinkedHashMap<>();
+            List<String> related = new ArrayList<>();
+            int metadata = 0;
+            if (proposals != null)
+                for (ICompletionProposal proposal : proposals)
+                {
+                    ICompletionProposal plain = unwrapProposal(proposal);
+                    if (plain == null)
+                        continue;
+                    classes.merge(plain.getClass().getSimpleName(), 1, Integer::sum);
+                    String name = plain instanceof ConfigurableCompletionProposal configurable
+                        ? configurable.getReplacementString() : displayString(plain);
+                    if (name == null)
+                        continue;
+                    if ("Метаданные".equalsIgnoreCase(name.trim()) || "Metadata".equalsIgnoreCase(name.trim()))
+                        metadata++;
+                    if (name.toLowerCase(java.util.Locale.ROOT).contains("мета")
+                        || name.toLowerCase(java.util.Locale.ROOT).contains("metadata"))
+                        related.add(name.replace('\r', ' ').replace('\n', ' '));
+                }
+            Global.tempLog("assist-word-loss", "stage=" + stage + " offset=" + offset + " filter=" + filter
+                + " count=" + (proposals == null ? -1 : proposals.length) + " metadata=" + metadata
+                + " classes=" + classes + " related=" + related
+                + " thread=" + Thread.currentThread().getName());
+        }
+        catch (RuntimeException failure)
+        {
+            Global.tempLog("assist-word-loss", "stage=" + stage + " diagnosticFailure=" + failure);
+        }
+    }
+
     private ICompletionProposal[] computeMemberStockViaSelectionProxy(ITextViewer real,
                                                                       int probeOffset)
     {
@@ -11810,6 +11882,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        logWordListComposition("filter.input", -1, filter, raw);
         if (isSortDirectionList(raw))
             return filterSortDirections(raw, filter);
         if (raw == null || raw.length == 0)
@@ -11990,6 +12063,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         finally
         {
         long cpu1 = mx.isThreadCpuTimeEnabled() ? mx.getCurrentThreadCpuTime() : -1L;
+        logWordListComposition("filter.output", -1, filter, result);
         java.lang.management.ThreadInfo ti1 = mx.getThreadInfo(tid);
         long blk1 = ti1 != null ? ti1.getBlockedTime() : -1L;
         long wait1 = ti1 != null ? ti1.getWaitedTime() : -1L;

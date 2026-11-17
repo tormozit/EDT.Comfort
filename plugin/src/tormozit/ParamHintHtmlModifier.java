@@ -1405,6 +1405,8 @@ public final class ParamHintHtmlModifier
     /** Один запасной источник страниц для боковой подсказки и подсказки при наведении. */
     static Object recoverMemberDocumentation(Object input, EObject source, Resource contextResource)
     {
+        Global.tempLog("member-documentation", "recovery source=" + source //$NON-NLS-1$ //$NON-NLS-2$
+            + " resource=" + (contextResource != null ? contextResource.getURI() : null)); //$NON-NLS-1$
         if (source == null || !needsMemberDocumentationRecovery(input))
             return input;
         Object group = Global.getField(input, "pageGroup"); //$NON-NLS-1$
@@ -1412,6 +1414,7 @@ public final class ParamHintHtmlModifier
         {
             List<EObject> members = new ArrayList<>();
             collectDocumentationMembers(source, members);
+            Global.tempLog("member-documentation", "members=" + members); //$NON-NLS-1$ //$NON-NLS-2$
             Object provider = BslSyntaxAssist.documentationProvider();
             String language = BslSyntaxAssist.language();
             List<Object> recovered = new ArrayList<>();
@@ -1433,6 +1436,8 @@ public final class ParamHintHtmlModifier
                 }
                 else if (member instanceof com._1c.g5.v8.dt.mcore.Property property)
                     memberPages.addAll(recoverPropertyDocumentation(provider, property, contextResource, language));
+                Global.tempLog("member-documentation", "member=" + member //$NON-NLS-1$ //$NON-NLS-2$
+                    + " recoveredPages=" + memberPages.size()); //$NON-NLS-1$
                 if (memberPages.isEmpty())
                     return input;
                 recovered.addAll(memberPages);
@@ -1446,9 +1451,11 @@ public final class ParamHintHtmlModifier
                 .newInstance(recovered, BslSyntaxAssist.searchQueryOf(group));
             Global.setFieldForce(input, "pageGroup", replacement); //$NON-NLS-1$
             Global.invoke(input, "setIndex", Integer.valueOf(0)); //$NON-NLS-1$
+            Global.tempLog("member-documentation", "replaced pages=" + recovered.size()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError ex)
         {
+            Global.tempLogException("member-documentation", "recovery", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return input;
     }
@@ -1458,6 +1465,11 @@ public final class ParamHintHtmlModifier
         com._1c.g5.v8.dt.mcore.Property property, Resource contextResource, String language)
     {
         Type owner = EcoreUtil2.getContainerOfType(property, Type.class);
+        Global.tempLog("member-documentation", "property=" + property.getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " class=" + property.getClass().getName() + " code=" + property.getCode() //$NON-NLS-1$ //$NON-NLS-2$
+            + " uri=" + EcoreUtil.getURI(property) + " owner=" + owner //$NON-NLS-1$ //$NON-NLS-2$
+            + " ownerCode=" + (owner != null ? owner.getCode() : null) //$NON-NLS-1$
+            + " context=" + (contextResource != null ? contextResource.getURI() : null)); //$NON-NLS-1$
         ProposalElement column = documentationColumn(property, contextResource);
         if (column != null)
         {
@@ -1483,6 +1495,7 @@ public final class ParamHintHtmlModifier
             Object item = Global.invoke(provider, "getTypeItemByName", owner.getName(), contextResource); //$NON-NLS-1$
             if (item instanceof EObject object && object.eIsProxy())
                 item = org.eclipse.emf.ecore.util.EcoreUtil.resolve(object, contextResource);
+            Global.tempLog("member-documentation", "platformType=" + item); //$NON-NLS-1$ //$NON-NLS-2$
             if (!(item instanceof Type platformType) || platformType.getCode() <= 0
                 || platformType.getContextDef() == null)
             {
@@ -1493,6 +1506,8 @@ public final class ParamHintHtmlModifier
                 if (property.getName() == null || candidate.getName() == null
                     || !property.getName().equalsIgnoreCase(candidate.getName()))
                     continue;
+                Global.tempLog("member-documentation", "candidate=" + candidate //$NON-NLS-1$ //$NON-NLS-2$
+                    + " code=" + candidate.getCode()); //$NON-NLS-1$
                 Object group = Global.invoke(provider, "getHoverDocumentationPages", candidate, language); //$NON-NLS-1$
                 List<Object> pages = new ArrayList<>();
                 for (Object page : BslSyntaxAssist.pagesOf(group))
@@ -1510,6 +1525,7 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception | LinkageError ex)
         {
+            Global.tempLogException("member-documentation", "property recovery", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return List.of();
     }
@@ -9057,6 +9073,17 @@ public final class ParamHintHtmlModifier
                 Type ownerType = ownerTypeOf(method);
                 if (ownerType == null)
                 {
+                    // Глобальные методы лежат непосредственно в GeneralContextDef, не в Type.
+                    // У части методов GlobalContext.type код -1: используем запись дерева документации.
+                    if (method.eContainer() instanceof com._1c.g5.v8.dt.mcore.GeneralContextDef
+                        && method.eResource() != null && method.eResource().getURI() != null
+                        && method.eResource().getURI().isPlatformPlugin()
+                        && "GlobalContext.type".equals(method.eResource().getURI().lastSegment()))
+                    {
+                        Object version = Global.invoke(provider, "getVersion", method); //$NON-NLS-1$
+                        collectCaPagesFromDocTreeByName(provider, version, null,
+                            method, lang, out);
+                    }
                     return;
                 }
                 ClassLoader cl = provider.getClass().getClassLoader();
@@ -9246,7 +9273,10 @@ public final class ParamHintHtmlModifier
                 Object root = Global.invoke(tree, "getRootNode"); //$NON-NLS-1$
                 if (root == null)
                     return false;
-                String[] typeNames = { ownerType.getNameRu(), ownerType.getName() };
+                // Названия раздела подтверждены в platform-doc/satree.xml.
+                String[] typeNames = ownerType != null
+                    ? new String[] { ownerType.getNameRu(), ownerType.getName() }
+                    : new String[] { "Глобальный контекст", "Global context" };
                 String[] methodNames = { method.getNameRu(), method.getName() };
                 Object typeNode = findDocTreeNodeByNames(root, typeNames, 0, 12);
                 if (typeNode == null)

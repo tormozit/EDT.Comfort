@@ -77,7 +77,7 @@ public final class Activator
         DebugValueEditorDialogWeaving.install(context);
         FullRebuildContainmentChecksWeaving.install(context);
         MarkerCreationDateWeaving.install(context);
-        // CommonAttributeLossDiagnostics.install(context);
+        CommonAttributeLossDiagnostics.install(context);
         DebugBreakpointsWeaving.install(context);
     }
 

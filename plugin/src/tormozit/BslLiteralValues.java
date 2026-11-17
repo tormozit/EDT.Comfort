@@ -13,14 +13,17 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.common.notify.impl.AdapterImpl;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
@@ -41,6 +44,16 @@ import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.Triple;
 import org.eclipse.xtext.util.Tuples;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.IResourceDelta;
+import org.eclipse.core.resources.ResourcesPlugin;
+
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.core.event.BmEvent;
+import com._1c.g5.v8.bm.integration.event.IBmSyncEventListener;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
@@ -161,6 +174,286 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
     private static final ThreadLocal<Request> REQUEST = new ThreadLocal<>();
 
+    /**
+     * Один проход передаётся следующей из двух проверок той же модели. Повтор той же проверки начинает
+     * новый проход; завершившийся второй потребитель освобождает кэш. Разные экземпляры AST не смешиваются.
+     */
+    public static ValidationPass validationPass(Module module, BooleanSupplier canceled, String checkId)
+    {
+        boolean retain = ValidationCache.otherCheckEnabled(module, checkId);
+        if (retain)
+            ValidationCache.watch(module);
+        Resource resource = module.eResource();
+        ValidationCache cache;
+        if (resource == null)
+            cache = new ValidationCache();
+        else
+        {
+            synchronized (resource)
+            {
+                cache = (ValidationCache)EcoreUtil.getAdapter(resource.eAdapters(), ValidationCache.class);
+                if (cache == null)
+                {
+                    cache = new ValidationCache();
+                    resource.eAdapters().add(cache);
+                }
+            }
+        }
+        SharedValidation shared;
+        String reason;
+        synchronized (cache)
+        {
+            shared = cache.pending;
+            cache.pending = null;
+            reason = shared == null ? "empty" : shared.module != module ? "different-ast"
+                : shared.used.contains(checkId) ? "same-check" : shared.staleReason();
+            if (reason != null)
+                shared = new SharedValidation(module, retain);
+        }
+        shared.used.add(checkId);
+        shared.canceled = canceled;
+        shared.retain = retain;
+        return new ValidationPass(cache, shared, checkId);
+    }
+
+    /** Общая область анализа только для фоновых проверок; complete вызывается после полного прохода. */
+    public static final class ValidationPass implements AutoCloseable
+    {
+        private final ValidationCache cache;
+        private final SharedValidation shared;
+        private final BslStructureInsertCommentTypes.InteractiveTypesScope types;
+        private final boolean queryScopeOwner;
+        private boolean complete;
+
+        private ValidationPass(ValidationCache cache, SharedValidation shared, String checkId)
+        {
+            this.cache = cache;
+            this.shared = shared;
+            queryScopeOwner = BslQueryResultTypes.beginOpenModuleCalculation(shared.module);
+            types = shared.types.open("column-check:" + checkId);
+        }
+
+        public Pass pass()
+        {
+            return shared.pass;
+        }
+
+        public void complete()
+        {
+            complete = true;
+        }
+
+        @Override
+        public void close()
+        {
+            try
+            {
+                types.close();
+            }
+            finally
+            {
+                BslQueryResultTypes.endOpenModuleCalculation(queryScopeOwner);
+                boolean canceled = Thread.currentThread().isInterrupted() || shared.canceled.getAsBoolean();
+                shared.canceled = () -> false;
+                String stale = shared.staleReason();
+                boolean retain = shared.retain && complete && !canceled && stale == null && shared.used.size() == 1;
+                synchronized (cache)
+                {
+                    if (retain)
+                        cache.pending = shared;
+                }
+            }
+        }
+    }
+
+    private static final class SharedValidation
+    {
+        final Module module;
+        final long generation = ValidationCache.GENERATION.get();
+        final boolean extendedTypes;
+        final Pass pass = new Pass();
+        final Set<String> used = new HashSet<>();
+        final Map<Resource, Object> dependencies = new IdentityHashMap<>();
+        BooleanSupplier canceled = () -> false;
+        boolean retain;
+        final BslStructureInsertCommentTypes.InteractiveTypesSession types =
+            new BslStructureInsertCommentTypes.InteractiveTypesSession(() -> canceled.getAsBoolean(), this::observe);
+
+        SharedValidation(Module module, boolean retain)
+        {
+            this.module = module;
+            this.retain = retain;
+            extendedTypes = BslDocCommentComputedTypes.isExtendedTypesEnabled(module);
+            pass.observe = this::observe;
+            observe(module);
+        }
+
+        void observe(EObject object)
+        {
+            if (retain && object != null && object.eResource() instanceof XtextResource resource)
+                dependencies.computeIfAbsent(resource, key -> {
+                    if (BslNodeLookup.rootAst(resource) instanceof Module dependency)
+                        ValidationCache.watch(dependency);
+                    return ValidationCache.stamp(resource);
+                });
+        }
+
+        String staleReason()
+        {
+            if (generation != ValidationCache.GENERATION.get())
+                return "model-or-workspace-change";
+            if (module.eResource() == null || extendedTypes != BslDocCommentComputedTypes.isExtendedTypesEnabled(module))
+                return "module-or-settings-change";
+            for (var dependency : dependencies.entrySet())
+                if (dependency.getValue() != ValidationCache.stamp(dependency.getKey()))
+                    return "resource-change:" + dependency.getKey().getURI();
+            return null;
+        }
+    }
+
+    /** Состояние принадлежит ресурсу; глобально хранятся только счётчик изменений и слабые ссылки на BM. */
+    private static final class ValidationCache extends AdapterImpl
+    {
+        private static final AtomicLong GENERATION = new AtomicLong();
+        private static final Map<IBmModel, Boolean> MODELS = new WeakHashMap<>();
+        private static final IBmSyncEventListener MODEL_LISTENER = ValidationCache::modelChanged;
+        private static final IResourceChangeListener WORKSPACE_LISTENER = ValidationCache::workspaceChanged;
+        private static boolean installed;
+        SharedValidation pending;
+
+        @Override
+        public boolean isAdapterForType(Object type)
+        {
+            return type == ValidationCache.class;
+        }
+
+        static Object stamp(Resource resource)
+        {
+            return BslSourceModelCache.stamp(resource);
+        }
+
+        private static boolean metadata(Object object)
+        {
+            if (!(object instanceof EObject node))
+                return false;
+            var model = node.eClass().getEPackage();
+            return model == com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage.eINSTANCE
+                || model == com._1c.g5.v8.dt.metadata.dbview.DbViewPackage.eINSTANCE
+                || model == com._1c.g5.v8.dt.form.model.FormPackage.eINSTANCE;
+        }
+
+        /** BM сообщает и о результатах анализа BSL. Они не меняют исходные данные состава колонок. */
+        private static void modelChanged(BmEvent event)
+        {
+            boolean relevant = false;
+            if (event.getChangeEvents() != null)
+                for (var change : event.getChangeEvents().values())
+                {
+                    EObject object = change.getObject();
+                    relevant |= metadata(object);
+                }
+            var association = event.getAssociationEvent();
+            boolean unknownRemoval = false;
+            if (association != null)
+            {
+                if (association.getAssociated() != null)
+                    for (Object object : association.getAssociated())
+                    {
+                        relevant |= metadata(object);
+                    }
+                if (association.getDeassociated() != null)
+                    for (Object object : association.getDeassociated())
+                    {
+                        relevant |= metadata(object);
+                    }
+                // Удаление без объектов нельзя объявлять служебным: типы удалённых объектов неизвестны.
+                unknownRemoval = (association.getDeassociated() == null || association.getDeassociated().isEmpty())
+                    && (association.getDeassociatedIds() != null && !association.getDeassociatedIds().isEmpty()
+                        || association.getDeassociatedUris() != null && !association.getDeassociatedUris().isEmpty());
+            }
+            if (relevant || unknownRemoval)
+                invalidate();
+        }
+
+        static boolean otherCheckEnabled(Module module, String checkId)
+        {
+            ICheckRepository repository = Global.getOsgiService(ICheckRepository.class);
+            var project = BslStructureInsertCommentTypes.projectOf(module);
+            if (repository == null || project == null)
+                return false;
+            String other = ComfortCheckIds.BSL_DYNAMIC_PROPERTY.equals(checkId)
+                ? ComfortCheckIds.BSL_UNKNOWN_LITERAL : ComfortCheckIds.BSL_DYNAMIC_PROPERTY;
+            if (ComfortCheckIds.BSL_UNKNOWN_LITERAL.equals(other) && !TypeUtil.isStringLiteralContentTypesEnabled())
+                return false;
+            for (var uid : repository.getCheckUidForCheckId(other, project))
+            {
+                var settings = repository.getSettings(uid, project);
+                if (settings != null && settings.isEnabled())
+                    return true;
+            }
+            return false;
+        }
+
+        static synchronized void watch(Module module)
+        {
+            if (!installed)
+            {
+                ResourcesPlugin.getWorkspace().addResourceChangeListener(WORKSPACE_LISTENER,
+                    IResourceChangeEvent.POST_CHANGE | IResourceChangeEvent.PRE_CLOSE | IResourceChangeEvent.PRE_DELETE);
+                installed = true;
+            }
+            IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
+            var project = BslStructureInsertCommentTypes.projectOf(module);
+            IBmModel model = manager == null || project == null ? null : manager.getModel(project);
+            if (model != null && MODELS.putIfAbsent(model, Boolean.TRUE) == null)
+                model.addSyncEventListener(MODEL_LISTENER);
+        }
+
+        static synchronized void stop()
+        {
+            if (installed)
+                ResourcesPlugin.getWorkspace().removeResourceChangeListener(WORKSPACE_LISTENER);
+            installed = false;
+            for (IBmModel model : MODELS.keySet())
+                if (!model.isDisposed())
+                    model.removeSyncEventListener(MODEL_LISTENER);
+            MODELS.clear();
+            invalidate();
+        }
+
+        private static void invalidate()
+        {
+            GENERATION.incrementAndGet();
+        }
+
+        private static void workspaceChanged(IResourceChangeEvent event)
+        {
+            if (event.getType() != IResourceChangeEvent.POST_CHANGE)
+            {
+                invalidate();
+                return;
+            }
+            if (event.getDelta() == null)
+                return;
+            try
+            {
+                boolean[] changed = {false};
+                event.getDelta().accept(delta -> {
+                    changed[0] |= delta.getKind() != IResourceDelta.CHANGED
+                        || (delta.getFlags() & (IResourceDelta.CONTENT | IResourceDelta.ENCODING
+                            | IResourceDelta.OPEN | IResourceDelta.DESCRIPTION)) != 0;
+                    return !changed[0];
+                });
+                if (changed[0])
+                    invalidate();
+            }
+            catch (org.eclipse.core.runtime.CoreException failure)
+            {
+                invalidate();
+            }
+        }
+    }
+
     /** Общий поиск формы для строковых подсказок и штатного вычислителя типов EDT. */
     static BasicForm basicFormByName(String fullName, XtextResource resource)
     {
@@ -191,6 +484,105 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     public static List<String> unknownLiteralValues(StringLiteral literal, BooleanSupplier canceled, Pass pass)
     {
         return unknownLiteralValues(literal, canceled, pass, null);
+    }
+
+    /** Члены строк проверяются по тем же рассчитанным типам, что и имена колонок в литералах. */
+    public static List<DynamicFeatureAccess> unknownRowMembers(Module module, BooleanSupplier canceled)
+    {
+        return unknownRowMembers(module, canceled, new Pass());
+    }
+
+    /** Состав колонок и вычислитель типов общие с проверкой строковых литералов. */
+    public static List<DynamicFeatureAccess> unknownRowMembers(Module module, BooleanSupplier canceled, Pass pass)
+    {
+        try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored =
+            BslStructureInsertCommentTypes.interactiveTypes("row-field-check", canceled)) //$NON-NLS-1$
+        {
+            return unknownRowMembersWithComputedTypes(module, canceled, pass);
+        }
+    }
+
+    private static List<DynamicFeatureAccess> unknownRowMembersWithComputedTypes(Module module,
+        BooleanSupplier canceled, Pass pass)
+    {
+        if (!(module.eResource() instanceof XtextResource resource))
+            return List.of();
+        List<DynamicFeatureAccess> problems = new ArrayList<>();
+        for (DynamicFeatureAccess access : EcoreUtil2.getAllContentsOfType(module, DynamicFeatureAccess.class))
+        {
+            if (canceled.getAsBoolean())
+                break;
+            if (access.getName() == null || access.eContainer() instanceof Invocation invocation
+                && invocation.getMethodAccess() == access)
+                continue;
+            Analysis analysis = new Analysis(resource, false, false, "", offsetOf(access), pass);
+            analysis.canceled = canceled;
+            List<TypeItem> types = analysis.typesOf(access.getSource());
+            // Неопределено допустимо для результата Найти; остальные альтернативы могут иметь свои члены.
+            boolean row = false;
+            boolean full = true;
+            for (TypeItem item : types)
+            {
+                Type type = analysis.resolve(item);
+                String name = type == null ? "" : type.getName();
+                if ("ValueTableRow".equals(name))
+                    row = true;
+                else if (!"Undefined".equals(name))
+                    full = false;
+            }
+            if (!row)
+                continue;
+            ColumnComposition columns = analysis.columnComposition(types, access.getSource());
+            full &= !columns.names().isEmpty();
+            boolean incompleteSource = !columns.complete();
+//             Global.tempLog("row-return-columns", "source=" + text(access.getSource())
+//                 + " member=" + access.getName() + " offset=" + offsetOf(access)
+//                 + " incomplete=" + incompleteSource);
+            full &= !incompleteSource;
+            Method method = analysis.methodOf(access);
+            // Любое добавление с неизвестным именем в этом методе делает проверку консервативной.
+            if (method != null)
+                for (EObject object : analysis.contents(method, DynamicFeatureAccess.class))
+                    if (object instanceof DynamicFeatureAccess member && in(member.getName(), "Колонки", "Columns"))
+                        full &= !analysis.hasUnknownMemberAdd(method, text(member.getSource()), true, 0, 0);
+            // Проверяем таблицы из результата функции: локального обращения к .Колонки может не быть.
+            if (method != null)
+                for (EObject object : analysis.contents(method, SimpleStatement.class))
+                    if (object instanceof SimpleStatement statement && isSimpleName(statement.getLeft())
+                        && statement.getRight() instanceof Invocation)
+                    {
+                        String variable = text(statement.getLeft());
+                        boolean unknown = analysis.hasUnknownMemberAdd(method, variable, true, 0, 0);
+//                         Global.tempLog("row-return-columns", "member=" + access.getName()
+//                             + " offset=" + offsetOf(access) + " variable=" + variable
+//                             + " source=" + text(statement.getRight()) + " incomplete=" + unknown);
+                        full &= !unknown;
+                    }
+            // Для параметров поднимаемся к аргументам вызовов, включая результаты функций у вызывающего.
+            if (method != null)
+                for (var parameter : method.getFormalParams())
+                {
+                    String variable = nullToEmpty(parameter.getName());
+                    boolean unknown = analysis.hasUnknownMemberAdd(method, variable, true, 0, 0);
+//                     Global.tempLog("row-return-columns", "method=" + method.getName()
+//                         + " member=" + access.getName() + " offset=" + offsetOf(access)
+//                         + " parameter=" + variable + " incomplete=" + unknown);
+                    full &= !unknown;
+                }
+            boolean found = false;
+            for (TypeItem item : types)
+            {
+                Type type = analysis.resolve(item);
+                if (type != null && type.getContextDef() != null)
+                    for (Property property : type.getContextDef().allProperties())
+                        if (!property.isDependsOnMetadata() && (access.getName().equalsIgnoreCase(property.getName())
+                            || access.getName().equalsIgnoreCase(property.getNameRu())))
+                            found = true;
+            }
+            if (full && !found)
+                problems.add(access);
+        }
+        return problems;
     }
 
     /**
@@ -341,7 +733,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     /**
      * Общий проход анализа литералов: узлы области и их подмножества по видам в порядке {@code eAllContents},
      * исходные методы экспортных методов, язык и конфигурация проекта. Только для неизменной модели — на одну
-     * проверку модуля или один расчёт; глобально не хранить. Текст узлов не запоминается: строки всех выражений модуля, удержанные до
+     * проверку модуля, пару проверок колонок одной модели или один расчёт; глобально не хранить. Текст узлов не запоминается: строки всех выражений модуля, удержанные до
      * конца его проверки в параллельных потоках, заметно поднимали расход памяти и нагрузку на GC.
      */
     public static final class Pass
@@ -369,6 +761,10 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private final Set<String> missingCommonModules = new HashSet<>();
         /** Готовые имена штатных типов; только на проход, отдельно для каждого фактического scope. */
         private final Map<XtextResource, StockServices> stockServices = new IdentityHashMap<>();
+        private Consumer<EObject> observe = object -> {};
+        /** Готовые свойства колонок; язык и оформление применяет конкретный Analysis. */
+        private final Map<Type, List<Property>> columnProperties = new IdentityHashMap<>();
+        private final Map<EObject, Map<String, Boolean>> unknownMemberAdds = new IdentityHashMap<>();
 
         /** Один набор сервисов строковых провайдеров на ресурс и проход проверки. */
         StockServices stockServices(XtextResource resource)
@@ -411,6 +807,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Узлы области в порядке {@code eAllContents}; индекс запоминается только построенным целиком. */
         List<EObject> contents(EObject scope, Runnable checkCanceled)
         {
+            observe.accept(scope);
             List<EObject> result = contents.get(scope);
             if (result != null)
                 return result;
@@ -1197,8 +1594,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
     static void stopTypeNameCache()
     {
+        ValidationCache.stop();
         BslTypeCatalog.stop();
     }
+
+    /** Полнота означает отсутствие источников неизвестных имён; пустой состав сам по себе не проверяется. */
+    private record ColumnComposition(List<String> names, boolean complete) {}
 
     private static final CallTarget NO_CALL_TARGET = new CallTarget(null, null, List.of(), null);
 
@@ -1238,6 +1639,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         private boolean dynamicFormAttributes;
         /** Элементы и команды могут добавляться при выполнении; даже непустой список не полный. */
         private boolean dynamicFormCollection;
+        /** Колонки добавляются с неизвестным именем: полноту нельзя восстановить следующей веткой. */
+        private boolean incompleteColumns;
         /** Ограничивать полноту по веткам только при поиске роли в вызываемом методе. */
         ParameterSearch parameterSearch;
         boolean sortDirection;
@@ -1451,7 +1854,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (validation && values.isEmpty() && stockContext != null && !dynamicFormCollection)
                 addStockValues();
-            if (dynamicFormAttributes || dynamicFormCollection)
+            if (dynamicFormAttributes || dynamicFormCollection || incompleteColumns)
                 full = false;
             // Единственный шаблонный член не задаёт полный список допустимых имён.
             if (values.size() == 1)
@@ -1648,6 +2051,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 EObject feature = entry != null ? entry.getFeature() : null;
                 if (feature != null && feature.eIsProxy())
                     feature = EcoreUtil.resolve(feature, resource);
+                pass.observe.accept(feature);
                 if (REQUEST.get() != null)
                     Global.tempLog("literal-auto-open", "method.feature name=" + access.getName()
                         + " feature=" + (feature != null ? feature.eClass().getName() : "null")
@@ -1706,6 +2110,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             EObject proxy = org.eclipse.emf.ecore.EcoreFactory.eINSTANCE.createEObject();
             ((org.eclipse.emf.ecore.InternalEObject)proxy).eSetProxyURI(exported.getSourceUri());
             EObject sourceMethod = EcoreUtil.resolve(proxy, context);
+            pass.observe.accept(sourceMethod);
             if (known != null)
                 known.put(sourceUri, sourceMethod);
             return sourceMethod;
@@ -1730,6 +2135,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (common == null)
                 pass.missingCommonModules.add(lower(name));
             Module model = common != null ? cachedModule(common) : null;
+            pass.observe.accept(model);
             if (model == null || model.eIsProxy())
                 return null;
             return pass.moduleMethods.computeIfAbsent(model, module ->
@@ -1797,15 +2203,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             if (scope == null || variable.isEmpty() || depth > MAX_UNKNOWN_ADD_DEPTH)
                 return false;
-            String key = (columns ? "c:" : "s:") + procedureDepth + ":" + lower(variable); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            Map<String, Boolean> known = UNKNOWN_MEMBER_ADDS.computeIfAbsent(scope, k -> new ConcurrentHashMap<>());
+            String key = (columns ? "c:" : "s:") + procedureDepth + ":" + depth + ":" + lower(variable); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            pass.observe.accept(scope);
+            Map<String, Boolean> known = pass.unknownMemberAdds.computeIfAbsent(scope, k -> new HashMap<>());
             Boolean cached = known.get(key);
             if (cached != null)
+            {
                 return cached;
+            }
             if (!visitingMemberAdds.computeIfAbsent(scope, k -> new HashSet<>()).add(key))
                 return false;
             boolean result = false;
-            for (EObject object : contents(scope, Invocation.class, SimpleStatement.class))
+            for (EObject object : contents(scope, Invocation.class, SimpleStatement.class, ForEachStatement.class))
             {
                 if (object instanceof Invocation invocation)
                 {
@@ -1820,9 +2229,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         break;
                     }
                 }
+                else if (object instanceof ForEachStatement loop && columns
+                    && matches(loop.getVariableAccess(), variable))
+                {
+                    boolean unknown = expressionHasUnknownMembers(loop.getCollection(), true, procedureDepth, depth);
+//                     Global.tempLog("row-return-columns", "flow=foreach variable=" + variable
+//                         + " collection=" + text(loop.getCollection()) + " depth=" + depth
+//                         + " incomplete=" + unknown);
+                    if (unknown)
+                    {
+                        result = true;
+                        break;
+                    }
+                }
                 else if (object instanceof SimpleStatement statement && matches(statement.getLeft(), variable)
-                    && statement.getRight() instanceof Invocation source
-                    && returnsUnknownAdd(source, columns, procedureDepth, depth))
+                    && expressionHasUnknownMembers(statement.getRight(), columns, procedureDepth, depth))
                 {
                     result = true;
                     break;
@@ -1852,26 +2273,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             for (EObject object : contents(module, Invocation.class))
                 if (object instanceof Invocation invocation && invocation.getMethodAccess() != null
                     && method.getName().equalsIgnoreCase(invocation.getMethodAccess().getName())
-                    && index < invocation.getParams().size() && isSimpleName(invocation.getParams().get(index))
+                    && index < invocation.getParams().size()
                     && calleeOf(invocation) == method)
                 {
                     Method caller = methodOf(invocation);
-                    if (hasUnknownMemberAdd(caller != null ? caller : module, text(invocation.getParams().get(index)),
-                        columns, 2, depth + 1))
+                    boolean unknown = expressionHasUnknownMembers(invocation.getParams().get(index), columns, 2, depth + 1);
+//                     Global.tempLog("row-return-columns", "flow=argument method=" + method.getName()
+//                         + " parameter=" + variable + " caller=" + (caller != null ? caller.getName() : "")
+//                         + " argument=" + text(invocation.getParams().get(index)) + " depth=" + depth
+//                         + " incomplete=" + unknown);
+                    if (unknown)
                         return true;
                 }
             return false;
         }
 
         private static final int MAX_UNKNOWN_ADD_DEPTH = 6;
-
-        /**
-         * {@link #hasUnknownMemberAdd}: область и ключ «вид:глубина:переменная» → результат. Общий для всех проходов:
-         * метод общего модуля иначе разбирался бы заново из каждого вызывающего модуля. Ключ слабый — после
-         * перепарсинга метод становится другим объектом и запись пропадает вместе со старым.
-         */
-        private static final Map<EObject, Map<String, Boolean>> UNKNOWN_MEMBER_ADDS =
-            Collections.synchronizedMap(new WeakHashMap<>());
 
         /** Область и ключ, разбираемые сейчас этим анализом: защита от циклических вызовов. */
         private final Map<EObject, Set<String>> visitingMemberAdds = new IdentityHashMap<>();
@@ -1909,6 +2326,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Метод модуля, вернувший значение вызова, возвращает переменную с неизвестным именем члена. */
         private boolean returnsUnknownAdd(Invocation source, boolean columns, int procedureDepth, int depth)
         {
+            if (depth > MAX_UNKNOWN_ADD_DEPTH)
+                return false;
             Method callee = calleeOf(source);
             if (callee == null)
                 return false;
@@ -1917,11 +2336,48 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     && methodOf(statement) == callee)
                 {
                     Expression value = statement.getExpression();
-                    if (value instanceof Invocation next ? returnsUnknownAdd(next, columns, procedureDepth, depth + 1)
-                        : isSimpleName(value)
-                            && hasUnknownMemberAdd(callee, text(value), columns, procedureDepth, depth + 1))
+                    if (expressionHasUnknownMembers(value, columns, procedureDepth, depth + 1))
                         return true;
                 }
+            return false;
+        }
+
+        /** Происхождение таблицы или её строки: имя, результат функции, получение строки и индекс. */
+        private boolean expressionHasUnknownMembers(Expression expression, boolean columns, int procedureDepth, int depth)
+        {
+            if (expression == null || depth > MAX_UNKNOWN_ADD_DEPTH)
+                return false;
+            if (isSimpleName(expression))
+                return hasUnknownMemberAdd(scopeOf(expression), text(expression), columns, procedureDepth, depth);
+            if (expression instanceof Invocation invocation)
+            {
+                if (returnsUnknownAdd(invocation, columns, procedureDepth, depth))
+                    return true;
+                // Неполнота сохраняется и у одиночной строки, и у массива строк (НайтиСтроки).
+                if (columns && invocation.getMethodAccess() instanceof DynamicFeatureAccess access
+                    && isTableType(typesOf(access.getSource())))
+                {
+                    List<TypeItem> resultTypes = typesOf(invocation);
+                    if (hasType(resultTypes, "ValueTableRow", "ValueTreeRow")
+                        || hasType(elementTypes(resultTypes), "ValueTableRow", "ValueTreeRow")
+                        || in(access.getName(), "НайтиСтроки", "FindRows"))
+                    {
+                        boolean unknown = expressionHasUnknownMembers(access.getSource(), true, procedureDepth, depth);
+//                         Global.tempLog("row-return-columns", "flow=table-result expression=" + text(invocation)
+//                             + " table=" + text(access.getSource()) + " depth=" + depth
+//                             + " incomplete=" + unknown);
+                        return unknown;
+                    }
+                }
+            }
+            if (columns && expression instanceof IndexAccess index
+                && hasType(typesOf(index), "ValueTableRow", "ValueTreeRow"))
+            {
+                boolean unknown = expressionHasUnknownMembers(index.getSource(), true, procedureDepth, depth);
+//                 Global.tempLog("row-return-columns", "flow=row-index expression=" + text(index)
+//                     + " source=" + text(index.getSource()) + " depth=" + depth + " incomplete=" + unknown);
+                return unknown;
+            }
             return false;
         }
 
@@ -2019,7 +2475,11 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                             List<TypeItem> elements = outer.sourceTypes.isEmpty() ? List.of()
                                 : elementTypes(returnTypes(enclosing));
                             if (!elements.isEmpty() && !hasType(elements, "ValueListItem")) //$NON-NLS-1$
+                            {
                                 objectTypes = elements;
+                                if (isTableType(outer.sourceTypes))
+                                    incompleteColumns |= hasColumnAddWithUnknownName(outer);
+                            }
                         }
                     }
                 }
@@ -2092,11 +2552,14 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 && isTableType(objectTypes))
             {
                 branch("columns"); //$NON-NLS-1$
-                List<String> columnNames = columns(objectTypes);
-                addAll(columnNames);
+                ColumnComposition composition = columnComposition(objectTypes, call.source);
+                addAll(composition.names());
                 // Колонка с неизвестным именем (Колонки.Добавить(Колонка.Имя)) EDT в тип не заносит — набор неполный.
-                if (hasColumnAddWithUnknownName(call))
+                if (!composition.complete() || hasColumnAddWithUnknownName(call))
+                {
+                    incompleteColumns = true;
                     full = false;
+                }
                 // Колонки результата запроса знает только план запроса (у типа РезультатЗапроса их нет).
                 if (hasType(objectTypes, "QueryResult") && call.source != null) //$NON-NLS-1$
                 {
@@ -2945,7 +3408,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         addAll(mdChildren(mdOf(type), en.contains("Manager") ? "dimensions" : "attributes")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 }
                 // В ИР первое место передачи решает: пусто — Неопределено, и поиск идёт дальше.
-                full = values.size() > before;
+                if (isTableType(ownerTypes))
+                {
+                    boolean unknown = hasUnknownMemberAdd(scopeOf(object), withoutSpaces(text(owner)), true, 0, 0);
+                    incompleteColumns |= unknown;
+                }
+                full = values.size() > before && !incompleteColumns;
                 return values.size() > before;
             }
             return false;
@@ -2992,6 +3460,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<TypeItem> typesOf(Expression expression)
         {
             checkCanceled();
+            pass.observe.accept(expression);
             if (expression == null)
                 return List.of();
             if (expression instanceof StaticFeatureAccess access)
@@ -3016,7 +3485,9 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 : module != null ? module.environments() : null;
             if (computer != null && environments != null)
             {
-                List<TypeItem> computed = computer.computeTypes(expression, environments);
+                List<TypeItem> computed = BslStructureInsertCommentTypes.interactiveTypesActive()
+                    ? BslStructureInsertCommentTypes.interactiveExpressionTypes(expression, environments)
+                    : computer.computeTypes(expression, environments);
                 if (computed != null && !computed.isEmpty())
                     return new ArrayList<>(computed);
             }
@@ -3106,6 +3577,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (item == null)
                 return null;
             EObject resolved = item.eIsProxy() ? EcoreUtil.resolve(item, resource) : item;
+            pass.observe.accept(resolved);
             return resolved instanceof Type type && !type.eIsProxy() ? type : null;
         }
 
@@ -3270,6 +3742,25 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<String> columns(List<TypeItem> tables)
         {
             List<String> names = new ArrayList<>();
+            for (Property property : columnProperties(tables))
+            {
+                addUnique(names, dualName(property));
+                rememberProperty(property);
+            }
+            return names;
+        }
+
+        /** Состав и его полнота имеют одинаковый источник у литерала и обращения к свойству строки. */
+        ColumnComposition columnComposition(List<TypeItem> types, Expression source)
+        {
+            List<String> names = columns(types);
+            boolean complete = !expressionHasUnknownMembers(source, true, 0, 0);
+            return new ColumnComposition(names, complete);
+        }
+
+        private List<Property> columnProperties(List<TypeItem> tables)
+        {
+            List<Property> properties = new ArrayList<>();
             for (TypeItem item : tables)
             {
                 Type table = resolve(item);
@@ -3288,18 +3779,30 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 for (TypeItem rowItem : rowTypes)
                 {
                     Type row = resolve(rowItem);
+                    if (row == null)
+                        continue;
+                    List<Property> known = pass.columnProperties.get(row);
+                    if (known != null)
+                    {
+                        properties.addAll(known);
+                        continue;
+                    }
+                    List<Property> calculated = new ArrayList<>();
                     // Колонки — свойства сверх свойств самой строки платформы («Родитель», «Строки» и т. п.).
                     Set<String> platform = platformPropertyNames(row);
-                    if (row != null && row.getContextDef() != null)
+                    if (row.getContextDef() != null)
                         for (Property property : row.getContextDef().allProperties())
                             if (!property.isDependsOnMetadata() && !platform.contains(lower(property.getName())))
                             {
-                                addUnique(names, dualName(property));
-                                rememberProperty(property);
+                                calculated.add(property);
                             }
+                    checkCanceled();
+                    pass.columnProperties.put(row, List.copyOf(calculated));
+                    properties.addAll(calculated);
                 }
             }
-            return names;
+            checkCanceled();
+            return properties;
         }
 
         /** Имена свойств платформенного типа с тем же именем, что у {@code type} (без колонок и ключей). */
@@ -4128,3 +4631,4 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         return text != null ? text.toLowerCase(Locale.ROOT) : ""; //$NON-NLS-1$
     }
 }
+

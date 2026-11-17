@@ -28,6 +28,7 @@
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslAstTruncationCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslPreprocessorStraddleCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslQueryResultFieldCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BslDynamicPropertyCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslForEachCollectionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslValueTypeCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslNumericIndexCheck"/>
