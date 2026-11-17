@@ -74,10 +74,42 @@ if [[ "$BUNDLE_BASE" != "$FEATURE_BASE" ]]; then
 fi
 
 CONTENT_XML=""
-if [[ -f site/content.jar ]]; then
-  CONTENT_XML="$(unzip -p site/content.jar content.xml 2>/dev/null || true)"
-elif [[ -f site/content.xml ]]; then
-  CONTENT_XML="$(cat site/content.xml)"
+if [[ -f site/content.jar || -f site/content.xml ]]; then
+  # Проверяем те же IU, которые останутся после Generate p2 site layout.
+  # PDE может вернуть устаревшие IU из памяти даже после удаления content.jar.
+  CONTENT_XML="$(python3 - <<'PY'
+import contextlib
+import io
+import pathlib
+import runpy
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+layout = runpy.run_path('.github/workflows/generate_composite.py')
+if pathlib.Path('site/content.jar').is_file():
+    with zipfile.ZipFile('site/content.jar') as archive:
+        content = archive.read('content.xml').decode('utf-8')
+else:
+    content = pathlib.Path('site/content.xml').read_text(encoding='utf-8')
+
+pathlib.Path('.tmp').mkdir(exist_ok=True)
+with open('.tmp/p2-release-verification.log', 'a', encoding='utf-8') as log:
+    versions = [u.attrib for u in ET.fromstring(content).findall('units/unit')
+                if u.get('id') == 'tormozit.comfort']
+    print(f'Input Comfort IUs: {versions}', file=log, flush=True)
+    print(f'Input Comfort IUs: {versions}', file=sys.stderr)
+    diagnostic = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(diagnostic):
+            content = layout['remove_stale_build_units'](
+                content, layout['read_artifacts_xml']('site'), 'site')
+    finally:
+        print(diagnostic.getvalue(), file=log, end='', flush=True)
+        print(diagnostic.getvalue(), file=sys.stderr, end='')
+print(content)
+PY
+)"
 fi
 
 if [[ -n "$CONTENT_XML" ]]; then
