@@ -90,6 +90,11 @@ final class BslCallingModules
         String name = ref.modulePath;
         if (name.startsWith("ОбщийМодуль.") && name.endsWith(".Модуль"))
             name = name.substring("ОбщийМодуль.".length(), name.length() - ".Модуль".length());
+        else if (name.endsWith(".Форма"))
+        {
+            name = GetRef.stripLowValueModuleSuffix(name);
+            Global.tempLog(LOG, "moduleName.form file=" + file + " raw=" + ref.modulePath + " name=" + name);
+        }
         return ref.extensionName == null ? name : null;
     }
 

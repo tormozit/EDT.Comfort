@@ -1256,7 +1256,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                 var call = org.eclipse.xtext.EcoreUtil2.getContainerOfType(at,
                     com._1c.g5.v8.dt.bsl.model.Invocation.class);
                 Global.tempLog(BslCallingModules.LOG, "menu.link uri=" + xtext.getURI() + " invocation=" + (call != null));
-                if (call == null)
+                if (call == null || call.getParams().stream().noneMatch(java.util.Objects::nonNull))
                     continue;
                 EObject target = resource.getResourceSet().getEObject(xtext.getURI(), true);
                 var method = ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(target);
