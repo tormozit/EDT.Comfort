@@ -658,11 +658,28 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             return;
         EditRefresh refresh = new EditRefresh(editor, document);
         WATCHED_DOCUMENTS.put(document, refresh);
+        ContentAssistSessionReloader.editorValidationOpened(document);
         document.addModelListener(refresh);
         widget.addDisposeListener(event ->
         {
             document.removeModelListener(refresh);
             WATCHED_DOCUMENTS.remove(document);
+            ContentAssistSessionReloader.editorValidationClosed(document);
+            refresh.closed = true;
+            widget.getDisplay().timerExec(-1, refresh.fire);
+            TypeRefreshJob job;
+            synchronized (TYPE_REFRESH_JOBS)
+            {
+                job = TYPE_REFRESH_JOBS.remove(document);
+                if (job != null)
+                {
+                    job.closed = true;
+                    job.pending.clear();
+                }
+            }
+            Global.tempLog("editor-validation-close", "cancel query refresh document="
+                + System.identityHashCode(document) + " job=" + job
+                + " accepted=" + (job != null && job.cancel()));
         });
         // Модуль только открыт: разбор уже прошёл, своего события до первой правки не будет
         refresh.modelChanged(null);
@@ -674,6 +691,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         private final java.lang.ref.WeakReference<BslXtextEditor> editor;
         private final IXtextDocument document;
         private final Runnable fire = this::fire;
+        private volatile boolean closed;
         /**
          * Первый досчёт после открытия — по всем методам: тип в методе под кареткой может зависеть от
          * запроса в другом (параметр по вызову), а правки до сих пор не было.
@@ -701,6 +719,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
 
         private void restart(Display display, int delayMs)
         {
+            if (closed)
+                return;
             display.timerExec(-1, fire);
             display.timerExec(delayMs, fire);
         }
@@ -708,6 +728,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         /** UI: при открытом списке досчёт делает сам список — откладываем; каретка — модельное смещение. */
         private void fire()
         {
+            if (closed)
+                return;
             BslXtextEditor current = editor.get();
             ISourceViewer viewer = current == null ? null : current.getInternalSourceViewer();
             StyledText widget = viewer == null ? null : viewer.getTextWidget();
@@ -734,6 +756,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
     {
         synchronized (TYPE_REFRESH_JOBS)
         {
+            if (!WATCHED_DOCUMENTS.containsKey(document))
+                return;
             TypeRefreshJob job = TYPE_REFRESH_JOBS.get(document);
             boolean created = job == null;
             if (created)
@@ -758,6 +782,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         private final IXtextDocument document;
         private final Map<Integer, Boolean> pending = new java.util.LinkedHashMap<>();
         private boolean needsValidation;
+        private volatile boolean closed;
 
         TypeRefreshJob(IXtextDocument document)
         {
@@ -769,6 +794,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         @Override
         protected IStatus run(IProgressMonitor monitor)
         {
+            if (closed)
+                return Status.CANCEL_STATUS;
             Map<Integer, Boolean> batch;
             synchronized (TYPE_REFRESH_JOBS)
             {
@@ -780,6 +807,8 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
             int generation = BslDocCommentComputedTypes.typesGeneration();
             try
             {
+                if (closed || monitor.isCanceled())
+                    return Status.CANCEL_STATUS;
                 if (!ContentAssistSessionReloader.isModelCurrent(document))
                 {
                     retry = true;
@@ -788,26 +817,26 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 completed = Boolean.TRUE.equals(BslNodeLookup.compute(monitor,
                     () -> ContentAssistSessionReloader.readOnlyPeekAstLowPriority(document, monitor, resource ->
                 {
-                    if (monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
+                    if (closed || monitor.isCanceled() || !ContentAssistSessionReloader.isModelCurrent(document))
                         throw new org.eclipse.core.runtime.OperationCanceledException();
                     java.util.Set<Integer> offsets = new java.util.LinkedHashSet<>(batch.keySet());
                     if (offsets.remove(Integer.valueOf(WHOLE_MODULE)))
-                        BslStructureInsertCommentTypes.refreshQueryTypesForModule(resource, monitor::isCanceled);
+                        BslStructureInsertCommentTypes.refreshQueryTypesForModule(resource, () -> closed || monitor.isCanceled());
                     for (Integer offset : offsets)
                     {
-                        if (monitor.isCanceled())
+                        if (closed || monitor.isCanceled())
                             throw new org.eclipse.core.runtime.OperationCanceledException();
                         BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset.intValue(),
-                            status -> {}, monitor::isCanceled);
+                            status -> {}, () -> closed || monitor.isCanceled());
                     }
                     // Один обход литералов для всех методов пакета, под тем же чтением модели.
                     // Сеансы временных таблиц — только у методов под кареткой, не у всего модуля.
                     BslTempTableSessions.refreshDocument(document, resource, batch.keySet().stream()
                         .mapToInt(Integer::intValue).filter(offset -> offset != WHOLE_MODULE).toArray(),
-                        monitor::isCanceled);
+                        () -> closed || monitor.isCanceled());
                     return Boolean.TRUE;
                 })));
-                if (!completed || monitor.isCanceled())
+                if (closed || !completed || monitor.isCanceled())
                     throw new org.eclipse.core.runtime.OperationCanceledException();
             }
             catch (org.eclipse.core.runtime.OperationCanceledException canceled)
@@ -825,7 +854,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                     && generation != BslDocCommentComputedTypes.typesGeneration();
                 synchronized (TYPE_REFRESH_JOBS)
                 {
-                    if (retry && WATCHED_DOCUMENTS.containsKey(document))
+                    if (closed)
+                        pending.clear();
+                    else if (retry && WATCHED_DOCUMENTS.containsKey(document))
                         batch.forEach((offset, revalidate) -> pending.merge(offset, revalidate, (a, b) -> a || b));
                     if (pending.isEmpty())
                         TYPE_REFRESH_JOBS.remove(document, this);
@@ -834,9 +865,9 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                         schedule(retry ? RELINK_ASSIST_RETRY_MS : 0L);
                 }
             }
-            if (completed && needsValidation)
+            if (!closed && completed && needsValidation)
             {
-                Global.invokeVoid(document, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+                ContentAssistSessionReloader.restartEditorValidation(document);
                 needsValidation = false;
             }
             return Status.OK_STATUS;

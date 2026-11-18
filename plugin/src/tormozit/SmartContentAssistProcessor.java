@@ -2734,7 +2734,7 @@ return;
             return result;
         }
         dropMemberCachesOnOtherModuleChange(viewer != null ? viewer.getDocument() : null);
-        dropListCachesOnTypesChange();
+        refreshMemberReceiverTypes(viewer);
 
         result = computeCompletionProposalsImpl(viewer, offset);
         // В комментарии пустой список — это просто «нет подходящих типов»: ни ИР,
@@ -6430,25 +6430,110 @@ return EMPTY;
     /** Поколение типов, при котором заполнен {@link #fullListCache}. */
     private int fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
 
-    /**
-     * Рассчитанные типы сменились (правка функции дала новый тип) — кэши списка, посчитанные
-     * при прежних, сбрасываются: Ctrl+Space после «Функция().» отдавал за 1 мс прежние члены,
-     * хотя EDT тип уже пересчитал (18.10 09:38, «…4» вместо «…3»). Сбрасывается только то,
-     * что посчитано при прежнем поколении: стирание всего подряд уничтожало свежий список
-     * автооткрытия, и окно не открывалось (18.10 09:41).
-     */
-    private void dropListCachesOnTypesChange()
+    private record MemberReceiverTypes(IDocument document, int dot, String members, int generation)
     {
+    }
+
+    private volatile MemberReceiverTypes memberReceiverTypes;
+    private Job memberReceiverTypesJob;
+
+    /**
+     * Глобальное обновление типов не меняет состав словаря. После точки оно лишь запускает
+     * фоновую сверку типов родителя и имён его членов; типы самих членов сюда не входят.
+     * UI читает готовый список, без чтения модели и ожидания сверки.
+     */
+    void refreshMemberReceiverTypes(ITextViewer viewer)
+    {
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        int caret = resolveWidgetCaret(viewer);
+        int dot = ReceiverTypeLabel.findMemberAccessDot(document, caret);
+        MemberReceiverTypes previous = memberReceiverTypes;
         int generation = BslDocCommentComputedTypes.typesGeneration();
-        boolean stock = memberStockFullList.length > 0 && memberStockTypesGeneration != generation;
-        boolean list = fullListCache.length > 0 && fullListCacheTypesGeneration != generation;
-        if (stock)
-            resetMemberStockFullList();
-        if (list)
+        Global.tempLog("assist-receiver-types", "check processor=" + System.identityHashCode(this)
+            + " dot=" + dot + " cache=" + fullListCache.length + " generation=" + generation
+            + " previous=" + (previous == null ? -1 : previous.generation()));
+        if (dot < 0 || !(document instanceof IXtextDocument xtext)
+            || previous == null || previous.document() != document || previous.dot() != dot
+            || previous.generation() == generation
+            || memberReceiverTypesJob != null && memberReceiverTypesJob.getState() != Job.NONE)
+            return;
+        org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
+        Job job = new Job("Комфорт: тип родителя списка членов")
         {
-            assignFullListCache(EMPTY);
-            fullListComplete = false;
-        }
+            @Override
+            protected IStatus run(org.eclipse.core.runtime.IProgressMonitor monitor)
+            {
+                String members = ContentAssistSessionReloader.readOnlyPeekAstLowPriority(xtext, monitor,
+                    resource -> ReceiverTypeLabel.memberTypesSignature(resource, dot));
+                int afterGeneration = BslDocCommentComputedTypes.typesGeneration();
+                Global.tempLog("assist-receiver-types", "resolved processor=" + System.identityHashCode(SmartContentAssistProcessor.this)
+                    + " dot=" + dot
+                    + " generation=" + generation + " after=" + afterGeneration
+                    + " known=" + (members != null) + " changed="
+                    + (members != null && !previous.members().equals(members))
+                    + " previousMembers=" + previous.members() + " liveMembers=" + members);
+                if (monitor.isCanceled() || members == null || generation != afterGeneration
+                    || !ContentAssistSessionReloader.isModelCurrent(document))
+                    return Status.CANCEL_STATUS;
+                if (display.isDisposed())
+                    return Status.CANCEL_STATUS;
+                display.asyncExec(() -> {
+                    int liveCaret = resolveWidgetCaret(viewer);
+                    if (viewer.getDocument() != document || memberReceiverTypes != previous
+                        || ReceiverTypeLabel.findMemberAccessDot(document, liveCaret) != dot
+                        || BslDocCommentComputedTypes.typesGeneration() != generation
+                        || !ContentAssistSessionReloader.isModelCurrent(document))
+                        return;
+                    memberReceiverTypes = new MemberReceiverTypes(document, dot, members, generation);
+                    boolean changed = !previous.members().equals(members);
+                    Global.tempLog("assist-receiver-types", "publish dot=" + dot
+                        + " changed=" + changed + " cache=" + fullListCache.length);
+                    if (!changed)
+                        return;
+                    resetMemberStockFullList();
+                    if (fullListContextKey == dot)
+                    {
+                        assignFullListCache(EMPTY);
+                        fullListReady = false;
+                        fullListComplete = false;
+                    }
+                    clearDelegateSyncProbe();
+                    memberStockContextGen++;
+                    if (memberStockBackgroundJob != null)
+                        memberStockBackgroundJob.cancel();
+                    memberStockBackgroundDot = -1;
+                    scheduleMemberStockCapture(viewer, dot);
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.INTERACTIVE);
+        memberReceiverTypesJob = job;
+        job.schedule();
+    }
+
+    /** Типы родителя той модели, по которой штатный расчёт только что построил членов. */
+    private void rememberMemberReceiverTypes(IDocument document, int caret)
+    {
+        int dot = ReceiverTypeLabel.findMemberAccessDot(document, caret);
+        if (dot < 0 || !(document instanceof IXtextDocument xtext))
+            return;
+        int generation = BslDocCommentComputedTypes.typesGeneration();
+        String members = ContentAssistSessionReloader.readOnlyPeekAst(xtext,
+            resource -> ReceiverTypeLabel.memberTypesSignature(resource, dot));
+        MemberReceiverTypes previous = memberReceiverTypes;
+        boolean sameBase = previous != null && previous.document() == document && previous.dot() == dot;
+        // Более короткий ответ EDT ещё может быть вытеснен старым запасом. Пока он жив,
+        // сохраняем его прежний тип, чтобы новый зонд не замаскировал смену родителя.
+        boolean keepPrevious = sameBase && !previous.members().equals(members)
+            && (hasMemberListForDot(dot) || fullListContextKey == dot && fullListCache.length > 0);
+        if (members != null && !keepPrevious
+            && generation == BslDocCommentComputedTypes.typesGeneration())
+            memberReceiverTypes = new MemberReceiverTypes(document, dot, members, generation);
+        Global.tempLog("assist-receiver-types", "baseline processor=" + System.identityHashCode(this)
+            + " dot=" + dot + " generation=" + generation + " keepPrevious=" + keepPrevious
+            + " known=" + (members != null) + " members=" + members);
     }
 
     /**
@@ -9733,6 +9818,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                     + " mode=" + delegateAssistMode() + " thread=" + Thread.currentThread().getName());
             }
             logWordListComposition("delegate", off, "", raw);
+            if (raw != null && raw.length > 0 && !containsOnlyTemplateProposals(raw))
+                rememberMemberReceiverTypes(completionDocument, off);
             raw = dropTemplateTypesInLiteral(viewer, off, raw);
             FunctionReturnTypes.rememberVariableTargets(raw);
             delegateCompleted = true;
@@ -10009,17 +10096,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (unwrapped.length > memberStockFullList.length)
         {
             memberStockFullList = unwrapped;
-            memberStockTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
         }
     }
-
-    /**
-     * Поколение рассчитанных типов ({@link BslDocCommentComputedTypes#typesGeneration}), при
-     * котором добыт {@link #memberStockFullList}. Запас привязан к точке, а слитый тип после
-     * «см. Функция» меняется от правки тела самой функции — в другом месте модуля: запас той же
-     * точки отдавал прежние члены («Кот13» после правки на «Кот12», лог 18.10 02:21).
-     */
-    private int memberStockTypesGeneration;
 
     /**
      * Ctrl+Space: запас членов, посчитанный до последнего переразбора, держит ссылки в
@@ -10126,7 +10204,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     private boolean hasMemberStock(int dot)
     {
         return memberStockFullListDot == dot
-            && memberStockTypesGeneration == BslDocCommentComputedTypes.typesGeneration()
             && (memberStockFullListComplete
                 || memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE);
     }
@@ -13019,6 +13096,36 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         {
             Expression receiver = findReceiverExpression(resource, dotOffset, offsetAfterDot);
             return receiver == null ? "" : formatExpressionTypes(receiver); //$NON-NLS-1$
+        }
+
+        /** Состав типов родителя и имена членов, без типов свойств и результатов методов. */
+        private static String memberTypesSignature(XtextResource resource, int dotOffset)
+        {
+            Expression receiver = findReceiverExpression(resource, dotOffset, dotOffset + 1);
+            if (receiver == null || receiver.getTypes().isEmpty())
+                return null;
+            java.util.TreeSet<String> types = new java.util.TreeSet<>();
+            for (TypeItem item : receiver.getTypes())
+            {
+                if (item == null || item.eIsProxy())
+                    return null;
+                java.util.TreeSet<String> members = new java.util.TreeSet<>();
+                if (item instanceof Type type)
+                {
+                    var context = type.getContextDef();
+                    if (context != null)
+                    {
+                        if (context.eIsProxy())
+                            return null;
+                        for (var property : context.allProperties())
+                            members.add("p:" + property.getName()); //$NON-NLS-1$
+                        for (var method : context.allMethods())
+                            members.add("m:" + method.getName()); //$NON-NLS-1$
+                    }
+                }
+                types.add(item.getName() + "{" + String.join(",", members) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            return String.join("|", types); //$NON-NLS-1$
         }
 
         // #region agent log

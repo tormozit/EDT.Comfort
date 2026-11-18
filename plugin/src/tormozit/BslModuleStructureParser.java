@@ -189,7 +189,7 @@ final class BslModuleStructureParser
         }
     }
 
-    private static Object parseBslModuleContent(String text) throws Exception
+    static Object parseBslModuleContent(String text) throws Exception
     {
         Method m = BslCompareUtils.class.getMethod("parseBslModuleContent", InputStream.class); //$NON-NLS-1$
         try (InputStream stream = new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)))

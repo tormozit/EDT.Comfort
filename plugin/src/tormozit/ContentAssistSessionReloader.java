@@ -3516,6 +3516,52 @@ boolean inLiteral = endCaret >= 0
 
     private static boolean assistSyncValidationRestartInstalled;
 
+    private static final java.util.Map<IDocument, Boolean> CLOSED_EDITOR_DOCUMENTS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+    private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, Boolean> CLOSED_EDITOR_VALIDATIONS =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    static void editorValidationOpened(IDocument doc)
+    {
+        installAssistSyncValidationRestart();
+        CLOSED_EDITOR_DOCUMENTS.remove(doc);
+        Object job = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+        CLOSED_EDITOR_VALIDATIONS.remove(job);
+        Global.tempLog("editor-validation-close", "opened document=" + System.identityHashCode(doc)
+            + " validation=" + job);
+    }
+
+    /** Отмена только задания редактора; проектные проверки производных данных сюда не входят. */
+    static void editorValidationClosed(IDocument doc)
+    {
+        CLOSED_EDITOR_DOCUMENTS.put(doc, Boolean.TRUE);
+        VALIDATION_WATCHES.remove(doc);
+        Object candidate = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
+        Global.tempLog("editor-validation-close", "closed document=" + System.identityHashCode(doc)
+            + " validation=" + candidate);
+        if (candidate instanceof org.eclipse.core.runtime.jobs.Job job)
+        {
+            CLOSED_EDITOR_VALIDATIONS.put(job, Boolean.TRUE);
+            Global.tempLog("editor-validation-close", "cancel validation state=" + job.getState()
+                + " accepted=" + job.cancel());
+        }
+    }
+
+    private static boolean isEditorValidationClosed(IDocument doc)
+    {
+        return CLOSED_EDITOR_DOCUMENTS.containsKey(doc);
+    }
+
+    static void restartEditorValidation(IDocument doc)
+    {
+        if (isEditorValidationClosed(doc))
+        {
+            Global.tempLog("editor-validation-close", "restart skipped document=" + System.identityHashCode(doc));
+            return;
+        }
+        Global.invokeVoid(doc, "checkAndUpdateAnnotations"); //$NON-NLS-1$
+    }
+
     /** Когда документ последний раз правили и когда его проверка последний раз отработала. */
     private static final class ValidationWatch
     {
@@ -3791,7 +3837,8 @@ boolean inLiteral = endCaret >= 0
      */
     private static void armValidationGuard(ValidationWatch watch)
     {
-        if (watch.validatedAt >= watch.changedAt
+        if (isEditorValidationClosed(watch.document == null ? null : watch.document.get())
+            || watch.validatedAt >= watch.changedAt
             || watch.guardChecks.get() >= VALIDATION_GUARD_MAX_CHECKS
             || !watch.guardPending.compareAndSet(false, true))
             return;
@@ -3806,7 +3853,7 @@ boolean inLiteral = endCaret >= 0
     {
         watch.guardPending.set(false);
         IDocument doc = watch.document == null ? null : watch.document.get();
-        if (doc == null || watch.validatedAt >= watch.changedAt)
+        if (doc == null || isEditorValidationClosed(doc) || watch.validatedAt >= watch.changedAt)
             return;
         Object jobObject = Global.invoke(doc, "getValidationJob"); //$NON-NLS-1$
         if (!(jobObject instanceof org.eclipse.core.runtime.jobs.Job job)
@@ -3853,18 +3900,40 @@ boolean inLiteral = endCaret >= 0
             new org.eclipse.core.runtime.jobs.JobChangeAdapter()
             {
                 @Override
+                public void scheduled(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    cancelClosedValidation(event.getJob());
+                }
+
+                @Override
+                public void aboutToRun(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+                {
+                    cancelClosedValidation(event.getJob());
+                }
+
+                @Override
                 public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                 {
+                    if (CLOSED_EDITOR_VALIDATIONS.containsKey(event.getJob()))
+                        Global.tempLog("editor-validation-close", "validation done after close job="
+                            + event.getJob() + " result=" + event.getResult());
                     if (event.getJob().belongsTo(ASSIST_SYNC_JOB_FAMILY))
                         restartMissedValidations();
                 }
             });
     }
 
+    private static void cancelClosedValidation(org.eclipse.core.runtime.jobs.Job job)
+    {
+        if (CLOSED_EDITOR_VALIDATIONS.containsKey(job))
+            Global.tempLog("editor-validation-close", "cancel rescheduled validation job=" + job
+                + " state=" + job.getState() + " accepted=" + job.cancel());
+    }
+
     private static void noteDocumentChangedForValidation(DocumentEvent event)
     {
         IDocument doc = event == null ? null : event.getDocument();
-        if (!(doc instanceof IXtextDocument))
+        if (!(doc instanceof IXtextDocument) || isEditorValidationClosed(doc))
             return;
         ValidationWatch watch = VALIDATION_WATCHES.computeIfAbsent(doc, key -> new ValidationWatch());
         watch.changedAt = System.nanoTime();

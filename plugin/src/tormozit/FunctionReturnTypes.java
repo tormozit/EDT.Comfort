@@ -2248,6 +2248,9 @@ final class FunctionReturnTypes
     {
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         boolean visible = assistant != null && ContentAssistPopupSync.isPopupVisible(assistant);
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor != null)
+            processor.refreshMemberReceiverTypes(ContentAssistSessionReloader.getActiveViewer());
         if (visible)
             ContentAssistPopupSync.refreshProposalTable(assistant);
         if (NATIVE_HINTS_CHANGED.getAndSet(false) && visible)

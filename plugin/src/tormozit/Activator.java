@@ -2909,6 +2909,15 @@ public class Activator extends AbstractUIPlugin
                 + job.getClass().getName() + " id=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
                 + (result != null ? " result=" + result.getSeverity() : "") //$NON-NLS-1$ //$NON-NLS-2$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+            // Каждый запуск: отличаем штатную синхронизацию от повторного запуска плагином.
+            if ("scheduled".equals(kind) && job.getClass().getName().endsWith("ValidationJob")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                StringBuilder caller = new StringBuilder("validation.schedule pid=").append(PID) //$NON-NLS-1$
+                    .append(" id=").append(Integer.toHexString(System.identityHashCode(job))); //$NON-NLS-1$
+                for (StackTraceElement element : Thread.currentThread().getStackTrace())
+                    caller.append("\n        at ").append(element); //$NON-NLS-1$
+                Global.tempLog(TOPIC, caller.toString());
+            }
         }
 
         private static void sample()
@@ -2959,7 +2968,8 @@ public class Activator extends AbstractUIPlugin
                         .append(" deep=").append(contains(stack, "performDeepAnalisys")); //$NON-NLS-1$ //$NON-NLS-2$
                     // Проверка Xтекст раньше выпадала из фильтра из-за заглавной «П».
                     // Полный стек отличает расчёт типов от ожидания блокировки модели.
-                    if (lowerName.contains("проверк") && lowerName.contains("текст")) //$NON-NLS-1$ //$NON-NLS-2$
+                    if (name.startsWith("derived_data_executor_") //$NON-NLS-1$
+                        || lowerName.contains("проверк") && lowerName.contains("текст")) //$NON-NLS-1$ //$NON-NLS-2$
                         for (StackTraceElement element : stack)
                             busy.append("\n        at ").append(element); //$NON-NLS-1$
                 }

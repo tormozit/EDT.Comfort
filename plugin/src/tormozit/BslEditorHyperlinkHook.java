@@ -1234,21 +1234,23 @@ public final class BslEditorHyperlinkHook implements IStartup
     }
 
     private static IHyperlink[] callingModuleLinks(ITextViewer viewer, IHyperlink[] links,
-        BslXtextEditor source, IWorkbenchPage page)
+        BslXtextEditor source, IWorkbenchPage page, CallingModuleContext context)
     {
+        if (context == null)
+            return links;
         IFile caller = source.getEditorInput().getAdapter(IFile.class);
         String name = BslCallingModules.moduleName(caller);
         Global.tempLog(BslCallingModules.LOG, "menu.detect file=" + caller + " name=" + name + " links=" + links.length);
         if (name == null || !(viewer.getDocument() instanceof IXtextDocument document))
             return links;
-        IHyperlink[] extended = readModel(document, true, resource -> {
+        List<CallingModuleCandidate> candidates = readModel(document, true, resource -> {
             if (resource == null || resource.getResourceSet() == null)
-                return links;
-            List<IHyperlink> result = new ArrayList<>(List.of(links));
-            java.util.Set<String> added = new java.util.HashSet<>();
+                return List.of();
+            List<CallingModuleCandidate> found = new ArrayList<>();
             for (IHyperlink link : links)
             {
-                if (!(link instanceof XtextHyperlink xtext) || xtext.getURI() == null
+                IHyperlink original = link instanceof HistoryHyperlink history ? history.delegate : link;
+                if (!(original instanceof XtextHyperlink xtext) || xtext.getURI() == null
                     || xtext.getURI().trimFragment().equals(resource.getURI().trimFragment()))
                     continue;
                 // Команда предлагается только на самом вызове, а не на имени в комментарии.
@@ -1265,17 +1267,126 @@ public final class BslEditorHyperlinkHook implements IStartup
                     + " method=" + (method == null ? null : method.getName()));
                 if (method == null || method.eIsProxy() || method.eResource() == null)
                     continue;
-                boolean eligible = BslCallingModules.canAdd(method);
-                boolean exists = BslCallingModules.names(method).stream().anyMatch(name::equalsIgnoreCase);
-                Global.tempLog(BslCallingModules.LOG, "menu target=" + EcoreUtil.getURI(method)
-                    + " caller=" + name + " eligible=" + eligible + " exists=" + exists);
-                if (eligible && !exists && added.add(EcoreUtil.getURI(method).toString()))
-                    result.add(new AddCallingModuleHyperlink(link.getHyperlinkRegion(),
-                        EcoreUtil.getURI(method), method.getName(), name, source, page));
+                found.add(new CallingModuleCandidate(link, xtext, method));
             }
-            return result.toArray(IHyperlink[]::new);
+            return found;
         });
-        return extended == null ? links : extended;
+        // Модель исходного модуля уже отпущена: чтение цели не задерживает штатный переход.
+        if (candidates == null || candidates.isEmpty())
+            return links;
+        List<IHyperlink> result = new ArrayList<>(List.of(links));
+        java.util.Set<String> added = new java.util.HashSet<>();
+        for (CallingModuleCandidate candidate : candidates)
+        {
+            BslNodeLookup.checkCanceled();
+            var method = candidate.method();
+            IHyperlink link = candidate.link();
+            result.set(result.indexOf(link), new HistoryHyperlink(candidate.xtext(), source, page, "Перейти"));
+            IFile targetFile = ForeignModuleModel.fileOf(method.eResource().getURI());
+            IXtextDocument targetDocument = context.document(targetFile);
+            CallingModuleAvailability availability;
+            if (targetDocument != null)
+                availability = ContentAssistSessionReloader.readOnlyPeekAst(targetDocument, targetResource -> {
+                    if (!(BslNodeLookup.rootAst(targetResource) instanceof com._1c.g5.v8.dt.bsl.model.Module module))
+                        return null;
+                    var parse = targetResource.getParseResult();
+                    if (parse == null || !parse.getRootNode().getText().equals(targetDocument.get()))
+                        return null;
+                    for (var iterator = module.eAllContents(); iterator.hasNext();)
+                        if (iterator.next() instanceof com._1c.g5.v8.dt.bsl.model.Method current
+                            && method.getName().equalsIgnoreCase(current.getName()))
+                            return new CallingModuleAvailability(BslCallingModules.canAdd(current, targetDocument),
+                                BslCallingModules.names(current).stream().anyMatch(name::equalsIgnoreCase));
+                    return null;
+                });
+            else
+                availability = new CallingModuleAvailability(BslCallingModules.canAdd(method, null),
+                    BslCallingModules.names(method).stream().anyMatch(name::equalsIgnoreCase));
+            if (availability == null)
+            {
+                context.incomplete = true;
+                Global.tempLog(BslCallingModules.LOG, "menu.modelNotReady file=" + targetFile);
+            }
+            boolean eligible = availability != null && availability.eligible();
+            boolean exists = availability != null && availability.exists();
+            Global.tempLog(BslCallingModules.LOG, "menu target=" + EcoreUtil.getURI(method)
+                + " caller=" + name + " eligible=" + eligible + " exists=" + exists);
+            if (eligible && !exists && added.add(EcoreUtil.getURI(method).toString()))
+                result.add(new AddCallingModuleHyperlink(link.getHyperlinkRegion(),
+                    EcoreUtil.getURI(method), method.getName(), name, source, page));
+        }
+        return result.toArray(IHyperlink[]::new);
+    }
+
+    private record CallingModuleCandidate(IHyperlink link, XtextHyperlink xtext,
+        com._1c.g5.v8.dt.bsl.model.Method method) {}
+
+    private record CallingModuleAvailability(boolean eligible, boolean exists) {}
+
+    /** Документы захватываются в UI, фон читает готовую модель настоящего редактора. */
+    private static final class CallingModuleContext
+    {
+        private record Dependency(IFile file, IXtextDocument document, String stamp) {}
+        private final java.util.Map<IFile, Dependency> open;
+        private final java.util.Map<IFile, Dependency> used = new java.util.concurrent.ConcurrentHashMap<>();
+        private volatile boolean incomplete;
+
+        private CallingModuleContext(java.util.Map<IFile, Dependency> open)
+        {
+            this.open = open;
+        }
+
+        static CallingModuleContext capture()
+        {
+            java.util.Map<IFile, Dependency> open = new java.util.HashMap<>();
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                for (IWorkbenchPage page : window.getPages())
+                    for (var reference : page.getEditorReferences())
+                    {
+                        IEditorPart part = reference.getEditor(false);
+                        BslXtextEditor editor = part == null ? null : GetRef.getActiveBslEditor(part);
+                        if (editor == null || editor.getEditorInput() == null)
+                            continue;
+                        IFile file = editor.getEditorInput().getAdapter(IFile.class);
+                        IXtextDocument document = editor.getDocument();
+                        if (file != null && document != null)
+                            open.put(file, new Dependency(file, document, ForeignModuleModel.stamp(file, document)));
+                    }
+            return new CallingModuleContext(open);
+        }
+
+        IXtextDocument document(IFile file)
+        {
+            if (file == null)
+                return null;
+            Dependency dependency = open.get(file);
+            if (dependency == null)
+                dependency = new Dependency(file, null, ForeignModuleModel.stamp(file, null));
+            used.put(file, dependency);
+            Global.tempLog(BslCallingModules.LOG, "menu.source file=" + file + " stamp=" + dependency.stamp()
+                + " document=" + System.identityHashCode(dependency.document()));
+            return dependency.document();
+        }
+
+        /** Только UI. Проверяется также открытие/закрытие редактора цели. */
+        boolean isCurrent()
+        {
+            if (incomplete)
+                return false;
+            for (Dependency dependency : used.values())
+            {
+                IXtextDocument document = ForeignModuleModel.openDocument(dependency.file());
+                String stamp = ForeignModuleModel.stamp(dependency.file(), document);
+                if (document != dependency.document() || !stamp.equals(dependency.stamp()))
+                {
+                    Global.tempLog(BslCallingModules.LOG, "menu.invalidate file=" + dependency.file()
+                        + " previous=" + dependency.stamp() + " current=" + stamp
+                        + " sameDocument=" + (document == dependency.document()));
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     private static final class AddCallingModuleHyperlink implements IHyperlink
@@ -1478,6 +1589,7 @@ public final class BslEditorHyperlinkHook implements IStartup
         private long pendingStamp;
         private int pendingOffset;
         private boolean pendingMultiple;
+        private CallingModuleContext pendingContext;
         private volatile long generation;
         private volatile boolean disposed;
         private final ISchedulingRule detectionRule = new ISchedulingRule()
@@ -1499,7 +1611,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             long stamp = document.getModificationStamp();
             DetectedLinks ready = detected;
             if (ready != null && ready.stamp() == stamp && ready.multiple() == multiple
-                && ready.covers(region.getOffset()))
+                && ready.covers(region.getOffset()) && (ready.context() == null || ready.context().isCurrent()))
                 return ready.links() == null ? null : ready.links().clone();
             IHyperlink[] stock = coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region);
             IHyperlink[] result = stock == null ? null : stock.clone();
@@ -1539,13 +1651,15 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (disposed)
                 return;
             if (pendingJob != null && pendingJob.getState() != Job.NONE && pendingStamp == stamp
-                && pendingOffset == region.getOffset() && pendingMultiple == multiple)
+                && pendingOffset == region.getOffset() && pendingMultiple == multiple
+                && (pendingContext == null || pendingContext.isCurrent()))
             {
                 return;
             }
             if (pendingJob != null)
                 pendingJob.cancel();
             long requestedGeneration = ++generation;
+            CallingModuleContext context = multiple ? CallingModuleContext.capture() : null;
             Job job = Job.create("Ссылки BSL-редактора", monitor -> //$NON-NLS-1$
             {
                 if (monitor.isCanceled() || document.getModificationStamp() != stamp)
@@ -1555,6 +1669,22 @@ public final class BslEditorHyperlinkHook implements IStartup
                 {
                     links = BslNodeLookup.compute(monitor,
                         () -> detect(viewer, region, multiple, () -> stock));
+                    if (monitor.isCanceled() || document.getModificationStamp() != stamp)
+                        return;
+                    Global.tempLog(BslCallingModules.LOG, "detect.primaryReady offset=" + region.getOffset()
+                        + " links=" + (links == null ? 0 : links.length));
+                    if (context != null && links != null && links.length > 0)
+                    {
+                        queuePublish(viewer, document,
+                            new DetectedLinks(stamp, region.getOffset(), multiple, links, context),
+                            shown, requestedGeneration, true);
+                        IHyperlink[] primary = links;
+                        Global.tempLog(BslCallingModules.LOG, "detect.menuStart offset=" + region.getOffset());
+                        links = BslNodeLookup.compute(monitor,
+                            () -> callingModuleLinks(viewer, primary, source, page, context));
+                        Global.tempLog(BslCallingModules.LOG, "detect.menuReady offset=" + region.getOffset()
+                            + " links=" + links.length);
+                    }
                 }
                 catch (OperationCanceledException canceled)
                 {
@@ -1562,20 +1692,18 @@ public final class BslEditorHyperlinkHook implements IStartup
                 }
                 catch (RuntimeException | LinkageError failure)
                 {
+                    Global.tempLog(BslCallingModules.LOG, "menu.detect.error error=" + failure);
                     return;
+                }
+                finally
+                {
+                    if (context != null)
+                        context.open.clear();
                 }
                 if (monitor.isCanceled() || document.getModificationStamp() != stamp)
                     return;
-                DetectedLinks result = new DetectedLinks(stamp, region.getOffset(), multiple, links);
-                Display display = Display.getDefault();
-                if (display != null && !display.isDisposed())
-                {
-                    display.asyncExec(() ->
-                    {
-                        if (!disposed && generation == requestedGeneration)
-                            publish(viewer, document, result, shown);
-                    });
-                }
+                DetectedLinks result = new DetectedLinks(stamp, region.getOffset(), multiple, links, context);
+                queuePublish(viewer, document, result, shown, requestedGeneration, false);
             });
             job.setSystem(true);
             job.setRule(detectionRule);
@@ -1583,7 +1711,19 @@ public final class BslEditorHyperlinkHook implements IStartup
             pendingStamp = stamp;
             pendingOffset = region.getOffset();
             pendingMultiple = multiple;
+            pendingContext = context;
             job.schedule();
+        }
+
+        private void queuePublish(ITextViewer viewer, IDocumentExtension4 document, DetectedLinks result,
+            IHyperlink[] shown, long requestedGeneration, boolean primary)
+        {
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> {
+                    if (!disposed && generation == requestedGeneration)
+                        publish(viewer, document, result, shown, primary);
+                });
         }
 
         /**
@@ -1593,9 +1733,10 @@ public final class BslEditorHyperlinkHook implements IStartup
          * не обрабатывает — подписи меняем в самом списке.
          */
         private void publish(ITextViewer viewer, IDocumentExtension4 document, DetectedLinks result,
-            IHyperlink[] shown)
+            IHyperlink[] shown, boolean primary)
         {
-            if (document.getModificationStamp() != result.stamp())
+            if (document.getModificationStamp() != result.stamp()
+                || !primary && result.context() != null && !result.context().isCurrent())
                 return;
             StyledText text = viewer.getTextWidget();
             if (text == null || text.isDisposed())
@@ -1608,9 +1749,16 @@ public final class BslEditorHyperlinkHook implements IStartup
                 IHyperlink query = BslQueryLiteralSupport.queryLink(source, viewer, result.offset());
                 if (query != null)
                     result = new DetectedLinks(result.stamp(), result.offset(), result.multiple(),
-                        new IHyperlink[] { new HistoryHyperlink(query, source, page) });
+                        new IHyperlink[] { new HistoryHyperlink(query, source, page) }, result.context());
             }
             detected = result;
+            Global.tempLog(BslCallingModules.LOG, "detect.publish offset=" + result.offset()
+                + " primary=" + primary + " links=" + (result.links() == null ? 0 : result.links().length));
+            if (!text.isFocusControl())
+            {
+                Global.tempLog(BslCallingModules.LOG, "detect.publish.noFocus offset=" + result.offset());
+                return;
+            }
             relabelShownLinks(text, shown, result.links());
             TextEditorCtrlClickSelectWordHook.pokeHyperlinkManager(text);
         }
@@ -1648,8 +1796,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                 links = new IHyperlink[] { type };
             }
             IHyperlink[] result = multiple ? metadataLinks(viewer, links, source, page) : links.clone();
-            if (multiple)
-                result = callingModuleLinks(viewer, result, source, page);
             if (description != null)
             {
                 IHyperlink[] extended = java.util.Arrays.copyOf(result, result.length + 1);
@@ -1676,15 +1822,23 @@ public final class BslEditorHyperlinkHook implements IStartup
         public void dispose()
         {
             disposed = true;
-            generation++;
-            if (pendingJob != null)
-                pendingJob.cancel();
+            cancelPending();
             if (delegate instanceof IHyperlinkDetectorExtension extension)
                 extension.dispose();
         }
+
+        private void cancelPending()
+        {
+            generation++;
+            if (pendingJob != null)
+                pendingJob.cancel();
+            detected = null;
+            Global.tempLog(BslCallingModules.LOG, "detect.cancel generation=" + generation);
+        }
     }
 
-    private record DetectedLinks(long stamp, int offset, boolean multiple, IHyperlink[] links)
+    private record DetectedLinks(long stamp, int offset, boolean multiple, IHyperlink[] links,
+        CallingModuleContext context)
     {
         /**
          * Ссылки покрывают всё слово под указателем, а не одно смещение: указатель на другой
@@ -2068,6 +2222,21 @@ public final class BslEditorHyperlinkHook implements IStartup
         HistoryScope(IWorkbenchPage page, IEditorPart source)
         {
             this.page = page;
+            BslXtextEditor editor = GetRef.getActiveBslEditor(source);
+            ITextViewer viewer = editor == null ? null : editor.getInternalSourceViewer();
+            if (viewer != null)
+            {
+                if (Global.getField(viewer, "fHyperlinkDetectors") instanceof IHyperlinkDetector[] detectors)
+                    for (IHyperlinkDetector detector : detectors)
+                        if (detector instanceof HistoryDetector pending)
+                            pending.cancelPending();
+                // TextViewer.fHyperlinkManager и HyperlinkManager.deactivate() проверены
+                // в .tmp/bundles/jface-text/: скрывает presenter и сбрасывает fActive.
+                Object manager = Global.getField(viewer, "fHyperlinkManager");
+                Global.tempLog(BslCallingModules.LOG, "detect.navigate manager=" + (manager != null));
+                if (manager != null)
+                    Global.invoke(manager, "deactivate");
+            }
             history = page.getNavigationHistory();
             Global.tempLog("bsl-hyperlink-history", "begin source=" + describeEditor(source));
             if (history == null)

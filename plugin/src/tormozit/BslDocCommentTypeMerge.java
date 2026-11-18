@@ -99,11 +99,23 @@ public final class BslDocCommentTypeMerge
         TypeSystemTiming previous = TYPE_SYSTEM_TIMING.get();
         TypeSystemTiming current = new TypeSystemTiming();
         TYPE_SYSTEM_TIMING.set(current);
+        String context = "pid=" + ProcessHandle.current().pid() + " thread=" + Thread.currentThread().getName()
+            + " pass=" + Integer.toHexString(System.identityHashCode(current))
+            + " module=" + (module == null || module.eResource() == null ? "-" : module.eResource().getURI());
+        Global.tempLog("type-system-timing", "begin " + context);
         return () -> {
             if (previous == null)
                 TYPE_SYSTEM_TIMING.remove();
             else
                 TYPE_SYSTEM_TIMING.set(previous);
+            StringBuilder detail = new StringBuilder("end ").append(context)
+                .append(" elapsedMs=").append((System.nanoTime() - current.started) / 1_000_000L)
+                .append(" linkCalls=").append(current.linkCalls)
+                .append(" skippedLinks=").append(current.skippedLinks);
+            current.stages.forEach((stage, values) -> detail.append(" ").append(stage)
+                .append("={calls=").append(values[0]).append(",ms=")
+                .append(values[1] / 1_000_000L).append("}"));
+            Global.tempLog("type-system-timing", detail.toString());
         };
     }
 
