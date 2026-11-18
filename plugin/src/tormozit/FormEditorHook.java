@@ -1861,6 +1861,13 @@ public class FormEditorHook implements IStartup
                 && viewer.getTable() == table)
             {
                 FormCommandsIcons.handleUsageDoubleClick(e, page, viewer, table);
+                handleFormListDoubleClick(e, page, viewer, table);
+                return;
+            }
+            if (page != null && Global.getField(page, "parametersViewer") instanceof TableViewer viewer //$NON-NLS-1$
+                && viewer.getTable() == table)
+            {
+                handleFormListDoubleClick(e, page, viewer, table);
                 return;
             }
         }
@@ -1874,6 +1881,30 @@ public class FormEditorHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         display.asyncExec(FormEditorHook::runWysiwygDoubleClickActions);
+    }
+
+    /**
+     * Двойной клик по строке списка параметров/команд формы. Выделение строки уже ставит штатный
+     * клик; как и в навигаторе, остаётся только активировать панель «Свойства» после события UI —
+     * без подсовывания объекта и без повторных попыток.
+     */
+    private static void handleFormListDoubleClick(Event event, FormEditorPage page,
+        TableViewer viewer, org.eclipse.swt.widgets.Table table)
+    {
+        org.eclipse.swt.widgets.TableItem row = table.getItem(new Point(event.x, event.y));
+        if (row == null || row.isDisposed() || !(row.getData() instanceof EObject target))
+            return;
+        if (!(target instanceof FormParameter || target instanceof FormCommand))
+            return;
+        // Иконка использования команды обрабатывается FormCommandsIcons (штатный «Перейти»).
+        if (target instanceof FormCommand && table.getColumnCount() > 1
+            && row.getBounds(1).contains(event.x, event.y))
+            return;
+        event.doit = false;
+        Object selected = viewer.getStructuredSelection().getFirstElement();
+        if (!(selected instanceof EObject current) || !sameEObject(current, target))
+            viewer.setSelection(new StructuredSelection(row.getData()), false);
+        OpenHelperAttributePropertiesHook.scheduleActivateProperties();
     }
 
     /**

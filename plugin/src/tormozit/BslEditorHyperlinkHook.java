@@ -2204,11 +2204,33 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             Global.tempLog("bsl-hyperlink-history", "open delegate=" + delegate.getClass().getName()
                 + " target=" + (delegate instanceof XtextHyperlink link ? link.getURI() : delegate.getHyperlinkText()));
+            boolean formTarget = isFormTargetLink(delegate);
             try (HistoryScope scope = new HistoryScope(page, source))
             {
                 delegate.open();
                 scope.opened = true;
+                // Как двойной клик по реквизиту в навигаторе: EDT уже выделил строку в списке
+                // формы, остаётся только активировать панель «Свойства» после события UI.
+                if (formTarget)
+                    OpenHelperAttributePropertiesHook.scheduleActivateProperties();
             }
+        }
+
+        /**
+         * URI перехода внутри формы: {@code bm://…Form#/parameters:Имя},
+         * {@code #/formCommands:Имя}, {@code #/items:Группа/items:Элемент} или
+         * {@code #/attributes:Реквизит} (набор фрагментов EDT — BslBmReferenceFinder).
+         * EDT сам выделяет строку, остаётся активировать панель «Свойства».
+         */
+        private static boolean isFormTargetLink(IHyperlink link)
+        {
+            if (!(link instanceof XtextHyperlink xtext) || xtext.getURI() == null)
+                return false;
+            String fragment = xtext.getURI().fragment();
+            return fragment != null && (fragment.startsWith("/parameters:") //$NON-NLS-1$
+                || fragment.startsWith("/formCommands:") //$NON-NLS-1$
+                || fragment.startsWith("/items:") //$NON-NLS-1$
+                || fragment.startsWith("/attributes:")); //$NON-NLS-1$
         }
     }
 
