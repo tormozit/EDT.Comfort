@@ -323,10 +323,7 @@ public final class BslDocCommentTypeMerge
             // Поле без своей TypeSection EDT считает через getTypesFromLinkParts,
             // минуя computeTypes. Поэтому обрабатываем и готовые свойства формы.
             FormAttributeTypes.convertFormProperties(types, context);
-            if (!(section instanceof TypeSection typeSection)
-                || !(typeSection.getParent() instanceof TypeSection.FieldDefinition field)
-                || !(field.getParent() instanceof TypeSection.TypeDefinition owner)
-                || !FormAttributeTypes.isForm(owner.getTypeName()))
+            if (!(section instanceof TypeSection typeSection) || !isFormField(typeSection))
                 return types;
             return FormAttributeTypes.convert(types, context);
         }
@@ -334,6 +331,32 @@ public final class BslDocCommentTypeMerge
         {
             return types;
         }
+    }
+
+    /**
+     * Реквизит объявлен внутри определения типа формы. Тип формы может стоять не только в
+     * непосредственном родителе поля, но и выше — например, в объявлении параметра-владельца
+     * или за промежуточной структурой ({@code * Отчет - ОтчетОбъект} под
+     * {@code Форма - ФормаКлиентскогоПриложения}), поэтому цепочка родителей просматривается
+     * целиком.
+     */
+    private static boolean isFormField(TypeSection section)
+    {
+        Object part = section.getParent();
+        for (int depth = 0; part != null && depth < 16; depth++)
+        {
+            if (part instanceof TypeSection.TypeDefinition definition
+                && FormAttributeTypes.isForm(definition.getTypeName()))
+                return true;
+            // Поле-структура: определение формы — в типах его самого или владельца.
+            if (part instanceof TypeSection.FieldDefinition field)
+                for (TypeSection owner : field.getTypeSections())
+                    for (TypeSection.TypeDefinition definition : owner.getTypeDefinitions())
+                        if (FormAttributeTypes.isForm(definition.getTypeName()))
+                            return true;
+            part = Global.invoke(part, "getParent"); //$NON-NLS-1$
+        }
+        return false;
     }
 
     private static final class FormAttributeTypes

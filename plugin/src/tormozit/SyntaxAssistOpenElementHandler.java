@@ -122,7 +122,14 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
         }
         Object group = element != null ? BslSyntaxAssist.viewDocumentationPages(element) : null;
         List<?> rawPages = BslSyntaxAssist.pagesOf(group);
-        List<?> pages = rawPages.stream().filter(Objects::nonNull).toList();
+        List<?> filteredPages = rawPages.stream().filter(Objects::nonNull).toList();
+        // Страница-ошибка вместо статьи (составной тип без кодов документации): берём запасной
+        // источник — тот же, что у подсказки при наведении.
+        List<?> recoveredPages = filteredPages.isEmpty() || hasErrorPage(filteredPages)
+            ? element != null ? ParamHintHtmlModifier.collectRecoveredPages(element, element.eResource())
+                : List.of()
+            : List.of();
+        List<?> pages = recoveredPages.isEmpty() ? filteredPages : recoveredPages;
         String query = firstMeaningful(selected, BslSyntaxAssist.searchQueryOf(group),
             wordAt(document, offset));
         Global.tempLog(TEMP_TOPIC, "смещение " + offset + ", элемент=" //$NON-NLS-1$ //$NON-NLS-2$
@@ -159,6 +166,21 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
             BslSyntaxAssist.openViewPage(pages.get(0));
         else
             BslSyntaxAssist.openDescriptor(BslSyntaxAssist.pageGroupDescriptor(pages, query));
+    }
+
+    /** Среди страниц есть штатная страница-ошибка EDT ({@code ErrorBslDocumentationPage}). */
+    private static boolean hasErrorPage(List<?> pages)
+    {
+        for (Object page : pages)
+        {
+            if (page == null)
+                continue;
+            Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
+            if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
+                || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
+                return true;
+        }
+        return false;
     }
 
     private static String firstMeaningful(String... values)

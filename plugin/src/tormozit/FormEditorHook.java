@@ -472,6 +472,7 @@ public class FormEditorHook implements IStartup
         TabCounts.install();
         AttributesDrop.install();
         AttributesTypePresentation.install();
+        AttributesCopyText.install();
         ParametersTypePresentation.install();
         AttributeHeaderTooltips.install();
         AttributesExtraColumns.install();
@@ -7331,6 +7332,126 @@ public class FormEditorHook implements IStartup
             {
                 gc.dispose();
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Ctrl+C в таблице реквизитов формы: в буфер — видимое имя (AttributesCopyText)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Текстовая часть Ctrl+C в таблице «Реквизиты».
+     *
+     * <p>Штатный делегат копирования ({@code CopyAttributeDelegate#getDomainObjectsNames},
+     * декомпилировано, {@code com._1c.g5.v8.dt.form.internal.ui.copypaste}) кладёт в
+     * {@link TextTransfer} значение {@code PropertyInfo.getName()}. Колонка «Реквизит» при
+     * русском варианте скрипта показывает другое имя: {@code FormAttributesLabelProvider#getText}
+     * берёт {@code getNameRu()}. У стандартного реквизита отчёта в буфер попадало
+     * {@code SettingsComposer} вместо видимого «КомпоновщикНастроек» — текст буфера расходился
+     * с тем, что видно на экране.
+     *
+     * <p>Подменяем не обработчик, а только текстовый формат: после успешного выполнения команды
+     * {@code org.eclipse.ui.edit.copy} перезаписываем буфер прежним объектным содержимым
+     * ({@link FormElementTransfer}) и видимыми именами выделенных строк — вставка реквизита в
+     * другую форму продолжает работать. Приём тот же, что в
+     * {@code NavigatorCopyTextAugmentHook}. Штатный обработчик копирования таблицы реквизитов
+     * тоже не заменяется: его результат уже лежит в буфере к моменту {@code postExecuteSuccess}.
+     */
+    private static final class AttributesCopyText
+    {
+        private static final String COPY_COMMAND_ID = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
+
+        private static boolean installed;
+
+        static void install()
+        {
+            if (installed || PlatformUI.getWorkbench() == null)
+                return;
+            ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (commandService == null)
+                return;
+            commandService.addExecutionListener(new IExecutionListener()
+            {
+                @Override
+                public void preExecute(String commandId, ExecutionEvent event)
+                {
+                }
+
+                @Override
+                public void postExecuteSuccess(String commandId, Object returnValue)
+                {
+                    apply(commandId);
+                }
+
+                @Override
+                public void notHandled(String commandId, NotHandledException exception)
+                {
+                }
+
+                @Override
+                public void postExecuteFailure(String commandId, ExecutionException exception)
+                {
+                }
+            });
+            installed = true;
+        }
+
+        private static void apply(String commandId)
+        {
+            if (!COPY_COMMAND_ID.equals(commandId))
+                return;
+            Display display = Display.getCurrent();
+            if (display == null)
+                return;
+            FormEditorPage page = FormEditor.getActiveFormEditorPage();
+            Tree tree = page != null ? getAttributesTree(page) : null;
+            Control focus = display.getFocusControl();
+            String visible = tree != null && !tree.isDisposed() ? selectedText(tree) : null;
+
+            Clipboard clipboard = new Clipboard(display);
+            try
+            {
+                Object plainText = clipboard.getContents(TextTransfer.getInstance());
+                Object formElements = clipboard.getContents(FormElementTransfer.getInstance());
+                if (tree == null || tree.isDisposed() || focus != tree
+                    || visible == null || visible.isEmpty() || visible.equals(plainText))
+                    return;
+                if (formElements != null)
+                {
+                    clipboard.setContents(new Object[] {formElements, visible},
+                        new Transfer[] {FormElementTransfer.getInstance(), TextTransfer.getInstance()});
+                }
+                else
+                {
+                    clipboard.setContents(new Object[] {visible},
+                        new Transfer[] {TextTransfer.getInstance()});
+                }
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        /** Видимые имена выделенных строк — то, что показано в колонке «Реквизит». */
+        private static String selectedText(Tree tree)
+        {
+            TreeItem[] selection = tree.getSelection();
+            if (selection == null || selection.length == 0)
+                return null;
+            StringBuilder text = new StringBuilder();
+            for (TreeItem item : selection)
+            {
+                if (item == null || item.isDisposed())
+                    continue;
+                String name = item.getText(0);
+                if (name == null || name.isEmpty())
+                    continue;
+                if (text.length() > 0)
+                    text.append('\n');
+                text.append(name);
+            }
+            return text.toString();
         }
     }
 

@@ -1405,19 +1405,50 @@ public final class ParamHintHtmlModifier
     /** Один запасной источник страниц для боковой подсказки и подсказки при наведении. */
     static Object recoverMemberDocumentation(Object input, EObject source, Resource contextResource)
     {
-        Global.tempLog("member-documentation", "recovery source=" + source //$NON-NLS-1$ //$NON-NLS-2$
-            + " resource=" + (contextResource != null ? contextResource.getURI() : null)); //$NON-NLS-1$
         if (source == null || !needsMemberDocumentationRecovery(input))
             return input;
         Object group = Global.getField(input, "pageGroup"); //$NON-NLS-1$
         try
         {
+            List<Object> recovered = collectRecoveredPages(source, contextResource);
+            if (recovered.isEmpty())
+            {
+                return input;
+            }
+            // Конструктор группы и setIndex подтверждены в bsl-ui/*.javap.txt.
+            Object replacement = group.getClass().getConstructor(List.class, String.class)
+                .newInstance(recovered, BslSyntaxAssist.searchQueryOf(group));
+            Global.setFieldForce(input, "pageGroup", replacement); //$NON-NLS-1$
+            Global.invoke(input, "setIndex", Integer.valueOf(0)); //$NON-NLS-1$
+            Global.tempLog("member-documentation", "replaced pages=" + recovered.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception | LinkageError ex)
+        {
+            Global.tempLogException("member-documentation", "recovery", ex); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return input;
+    }
+
+    /**
+     * Страницы членов выражения (или поля структуры): общий запасной сбор для подсказки при
+     * наведении, боковой подсказки и Синтакс-помощника. Пустой список — ничего не нашлось.
+     */
+    static List<Object> collectRecoveredPages(EObject source, Resource contextResource)
+    {
+        List<Object> recovered = new ArrayList<>();
+        try
+        {
+            Global.tempLog("member-documentation", "recovery source=" + source //$NON-NLS-1$ //$NON-NLS-2$
+                + " resource=" + (contextResource != null ? contextResource.getURI() : null)); //$NON-NLS-1$
+            if (source == null)
+                return recovered;
             List<EObject> members = new ArrayList<>();
             collectDocumentationMembers(source, members);
             Global.tempLog("member-documentation", "members=" + members); //$NON-NLS-1$ //$NON-NLS-2$
             Object provider = BslSyntaxAssist.documentationProvider();
             String language = BslSyntaxAssist.language();
-            List<Object> recovered = new ArrayList<>();
+            if (provider == null)
+                return recovered;
             if (contextResource == null)
                 contextResource = source instanceof ProposalElement proposal && proposal.getModel() != null
                     ? proposal.getModel().eResource() : source.eResource();
@@ -1439,25 +1470,15 @@ public final class ParamHintHtmlModifier
                 Global.tempLog("member-documentation", "member=" + member //$NON-NLS-1$ //$NON-NLS-2$
                     + " recoveredPages=" + memberPages.size()); //$NON-NLS-1$
                 if (memberPages.isEmpty())
-                    return input;
+                    return List.of();
                 recovered.addAll(memberPages);
             }
-            if (recovered.isEmpty())
-            {
-                return input;
-            }
-            // Конструктор группы и setIndex подтверждены в bsl-ui/*.javap.txt.
-            Object replacement = group.getClass().getConstructor(List.class, String.class)
-                .newInstance(recovered, BslSyntaxAssist.searchQueryOf(group));
-            Global.setFieldForce(input, "pageGroup", replacement); //$NON-NLS-1$
-            Global.invoke(input, "setIndex", Integer.valueOf(0)); //$NON-NLS-1$
-            Global.tempLog("member-documentation", "replaced pages=" + recovered.size()); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | LinkageError ex)
         {
             Global.tempLogException("member-documentation", "recovery", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        return input;
+        return recovered;
     }
 
     /** Копии платформенных свойств и вычисленные колонки; исходную модель не меняем. */
@@ -1484,6 +1505,18 @@ public final class ParamHintHtmlModifier
                 pages.add(page);
             }
             return pages;
+        }
+        // Составной платформенный тип (ОтчетОбъект) кодов документации не имеет, поэтому у его
+        // свойства страницы нет. BslFormDataTypes подставляет свойство именованного двойника
+        // (ОтчетОбъектИмяОтчета), где коды есть.
+        com._1c.g5.v8.dt.mcore.Property documented = BslFormDataTypes.documentationProperty(property,
+            contextResource != null && !contextResource.getContents().isEmpty()
+                ? contextResource.getContents().get(0) : null);
+        if (documented != property)
+        {
+            List<Object> pages = pagesOfProperty(provider, documented, language);
+            if (!pages.isEmpty())
+                return pages;
         }
         if (owner == null || owner.getCode() != -1 || contextResource == null
             || property instanceof com._1c.g5.v8.dt.mcore.DerivedProperty)
@@ -1528,6 +1561,28 @@ public final class ParamHintHtmlModifier
             Global.tempLogException("member-documentation", "property recovery", ex); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return List.of();
+    }
+
+    /**
+     * Страницы свойства без страницы-ошибки; пусто — документация по этому свойству не нашлась.
+     * Общий фильтр для подстановленного свойства и для найденного кандидата.
+     */
+    private static List<Object> pagesOfProperty(Object provider, com._1c.g5.v8.dt.mcore.Property property,
+        String language)
+    {
+        List<Object> pages = new ArrayList<>();
+        for (Object page : BslSyntaxAssist.pagesOf(Global.invoke(provider, "getHoverDocumentationPages", //$NON-NLS-1$
+            property, language)))
+        {
+            if (page == null)
+                return List.of();
+            Object view = Global.invoke(page, "getViewPage"); //$NON-NLS-1$
+            if (page.getClass().getName().endsWith(".ErrorBslDocumentationPage") //$NON-NLS-1$
+                || view != null && view.getClass().getName().endsWith(".ErrorBslDocumentationPage")) //$NON-NLS-1$
+                return List.of();
+            pages.add(page);
+        }
+        return pages;
     }
 
     /**

@@ -3230,11 +3230,15 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
-     * Сужение типа выражения с точкой условием {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000).
+     * Сужение типа выражения с точкой условием {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000) и таким же
+     * условием тернарного оператора {@code ?(ТипЗнч(А.Б) = Тип("Х"), А.Б.Член(), …)}.
      * EDT сужает так только переменную ({@code CreatorTreeState.createTypesByPredicates}: тип из
      * {@code typeScope} по имени, разделённому точками); для {@code А.Б} внутри ветки берём тот же тип вместо
      * вычисленных. Сравнение связано с корнем условия только через «И»; присваивание пути, его начала
      * или корневой переменной в ветке до обращения сужение отменяет.
+     * <p>Тернарный оператор в модели — {@link Invocation} с именем метода {@code "?"} и тремя параметрами:
+     * условие, ветка «Тогда», ветка «Иначе». Сужается только вторая — как ветка «Тогда»: ветку «Иначе»
+     * не сужает и {@code Если} (исключение типа из набора — отдельное поведение EDT, здесь не повторяется).
      */
     private static final class TypeOfBranchNarrowing
     {
@@ -3252,6 +3256,13 @@ public final class BslStructureInsertCommentTypes
                         if (typeName != null)
                             return narrowed(types, access, branch, typeName);
                     }
+                    else if (container instanceof Invocation ternary && isTernary(ternary)
+                        && ternary.getParams().get(1) == child)
+                    {
+                        String typeName = typeNameFor(ternary.getParams().get(0), access);
+                        if (typeName != null)
+                            return narrowed(types, access, null, typeName);
+                    }
                     child = container;
                 }
             }
@@ -3261,10 +3272,20 @@ public final class BslStructureInsertCommentTypes
             return types;
         }
 
+        /** Тернарный оператор {@code ?(условие, тогда, иначе)} — {@link Invocation} с методом {@code "?"}. */
+        private static boolean isTernary(Invocation invocation)
+        {
+            return invocation.getParams().size() == 3
+                && invocation.getMethodAccess() instanceof StaticFeatureAccess method
+                && "?".equals(method.getName()); //$NON-NLS-1$
+        }
+
+        /** @param branch ветка {@code Если} либо {@code null} — ветка «Тогда» тернарного оператора */
         private static List<TypeItem> narrowed(List<TypeItem> types, DynamicFeatureAccess access,
             com._1c.g5.v8.dt.bsl.model.Conditional branch, String typeName)
         {
-            if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(access) || reassigned(branch, access))
+            if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(access)
+                || branch != null && reassigned(branch, access))
                 return types;
             TypeItem type = typeByName(access, typeName);
             return type == null ? types : List.of(type);

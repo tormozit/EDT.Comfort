@@ -26,6 +26,8 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * Постоянный список контекстов проверок, отложенных шлюзом пересчёта раннего бандла, по проектам.
  * Переживает закрытие уведомления и перезапуск EDT. Контекст снимается со списка, когда шлюз его
  * пропустил ({@link #passed}): правка открытого объекта, ручной запуск, «Запустить» отложенного.
+ * Общий пересчёт проверок проекта проверяет все объекты, поэтому снимает список целиком
+ * ({@link #clear(IProject)}).
  *
  * <p>Элемент для пересчёта — {@code {идентификатор объекта, EClass, сегмент, класс контекста}}
  * ({@link ComfortCheckRecompute#recomputeContexts}); ключ — {@code «сегмент\nидентификатор»}, как в шлюзе.
@@ -107,6 +109,22 @@ public final class DeferredCheckContexts
         Map<String, Entry> stored = load(workspaceProject.getName());
         if (!stored.isEmpty() && stored.remove(String.valueOf(key)) != null)
             changed(workspaceProject.getName());
+    }
+
+    /**
+     * Снять все пометки проекта: общий пересчёт проверок проекта уже проверяет каждый его объект.
+     * Идущие пересчёты отложенного доработают сами — их записи к тому времени уже удалены.
+     */
+    public static void clear(IProject project)
+    {
+        if (project == null)
+            return;
+        Map<String, Entry> stored = load(project.getName());
+        if (!stored.isEmpty())
+        {
+            stored.clear();
+            changed(project.getName());
+        }
     }
 
     /** Сколько объектов отложено во всех проектах. */

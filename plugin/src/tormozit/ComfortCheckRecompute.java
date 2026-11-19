@@ -141,7 +141,8 @@ public final class ComfortCheckRecompute
      * ничего. Поэтому зовём штатный планировщик так же, как это делает команда ЕДТ «Запустить
      * проверку»: {@code ICheckScheduler.scheduleValidation} с пустыми наборами проверок и
      * объектов — при пустом наборе объектов он уходит в {@code scheduleScopedFullRebuild},
-     * то есть полную перепроверку проекта.
+     * то есть полную перепроверку проекта. Проверка покрывает все отложенные объекты, поэтому
+     * их накопленные пометки снимаются ({@link DeferredCheckContexts#clear}).
      *
      * @param project проект; {@code null} — ничего не делать
      */
@@ -211,6 +212,9 @@ public final class ComfortCheckRecompute
             {
                 Debug.log("проверка проекта: планировщик вызван"); //$NON-NLS-1$
                 scheduler.scheduleValidation(project, checkIds, List.of(), monitor);
+                // Полная проверка проекта покрывает все отложенные объекты: пометки снимаются
+                if (checkIds.isEmpty())
+                    DeferredCheckContexts.clear(project);
                 Debug.log("проверка проекта: планировщик отработал, ждём завершения"); //$NON-NLS-1$
                 // Ход расчёта показывает штатный индикатор EDT; ожидание конца — ради уведомления, в «Состоянии» его не видно
                 Job wait = Job.create(jobTitle + ": ожидание завершения", waitMonitor -> //$NON-NLS-1$

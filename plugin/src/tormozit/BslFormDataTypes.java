@@ -50,6 +50,9 @@ public final class BslFormDataTypes
     private static final String ITEM = "Lcom/_1c/g5/v8/dt/mcore/TypeItem;"; //$NON-NLS-1$
     private static final String BASE_ATTRIBUTE = "data-comfort-form-base"; //$NON-NLS-1$
     private static final Pattern BASE_TYPE = Pattern.compile(BASE_ATTRIBUTE + "=\"([^\"]+)\""); //$NON-NLS-1$
+    /** Именованные двойники составных типов: у них есть коды документации. */
+    private static final Map<String, String> DOCUMENTATION_TWINS =
+        Map.of("ReportObject", "ReportObjectReportName"); //$NON-NLS-1$ //$NON-NLS-2$
     private static final AtomicBoolean weavingInstalled = new AtomicBoolean();
     private static final AtomicBoolean transformerInstalled = new AtomicBoolean();
     // Значения содержат только строки, не удерживают модель проекта через слабый ключ.
@@ -257,8 +260,15 @@ public final class BslFormDataTypes
     public static Property documentationProperty(Property property, EObject context)
     {
         Property original = PROPERTY_DOCUMENTATION.getOrDefault(property, property);
-        if (original == property && property.getCode() == -1)
-            original = formAttributeDocumentationProperty(property, context);
+        if (original.getCode() == -1)
+        {
+            Property resolved = original == property
+                ? formAttributeDocumentationProperty(property, context) : original;
+            if (resolved == original || resolved == null)
+                resolved = codedTwinDocumentationProperty(original, context);
+            if (resolved != null)
+                original = resolved;
+        }
         Map<String, TypeItem> contents = contentTypes(original, context);
         if (contents.isEmpty())
             return original;
@@ -278,6 +288,47 @@ public final class BslFormDataTypes
         }
         copy.setTypeContainer(container);
         return copy;
+    }
+
+    /**
+     * Составной платформенный тип ({@code ReportObject} — ОтчетОбъект) собственных кодов
+     * документации не имеет: они у его именованного двойника ({@code ReportObjectReportName} —
+     * ОтчетОбъектИмяОтчета). Свойство двойника с тем же именем и есть страница документации.
+     */
+    private static Property codedTwinDocumentationProperty(Property property, EObject context)
+    {
+        try
+        {
+            var owner = org.eclipse.xtext.EcoreUtil2.getContainerOfType(property,
+                com._1c.g5.v8.dt.mcore.Type.class);
+            String twinName = owner != null && owner.getCode() == -1
+                ? DOCUMENTATION_TWINS.get(owner.getName()) : null;
+            if (twinName == null)
+                return null;
+            Object provider = BslSyntaxAssist.documentationProvider();
+            Object resource = context != null && context.eResource() != null ? context.eResource()
+                : property.eResource();
+            if (provider == null || resource == null)
+                return null;
+            Object template = Global.invoke(provider, "getTypeItemByName", twinName, resource); //$NON-NLS-1$
+            if (template instanceof EObject object && object.eIsProxy())
+                template = EcoreUtil.resolve(object, (Resource)resource);
+            if (!(template instanceof com._1c.g5.v8.dt.mcore.Type twin) || twin.getContextDef() == null
+                || twin.getCode() <= 0)
+                return null;
+            for (Property candidate : twin.getContextDef().allProperties())
+            {
+                if (candidate.getCode() == -1 || !java.util.Objects.equals(property.getName(), candidate.getName()))
+                    continue;
+                PROPERTY_DOCUMENTATION.put(property, candidate);
+                return candidate;
+            }
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            // Остаётся штатная страница: подстановка только улучшает её.
+        }
+        return null;
     }
 
     /** Сохранённый контекст настоящей формы мог быть рассчитан до установки хука конвертера. */
