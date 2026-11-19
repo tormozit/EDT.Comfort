@@ -1,6 +1,7 @@
 package tormozit.checks;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -9,8 +10,12 @@ import java.util.Set;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.emf.common.util.TreeIterator;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.EcoreFactory;
+import org.eclipse.emf.ecore.InternalEObject;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.resource.XtextResource;
@@ -19,6 +24,7 @@ import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
 import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefProperty;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
@@ -58,6 +64,7 @@ import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
 import tormozit.FormItemTypes;
+import tormozit.Global;
 import tormozit.TypeDescriptionPresentationHook;
 
 /**
@@ -84,6 +91,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 + "Единственный ожидаемый тип Неопределено допускает любое значение; "
                 + "вместе с конкретными типами он разрешает также значение Неопределено. "
                 + "Ожидаемый тип Строка допускает значение любого типа. "
+                + "Строковое значение можно присваивать и передавать параметрам типа Число: платформа преобразует его автоматически. "
                 + "Значение Неопределено можно присваивать и передавать параметрам любого типа. "
                 + "Значение типа-расширения (например, РасширениеТаблицыФормыДляДинамическогоСписка) "
                 + "совместимо с его базовым типом (ТаблицаФормы), значение типа-наследника "
@@ -130,6 +138,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
          */
         private final Map<com._1c.g5.v8.dt.bsl.model.FormalParam, List<TypeItem>> documentedParameters =
             new IdentityHashMap<>();
+        /** Исходные BSL-методы экспортных методов модулей по URI: разрешение грузит модуль вызываемого метода. */
+        private final Map<URI, com._1c.g5.v8.dt.bsl.model.Method> sourceMethods = new HashMap<>();
 
         Session(XtextResource resource, ResultAcceptor acceptor)
         {
@@ -260,6 +270,41 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             return declared;
         }
 
+        /**
+         * Исходный BSL-метод экспортного метода модуля: {@code BslContextDefMethod} не хранит типы
+         * параметров, а его {@code sourceUri} указывает на метод в модуле, где есть документирующий
+         * комментарий. Разрешение грузит модуль, поэтому запоминается на одну проверку.
+         */
+        private com._1c.g5.v8.dt.bsl.model.Method sourceMethod(BslContextDefMethod exported, EObject context)
+        {
+            URI uri = exported.getSourceUri();
+            if (uri == null)
+                return null;
+            Resource contextResource = context.eResource();
+            if (uri.isRelative() && contextResource != null)
+                uri = uri.resolve(contextResource.getURI());
+            if (sourceMethods.containsKey(uri))
+                return sourceMethods.get(uri);
+            com._1c.g5.v8.dt.bsl.model.Method method = null;
+            EObject proxy = EcoreFactory.eINSTANCE.createEObject();
+            ((InternalEObject)proxy).eSetProxyURI(uri);
+            try
+            {
+                if (EcoreUtil.resolve(proxy, context) instanceof com._1c.g5.v8.dt.bsl.model.Method resolved
+                    && !resolved.eIsProxy())
+                    method = resolved;
+            }
+            catch (RuntimeException error)
+            {
+                // Контекст модели недоступен: вызов остаётся непроверенным, как и раньше.
+                Global.tempLogException("value-type-source-method", "resolve uri=" + uri, error); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            Global.tempLog("value-type-source-method", "uri=" + uri //$NON-NLS-1$ //$NON-NLS-2$
+                + " method=" + (method == null ? "null" : method.getName())); //$NON-NLS-1$ //$NON-NLS-2$
+            sourceMethods.put(uri, method);
+            return method;
+        }
+
         private void checkInvocation(Invocation invocation, Environments envs)
         {
             FeatureAccess access = invocation.getMethodAccess();
@@ -272,13 +317,21 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             // Параметр необязателен хотя бы в одной подходящей сигнатуре: Неопределено — его пропуск.
             boolean[] optional = new boolean[invocation.getParams().size()];
             boolean[] unrestricted = new boolean[invocation.getParams().size()];
-            boolean[] documentedInput = new boolean[invocation.getParams().size()];
             boolean methodFound = false;
             for (FeatureEntry entry : entries(access, envs))
             {
                 if (!envs.containsAny(entry.getEnvironments()))
                     continue;
-                if (entry.getFeature() instanceof com._1c.g5.v8.dt.bsl.model.Method local)
+                EObject feature = entry.getFeature();
+                // Экспортный метод модуля приходит методом его контекста и не хранит типы параметров:
+                // берём их из документации исходного метода модуля.
+                if (feature instanceof BslContextDefMethod exported)
+                {
+                    com._1c.g5.v8.dt.bsl.model.Method source = sourceMethod(exported, invocation);
+                    if (source != null)
+                        feature = source;
+                }
+                if (feature instanceof com._1c.g5.v8.dt.bsl.model.Method local)
                 {
                     int count = invocation.getParams().size();
                     if (local.eIsProxy() || count > local.getFormalParams().size())
@@ -296,16 +349,13 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                             || resolved.stream().allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
                         if (declared != null)
                             expected.get(i).addAll(declared);
-                        // Передача без Знач допускает изменение аргумента, но его входной
-                        // тип всё равно должен соответствовать документирующему комментарию.
-                        documentedInput[i] = true;
                         optional[i] |= parameter.getDefaultValue() != null;
                     }
                     continue;
                 }
                 // Все варианты родительского типа участвуют в одной проверке аргумента,
                 // включая методы модулей: несовместимость одного варианта недостаточна.
-                if (!(entry.getFeature() instanceof Method method) || method.eIsProxy())
+                if (!(feature instanceof Method method) || method.eIsProxy())
                     return;
                 methodFound = true;
                 boolean matching = false;
@@ -319,7 +369,10 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     {
                         var parameter = set.getParams().get(i);
                         List<TypeItem> parameterTypes = resolve(parameter.getType(), invocation);
-                        unrestricted[i] |= parameter.isOut() || parameterTypes == null || parameterTypes.isEmpty()
+                        // В модели платформы out=true у всех параметров, включая входные,
+                        // поэтому направление не учитываем: иначе аргументы платформы
+                        // не проверяются вовсе.
+                        unrestricted[i] |= parameterTypes == null || parameterTypes.isEmpty()
                             || parameterTypes.stream()
                                 .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item))); //$NON-NLS-1$
                         expected.get(i).addAll(parameter.getType());
@@ -336,15 +389,12 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 return;
             for (int i = 0; i < expected.size(); i++)
             {
-                // EDT помечает значение УстановитьЗначение как out. Ограничение выбранного поля
-                // проверяем до общего пропуска выходных параметров, сохраняя типы сигнатуры.
+                // EDT помечает значение УстановитьЗначение как out: ограничение выбранного
+                // поля проверяем отдельно, сохраняя типы сигнатуры.
                 if (i == 1 && checkDataLockValue(invocation, envs, expected.get(i)))
                     continue;
-                if (!unrestricted[i]
-                    && (documentedInput[i] || !BslForEachCollectionCheck.isOutputArgument(invocation, i)))
-                {
+                if (!unrestricted[i])
                     checkValue(invocation.getParams().get(i), expected.get(i), envs, true, optional[i]);
-                }
             }
         }
 
@@ -450,6 +500,9 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             if (hasType(concreteExpected, "String")) //$NON-NLS-1$
                 return;
             if (hasType(concreteExpected, "Arbitrary")) //$NON-NLS-1$
+                return;
+            // Строковое значение платформа автоматически преобразует в число.
+            if (hasType(concreteExpected, "Number") && hasType(concreteActual, "String")) //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             if (!concreteExpected.isEmpty() && !concreteActual.isEmpty())
             {

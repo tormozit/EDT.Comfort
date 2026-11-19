@@ -1579,7 +1579,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             Object settings = Global.getField(panel, "currentFilterSettings"); //$NON-NLS-1$
             if (settings == null)
                 settings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
-            List<String> paths = collectStaticMarkPaths(dialog, viewer);
+            List<String> paths = collectStaticMarkPaths(dialog, panel, viewer);
             boolean blacklist = resolveBlacklistFromDialog(dialog, panel, settings);
             boolean includeSub = settings != null && Boolean.TRUE.equals(Global.invoke(settings,
                     "isIncludeObjectsFromSubordinateSubsystems")); //$NON-NLS-1$
@@ -1615,14 +1615,70 @@ public final class FilterBySubsystemsDialogHook implements IStartup
      * Статические (не серые) пометки → полные пути в дереве.
      * Корень: {@link IDtProject#getName()} или {@link #PRESET_OTHER_ROOT} для стороны коммита.
      */
-    private static List<String> collectStaticMarkPaths(Object dialog, CheckboxTreeViewer viewer)
+    private static List<String> collectStaticMarkPaths(
+            Object dialog, Object panel, CheckboxTreeViewer viewer)
     {
         List<String> paths = new ArrayList<>();
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return paths;
         collectStaticMarkPathsRec(dialog, viewer, tree.getItems(), paths);
+        collectHiddenMarkPaths(dialog, panel, viewer, paths);
         return paths;
+    }
+
+    /**
+     * Пометки из свёрнутых веток: обход {@link TreeItem} их не видит, поэтому пресет
+     * получался пустым, хотя в диалоге стояли галочки. Читаем настройки диалога —
+     * состояние сравнения конфигураций при этом не меняется (до нажатия ОК).
+     */
+    private static void collectHiddenMarkPaths(Object dialog, Object panel,
+            CheckboxTreeViewer viewer, List<String> paths)
+    {
+        Object settings = Global.getField(panel, "currentFilterSettings"); //$NON-NLS-1$
+        if (settings == null)
+            settings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
+        Object manager = Global.getField(panel, "filterBySubsystemsManager"); //$NON-NLS-1$
+        if (settings == null || manager == null || viewer.getTree() == null
+                || viewer.getTree().isDisposed()
+                || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+            return;
+        for (TreeItem rootItem : viewer.getTree().getItems())
+        {
+            IDtProject rootDt = toDtProjectElement(rootItem != null ? rootItem.getData() : null);
+            if (rootDt == null)
+                continue;
+            Object subsObj = Global.invoke(manager, "getCheckedSubsystems", settings, rootDt); //$NON-NLS-1$
+            if (!(subsObj instanceof Set<?> subs))
+                continue;
+            for (Object subsystem : subs)
+            {
+                if (subsystem == null || viewer.getChecked(subsystem))
+                    continue;
+                String path = buildMarkPathFromModel(dialog, provider, rootDt, subsystem);
+                if (path != null && !path.isEmpty() && !paths.contains(path))
+                    paths.add(path);
+            }
+        }
+    }
+
+    private static String buildMarkPathFromModel(Object dialog, ITreeContentProvider provider,
+            IDtProject rootDt, Object element)
+    {
+        List<String> segments = new ArrayList<>();
+        Object current = element;
+        for (int depth = 0; depth < 64 && current != null; depth++)
+        {
+            Object name = Global.invoke(current, "getName"); //$NON-NLS-1$
+            segments.add(0, name instanceof String text ? text : String.valueOf(current));
+            if (current == rootDt || toDtProjectElement(current) != null)
+            {
+                segments.set(0, rootKeyForPreset(dialog, rootDt));
+                return String.join(".", segments); //$NON-NLS-1$
+            }
+            current = provider.getParent(current);
+        }
+        return null;
     }
 
     private static void collectStaticMarkPathsRec(
@@ -1742,7 +1798,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                     "Состояние «" + name + "» повреждено или пусто."); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        int applied = applyStaticMarkPaths(dialog, panel, viewer, snap);
+        applyStaticMarkPaths(dialog, panel, viewer, snap);
     }
 
     /**
@@ -1759,19 +1815,19 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (settings == null)
             settings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
         Object dialogSettings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
+
         clearCompareSideMarkLists(dialog);
         clearViewerMarkCaches(panel, viewer);
         if (settings != null)
             clearAllMarksInSettings(settings);
-        if (dialogSettings != null && dialogSettings != settings)
-            clearAllMarksInSettings(dialogSettings);
         if (viewer != null && viewer.getTree() != null && !viewer.getTree().isDisposed())
             resetAllTreeItemChecks(viewer.getTree());
 
+        // Пишем только в рабочую копию диалога (currentFilterSettings). filterSettings
+        // сравнения не трогаем — он применится по ОК через installCompareOkSaveGuard.
         applyIncludeFlagsQuiet(panel, settings, snap.includeSub, snap.includeParent);
-        if (dialogSettings != null && dialogSettings != settings)
-            applyIncludeFlagsQuiet(panel, dialogSettings, snap.includeSub, snap.includeParent);
-        setBlacklistModeOnDialog(dialog, snap.blacklist);
+        if (settings != null)
+            setBlacklistMode(settings, snap.blacklist);
 
         int applied = 0;
         if (viewer != null && viewer.getTree() != null && !viewer.getTree().isDisposed())
@@ -1800,8 +1856,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                         while (rootItem != null && !rootItem.isDisposed()
                                 && rootItem.getParentItem() != null)
                             rootItem = rootItem.getParentItem();
-                        Object rootData = rootItem != null && !rootItem.isDisposed()
-                                ? rootItem.getData() : null;
                         continue;
                     }
                     // Голый корень (Конфигурация / OTHER) — не статика подсистем.
@@ -1816,8 +1870,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
 
                     if (settings != null)
                         applyElementMarkWithRoot(settings, rootDt, element);
-                    if (dialogSettings != null && dialogSettings != settings)
-                        applyElementMarkWithRoot(dialogSettings, rootDt, element);
 
                     item.setChecked(true);
                     item.setGrayed(false);
@@ -1837,8 +1889,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             // setSubtreeCheckGrayed — секунды и раскрытие узлов на больших конфигурациях.
             uncheckTreeRoots(viewer);
             clearProjectFullChecks(settings);
-            if (dialogSettings != null && dialogSettings != settings)
-                clearProjectFullChecks(dialogSettings);
             markStaticAncestorsPartial(viewer);
             forcePartialRootMarks(viewer, settings);
         }

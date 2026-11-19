@@ -1237,6 +1237,25 @@ public class FormEditorHook implements IStartup
     }
 
     /**
+     * Shell сайта части или {@code null}, если часть уже закрыта.
+     *
+     * <p>Сайт закрытой части остаётся не-null, поэтому проверка {@code site != null} закрытие не
+     * отсекает, а {@code getShell()} на таком сайте бросает {@link IllegalStateException} «was
+     * called after part disposal» и пишет его в системный лог. {@code PartSite.dispose()} обнуляет
+     * {@code part} и {@code workbenchWindow}; у сайта страницы редактора формы
+     * ({@code MultiPageEditorSite}) {@code getPage()} делегируется наружу и тоже даёт {@code null}.
+     * Отложенный вызов (timerExec/asyncExec) обязан проверять живость через этот метод, а не через
+     * {@code getSite() != null} и не через {@code getSite().getShell()}.
+     */
+    private static Shell aliveShell(IWorkbenchPartSite site)
+    {
+        if (site == null || site.getPart() == null || site.getPage() == null)
+            return null;
+        Shell shell = site.getShell();
+        return shell != null && !shell.isDisposed() ? shell : null;
+    }
+
+    /**
      * Открывает форму, выделяет текущий объект метаданных в дереве реквизитов тем же способом,
      * что и перетаскивание из навигатора, и выполняет штатную команду «Перейти». Вызывается
      * двойным кликом по колонке основной формы в редакторе объекта метаданных.
@@ -1509,7 +1528,10 @@ public class FormEditorHook implements IStartup
     /** Выделение доходит до группы действий асинхронно; вызываем «Перейти» реквизита формы. */
     private static void runExternalAttributeGoTo(FormEditorPage page, int generation, int attempt)
     {
-        if (generation != externalGoToGeneration || page == null || page.getSite() == null)
+        if (generation != externalGoToGeneration || page == null)
+            return;
+        Shell shell = aliveShell(page.getSite());
+        if (shell == null)
             return;
         Object group = Global.getField(page, "attributeActionsGroup"); //$NON-NLS-1$
         if (group != null)
@@ -1522,7 +1544,7 @@ public class FormEditorHook implements IStartup
         {
             return;
         }
-        page.getSite().getShell().getDisplay().timerExec(EXTERNAL_GO_TO_RETRY_MS,
+        shell.getDisplay().timerExec(EXTERNAL_GO_TO_RETRY_MS,
             () -> runExternalAttributeGoTo(page, generation, attempt + 1));
     }
 
@@ -4994,16 +5016,18 @@ public class FormEditorHook implements IStartup
 
         private static void attach(FormEditor editor, int attempt)
         {
+            Shell shell = aliveShell(editor.getSite());
+            if (shell == null)
+                return;
             FormEditorPage page = findFormPage(editor);
             boolean commandsReady = attachGroup(page, "formCommandsActionsGroup"); //$NON-NLS-1$
             boolean itemsReady = attachGroup(page, "itemsActionsGroup"); //$NON-NLS-1$
-            if ((!commandsReady || !itemsReady) && attempt < 100 && editor.getSite() != null)
-            {
-                editor.getSite().getShell().getDisplay().timerExec(200, () -> {
-                    if (editor.getSite() != null && !editor.getSite().getShell().isDisposed())
-                        attach(editor, attempt + 1);
-                });
-            }
+            if ((commandsReady && itemsReady) || attempt >= 100)
+                return;
+            shell.getDisplay().timerExec(200, () -> {
+                if (!shell.isDisposed())
+                    attach(editor, attempt + 1);
+            });
         }
 
         private static boolean attachGroup(FormEditorPage page, String field)
@@ -5083,7 +5107,7 @@ public class FormEditorHook implements IStartup
                 queueInsertedSelection(page, inserted.values());
                 if (!inserted.isEmpty())
                     page.getSite().getShell().getDisplay().asyncExec(() -> {
-                        if (page.getSite() == null || page.getSite().getShell().isDisposed())
+                        if (aliveShell(page.getSite()) == null)
                             return;
                         selectInserted(page, inserted.values(), false);
                         if (!handlers.isEmpty())
@@ -5118,7 +5142,7 @@ public class FormEditorHook implements IStartup
 
         private static void selectInserted(FormEditorPage page, Collection<EObject> inserted, boolean restorePage)
         {
-            if (page.getSite() == null || page.getSite().getShell().isDisposed())
+            if (aliveShell(page.getSite()) == null)
                 return;
             if (restorePage)
             {
@@ -5203,8 +5227,8 @@ public class FormEditorHook implements IStartup
 
         private static void offerHandlers(FormEditorPage page, Map<Form, Set<String>> handlers)
         {
-            Shell shell = page.getSite() != null ? page.getSite().getShell() : null;
-            if (shell == null || shell.isDisposed())
+            Shell shell = aliveShell(page.getSite());
+            if (shell == null)
                 return;
             String title = Global.withPluginWindowTitle("Перенос обработчиков");
             if (!MessageDialog.openQuestion(shell, title,

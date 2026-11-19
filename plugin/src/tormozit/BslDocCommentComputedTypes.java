@@ -53,17 +53,20 @@ import com._1c.g5.v8.dt.bsl.model.Conditional;
 import com._1c.g5.v8.dt.bsl.model.IfStatement;
 import com._1c.g5.v8.dt.bsl.model.IfPreprocessor;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.LoopStatement;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.PreprocessorConditional;
 import com._1c.g5.v8.dt.bsl.model.PreprocessorExpression;
 import com._1c.g5.v8.dt.bsl.model.PreprocessorIfConditional;
+import com._1c.g5.v8.dt.bsl.model.PreprocessorItemStatements;
 import com._1c.g5.v8.dt.bsl.model.PreprocessorLiteralExpression;
 import com._1c.g5.v8.dt.bsl.model.PreprocessorLiteralExpressionType;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
+import com._1c.g5.v8.dt.bsl.model.TryExceptStatement;
 import com._1c.g5.v8.dt.bsl.model.UnaryOperation;
 import com._1c.g5.v8.dt.bsl.model.UnaryPreprocessorExpression;
 import com._1c.g5.v8.dt.bsl.model.Variable;
@@ -2516,29 +2519,73 @@ public final class BslDocCommentComputedTypes
                 if (part == branch)
                     break;
             }
-            EObject parent = condition.eContainer();
-            List<Statement> statements = parent instanceof Block block ? block.getStatements()
-                : parent instanceof Conditional part ? part.getStatements() : List.of();
             java.util.Set<Variable> written = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-            for (int index = statements.indexOf(condition) - 1; index >= 0; index--)
+            // Проверка может быть вложена во внешние «Если»: ищем присваивание и на их уровне.
+            for (Statement scope = condition; scope != null; scope = enclosingStatement(scope))
             {
-                // Не переносим сведения через развилки, циклы, препроцессор и вызовы с побочными эффектами.
-                if (!(statements.get(index) instanceof SimpleStatement assignment)
-                    || !(assignment.getLeft() instanceof StaticFeatureAccess left)
-                    || variable(left) == null || !pureTypeCalls(assignment.getRight()))
+                List<Statement> statements = statementsContaining(scope);
+                int position = statements.indexOf(scope);
+                if (position < 0)
                     return null;
-                Variable target = variable(left);
-                if (target == alias)
+                for (int index = position - 1; index >= 0; index--)
                 {
-                    Expression argument = typeOfArgument(assignment.getRight());
-                    if (!(argument instanceof StaticFeatureAccess source))
+                    // Не переносим сведения через развилки, циклы, препроцессор и вызовы с побочными эффектами.
+                    if (!(statements.get(index) instanceof SimpleStatement assignment)
+                        || !(assignment.getLeft() instanceof StaticFeatureAccess left)
+                        || variable(left) == null || !pureTypeCalls(assignment.getRight()))
                         return null;
-                    Variable value = variable(source);
-                    return value == null || value == alias || written.contains(value) ? null : source;
+                    Variable target = variable(left);
+                    if (target == alias)
+                    {
+                        Expression argument = typeOfArgument(assignment.getRight());
+                        if (!(argument instanceof StaticFeatureAccess source))
+                            return null;
+                        Variable value = variable(source);
+                        return value == null || value == alias || written.contains(value) ? null : source;
+                    }
+                    written.add(target);
                 }
-                written.add(target);
             }
             return null;
+        }
+
+        /**
+         * Внешний оператор {@code Если}, в ветку которого вложен данный. Через цикл и {@code Попытка} наружу не
+         * переходим: их тело может изменить проверяемую переменную между сохранением типа и проверкой.
+         */
+        private static Statement enclosingStatement(Statement statement)
+        {
+            EObject parent = statement.eContainer();
+            if (parent instanceof Conditional part)
+                return part.eContainer() instanceof IfStatement owner ? owner : null;
+            if (parent instanceof IfStatement owner) // ветка «Иначе» лежит прямо в IfStatement
+                return owner;
+            return null;
+        }
+
+        /**
+         * Операторы, среди которых лежит данный: тело метода или модуля, ветка {@code Если}/{@code ИначеЕсли}/
+         * {@code Иначе}, тело цикла, ветка {@code Попытка}/{@code Исключение}, тело директивы препроцессора.
+         * Грамматика BSL кладёт операторы цикла, {@code Попытка} и директивы прямо в конструкцию, без
+         * промежуточного блока.
+         */
+        private static List<Statement> statementsContaining(Statement statement)
+        {
+            EObject parent = statement.eContainer();
+            if (parent instanceof Block block)
+                return block.getStatements();
+            if (parent instanceof Conditional part)
+                return part.getStatements();
+            if (parent instanceof IfStatement owner)
+                return owner.getElseStatements();
+            if (parent instanceof LoopStatement loop)
+                return loop.getStatements();
+            if (parent instanceof TryExceptStatement attempt)
+                return attempt.getTryStatements().contains(statement) ? attempt.getTryStatements()
+                    : attempt.getExceptStatements();
+            if (parent instanceof PreprocessorItemStatements item)
+                return item.getStatements();
+            return List.of();
         }
 
         private static Variable variable(StaticFeatureAccess access)

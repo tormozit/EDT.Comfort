@@ -41,6 +41,7 @@
     <fix class="tormozit.checks.BrokenMdCompositionFix"/>
     <fix class="tormozit.checks.FindBrokenMdReferencesFix"/>
     <fix class="tormozit.checks.UnreachableMdObjectFix"/>
+    <fix class="tormozit.checks.EditExpectedTypeFix"/>
   </extension>
 
 </plugin>

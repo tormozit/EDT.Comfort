@@ -91,6 +91,7 @@ public final class BslEditorHoverHook implements IStartup
             ParamHintHtmlModifier.install(Display.getDefault());
             MethodDefinitionLink.install(Display.getDefault());
             MetadataTypeMenu.install(Display.getDefault());
+            HoverShowProbe.install(Display.getDefault());
 
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
@@ -504,6 +505,8 @@ public final class BslEditorHoverHook implements IStartup
             public IInformationControl createInformationControl(org.eclipse.swt.widgets.Shell parent)
             {
                 IInformationControl control = delegate.createInformationControl(parent);
+                Global.tempLog("hover-problem", "control=" + probeInfo(control) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " browser=" + (control != null && IrBslHoverHtml.findControlBrowser(control) != null)); //$NON-NLS-1$
                 IrBslHoverHtml.installHtmlDecoration(control);
                 String text = text();
                 if (text != null && control instanceof org.eclipse.jface.text.IInformationControlExtension4 ext)
@@ -534,6 +537,61 @@ public final class BslEditorHoverHook implements IStartup
                     && ext.canReplace(other);
             }
         }
+    }
+
+    /**
+     * Временная диагностика «не рисуется окно подсказки проблемы»: что происходит с
+     * каждым показанным окном, в котором есть браузер. Пишет до и после обработки
+     * {@code SWT.Show} остальными фильтрами плагина (в частности подсказки параметров,
+     * которая может спрятать окно через {@code setAlpha(0)}).
+     */
+    private static final class HoverShowProbe
+    {
+        private static final String MARK = "tormozit.hoverShowProbe"; //$NON-NLS-1$
+
+        static void install(Display display)
+        {
+            if (display == null || display.isDisposed() || Boolean.TRUE.equals(display.getData(MARK)))
+                return;
+            display.setData(MARK, Boolean.TRUE);
+            display.addFilter(org.eclipse.swt.SWT.Show, event ->
+            {
+                if (!(event.widget instanceof org.eclipse.swt.widgets.Shell shell) || shell.isDisposed())
+                    return;
+                Browser browser = IrBslHoverHtml.findControlBrowser(shell);
+                if (browser == null)
+                    return;
+                Global.tempLog("hover-problem", "show shell=" + shell.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " bounds=" + shell.getBounds() + " alpha=" + alphaOf(shell) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " visible=" + shell.isVisible()); //$NON-NLS-1$
+                display.asyncExec(() ->
+                {
+                    if (shell.isDisposed())
+                        return;
+                    Global.tempLog("hover-problem", "shown shell=" + shell.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " bounds=" + shell.getBounds() + " alpha=" + alphaOf(shell) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " visible=" + shell.isVisible()); //$NON-NLS-1$
+                });
+            });
+        }
+
+        private static int alphaOf(org.eclipse.swt.widgets.Shell shell)
+        {
+            try
+            {
+                return shell.getAlpha();
+            }
+            catch (Exception e)
+            {
+                return -1;
+            }
+        }
+    }
+
+    /** Класс объекта подсказки для временной диагностики {@code hover-problem}. */
+    private static String probeInfo(Object info)
+    {
+        return info == null ? "null" : info.getClass().getName(); //$NON-NLS-1$
     }
 
     /** Описание содержимого редактора и его штатный контрол. */
@@ -941,7 +999,14 @@ public final class BslEditorHoverHook implements IStartup
             lastFunctionTarget = null;
             lastHoverBaseInput = null;
             lastHoverOffset = -1;
-            if (hoverRegion != null && annotationTextAt(textViewer, hoverRegion) == null)
+            // Временная безусловная диагностика «не рисуется окно подсказки проблемы».
+            int probeOffset = hoverRegion == null ? -1 : hoverRegion.getOffset();
+            String probeAnnotation = hoverRegion == null ? null : annotationTextAt(textViewer, hoverRegion);
+            Global.tempLog("hover-problem", "enter offset=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
+                + " suppress=" + suppressPointerHover + " ctrl=" + KeyStateProbe.isCtrlPressed() //$NON-NLS-1$ //$NON-NLS-2$
+                + " hints=" + ComfortSettings.isHoverHintsEnabled() //$NON-NLS-1$
+                + " annotation=" + (probeAnnotation == null ? "none" : "yes")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (hoverRegion != null && probeAnnotation == null)
             {
                 ContentHover queryHover =
                     contentHover(editor, textViewer, hoverRegion.getOffset());
@@ -949,7 +1014,9 @@ public final class BslEditorHoverHook implements IStartup
                 {
                     cancelIrEnrichment();
                     lastQueryHover = queryHover;
-                    return queryHover.info();
+                    Object queryInfo = queryHover.info();
+                    Global.tempLog("hover-problem", "query info=" + probeInfo(queryInfo)); //$NON-NLS-1$ //$NON-NLS-2$
+                    return queryInfo;
                 }
             }
             if (suppressPointerHover)
@@ -959,6 +1026,8 @@ public final class BslEditorHoverHook implements IStartup
                 {
                     IrBslHoverDebug.step("hover", "suppressed reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
                         + " offset=" + (hoverRegion == null ? -1 : hoverRegion.getOffset())); //$NON-NLS-1$
+                    Global.tempLog("hover-problem", "suppressed reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$
+                        + " offset=" + probeOffset); //$NON-NLS-1$
                     return null;
                 }
             }
@@ -966,6 +1035,8 @@ public final class BslEditorHoverHook implements IStartup
             // план результатов запросов метода (поля выборки), как перед списком.
             refreshQueryTypesBeforeHover(textViewer, hoverRegion);
             Object info = nativeHoverInfo(textViewer, hoverRegion);
+            Global.tempLog("hover-problem", "native info=" + probeInfo(info) //$NON-NLS-1$ //$NON-NLS-2$
+                + " offset=" + probeOffset); //$NON-NLS-1$
             if (info == null || hoverRegion == null || editor == null)
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
@@ -1012,8 +1083,13 @@ public final class BslEditorHoverHook implements IStartup
                 || !(viewer.getDocument() instanceof IXtextDocument document))
                 return delegateExt2 != null ? delegateExt2.getHoverInfo2(viewer, region)
                     : delegate.getHoverInfo(viewer, region);
-            if (region == null || Boolean.TRUE.equals(Global.invoke(document, "needsReconciling")))
+            boolean reconciling = Boolean.TRUE.equals(Global.invoke(document, "needsReconciling")); //$NON-NLS-1$
+            if (region == null || reconciling)
+            {
+                Global.tempLog("hover-problem", "native skip region=" + (region == null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " reconciling=" + reconciling); //$NON-NLS-1$
                 return null;
+            }
             org.eclipse.xtext.util.CancelIndicator cancellation =
                 Global.invoke(document, "getCancelIndicator") instanceof org.eclipse.xtext.util.CancelIndicator indicator
                     ? indicator : org.eclipse.xtext.util.CancelIndicator.NullImpl;

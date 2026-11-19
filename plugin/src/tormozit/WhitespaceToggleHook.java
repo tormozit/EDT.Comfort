@@ -40,6 +40,7 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.texteditor.AbstractTextEditor;
 import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.texteditor.ITextEditorActionConstants;
 import org.osgi.framework.Bundle;
@@ -269,6 +270,8 @@ public final class WhitespaceToggleHook implements IStartup
             retryLater(editor, attempt);
             return;
         }
+        if (isDisposed(editor))
+            return;
 
         IAction action = editor.getAction(ITextEditorActionConstants.SHOW_WHITESPACE_CHARACTERS);
         if (action == null)
@@ -320,6 +323,22 @@ public final class WhitespaceToggleHook implements IStartup
         managedToggles.put(editor, new ToggleBinding(toolbar, item));
         schedulePreferencesContextMenu(item);
         updateToggleVisibility();
+    }
+
+    /**
+     * Редактор уже закрыт? {@code AbstractTextEditor.dispose()} обнуляет {@code fActions}, и
+     * {@code getAction(...)} на закрытом редакторе бросает {@link NullPointerException}.
+     * Проверка {@code getEditorSite() != null} закрытие не отсекает: сайт части остаётся
+     * не-null, поэтому асинхронный {@link #tryAttach} доходил до {@code getAction} уже после
+     * закрытия редактора.
+     *
+     * <p>Поле {@code fActions} проверено в {@code org.eclipse.ui.workbench.texteditor} 3.17.200
+     * и 3.19.400. Для реализаций {@link ITextEditor} не-{@link AbstractTextEditor} редактор
+     * считается живым.
+     */
+    private static boolean isDisposed(ITextEditor editor)
+    {
+        return editor instanceof AbstractTextEditor && Global.getField(editor, "fActions") == null; //$NON-NLS-1$
     }
 
     private static void schedulePreferencesContextMenu(IContributionItem item)

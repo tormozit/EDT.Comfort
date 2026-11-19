@@ -3371,6 +3371,14 @@ public final class BslModuleSpellCheckHook implements IStartup
                 base = Arrays.copyOf(base, base.length + 1);
                 base[base.length - 1] = addParameter;
             }
+            ICompletionProposal editExpected = BslExpectedTypeQuickFix.proposal(createAnnotation, fallbackIcon);
+            if (editExpected != null
+                && Arrays.stream(base).noneMatch(p -> p != null
+                    && BslExpectedTypeQuickFix.TITLE.equals(p.getDisplayString())))
+            {
+                base = Arrays.copyOf(base, base.length + 1);
+                base[base.length - 1] = editExpected;
+            }
         }
         ICompletionProposal extra = null;
         if (annotation instanceof XtextAnnotation xa)
