@@ -125,6 +125,12 @@ public final class BslEditorHyperlinkHook implements IStartup
         "org.eclipse.xtext.ui.editor.hyperlinking.OpenDeclaration"; //$NON-NLS-1$
 
     /**
+     * {@link #fullNameLink} увидел путь через форму к реквизиту: штатную ссылку на форму
+     * для этого места не берём (иначе Ctrl+наведение предлагает «Модуль формы»/«В навигаторе»).
+     */
+    private static final ThreadLocal<Boolean> FORM_MEMBER_PATH = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    /**
      * Команда «Перейти к определению» берёт свой экземпляр детектора (не из массива
      * просмотрщика). Для свойства подменяем обработчик одного вызова, как в LwtTextSaveHook;
      * для ссылки на тип в комментарии сохраняем дополнение после штатного обработчика.
@@ -649,7 +655,11 @@ public final class BslEditorHyperlinkHook implements IStartup
                 for (int i = start + skip; i < position; i++)
                     if (text.charAt(i) == '.')
                         hovered++;
-                return new Object[] { text.substring(start + skip, end), Integer.valueOf(leaf.getOffset() + start),
+                String path = text.substring(start + skip, end);
+                int memberStart = formMemberStart(path.split("\\.", -1)); //$NON-NLS-1$
+                if (memberStart >= 0 && hovered >= memberStart)
+                    FORM_MEMBER_PATH.set(Boolean.TRUE);
+                return new Object[] { path, Integer.valueOf(leaf.getOffset() + start),
                     Integer.valueOf(skip), Integer.valueOf(hovered) };
             };
             Object[] found = readModel(document, segmentOnly, work);
@@ -668,6 +678,12 @@ public final class BslEditorHyperlinkHook implements IStartup
             // Дочерние объекты правее фрагмента под указателем не рассматриваем:
             // «Тип.Имя» — сегменты 0–1, далее пары «Вид.Имя».
             int hovered = (Integer) found[3];
+            // Путь через форму к реквизиту: цель — сам реквизит (формы или метаданных),
+            // а не форма. Если не разрешился — ссылки нет, на форму не откатываемся.
+            int memberStart = formMemberStart(segments);
+            if (memberStart >= 0 && hovered >= memberStart)
+                return formPathMemberLink(editor, page, project, segments, memberStart, hovered,
+                    regionStart, skip);
             int limit = hovered < 2 ? 2 : hovered + 2 - hovered % 2;
             for (int count = Math.min(segments.length, limit); count >= 2; count--)
             {
@@ -704,6 +720,314 @@ public final class BslEditorHyperlinkHook implements IStartup
         catch (RuntimeException | LinkageError e)
         {
             return null;
+        }
+    }
+
+    /** Начало сегментов-реквизитов после «…Форма.<Имя>.» / «ОбщаяФорма.<Имя>.»; иначе -1. */
+    private static int formMemberStart(String[] segments)
+    {
+        if (segments == null || segments.length < 3)
+            return -1;
+        if (isRuOrEn(segments[0], "ОбщаяФорма", "CommonForm")) //$NON-NLS-1$ //$NON-NLS-2$
+            return 2;
+        for (int i = 0; i + 1 < segments.length; i += 2)
+            if (isRuOrEn(segments[i], "Форма", "Form")) //$NON-NLS-1$ //$NON-NLS-2$
+                return i + 2;
+        return -1;
+    }
+
+    private static boolean isRuOrEn(String value, String ru, String en)
+    {
+        return ru.equalsIgnoreCase(value) || en.equalsIgnoreCase(value);
+    }
+
+    /**
+     * Реквизит формы или вложенный реквизит в пути «…Форма.<Имя>.<Реквизит>…»: переход на сам
+     * реквизит, а не на форму. {@code null} — цель не найдена; форму в этом случае не подставляем.
+     */
+    private static IHyperlink formPathMemberLink(BslXtextEditor editor, IWorkbenchPage page,
+        IV8Project project, String[] segments, int memberStart, int hovered, int regionStart, int skip)
+    {
+        if (project == null || memberStart <= 0 || hovered < memberStart)
+            return null;
+        if (!(GoToDefinition.resolveEObjectByQualifiedName(
+            normalizeFullName(segments, memberStart), project) instanceof BasicForm basicForm))
+            return null;
+        com._1c.g5.v8.dt.metadata.mdclass.AbstractForm abstractForm = basicForm.getForm();
+        if (abstractForm != null && abstractForm.eIsProxy())
+            abstractForm = (com._1c.g5.v8.dt.metadata.mdclass.AbstractForm)EcoreUtil.resolve(abstractForm,
+                basicForm);
+        if (!(abstractForm instanceof com._1c.g5.v8.dt.form.model.Form form) || form.eIsProxy())
+            return null;
+        com._1c.g5.v8.dt.form.model.AbstractFormAttribute attribute =
+            formAttribute(form, segments[memberStart]);
+        if (attribute == null)
+            return null;
+        IRegion region = memberRegion(regionStart + skip, segments, hovered);
+        if (hovered == memberStart)
+            return new FormElementHyperlink(region, attribute, editor, page);
+        java.util.List<String> dataPath = new java.util.ArrayList<>();
+        for (int i = memberStart; i <= hovered; i++)
+            dataPath.add(segments[i]);
+        // Вложенный реквизит: родные типы формы (с дополнительными реквизитами), затем источник
+        // найденного свойства — реквизит/колонка формы или строка данных формы.
+        EObject contextProperty = formContextProperty(form, attribute);
+        IHyperlink link = contextProperty == null ? null
+            : nestedMemberLink(contextProperty, segments, memberStart, hovered, region, basicForm, dataPath,
+                editor, page);
+        // Тип данных формы может быть без источника — тогда цель ищем по объявленному типу.
+        return link != null ? link
+            : nestedMemberLink(attribute, segments, memberStart, hovered, region, basicForm, dataPath,
+                editor, page);
+    }
+
+    /** Проход по вложенным сегментам от {@code start} до {@code hovered} и ссылка на цель. */
+    private static IHyperlink nestedMemberLink(EObject start, String[] segments, int memberStart,
+        int hovered, IRegion region, BasicForm basicForm, java.util.List<String> dataPath,
+        BslXtextEditor editor, IWorkbenchPage page)
+    {
+        EObject current = start;
+        java.util.List<TypeItem> types = Activator.docCommentMemberTypes(current);
+        for (int i = memberStart + 1; i <= hovered; i++)
+        {
+            Property found = Activator.docCommentMember(types, segments[i]);
+            if (found == null)
+                return null;
+            current = found;
+            types = Activator.docCommentMemberTypes(found);
+        }
+        return memberHyperlink(current, region, basicForm, dataPath, editor, page);
+    }
+
+    private static com._1c.g5.v8.dt.form.model.AbstractFormAttribute formAttribute(
+        com._1c.g5.v8.dt.form.model.Form form, String name)
+    {
+        if (name == null || form.getAttributes() == null)
+            return null;
+        for (com._1c.g5.v8.dt.form.model.FormAttribute attribute : form.getAttributes())
+            if (attribute != null && attribute.getName() != null
+                && name.equalsIgnoreCase(attribute.getName()))
+                return attribute;
+        return null;
+    }
+
+    /** Свойство контекста формы для реквизита — носитель родного типа данных формы. */
+    private static EObject formContextProperty(com._1c.g5.v8.dt.form.model.Form form,
+        com._1c.g5.v8.dt.form.model.AbstractFormAttribute attribute)
+    {
+        if (form.getFormContext() == null)
+            return null;
+        for (Property property : form.getFormContext().getProperties())
+            if (property instanceof DerivedProperty derived && derived.getSource() == attribute)
+                return property;
+        String uri = EcoreUtil.getURI(attribute).toString();
+        for (Property property : form.getFormContext().getProperties())
+            if (property instanceof DerivedProperty derived && derived.getSource() != null
+                && uri.equals(EcoreUtil.getURI(derived.getSource()).toString()))
+                return property;
+        return null;
+    }
+
+    private static IHyperlink memberHyperlink(EObject member, IRegion region, BasicForm basicForm,
+        java.util.List<String> dataPath, BslXtextEditor editor, IWorkbenchPage page)
+    {
+        if (member instanceof com._1c.g5.v8.dt.form.model.AbstractFormAttribute
+            || member instanceof com._1c.g5.v8.dt.form.model.FormItem)
+            return new FormElementHyperlink(region, member, editor, page);
+        if (member instanceof Property property)
+        {
+            EObject source = property instanceof DerivedProperty derived ? derived.getSource() : null;
+            if (source instanceof com._1c.g5.v8.dt.form.model.AbstractFormAttribute
+                || source instanceof com._1c.g5.v8.dt.form.model.FormItem)
+                return new FormElementHyperlink(region, source, editor, page);
+            return new FormDataMemberHyperlink(region, basicForm, dataPath, page);
+        }
+        return null;
+    }
+
+    private static IRegion memberRegion(int pathStart, String[] segments, int hovered)
+    {
+        int offset = pathStart;
+        for (int i = 0; i < hovered; i++)
+            offset += segments[i].length() + 1;
+        return new Region(offset, segments[hovered].length());
+    }
+
+    /**
+     * Готовая ссылка на сегмент пути через форму по тексту документа: нужна в UI-потоке,
+     * где читать модель нельзя. Иначе штатная ссылка EDT открывает объект метаданных раньше,
+     * чем фоновая проверка заменит её.
+     */
+    private static DeferredFormMemberHyperlink deferredFormMemberLink(BslXtextEditor editor,
+        IWorkbenchPage page, ITextViewer viewer, IRegion region)
+    {
+        if (editor == null || page == null || region == null
+            || !(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        Object[] found = formMemberPathAtDocument(document, region.getOffset());
+        if (found == null)
+            return null;
+        String[] segments = (String[])found[0];
+        int memberStart = ((Integer)found[1]).intValue();
+        int hovered = ((Integer)found[2]).intValue();
+        int pathStart = ((Integer)found[3]).intValue();
+        IV8ProjectManager manager = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project project = manager == null ? null : manager.getProject(document.getResourceURI());
+        if (project == null)
+            return null;
+        return new DeferredFormMemberHyperlink(memberRegion(pathStart, segments, hovered), segments,
+            memberStart, hovered, pathStart, project, editor, page);
+    }
+
+    /** Путь к реквизиту через форму в строке документа; {@code null} — это не такой путь. */
+    private static Object[] formMemberPathAtDocument(org.eclipse.jface.text.IDocument document, int offset)
+    {
+        try
+        {
+            int line = document.getLineOfOffset(offset);
+            int lineStart = document.getLineOffset(line);
+            String text = document.get(lineStart, document.getLineLength(line));
+            int position = offset - lineStart;
+            int left = position;
+            int right = position;
+            while (left > 0 && isTypeNameChar(text.charAt(left - 1)))
+                left--;
+            while (right < text.length() && isTypeNameChar(text.charAt(right)))
+                right++;
+            while (left < right && text.charAt(left) == '.')
+                left++;
+            while (right > left && text.charAt(right - 1) == '.')
+                right--;
+            if (left >= right)
+                return null;
+            String path = text.substring(left, right);
+            String[] segments = path.split("\\.", -1); //$NON-NLS-1$
+            if (segments.length < 4)
+                return null;
+            String first = segments[0];
+            if (!MdTypeMapping.isKnownMdRootType(first) && MdTypeMapping.ruPluralToRu(first) == null
+                && !GoToDefinition.TYPE_SUFFIX_MAP.containsKey(first))
+                return null;
+            int memberStart = formMemberStart(segments);
+            if (memberStart < 0 || segments.length <= memberStart)
+                return null;
+            int local = Math.max(0, Math.min(path.length(), position - left));
+            int hovered = 0;
+            for (int i = 0; i < local; i++)
+                if (path.charAt(i) == '.')
+                    hovered++;
+            if (hovered < memberStart || hovered >= segments.length)
+                return null;
+            return new Object[] { segments, Integer.valueOf(memberStart), Integer.valueOf(hovered),
+                Integer.valueOf(lineStart + left), Integer.valueOf(segments[hovered].length()) };
+        }
+        catch (org.eclipse.jface.text.BadLocationException e)
+        {
+            return null;
+        }
+    }
+
+    /** Отложенная ссылка: путь уже разобран, форма и строка разрешаются при открытии. */
+    private static final class DeferredFormMemberHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final String[] segments;
+        private final int memberStart;
+        private final int hovered;
+        private final int pathStart;
+        private final IV8Project project;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        DeferredFormMemberHyperlink(IRegion region, String[] segments, int memberStart, int hovered,
+            int pathStart, IV8Project project, BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.segments = segments;
+            this.memberStart = memberStart;
+            this.hovered = hovered;
+            this.pathStart = pathStart;
+            this.project = project;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return segments[hovered]; }
+
+        @Override
+        public void open()
+        {
+            IHyperlink link = formPathMemberLink(source, page, project, segments, memberStart, hovered,
+                pathStart, 0);
+            if (link != null)
+                link.open();
+        }
+    }
+
+    private static final class FormElementHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final EObject target;
+        private final BslXtextEditor source;
+        private final IWorkbenchPage page;
+
+        FormElementHyperlink(IRegion region, EObject target, BslXtextEditor source, IWorkbenchPage page)
+        {
+            this.region = region;
+            this.target = target;
+            this.source = source;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText() { return "Перейти к реквизиту формы"; } //$NON-NLS-1$
+
+        @Override
+        public void open()
+        {
+            try (HistoryScope scope = new HistoryScope(page, source))
+            {
+                scope.opened = FormEditorHook.openFormElement(page, target) != null;
+            }
+        }
+    }
+
+    /**
+     * Строка данных формы для вложенного реквизита в ссылке комментария. Открывается редактор
+     * формы и выделяется путь в дереве реквизитов формы ({@code Объект → Команды}) — той же
+     * механикой, что и остальные переходы к реквизитам формы, без редактора метаданных.
+     */
+    private static final class FormDataMemberHyperlink implements IHyperlink
+    {
+        private final IRegion region;
+        private final BasicForm form;
+        private final java.util.List<String> dataPath;
+        private final IWorkbenchPage page;
+
+        FormDataMemberHyperlink(IRegion region, BasicForm form, java.util.List<String> dataPath,
+            IWorkbenchPage page)
+        {
+            this.region = region;
+            this.form = form;
+            this.dataPath = dataPath;
+            this.page = page;
+        }
+
+        @Override public IRegion getHyperlinkRegion() { return region; }
+        @Override public String getTypeLabel() { return null; }
+        @Override public String getHyperlinkText()
+        {
+            return dataPath == null || dataPath.isEmpty() ? "Перейти к реквизиту формы" //$NON-NLS-1$
+                : dataPath.get(dataPath.size() - 1);
+        }
+
+        @Override
+        public void open()
+        {
+            FormEditorHook.openFormDataPath(page, form, dataPath);
         }
     }
 
@@ -1614,8 +1938,10 @@ public final class BslEditorHyperlinkHook implements IStartup
                 && ready.covers(region.getOffset()) && (ready.context() == null || ready.context().isCurrent()))
                 return ready.links() == null ? null : ready.links().clone();
             IHyperlink[] stock = coveringOnly(delegate.detectHyperlinks(viewer, region, multiple), region);
-            IHyperlink[] result = stock == null ? null : stock.clone();
-            if (result != null)
+            DeferredFormMemberHyperlink deferred = deferredFormMemberLink(source, page, viewer, region);
+            IHyperlink[] result = deferred != null ? new IHyperlink[] { deferred }
+                : stock == null ? null : stock.clone();
+            if (deferred == null && result != null)
                 for (int i = 0; i < result.length; i++)
                     if (result[i] instanceof XtextHyperlink link)
                         result[i] = new HistoryHyperlink(link, source, page);
@@ -1773,8 +2099,14 @@ public final class BslEditorHyperlinkHook implements IStartup
             BslNodeLookup.checkCanceled();
             // Штатные ссылки литерала («ПолучитьФорму») ведут на имя целиком: на «Обработка1»
             // в имени формы предложили бы форму.
+            FORM_MEMBER_PATH.set(Boolean.FALSE);
             IHyperlink segment = region == null ? null : segmentLink(source, page, viewer, region.getOffset());
-            IHyperlink[] links = segment != null ? new IHyperlink[] { segment } : stock.get();
+            boolean formMember = Boolean.TRUE.equals(FORM_MEMBER_PATH.get());
+            FORM_MEMBER_PATH.remove();
+            // Путь «…Форма.<Имя>.<Реквизит>…»: штатная ссылка ведёт на форму — её не берём,
+            // даже если наш переход не разрешился.
+            IHyperlink[] links = segment != null ? new IHyperlink[] { segment }
+                : formMember ? null : stock.get();
             // #region agent log
             StringBuilder linksLog = new StringBuilder();
             if (links != null)

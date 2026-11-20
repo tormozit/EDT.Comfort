@@ -1508,6 +1508,22 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
+     * Типы значения сегмента ссылки «см.» для гиперссылок: у реквизита формы — её родные
+     * данные формы (с дополнительными реквизитами), у остальных — тип значения.
+     */
+    static java.util.List<com._1c.g5.v8.dt.mcore.TypeItem> docCommentMemberTypes(EObject owner)
+    {
+        return DocCommentLinks.typesOf(owner);
+    }
+
+    /** Вложенный реквизит сегмента «см.» по типам предыдущего сегмента. */
+    static com._1c.g5.v8.dt.mcore.Property docCommentMember(
+        java.util.List<com._1c.g5.v8.dt.mcore.TypeItem> types, String name)
+    {
+        return DocCommentLinks.member(types, name);
+    }
+
+    /**
      * Общий резолвер «см.»: настоящий BSL Method/FormalParam вместо проверки одного имени (#1026).
      * Точки входа подтверждены bsl.comment 6.1.0.v202605050943: проверка, гиперссылки,
      * комментарий и вычисление типов вызывают LinkPart.getActualObjectForPart.
@@ -1753,6 +1769,12 @@ public class Activator extends AbstractUIPlugin
          * в контексте типа предыдущего сегмента: у объекта — его реквизиты и табличные части,
          * у табличной части и таблицы значений — колонки строки, у ссылки — реквизиты.
          */
+        /** Вложенный реквизит по готовым типам (для гиперссылок на сегменты «см.»). */
+        static Property member(java.util.List<TypeItem> types, String name)
+        {
+            return findProperty(types, name, 0);
+        }
+
         private static Property findProperty(java.util.List<TypeItem> types, String name, int depth)
         {
             if (types == null || types.isEmpty() || depth > 8)
@@ -1802,6 +1824,12 @@ public class Activator extends AbstractUIPlugin
                     if (types.isEmpty() && property instanceof DerivedProperty derived
                         && derived.getSource() instanceof AbstractFormAttribute attribute
                         && attribute.getValueType() != null)
+                        for (TypeItem item : attribute.getValueType().getTypes())
+                            addExpanded(types, item, 0);
+                }
+                else if (owner instanceof AbstractFormAttribute attribute)
+                {
+                    if (attribute.getValueType() != null)
                         for (TypeItem item : attribute.getValueType().getTypes())
                             addExpanded(types, item, 0);
                 }

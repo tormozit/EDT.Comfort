@@ -101,6 +101,7 @@ public final class Activator
         private static final String METHOD = "getEditorComponentDescriptor"; //$NON-NLS-1$
         private static final String DESCRIPTOR = "(Ljava/lang/Object;)Lcom/_1c/g5/v8/dt/common/Pair;"; //$NON-NLS-1$
         private static final String ATTRIBUTE = "com/_1c/g5/v8/dt/form/model/AbstractFormAttribute"; //$NON-NLS-1$
+        private static final String DATA_ROW = "com/_1c/g5/v8/dt/form/model/PropertyInfo"; //$NON-NLS-1$
         private static final String COMPONENT = "com/_1c/g5/v8/dt/form/ui/editor/FormEditorComponent"; //$NON-NLS-1$
         private static final String PAIR = "com/_1c/g5/v8/dt/common/Pair"; //$NON-NLS-1$
 
@@ -150,9 +151,15 @@ public final class Activator
                         {
                             super.visitCode();
                             Label stock = new Label();
+                            Label attribute = new Label();
                             super.visitVarInsn(Opcodes.ALOAD, 0);
                             super.visitTypeInsn(Opcodes.INSTANCEOF, ATTRIBUTE);
+                            super.visitJumpInsn(Opcodes.IFNE, attribute);
+                            // Строка данных формы (Объект.Команды) тоже имеет свою строку дерева.
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitTypeInsn(Opcodes.INSTANCEOF, DATA_ROW);
                             super.visitJumpInsn(Opcodes.IFEQ, stock);
+                            super.visitLabel(attribute);
                             super.visitFieldInsn(Opcodes.GETSTATIC, COMPONENT, "ATTRIBUTES", //$NON-NLS-1$
                                 "L" + COMPONENT + ";"); //$NON-NLS-1$ //$NON-NLS-2$
                             super.visitVarInsn(Opcodes.ALOAD, 0);

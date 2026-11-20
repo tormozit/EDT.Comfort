@@ -1072,7 +1072,7 @@ public class FormEditorHook implements IStartup
     {
 
         /** Цели разделены по рабочему окну и URI формы; повторный запрос заменяет прежний. */
-        private static final Map<IWorkbenchPage, Map<String, EObject>> pending = new WeakHashMap<>();
+        private static final Map<IWorkbenchPage, Map<String, Object>> pending = new WeakHashMap<>();
 
         /**
          * Ближайший к {@code object} объект формы, у которого в редакторе есть своя строка.
@@ -1104,11 +1104,16 @@ public class FormEditorHook implements IStartup
         static IEditorPart open(IWorkbenchPage workbenchPage, EObject object)
         {
             EObject target = target(object);
-            Form form = form(target);
-            if (workbenchPage == null || form == null)
+            return open(workbenchPage, form(target), target);
+        }
+
+        /** Открытие с явной формой: цель может быть строкой данных формы ({@link PropertyInfo}). */
+        private static IEditorPart open(IWorkbenchPage workbenchPage, Form form, Object target)
+        {
+            if (workbenchPage == null || form == null || target == null)
                 return null;
             String key = EcoreUtil.getURI(form).toString();
-            Map<String, EObject> requests = pending.computeIfAbsent(workbenchPage, ignored -> new HashMap<>());
+            Map<String, Object> requests = pending.computeIfAbsent(workbenchPage, ignored -> new HashMap<>());
             requests.put(key, target);
             try
             {
@@ -1142,21 +1147,21 @@ public class FormEditorHook implements IStartup
             }
         }
 
-        private static Map<String, EObject> requests(FormEditor editor)
+        private static Map<String, Object> requests(FormEditor editor)
         {
             return editor.getSite() != null ? pending.get(editor.getSite().getPage()) : null;
         }
 
         static boolean hasPending(FormEditor editor, FormEditorPage page)
         {
-            Map<String, EObject> requests = requests(editor);
+            Map<String, Object> requests = requests(editor);
             return requests != null && page.getModel() != null
                 && requests.containsKey(EcoreUtil.getURI(page.getModel()).toString());
         }
 
         static void cancel(FormEditor editor)
         {
-            Map<String, EObject> requests = requests(editor);
+            Map<String, Object> requests = requests(editor);
             Form form = requests != null && !requests.isEmpty() ? editor.getForm() : null;
             if (form == null)
                 return;
@@ -1166,13 +1171,24 @@ public class FormEditorHook implements IStartup
         /** false — контролы/строка ещё не готовы; повтор делает существующий attach. */
         static boolean apply(FormEditor editor, FormEditorPage page)
         {
-            Map<String, EObject> requests = requests(editor);
+            Map<String, Object> requests = requests(editor);
             if (requests == null || page.getModel() == null)
                 return true;
             String key = EcoreUtil.getURI(page.getModel()).toString();
-            EObject target = requests.get(key);
+            Object target = requests.get(key);
             if (target == null)
                 return true;
+            if (target instanceof PropertyInfo info)
+            {
+                // Дерево ещё создаётся — страница применит запрос повторно.
+                if (ItemsTree.attributesViewer(page) == null)
+                    return false;
+                requests.remove(key, target);
+                // Строка данных формы: только выделение, без «Перейти» (оно уводит в объект).
+                page.setSelection(FormEditorComponent.ATTRIBUTES, true, info);
+                OpenHelperAttributePropertiesHook.scheduleActivateProperties();
+                return true;
+            }
             if (target instanceof FormItem item)
             {
                 Object rawViewer = Global.getField(page, "itemsViewer"); //$NON-NLS-1$
@@ -1198,7 +1214,7 @@ public class FormEditorHook implements IStartup
                 // FormAttribute.columns, и FormAttributeAdditionalColumns.columns).
                 page.setSelection(component, true, target);
                 if (target instanceof FormAttribute || target instanceof FormCommand)
-                    scheduleGoTo(editor, page, target);
+                    scheduleGoTo(editor, page, (EObject)target);
             }
             // Элемент выбран — показываем его свойства (панель активируется после текущего события UI).
             OpenHelperAttributePropertiesHook.scheduleActivateProperties();
@@ -1287,6 +1303,73 @@ public class FormEditorHook implements IStartup
             return;
         }
         awaitFormAttributeAndGoTo(workbenchPage, basicForm, sourceAttribute, generation, 0);
+    }
+
+    /**
+     * Открывает форму и выделяет строку дерева реквизитов по пути к данным,
+     * например {@code Объект.Команды}. Цель передаётся в редактор до открытия — первая
+     * отрисовка дерева уже с нужной строкой (как у остальных переходов к реквизитам формы),
+     * без повторного выделения и «Перейти» в объект метаданных.
+     */
+    static void openFormDataPath(IWorkbenchPage workbenchPage,
+        com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm, java.util.List<String> segments)
+    {
+        if (workbenchPage == null || basicForm == null || segments == null || segments.isEmpty())
+            return;
+        com._1c.g5.v8.dt.metadata.mdclass.AbstractForm abstractForm = basicForm.getForm();
+        if (abstractForm != null && abstractForm.eIsProxy())
+            abstractForm = (com._1c.g5.v8.dt.metadata.mdclass.AbstractForm)EcoreUtil.resolve(abstractForm,
+                basicForm);
+        if (!(abstractForm instanceof Form form) || form.eIsProxy())
+            return;
+        PropertyInfo target = propertyInfoByPath(form, segments);
+        if (target != null)
+            FormElementOpening.open(workbenchPage, form, target);
+    }
+
+    /** Строка дерева реквизитов по пути к данным — до открытия редактора, по модели формы. */
+    private static PropertyInfo propertyInfoByPath(Form form, java.util.List<String> segments)
+    {
+        com._1c.g5.v8.dt.form.model.IPropertyInfoProvider.Registry registry =
+            com._1c.g5.v8.dt.form.model.IPropertyInfoProvider.Registry.INSTANCE;
+        java.util.List<PropertyInfo> level = registry.getPropertyInfo(form);
+        PropertyInfo current = null;
+        for (int i = 0; i < segments.size(); i++)
+        {
+            current = null;
+            if (level != null)
+                for (PropertyInfo info : level)
+                    if (info != null && matchesDataPathSegment(info, segments.get(i)))
+                    {
+                        current = info;
+                        break;
+                    }
+            if (current == null && i == 0)
+            {
+                // Корневые строки могут не прийти от провайдера — берём их у службы связей.
+                AbstractFormAttribute attribute = ItemsTree.attributeByName(form.getAttributes(),
+                    segments.get(0));
+                com._1c.g5.v8.dt.form.service.datasourceinfo.IDataSourceInfoAssociationService service =
+                    Global.getOsgiService(
+                        com._1c.g5.v8.dt.form.service.datasourceinfo.IDataSourceInfoAssociationService.class);
+                if (attribute != null && service != null)
+                    current = service.findPropertyInfo(form, attribute);
+            }
+            if (current == null)
+                return null;
+            if (i == segments.size() - 1)
+                return current;
+            PropertyInfo node = current;
+            level = registry.getPropertyInfoProvider(node)
+                .map(provider -> provider.getPropertyInfo(node)).orElse(java.util.List.of());
+        }
+        return null;
+    }
+
+    private static boolean matchesDataPathSegment(PropertyInfo info, String segment)
+    {
+        return segment != null && (segment.equalsIgnoreCase(info.getName())
+            || segment.equalsIgnoreCase(info.getNameRu()));
     }
 
     /**
