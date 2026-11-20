@@ -84,8 +84,8 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataSet;
 import com._1c.g5.v8.dt.dcs.model.schema.DataSetField;
 import com._1c.g5.v8.dt.dcs.model.schema.NestedDataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.model.settings.SettingsVariant;
+import com._1c.g5.v8.dt.form.model.AbstractFormAttribute;
 import com._1c.g5.v8.dt.form.model.Form;
-import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.FormItem;
@@ -6042,7 +6042,7 @@ public final class ConfigSearchResultsHook implements IStartup
 
     /**
      * Ближайший к {@code leaf} (включая сам {@code leaf}) предок-реквизит/команда/параметр/элемент
-     * формы ({@code FormAttribute}/{@code FormCommand}/{@code FormParameter}/{@code FormField}).
+     * формы ({@code AbstractFormAttribute}/{@code FormCommand}/{@code FormParameter}/{@code FormField}).
      * Имена элементов формы уникальны во ВСЁМ дереве формы (в отличие от более ранней версии,
      * искавшей элемент на фиксированной "глубине" — вложенность {@code FormField} может быть любой,
      * а самый внутренний элемент однозначно идентифицирует место вхождения). См.
@@ -6051,7 +6051,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static EObject findNearestFormChild(EObject leaf)
     {
         for (EObject cur = leaf; cur != null; cur = cur.eContainer())
-            if (cur instanceof FormField || cur instanceof FormAttribute
+            if (cur instanceof FormField || cur instanceof AbstractFormAttribute
                 || cur instanceof FormCommand || cur instanceof FormParameter)
                 return cur;
         return null;
@@ -9403,11 +9403,14 @@ public final class ConfigSearchResultsHook implements IStartup
          * Объект, чьи свойства покажет панель: реквизит МД ({@code BasicFeature}), элемент формы
          * ({@link FormItem} — группа/кнопка/поле/декорация), команда/реквизит/параметр формы.
          * {@code FormItem} нужен для картинок на {@code PopupGroupExtInfo}: палитра показывает
-         * группу, а не ExtInfo.
+         * группу, а не ExtInfo. {@link AbstractFormAttribute} — не только реквизит верхнего
+         * уровня, но и вложенная колонка: её строка в дереве реквизитов тоже показывает свойства
+         * (без неё цикл ожидания искал цепочку признаков {@code additionalColumns.columns} и не
+         * находил поле панели).
          */
         private static boolean isPanelMember(EObject obj)
         {
-            return obj instanceof BasicFeature || obj instanceof FormItem || obj instanceof FormAttribute
+            return obj instanceof BasicFeature || obj instanceof FormItem || obj instanceof AbstractFormAttribute
                 || obj instanceof FormCommand || obj instanceof FormParameter || isNestedMdObject(obj);
         }
 

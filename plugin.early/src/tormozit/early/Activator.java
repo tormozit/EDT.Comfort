@@ -79,6 +79,94 @@ public final class Activator
         MarkerCreationDateWeaving.install(context);
         CommonAttributeLossDiagnostics.install(context);
         DebugBreakpointsWeaving.install(context);
+        FormAttributeSelectionWeaving.install(context);
+    }
+
+    /**
+     * Переход к вложенной колонке реквизита формы. Штатный поздний переход страницы
+     * ({@code FormEditorPage.createPageControls → gotoSelection}) берёт выделение и превращает
+     * его в компонент через приватный {@code getEditorComponentDescriptor(Object)}; для колонки
+     * ({@code FormAttributeColumn}) тот поднимается по контейнерам до {@code FormAttribute} и
+     * возвращает ВНЕШНИЙ реквизит — в дереве реквизитов выделяется он, а не колонка.
+     *
+     * <p>Вплетаем проверку в начало метода: для любого {@code AbstractFormAttribute} возвращаем
+     * сам объект, а не контейнер. Дерево реквизитов само превращает его в свою строку
+     * ({@code IDataSourceInfoAssociationService.findPropertyInfo} поддерживает и
+     * {@code FormAttribute.columns}, и {@code FormAttributeAdditionalColumns.columns}). Для
+     * реквизита верхнего уровня результат прежний — {@code (ATTRIBUTES, реквизит)}.
+     */
+    private static final class FormAttributeSelectionWeaving implements WeavingHook
+    {
+        private static final String TARGET = "com._1c.g5.v8.dt.form.ui.editor.FormEditorPage"; //$NON-NLS-1$
+        private static final String METHOD = "getEditorComponentDescriptor"; //$NON-NLS-1$
+        private static final String DESCRIPTOR = "(Ljava/lang/Object;)Lcom/_1c/g5/v8/dt/common/Pair;"; //$NON-NLS-1$
+        private static final String ATTRIBUTE = "com/_1c/g5/v8/dt/form/model/AbstractFormAttribute"; //$NON-NLS-1$
+        private static final String COMPONENT = "com/_1c/g5/v8/dt/form/ui/editor/FormEditorComponent"; //$NON-NLS-1$
+        private static final String PAIR = "com/_1c/g5/v8/dt/common/Pair"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            context.registerService(WeavingHook.class, new FormAttributeSelectionWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] bytes = transform(woven.getBytes());
+                if (bytes != null)
+                    woven.setBytes(bytes);
+                System.getProperties().put("tormozit.formAttributeSelection.woven", bytes != null); //$NON-NLS-1$
+            }
+            catch (Throwable failure)
+            {
+                System.getProperties().put("tormozit.formAttributeSelection.failed", //$NON-NLS-1$
+                    String.valueOf(failure));
+            }
+        }
+
+        /** @return {@code null} — сигнатура метода не найдена (правка не применена) */
+        static byte[] transform(byte[] classfileBuffer)
+        {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (visitor == null || !METHOD.equals(name) || !DESCRIPTOR.equals(descriptor))
+                        return visitor;
+                    return new MethodVisitor(Opcodes.ASM9, visitor)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            Label stock = new Label();
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitTypeInsn(Opcodes.INSTANCEOF, ATTRIBUTE);
+                            super.visitJumpInsn(Opcodes.IFEQ, stock);
+                            super.visitFieldInsn(Opcodes.GETSTATIC, COMPONENT, "ATTRIBUTES", //$NON-NLS-1$
+                                "L" + COMPONENT + ";"); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitVarInsn(Opcodes.ALOAD, 0);
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, PAIR, "newPair", //$NON-NLS-1$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)L" + PAIR + ";", false); //$NON-NLS-1$ //$NON-NLS-2$
+                            super.visitInsn(Opcodes.ARETURN);
+                            super.visitLabel(stock);
+                            touched.set(true);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return touched.get() ? writer.toByteArray() : null;
+        }
     }
 
     /**

@@ -63,8 +63,21 @@ import com._1c.g5.v8.dt.bsl.model.BslIndexPackage;
 import com._1c.g5.v8.dt.bsl.model.ModuleContextDefIndex;
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com._1c.g5.v8.dt.metadata.mdclass.DataProcessorTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.ReportTabularSection;
+import com._1c.g5.v8.dt.metadata.mdtype.TabularSectionTypes;
+import com._1c.g5.v8.dt.mcore.ContextDef;
+import com._1c.g5.v8.dt.mcore.DerivedProperty;
+import com._1c.g5.v8.dt.mcore.Property;
+import com._1c.g5.v8.dt.mcore.Type;
+import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.TypeSet;
+import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
+import com._1c.g5.v8.dt.form.model.AbstractFormAttribute;
 import com.e1c.g5.dt.core.api.platform.BmOperationContext;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.resource.Resource;
@@ -1601,6 +1614,20 @@ public class Activator extends AbstractUIPlugin
                     acceptCompletionNames(provider, names, null, assist, acceptor);
                     return;
                 }
+                // Вложенные реквизиты: штатная подсказка после «…Форма.ФормаЭлемента.»
+                // предлагает только реквизиты самой формы, а после реквизита формы обрывается.
+                // Для имён метаданных (Справочник.Объект.…) штатный список уже есть — не дублируем.
+                if (owner instanceof Property || owner instanceof TypeItem
+                    || owner instanceof com._1c.g5.v8.dt.mcore.Parameter || owner instanceof BasicFeature)
+                {
+                    var nested = nestedProperties(owner);
+                    if (!nested.isEmpty())
+                    {
+                        for (Property property : nested)
+                            acceptCompletionProperty(provider, property, assist, acceptor);
+                        return;
+                    }
+                }
                 boolean formMethods = owner instanceof AbstractForm;
                 String featureName = formMethods || owner instanceof CommonModule ? "module" : "managerModule"; //$NON-NLS-1$ //$NON-NLS-2$
                 var feature = owner.eClass().getEStructuralFeature(featureName);
@@ -1633,6 +1660,213 @@ public class Activator extends AbstractUIPlugin
                     acceptor.accept(completion);
                 }
             }
+        }
+
+        /** Имя вложенного реквизита после «…Форма.ФормаЭлемента.Объект.». */
+        private static void acceptCompletionProperty(Object provider, Property property,
+            ContentAssistContext assist, ICompletionProposalAcceptor acceptor)
+        {
+            String name = property.getName();
+            if (name == null || name.isBlank())
+                name = property.getNameRu();
+            if (name == null || name.isBlank())
+                return;
+            Object proposal = Global.invoke(provider, "createSimpleProposals", name, name, //$NON-NLS-1$
+                nestedPropertyImage(property), assist);
+            if (proposal instanceof ICompletionProposal completion)
+            {
+                acceptor.accept(completion);
+            }
+        }
+
+        /** Иконка реквизита метаданных; у реквизита формы её нет — как в штатной подсказке. */
+        private static Image nestedPropertyImage(Property property)
+        {
+            try
+            {
+                if (property instanceof DerivedProperty derived && derived.getSource() != null
+                    && !derived.getSource().eIsProxy())
+                {
+                    EObject source = derived.getSource();
+                    if (source instanceof BasicFeature || source.eClass().getName().endsWith("TabularSection")) //$NON-NLS-1$
+                        return MdUiSharedImages.getMdClassImage(source.eClass());
+                }
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+            }
+            return null;
+        }
+
+        /**
+         * Вложенные реквизиты: штатная подсказка после «…Форма.ФормаЭлемента.» предлагает только
+         * реквизиты самой формы, а после реквизита формы ничего не предлагает — части глубже
+         * четвёртой {@code createProposalsForLinkPartCommentContent} не обрабатывает.
+         */
+        private static java.util.List<Property> nestedProperties(EObject owner)
+        {
+            java.util.Map<String, Property> byName = new LinkedHashMap<>();
+            collectNestedProperties(typesOf(owner), byName, 0);
+            return new java.util.ArrayList<>(byName.values());
+        }
+
+        private static void collectNestedProperties(java.util.List<TypeItem> types,
+            java.util.Map<String, Property> out, int depth)
+        {
+            if (types == null || types.isEmpty() || depth > 8)
+                return;
+            java.util.List<TypeItem> rows = new java.util.ArrayList<>();
+            for (TypeItem item : types)
+            {
+                if (!(item instanceof Type type) || type.eIsProxy())
+                    continue;
+                try
+                {
+                    ContextDef def = type.getContextDef();
+                    if (def != null && !def.eIsProxy() && def.allProperties() != null)
+                        for (Property property : def.allProperties())
+                        {
+                            // dependsOnMetadata — шаблон произвольного имени, а не реальный реквизит.
+                            if (property == null || property.eIsProxy() || property.isDependsOnMetadata())
+                                continue;
+                            String name = property.getName();
+                            if (name == null || name.isBlank())
+                                name = property.getNameRu();
+                            if (name != null && !name.isBlank())
+                                out.putIfAbsent(name.toLowerCase(java.util.Locale.ROOT), property);
+                        }
+                    if (type.getCollectionElementTypes() != null)
+                        rows.addAll(type.getCollectionElementTypes().allTypes());
+                }
+                catch (RuntimeException | LinkageError ignored)
+                {
+                }
+            }
+            collectNestedProperties(rows, out, depth + 1);
+        }
+
+        /**
+         * Сегмент «см.» после реквизита формы, реквизита объекта или табличной части.
+         * <p>
+         * Штатный {@code LinkPart.getActualObjectForPart} разрешает после формы только её реквизит
+         * или «Элементы.Имя» ({@code getActualFormChildObject}) и обрывает цепочку. Здесь имя ищется
+         * в контексте типа предыдущего сегмента: у объекта — его реквизиты и табличные части,
+         * у табличной части и таблицы значений — колонки строки, у ссылки — реквизиты.
+         */
+        private static Property findProperty(java.util.List<TypeItem> types, String name, int depth)
+        {
+            if (types == null || types.isEmpty() || depth > 8)
+                return null;
+            java.util.List<TypeItem> rows = new java.util.ArrayList<>();
+            for (TypeItem item : types)
+            {
+                if (!(item instanceof Type type) || type.eIsProxy())
+                    continue;
+                try
+                {
+                    ContextDef def = type.getContextDef();
+                    if (def != null && !def.eIsProxy() && def.allProperties() != null)
+                        for (Property property : def.allProperties())
+                        {
+                            if (property == null || property.eIsProxy())
+                                continue;
+                            if (name.equalsIgnoreCase(property.getName())
+                                || name.equalsIgnoreCase(property.getNameRu()))
+                                return property;
+                        }
+                    if (type.getCollectionElementTypes() != null)
+                        rows.addAll(type.getCollectionElementTypes().allTypes());
+                }
+                catch (RuntimeException | LinkageError ignored)
+                {
+                }
+            }
+            return rows.isEmpty() ? null : findProperty(rows, name, depth + 1);
+        }
+
+        /** Типы значения сегмента пути: реквизита, типа, параметра или метаданных. */
+        private static java.util.List<TypeItem> typesOf(EObject owner)
+        {
+            java.util.List<TypeItem> types = new java.util.ArrayList<>();
+            try
+            {
+                if (owner instanceof Property property)
+                {
+                    // Родные данные формы: контекст формы уже содержит тип, построенный EDT
+                    // (FormImplicitRefInferrer) вместе с дополнительными реквизитами и колонками.
+                    // Пересчёт из типа метаданных их бы потерял.
+                    addTypeContainer(types, property.getTypeContainer());
+                    if (types.isEmpty() && property.getTypes() != null)
+                        for (TypeItem item : property.getTypes())
+                            addExpanded(types, item, 0);
+                    if (types.isEmpty() && property instanceof DerivedProperty derived
+                        && derived.getSource() instanceof AbstractFormAttribute attribute
+                        && attribute.getValueType() != null)
+                        for (TypeItem item : attribute.getValueType().getTypes())
+                            addExpanded(types, item, 0);
+                }
+                else if (owner instanceof com._1c.g5.v8.dt.mcore.Parameter parameter)
+                {
+                    if (parameter.getType() != null)
+                        for (TypeItem item : parameter.getType())
+                            addExpanded(types, item, 0);
+                }
+                else if (owner instanceof TypeItem item)
+                    addExpanded(types, item, 0);
+                else if (owner instanceof com._1c.g5.v8.dt.metadata.mdclass.TypeDescriptionProvider provider)
+                {
+                    if (provider.getTypeDescription() != null)
+                        for (TypeItem item : provider.getTypeDescription().getTypes())
+                            addExpanded(types, item, 0);
+                }
+                else if (owner instanceof DbObjectTabularSection section)
+                    addRowType(types, section.getProducedTypes());
+                else if (owner instanceof ReportTabularSection section)
+                    addRowType(types, section.getProducedTypes());
+                else if (owner instanceof DataProcessorTabularSection section)
+                    addRowType(types, section.getProducedTypes());
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+            }
+            return types;
+        }
+
+        private static void addRowType(java.util.List<TypeItem> types, TabularSectionTypes produced)
+        {
+            if (produced == null || produced.getRowType() == null || produced.getRowType().getType() == null)
+                return;
+            addExpanded(types, produced.getRowType().getType(), 0);
+        }
+
+        private static void addTypeContainer(java.util.List<TypeItem> types,
+            com._1c.g5.v8.dt.mcore.TypeContainer container)
+        {
+            if (container == null)
+                return;
+            for (TypeItem item : container.allTypes())
+                addExpanded(types, item, 0);
+        }
+
+        /** Составной тип и набор раскрываются до конкретных типов. */
+        private static void addExpanded(java.util.List<TypeItem> types, TypeItem item, int depth)
+        {
+            if (item == null || depth > 8)
+                return;
+            try
+            {
+                if (item instanceof TypeSet set && set.getBaseTypes() != null && !set.getBaseTypes().isEmpty())
+                {
+                    for (TypeItem nested : set.getBaseTypes())
+                        addExpanded(types, nested, depth + 1);
+                    return;
+                }
+            }
+            catch (RuntimeException | LinkageError ignored)
+            {
+                return;
+            }
+            types.add(item);
         }
 
         private static java.util.List<String> completionParameterNames(com._1c.g5.v8.dt.bsl.model.Method method)
@@ -1703,6 +1937,11 @@ public class Activator extends AbstractUIPlugin
                     owner = form.getForm();
                 if (owner == null || owner.eIsProxy())
                     return null;
+                // Вложенный реквизит: штатный резолвер обрывает цепочку на реквизите формы,
+                // а после него реквизиты и табличные части объекта уже не разрешает.
+                EObject member = findProperty(typesOf(owner), name, 0);
+                if (member != null)
+                    return member;
                 String featureName = owner instanceof AbstractForm || owner instanceof CommonModule
                     ? "module" : "managerModule"; //$NON-NLS-1$ //$NON-NLS-2$
                 var feature = owner.eClass().getEStructuralFeature(featureName);

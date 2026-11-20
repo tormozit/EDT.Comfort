@@ -1074,11 +1074,17 @@ public class FormEditorHook implements IStartup
         /** Цели разделены по рабочему окну и URI формы; повторный запрос заменяет прежний. */
         private static final Map<IWorkbenchPage, Map<String, EObject>> pending = new WeakHashMap<>();
 
+        /**
+         * Ближайший к {@code object} объект формы, у которого в редакторе есть своя строка.
+         * {@link AbstractFormAttribute} — не только реквизит верхнего уровня, но и вложенная
+         * колонка реквизита-таблицы/{@code ДополнительныеКолонки}: у неё тоже есть строка дерева
+         * реквизитов, а без неё переход выделял внешний реквизит.
+         */
         private static EObject target(EObject object)
         {
             for (EObject current = object; current != null; current = current.eContainer())
             {
-                if (current instanceof FormItem || current instanceof FormAttribute
+                if (current instanceof FormItem || current instanceof AbstractFormAttribute
                     || current instanceof FormCommand || current instanceof FormParameter)
                     return current;
                 if (current instanceof Form)
@@ -1182,9 +1188,14 @@ public class FormEditorHook implements IStartup
             }
             else
             {
-                FormEditorComponent component = target instanceof FormAttribute ? FormEditorComponent.ATTRIBUTES
+                FormEditorComponent component = target instanceof AbstractFormAttribute
+                    ? FormEditorComponent.ATTRIBUTES
                     : target instanceof FormCommand ? FormEditorComponent.FORM_COMMANDS : FormEditorComponent.PARAMETERS;
                 requests.remove(key, target);
+                // Объект колонки EDT сам превращает в строку дерева реквизитов
+                // (FormAttributeTreeViewer конвертирует выделение через
+                // IDataSourceInfoAssociationService.findPropertyInfo, а тот поддерживает и
+                // FormAttribute.columns, и FormAttributeAdditionalColumns.columns).
                 page.setSelection(component, true, target);
                 if (target instanceof FormAttribute || target instanceof FormCommand)
                     scheduleGoTo(editor, page, target);
