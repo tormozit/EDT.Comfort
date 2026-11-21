@@ -76,6 +76,8 @@ import com._1c.g5.v8.dt.bsl.model.resource.owner.IBslOwnerComputerService;
 import com._1c.g5.v8.dt.bsl.model.typesytem.TypeSystemMode;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeState;
 import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTreeTypeStateWithSubStates;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeState;
+import com._1c.g5.v8.dt.bsl.model.typesytem.VariableTypeStateProvider;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.BslResource;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
@@ -87,6 +89,7 @@ import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.Environment;
 import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 
 /**
  * Влитие рассчитанного по коду типа в документирующий комментарий (issue 509).
@@ -253,7 +256,6 @@ public final class BslDocCommentComputedTypes
      */
     private static final java.util.concurrent.atomic.AtomicInteger TYPES_GENERATION =
         new java.util.concurrent.atomic.AtomicInteger();
-
     static int typesGeneration()
     {
         return TYPES_GENERATION.get();
@@ -984,6 +986,170 @@ public final class BslDocCommentComputedTypes
         {
         }
         return replace;
+    }
+
+    /** Тип бокового комментария итератора до добавления зависимости типа элемента коллекции. */
+    private static final java.util.Map<Variable, List<TypeItem>> ITERATOR_COMMENT_TYPES =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** Штатная опция проекта «Перезаписывать типы документирующим комментарием». */
+    public static boolean isReplaceTypesByDocumentationComment(IProject project)
+    {
+        try
+        {
+            return project != null && project.isAccessible()
+                && new ProjectScope(project).getNode(EDT_BSL_NODE).getBoolean(EDT_REPLACE_KEY, true);
+        }
+        catch (Throwable ignored)
+        {
+            return true;
+        }
+    }
+
+    /** Сбрасывает кэш рассчитанных типов, чтобы подсказка не показывала тип до нашей правки. */
+    static void clearTypeCaches(EObject context)
+    {
+        try
+        {
+            Resource resource = context == null ? null : context.eResource();
+            if (resource == null)
+                return;
+            var provider = org.eclipse.xtext.resource.IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(resource.getURI());
+            if (provider == null)
+                return;
+            for (Class<?> type : new Class<?>[] {
+                com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem.class,
+                com._1c.g5.v8.dt.bsl.resource.TypesComputer.class,
+                com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer.class })
+            {
+                Object service = provider.get(type);
+                if (service == null)
+                    continue;
+                for (java.lang.reflect.Field field : type.getDeclaredFields())
+                {
+                    if (!org.eclipse.xtext.util.OnChangeEvictingCache.class.equals(field.getType()))
+                        continue;
+                    field.setAccessible(true);
+                    Object cache = field.get(service);
+                    if (cache instanceof org.eclipse.xtext.util.OnChangeEvictingCache evicting)
+                        evicting.clear(resource);
+                }
+            }
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /** Запомненный тип бокового комментария итератора либо пусто. */
+    static List<TypeItem> iteratorCommentTypes(Variable variable)
+    {
+        List<TypeItem> types = variable == null ? null : ITERATOR_COMMENT_TYPES.get(variable);
+        return types == null ? List.of() : types;
+    }
+
+    /** Включена ли штатная опция «Перезаписывать типы документирующим комментарием». */
+    static boolean replaceTypesByDocumentationComment(EObject object)
+    {
+        return isReplaceTypesByDocumentationComment(resolveProject(object));
+    }
+
+
+    /** Зонд/починка: состояние отдаёт тип итератора после обработки ForEachStatement. */
+    public static void probeForEach(Object loopStatement)
+    {
+        try
+        {
+            if (!(loopStatement instanceof com._1c.g5.v8.dt.bsl.model.ForEachStatement loop))
+                return;
+            var access = loop.getVariableAccess();
+            if (access == null || access.getFeatureEntries().isEmpty()
+                || !(access.getFeatureEntries().get(0).getFeature() instanceof Variable variable))
+                return;
+            org.eclipse.xtext.nodemodel.ICompositeNode node =
+                org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(loop);
+            Environmental owner = org.eclipse.xtext.EcoreUtil2.getContainerOfType(loop, Environmental.class);
+            Environments environments = owner == null ? Environments.ALL : owner.environments();
+            List<TypeItem> commentTypes = ITERATOR_COMMENT_TYPES.get(variable);
+            if (commentTypes != null && !commentTypes.isEmpty())
+            {
+                boolean replace = isReplaceTypesByDocumentationComment(resolveProject(variable));
+                VariableTypeStateProvider provider =
+                    TypeSystemUtil.getOrInitVariableProvider(variable, TypeSystemMode.NORMAL);
+                org.eclipse.xtext.nodemodel.ICompositeNode collectionNode =
+                    org.eclipse.xtext.nodemodel.util.NodeModelUtils.findActualNodeFor(loop.getCollection());
+                int from = collectionNode == null ? 0 : collectionNode.getTotalEndOffset();
+                for (VariableTypeState state : provider.getAll(environments))
+                {
+                    if (state == null || state.getOffset() < from || state.getOffset() > node.getEndOffset())
+                        continue;
+                    Object raw = Global.getField(state, "typesState"); //$NON-NLS-1$
+                    if (raw instanceof java.util.Set<?> types)
+                    {
+                        @SuppressWarnings("unchecked")
+                        java.util.Set<TypeItem> target = (java.util.Set<TypeItem>)types;
+                        if (replace)
+                            target.clear();
+                        target.addAll(commentTypes);
+                    }
+                    // Момент назначения типа итератору: штатно здесь выставлен признак
+                    // «зависеть от коллекции», из-за которого getTypes() подмешивает тип
+                    // элемента коллекции. При замещении его снимаем.
+                    Global.invokeVoid(state, "setDependOnCollection", Boolean.FALSE); //$NON-NLS-1$
+                }
+            }
+            if (commentTypes != null && !commentTypes.isEmpty())
+                clearTypeCaches(variable);
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /** Зонд: типы состояния до добавления зависимости типа элемента коллекции. */
+    public static void probeDepend(Object target, Object collection)
+    {
+        try
+        {
+            String variable = "?"; //$NON-NLS-1$
+            String types = ""; //$NON-NLS-1$
+            if (target instanceof VariableTypeState state)
+            {
+                variable = state.getVariable() == null ? "?" : state.getVariable().getName(); //$NON-NLS-1$
+                types = names(state.getTypes());
+                if (state.getVariable() != null && state.hasTypes()
+                    && collection instanceof Expression expression
+                    && expression.eContainer() instanceof com._1c.g5.v8.dt.bsl.model.ForEachStatement loop
+                    && loop.getCollection() == expression && loop.getVariableAccess() != null
+                    && !loop.getVariableAccess().getFeatureEntries().isEmpty()
+                    && loop.getVariableAccess().getFeatureEntries().get(0).getFeature() == state.getVariable())
+                {
+                    List<TypeItem> captured = new ArrayList<>();
+                    for (TypeItem item : state.getTypes())
+                        captured.add(item);
+                    ITERATOR_COMMENT_TYPES.put(state.getVariable(), captured);
+                }
+            }
+        }
+        catch (Throwable ignored)
+        {
+        }
+    }
+
+    /** Имена типов через запятую. */
+    static String names(Iterable<?> types)
+    {
+        StringBuilder text = new StringBuilder();
+        for (Object item : types)
+        {
+            if (!(item instanceof TypeItem type))
+                continue;
+            if (text.length() > 0)
+                text.append(',');
+            text.append(McoreUtil.getTypeName(type));
+        }
+        return text.toString();
     }
 
     /**
@@ -2458,7 +2624,7 @@ public final class BslDocCommentComputedTypes
         }
     }
 
-    /**
+        /**
      * CreatorTreeState из bsl 28.0.1.v202605050943 принимает StaticFeatureAccess аргумента ТипЗнч.
      * Ссылку берём из присваивания, позицию — из условия; диапазоны веток и типы создаёт сама EDT.
      * AST не меняется, расчёт/ожидание валидации не запускаются.
@@ -2670,6 +2836,38 @@ public final class BslDocCommentComputedTypes
                                 touched.set(true);
                             }
                             super.visitInsn(opcode);
+                        }
+                    };
+                                if (mv != null && "doInternalProcess".equals(name) //$NON-NLS-1$
+                    && "(Lcom/_1c/g5/v8/dt/bsl/model/ForEachStatement;Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)V".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "probeForEach", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                if (mv != null && "processDependState".equals(name) //$NON-NLS-1$
+                    && "(Lcom/_1c/g5/v8/dt/bsl/model/typesytem/VariableTreeTypeState;Lcom/_1c/g5/v8/dt/bsl/model/Expression;Ljava/util/List;ZLcom/_1c/g5/v8/dt/mcore/util/Environments;)V".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            visitVarInsn(Opcodes.ALOAD, 1);
+                            visitVarInsn(Opcodes.ALOAD, 2);
+                            visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "probeDepend", //$NON-NLS-1$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                            touched.set(true);
                         }
                     };
                 if (mv != null && "doProcess".equals(name) //$NON-NLS-1$
@@ -2978,8 +3176,7 @@ public final class BslDocCommentComputedTypes
             }
         }
 
-        private void weaveCreator(WovenClass wovenClass)
-        {
+        private void weaveCreator(WovenClass wovenClass)        {
             try
             {
                 byte[] original = wovenClass.getBytes();
@@ -2997,5 +3194,6 @@ public final class BslDocCommentComputedTypes
             {
             }
         }
+
     }
 }

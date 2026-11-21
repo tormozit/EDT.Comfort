@@ -3426,6 +3426,9 @@ public final class BslStructureInsertCommentTypes
             if (types == null || variable == null || offset < 0
                 || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
                 return types;
+            List<TypeItem> comment = BslDocCommentComputedTypes.iteratorCommentTypes(variable);
+            if (!comment.isEmpty() && BslDocCommentComputedTypes.replaceTypesByDocumentationComment(variable))
+                return comment;
             if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
                 types = ArrayElementTypes.infer(types, variable, offset, environments);
             types = CollectionValueTypes.infer(types, variable, offset, environments);
@@ -4337,6 +4340,13 @@ public final class BslStructureInsertCommentTypes
             List<TypeItem> cached = variables.get(key);
             if (cached != null)
                 return cached;
+            List<TypeItem> comment = BslDocCommentComputedTypes.iteratorCommentTypes(variable);
+            if (!comment.isEmpty() && BslDocCommentComputedTypes.replaceTypesByDocumentationComment(variable))
+            {
+                List<TypeItem> result = List.copyOf(comment);
+                variables.put(key, result);
+                return result;
+            }
             if (!activeVariables.add(key))
                 return variableNative(variable, offset, environments, provided);
             try
