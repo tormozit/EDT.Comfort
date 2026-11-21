@@ -61,6 +61,8 @@ import com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart;
 import com._1c.g5.v8.dt.bsl.documentation.comment.BslMultiLineCommentDocumentationProvider;
 import com._1c.g5.v8.dt.bsl.model.BslContextDef;
 import com._1c.g5.v8.dt.bsl.model.BslIndexPackage;
+import com._1c.g5.v8.dt.bsl.model.Conditional;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.ModuleContextDefIndex;
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
@@ -153,6 +155,7 @@ public class Activator extends AbstractUIPlugin
         MarkerCreationDates.start();
         EmptyExceptStatementFix.start();
         NstrMainLanguageFix.start();
+        RollbackTransactionFix.start();
         DocCommentLinks.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
@@ -347,6 +350,7 @@ public class Activator extends AbstractUIPlugin
         MarkerCreationDates.stop();
         EmptyExceptStatementFix.stop();
         NstrMainLanguageFix.stop();
+        RollbackTransactionFix.stop();
         DocCommentLinks.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
@@ -2377,6 +2381,69 @@ public class Activator extends AbstractUIPlugin
             {
                 return null;
             }
+        }
+    }
+
+    /**
+     * {@code rollback-transaction} (#1070): транзакцию завершает и отмена, а не только фиксация.
+     * Вложенный {@code Если} засчитывается лишь при завершении транзакции во всех ветках, включая
+     * {@code ИначеЕсли} и обязательную завершающую ветку {@code Иначе}. Ранний бандл вплетает вызов
+     * этой функции в {@code RollbackTransactionCheck.analyzeTryPart}, а простые вызовы фиксации и
+     * отмены проверяет сам, поэтому после остановки основного бандла достаточно резервной функции.
+     */
+    private static final class RollbackTransactionFix
+    {
+        private static final String CALLBACK = "tormozit.rollbackTransaction.branches"; //$NON-NLS-1$
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK,
+                (Function<Object[], Boolean>)RollbackTransactionFix::completeConditional);
+        }
+
+        static void stop()
+        {
+            System.getProperties().put(CALLBACK, (Function<Object[], Boolean>)args -> Boolean.FALSE);
+        }
+
+        private static Boolean completeConditional(Object[] args)
+        {
+            return Boolean.valueOf(args != null && args.length >= 2 && args[1] instanceof IfStatement statement
+                && closesAllPaths(statement));
+        }
+
+        private static boolean closesAllPaths(IfStatement statement)
+        {
+            Conditional ifPart = statement.getIfPart();
+            if (ifPart == null || !closesBranch(ifPart.getStatements()))
+                return false;
+            for (Conditional elseIf : statement.getElsIfParts())
+                if (elseIf == null || !closesBranch(elseIf.getStatements()))
+                    return false;
+            // Без завершающей ветки «Иначе» остаётся путь, на котором транзакция не закрыта.
+            return closesBranch(statement.getElseStatements());
+        }
+
+        private static boolean closesBranch(List<Statement> statements)
+        {
+            if (statements == null)
+                return false;
+            for (Statement statement : statements)
+                if (isTransactionEnd(statement)
+                    || statement instanceof IfStatement nested && closesAllPaths(nested))
+                    return true;
+            return false;
+        }
+
+        private static boolean isTransactionEnd(Statement statement)
+        {
+            if (!(statement instanceof com._1c.g5.v8.dt.bsl.model.SimpleStatement simple)
+                || !(simple.getLeft() instanceof Invocation invocation)
+                || invocation.getMethodAccess() == null)
+                return false;
+            String name = invocation.getMethodAccess().getName();
+            return "ЗафиксироватьТранзакцию".equals(name) || "CommitTransaction".equals(name) //$NON-NLS-1$ //$NON-NLS-2$
+                || "ОтменитьТранзакцию".equals(name) || "RollbackTransaction".equals(name); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

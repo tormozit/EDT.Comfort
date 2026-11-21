@@ -70,6 +70,7 @@ public final class Activator
         CheckExecutorEnabledWeaving.install(context);
         EmptyExceptStatementWeaving.install(context);
         NstrEmptyLanguageWeaving.install(context);
+        RollbackTransactionWeaving.install(context);
         QlHubOpenModulesWeaving.install(context);
         SuppressionRangesWeaving.install(context);
         LocationCellTextWeaving.install(context);
@@ -1476,6 +1477,126 @@ public final class Activator
             {
                 System.setProperty(CALLBACK + ".status", failure.toString()); //$NON-NLS-1$
             }
+        }
+    }
+
+    /**
+     * {@code rollback-transaction} из {@code com.e1c.v8codestyle.bsl} 0.7.0.v20260515-0037 и
+     * 0.8.0.v20260915-2022 (#1070). В {@code analyzeTryPart} завершением транзакции считаются и
+     * фиксация, и отмена. Если завершение находится в {@code Если}, оно засчитывается только когда
+     * каждая ветка {@code Если/ИначеЕсли/Иначе} завершает транзакцию; этот разбор делает основной
+     * бандл ({@code Activator.RollbackTransactionFix}).
+     */
+    private static final class RollbackTransactionWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.rollbackTransaction.branches"; //$NON-NLS-1$
+        private static final String TARGET = "com.e1c.v8codestyle.bsl.check.RollbackTransactionCheck"; //$NON-NLS-1$
+        private static final String OWNER = TARGET.replace('.', '/');
+        private static final String ANALYZE_DESCRIPTOR =
+            "(Lcom/_1c/g5/v8/dt/bsl/model/Invocation;Ljava/util/List;"
+                + "Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;)V"; //$NON-NLS-1$
+        private static final String STATEMENT_DESCRIPTOR =
+            "(Lcom/_1c/g5/v8/dt/bsl/model/Statement;)Z"; //$NON-NLS-1$
+        private static final String END_METHOD = "comfort$isTransactionEnd"; //$NON-NLS-1$
+        private static final String FUNCTION = "java/util/function/Function"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK,
+                (Function<Object[], Boolean>)args -> Boolean.FALSE);
+            context.registerService(WeavingHook.class, new RollbackTransactionWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                boolean[] hasHelper = { false };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (END_METHOD.equals(name))
+                            hasHelper[0] = true;
+                        if (!"analyzeTryPart".equals(name) || !ANALYZE_DESCRIPTOR.equals(descriptor)) //$NON-NLS-1$
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                if (opcode == Opcodes.INVOKEVIRTUAL && OWNER.equals(owner)
+                                    && "isCommitStatement".equals(method) //$NON-NLS-1$
+                                    && STATEMENT_DESCRIPTOR.equals(descriptor))
+                                {
+                                    patched[0]++;
+                                    super.visitMethodInsn(opcode, owner, END_METHOD, descriptor, isInterface);
+                                    return;
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] == 1 && !hasHelper[0])
+                {
+                    emitEndMethod(writer);
+                    woven.setBytes(writer.toByteArray());
+                }
+                System.setProperty(CALLBACK + ".status", //$NON-NLS-1$
+                    patched[0] == 1 && !hasHelper[0] ? "woven" : "bytecode differs"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", failure.toString()); //$NON-NLS-1$
+            }
+        }
+
+        /** Прямая фиксация или отмена либо полное условие, все ветки которого завершают транзакцию. */
+        private static void emitEndMethod(ClassWriter writer)
+        {
+            MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_SYNTHETIC,
+                END_METHOD, STATEMENT_DESCRIPTOR, null, null);
+            mv.visitCode();
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, OWNER, "isCommitStatement", //$NON-NLS-1$
+                STATEMENT_DESCRIPTOR, false);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, OWNER, "isRollbackStatement", //$NON-NLS-1$
+                STATEMENT_DESCRIPTOR, false);
+            mv.visitInsn(Opcodes.IOR);
+            EarlyWeaving.emitGetProperty(mv, CALLBACK, FUNCTION);
+            mv.visitInsn(Opcodes.ICONST_2);
+            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitInsn(Opcodes.AASTORE);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitVarInsn(Opcodes.ALOAD, 1);
+            mv.visitInsn(Opcodes.AASTORE);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION, "apply", //$NON-NLS-1$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", //$NON-NLS-1$
+                "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+            mv.visitInsn(Opcodes.IOR);
+            mv.visitInsn(Opcodes.IRETURN);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
         }
     }
 
