@@ -158,12 +158,18 @@ import com._1c.g5.v8.dt.bsl.linking.BslLinkingDiagnosticErrorCodes;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefProperty;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.Block;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.FormalParam;
+import com._1c.g5.v8.dt.bsl.model.GotoStatement;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.Label;
+import com._1c.g5.v8.dt.bsl.model.LabeledStatement;
+import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
@@ -3505,8 +3511,9 @@ public final class BslModuleSpellCheckHook implements IStartup
      * {@link #buildSimilarNameProposal} - сначала {@link IScope} несвязавшейся ссылки (когда BSL
      * резолвит имя как cross-reference), затем {@link #candidateNameTable}. {@code undefined-type}
      * покрывается платформенными типами из {@link #platformApiNames()} (каталог
-     * {@code McorePackage.Literals.TYPE_ITEM}). {@code undefined-label} пока не поддержан - метки
-     * не входят ни в один из трёх источников {@link #candidateNameTable}.
+     * {@code McorePackage.Literals.TYPE_ITEM}). Для {@code undefined-label} (в API EDT константа
+     * {@code UNDEFINED_LABLE}) и проверки «Метка после «Перейти» не объявлена» кандидаты берутся
+     * только из меток той же процедуры или функции - {@link #labelNamesAt}.
      *
      * <p>"Свойство (метод) объекта не обнаружено" - обращение через точку (`Объект.Метод`) к
      * несуществующему свойству/методу. Кандидаты ищутся в той же общей таблице (не только среди
@@ -3518,6 +3525,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         BslLinkingDiagnosticErrorCodes.UNDEFINED_VARIABLE,
         BslLinkingDiagnosticErrorCodes.UNDEFINED_METHOD,
         BslLinkingDiagnosticErrorCodes.UNDEFINED_FUNCTION,
+        BslLinkingDiagnosticErrorCodes.UNDEFINED_LABLE,
         BslLinkingDiagnosticErrorCodes.UNDEFINED_TYPE);
 
     private static ICompletionProposal similarNameProposalForUnresolvedReference(XtextAnnotation xa,
@@ -3534,6 +3542,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             Issue issue = xa.getIssue();
             String code = issue != null ? issue.getCode() : null;
             boolean isLinking = Diagnostic.LINKING_DIAGNOSTIC.equals(code);
+            boolean isLabelCode = BslLinkingDiagnosticErrorCodes.UNDEFINED_LABLE.equals(code);
             boolean isDeclaredNameCode = DECLARED_NAME_ERROR_CODES.contains(code);
             if (issue == null)
                 return null;
@@ -3542,6 +3551,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             IXtextDocument document = xa.getDocument();
             if (offset == null || length == null || document == null)
                 return null;
+            boolean labelCheck = isLabelCode;
             boolean queryFieldCheck = false;
             boolean literalCheck = false;
             boolean unknownMethodCheck = false;
@@ -3559,12 +3569,17 @@ public final class BslModuleSpellCheckHook implements IStartup
                         return 2;
                     if (project != null && CreateMethodFix.isUnknownMethodCheck(code, project))
                         return 3;
+                    if (new CheckUid(ComfortCheckIds.BSL_GOTO_LABEL, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
+                        return 4;
                     return 0;
                 });
                 queryFieldCheck = checkKind == 1;
                 literalCheck = checkKind == 2;
                 unknownMethodCheck = checkKind == 3;
+                labelCheck |= checkKind == 4;
             }
+            if (labelCheck)
+                return similarLabelProposal(document, offset, icon);
             if (literalCheck)
                 return similarLiteralProposal(document, offset, icon);
             if (onlyComfortCheck ? !queryFieldCheck
@@ -3608,6 +3623,90 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
             return null;
         });
+    }
+
+    /**
+     * issue #1075: быстрое исправление неизвестной метки после «Перейти» - то же «Заменить на '…'»,
+     * что и для неизвестного свойства, но кандидаты берутся только из меток той же процедуры или
+     * функции. Префикс {@code ~} в исходном тексте и в замене сохраняется.
+     *
+     * <p>Диапазон замены берётся из узла cross-reference {@code GOTO_STATEMENT__LABEL}, а не из
+     * офсета annotations: метка - один терминал {@code LABEL_TOK} ({@code ~имя}), и офсет может
+     * указывать на его середину.
+     */
+    private static ICompletionProposal similarLabelProposal(IXtextDocument document, int offset, Image icon)
+    {
+        return document.readOnly((IUnitOfWork<ICompletionProposal, XtextResource>) resource -> {
+            if (resource.getContents().isEmpty() || resource.getParseResult() == null)
+                return null;
+            ILeafNode leaf = BslNodeLookup.leafAt(resource.getParseResult().getRootNode(), offset);
+            if (leaf == null)
+                return null;
+            String typed = bareLabelName(leaf.getText());
+            if (!isIdentifierLike(typed))
+                return null;
+            GotoStatement target = null;
+            INode labelNode = null;
+            for (GotoStatement goTo : EcoreUtil2.getAllContentsOfType(resource.getContents().get(0),
+                GotoStatement.class))
+            {
+                for (INode node : NodeModelUtils.findNodesForFeature(goTo,
+                    BslPackage.Literals.GOTO_STATEMENT__LABEL))
+                {
+                    if (node.getOffset() <= offset && offset <= node.getOffset() + node.getLength())
+                    {
+                        target = goTo;
+                        labelNode = node;
+                        break;
+                    }
+                }
+                if (target != null)
+                    break;
+            }
+            if (target == null)
+                return null;
+            Block block = EcoreUtil2.getContainerOfType(target, com._1c.g5.v8.dt.bsl.model.Method.class);
+            if (block == null)
+                block = EcoreUtil2.getContainerOfType(target, Module.class);
+            if (block == null)
+                return null;
+            List<String> names = labelNamesAt(block);
+            NameMatch match = matchInNames(names, typed);
+            if (match == null || match.exact || match.name.equals(typed))
+                return null;
+            String replacement = "~" + match.name; //$NON-NLS-1$
+            int replaceOffset = labelNode == null ? leaf.getOffset() : labelNode.getOffset();
+            int replaceLength = labelNode == null ? leaf.getLength() : labelNode.getLength();
+            return new CompletionProposal(replacement, replaceOffset, replaceLength, replacement.length(), icon,
+                ISSUE176_PROPOSAL_PREFIX + replacement + "'", null, null); //$NON-NLS-1$
+        });
+    }
+
+    /** Имена меток той же процедуры или функции, без префикса {@code ~} и двоеточия. */
+    private static List<String> labelNamesAt(Block block)
+    {
+        List<String> names = new ArrayList<>();
+        for (LabeledStatement labeled : BslUtil.getAllLabeledStatements(block))
+            for (Label label : labeled.getLabels())
+            {
+                String name = bareLabelName(label.getName());
+                if (name != null)
+                    names.add(name);
+            }
+        return names;
+    }
+
+    /** {@code ~имя:} / {@code ~имя} → {@code имя} - единый вид для сравнения и замены. */
+    private static String bareLabelName(String text)
+    {
+        if (text == null)
+            return null;
+        String name = text.strip();
+        if (name.startsWith("~")) //$NON-NLS-1$
+            name = name.substring(1);
+        if (name.endsWith(":")) //$NON-NLS-1$
+            name = name.substring(0, name.length() - 1);
+        return name;
     }
 
     /**

@@ -53,6 +53,9 @@ public final class ComfortCheckIds
     /** Обращение по числовому индексу к типу, который его не поддерживает. */
     public static final String BSL_NUMERIC_INDEX = "comfort-bsl-numeric-index"; //$NON-NLS-1$
 
+    /** {@code tormozit.checks.BslGotoLabelCheck} — метка после «Перейти» не объявлена. */
+    public static final String BSL_GOTO_LABEL = "comfort-bsl-goto-label"; //$NON-NLS-1$
+
     /** Литерал вне полного списка допустимых значений; прежний id сохраняет настройки проверки. */
     public static final String BSL_UNKNOWN_LITERAL = "comfort-bsl-unknown-column"; //$NON-NLS-1$
 

@@ -25,6 +25,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.AbstractDocument;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentExtension3;
@@ -67,8 +68,11 @@ import com._1c.g5.v8.dt.bsl.model.Block;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.ImplicitVariable;
+import com._1c.g5.v8.dt.bsl.model.Label;
+import com._1c.g5.v8.dt.bsl.model.LabeledStatement;
 import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IConfigurationAware;
@@ -96,6 +100,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 {
     private static final int NAME_WEIGHT = 10;
     private static final int PARAM_WEIGHT = 1;
+    private static final String LABEL_PROPOSAL_INFO = "Метка текущего метода"; //$NON-NLS-1$
     static final ICompletionProposal[] EMPTY = new ICompletionProposal[0];
     /** Кэш member-access с большим списком — не дёргать delegate повторно. */
     private static final int MIN_STABLE_MEMBER_CACHE = 20;
@@ -1955,6 +1960,7 @@ return;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
         ICompletionProposal[] list = dot >= 0 && memberStockFullListDot == dot
             ? memberStockFullList : isCacheValidForCaret(doc, caret) ? fullListCache : EMPTY;
+        list = withLabelProposals(list, doc, caret);
         BslExpectedTypePremiums.ensure(doc, caret, list);
     }
 
@@ -2394,10 +2400,11 @@ return result;
         if (hasTextSelection(viewer))
             return computeSelectionProposals(viewer);
         ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
+        IDocument popupDoc = viewer != null ? viewer.getDocument() : null;
+        result = withLabelProposals(result, popupDoc, caret);
         if (result == null || result.length == 0)
         return result;
-        return synthesizeBareConstructorProposals(result,
-        viewer != null ? viewer.getDocument() : null, caret);
+        return synthesizeBareConstructorProposals(result, popupDoc, caret);
 
     }
 
@@ -2752,6 +2759,8 @@ return;
             viewer != null ? viewer.getDocument() : null, offset);
 
         result = queryParametersOnly(viewer, offset, result);
+        result = withLabelProposals(result, viewer != null ? viewer.getDocument() : null,
+            resolveInvocationCaret(viewer, offset));
 
         // После схлопывания перегрузок и штатного расчёта могут остаться исходные EDT proposal.
         // Перевод типов в подписи нужен при любом режиме фильтра и порядка ИР.
@@ -4394,7 +4403,7 @@ if (RepeatedInvocationDetect.isActive())
         int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
         ICompletionProposal[] result = resolveProposalList(viewer, probeOffset, caret, filter,
             SmartAssistFilterState.isSmartFilterEnabled());
-        return result;
+        return withLabelProposals(result, doc, caret);
     }
 
     /** Popup/toggle в литерале+ИР: smart ON — по префиксу, OFF — полный merged. */
@@ -12677,6 +12686,143 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
         {
             return ""; //$NON-NLS-1$
         }
+    }
+
+    /**
+     * После {@code ~} и сразу после {@code Перейти }/{@code Goto } показываем только метки
+     * текущего метода. Список берём из готовой модели через
+     * {@link ContentAssistSessionReloader#readOnlyPeekAst}, без проверки и пересчёта.
+     */
+    private ICompletionProposal[] withLabelProposals(ICompletionProposal[] result, IDocument doc, int caret)
+    {
+        if (result == null || doc == null || caret < 0)
+            return result;
+        String filter = computeIdentifierFilter(doc, caret);
+        boolean tilde = !filter.isEmpty() && filter.charAt(0) == '~';
+        if ((!tilde && !isGotoLabelPosition(doc, caret, filter)) || isStringLiteralAssistContext(doc, caret)
+            || isCommentAssistContext(doc, caret) || ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+            return result;
+        if (!(doc instanceof IXtextDocument xtext))
+            return result;
+        List<String> labels = ContentAssistSessionReloader.readOnlyPeekAst(xtext,
+            resource -> methodLabels(resource, caret));
+        if (labels == null || labels.isEmpty())
+            return result;
+        SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
+        List<BslAddedWordProposal> matched = new ArrayList<>();
+        for (String label : labels)
+        {
+            if (!filter.isEmpty() && matcher.computeNamePremium(label) <= 0)
+                continue;
+            matched.add(new BslAddedWordProposal(label, BslAddedWordProposal.Kind.CONSTRUCTION, label,
+                BslAddedWordProposal.Absorb.WORD, -1, null, null, false, false, false)
+                    .withAdditionalInfo(LABEL_PROPOSAL_INFO));
+        }
+        matched.sort((left, right) -> {
+            int byScore = Integer.compare(matcher.computeNamePremium(right.getWord()),
+                matcher.computeNamePremium(left.getWord()));
+            return byScore != 0 ? byScore : left.getWord().compareToIgnoreCase(right.getWord());
+        });
+        return matched.isEmpty() ? EMPTY : matched.toArray(new ICompletionProposal[0]);
+    }
+
+    /** Каретка сразу после {@code Перейти }/{@code Goto } (или после начатого имени метки). */
+    static boolean isGotoLabelPosition(IDocument doc, int caret)
+    {
+        return isGotoLabelPosition(doc, caret, null);
+    }
+
+    private static boolean isGotoLabelPosition(IDocument doc, int caret, String filter)
+    {
+        if (doc == null || caret < 0 || caret > doc.getLength() || isStringLiteralAssistContext(doc, caret)
+            || isCommentAssistContext(doc, caret) || ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0)
+            return false;
+        try
+        {
+            String word = filter != null ? filter : computeIdentifierFilter(doc, caret);
+            int start = caret - word.length();
+            if (start < 0)
+                return false;
+            int keywordEnd = start;
+            while (keywordEnd > 0)
+            {
+                char before = doc.getChar(keywordEnd - 1);
+                if (before != ' ' && before != '\t')
+                    break;
+                keywordEnd--;
+            }
+            // Между ключевым словом и меткой должен быть хотя бы один пробел.
+            if (keywordEnd == start)
+                return false;
+            int keywordStart = keywordEnd;
+            while (keywordStart > 0 && Character.isLetterOrDigit(doc.getChar(keywordStart - 1)))
+                keywordStart--;
+            String keyword = doc.get(keywordStart, keywordEnd - keywordStart);
+            return "перейти".equalsIgnoreCase(keyword) || "goto".equalsIgnoreCase(keyword); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (BadLocationException | RuntimeException ignored)
+        {
+            return false;
+        }
+    }
+
+    /** Есть ли в методе каретки хотя бы одна метка — без проверки и пересчёта модели. */
+    static boolean hasMethodLabels(IDocument doc, int caret)
+    {
+        if (!(doc instanceof IXtextDocument xtext) || caret < 0)
+            return false;
+        List<String> labels = ContentAssistSessionReloader.readOnlyPeekAst(xtext,
+            resource -> methodLabels(resource, caret));
+        return labels != null && !labels.isEmpty();
+    }
+
+    /** Метки метода, в котором стоит каретка; повторы по имени (без учёта регистра) убираем. */
+    private static List<String> methodLabels(XtextResource resource, int caret)
+    {
+        if (resource == null || resource.getParseResult() == null)
+            return List.of();
+        INode root = resource.getParseResult().getRootNode();
+        if (root == null)
+            return List.of();
+        INode leaf = BslNodeLookup.leafAt(root, caret);
+        if (leaf == null && caret > 0)
+            leaf = BslNodeLookup.leafAt(root, caret - 1);
+        EObject semantic = leaf != null ? leaf.getSemanticElement() : null;
+        EObject actual = leaf != null ? NodeModelUtils.findActualSemanticObjectFor(leaf) : null;
+        EObject parentSemantic = leaf != null && leaf.getParent() != null
+            ? leaf.getParent().getSemanticElement() : null;
+        com._1c.g5.v8.dt.bsl.model.Method method =
+            EcoreUtil2.getContainerOfType(semantic, com._1c.g5.v8.dt.bsl.model.Method.class);
+        if (method == null)
+            method = EcoreUtil2.getContainerOfType(actual, com._1c.g5.v8.dt.bsl.model.Method.class);
+        if (method == null)
+            method = EcoreUtil2.getContainerOfType(parentSemantic, com._1c.g5.v8.dt.bsl.model.Method.class);
+        if (method == null)
+            return List.of();
+        Map<String, String> labels = new LinkedHashMap<>();
+        for (LabeledStatement statement : BslUtil.getAllLabeledStatements(method))
+        {
+            for (Label label : statement.getLabels())
+            {
+                String name = normalizeLabelName(label.getName());
+                if (name != null)
+                    labels.putIfAbsent(name.toLowerCase(java.util.Locale.ROOT), name);
+            }
+        }
+        return List.copyOf(labels.values());
+    }
+
+    private static String normalizeLabelName(String raw)
+    {
+        if (raw == null)
+            return null;
+        String name = raw.trim();
+        while (!name.isEmpty() && name.charAt(0) == '~')
+            name = name.substring(1).trim();
+        int colon = name.indexOf(':');
+        if (colon >= 0)
+            name = name.substring(0, colon).trim();
+        return name.isEmpty() ? null : "~" + name; //$NON-NLS-1$
     }
 
     /**

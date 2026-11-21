@@ -1553,12 +1553,10 @@ public final class Activator
                     emitEndMethod(writer);
                     woven.setBytes(writer.toByteArray());
                 }
-                System.setProperty(CALLBACK + ".status", //$NON-NLS-1$
-                    patched[0] == 1 && !hasHelper[0] ? "woven" : "bytecode differs"); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            catch (Throwable failure)
+            catch (Throwable ignored)
             {
-                System.setProperty(CALLBACK + ".status", failure.toString()); //$NON-NLS-1$
+                // Байткод проверки не должен ломать загрузку класса: при ошибке остаётся штатный.
             }
         }
 

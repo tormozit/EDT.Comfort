@@ -147,6 +147,8 @@ import com._1c.g5.v8.dt.platform.version.Version;
 final class BslExpectedTypePremiums
 {
     private static final String LOG = "expected-type"; //$NON-NLS-1$
+    /** Синтетический ключ премии автооткрытия после «Перейти »: метки есть в методе. */
+    private static final String GOTO_LABEL_AUTO_OPEN_KEY = "~goto"; //$NON-NLS-1$
     private static volatile long foreignParameterRevision;
     /** {@code КонстантаМаксСловПроверятьДляОжидаемогоТипа}. */
     private static final int MAX_WORDS_FOR_TYPE = 200;
@@ -3036,6 +3038,28 @@ final class BslExpectedTypePremiums
             return result;
         }
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
+        // После «Перейти » автооткрытие даёт только наличие меток: обычные слова места
+        // (статистика, даже ключевые слова) не должны открывать список без меток.
+        if (SmartContentAssistProcessor.isGotoLabelPosition(context.document(), context.caret()))
+        {
+            // Наличие меток берём из модели, а не из переданного списка: премия
+            // вычисляется и до того, как в список добавлены предложения меток.
+            boolean hasLabels = SmartContentAssistProcessor.hasMethodLabels(
+                context.document(), context.caret());
+            for (ICompletionProposal proposal : list)
+            {
+                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                if (!(raw instanceof BslAddedWordProposal))
+                    continue;
+                String key = lower(SmartContentAssistProcessor.filterMatchName(raw));
+                if (!key.startsWith("~")) //$NON-NLS-1$
+                    continue;
+                result.values().put(key, Integer.valueOf(10));
+            }
+            if (hasLabels)
+                result.autoOpen().add(GOTO_LABEL_AUTO_OPEN_KEY);
+            return result;
+        }
         // ИР: ЗаполнитьЛокальныеСвойстваИМетодыПоТексту → ЗаполнитьТаблицуСловИзТекста.
         // Частота уже собрана по всему методу, без строк, комментариев и слова у каретки.
         for (Map.Entry<String, String> member : scene.memberNames().entrySet())

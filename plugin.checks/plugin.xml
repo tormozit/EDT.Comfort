@@ -33,6 +33,7 @@
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslValueTypeCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslNumericIndexCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BslUnknownLiteralCheck"/>
+    <check category="tormozit.comfort.checks" class="tormozit.checks.BslGotoLabelCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.BrokenMdCompositionCheck"/>
     <check category="tormozit.comfort.checks" class="tormozit.checks.UnreachableMdObjectCheck"/>
   </extension>
