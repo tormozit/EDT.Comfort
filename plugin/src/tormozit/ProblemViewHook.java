@@ -56,6 +56,7 @@ import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CCombo;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Canvas;
@@ -63,6 +64,7 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
@@ -1527,6 +1529,13 @@ public final class ProblemViewHook implements IStartup
         private static final int SOURCE_IDLE_POLL_MS = 400;
 
         /**
+         * Сколько ждём {@code isIdle()} проекта. Конвейер производных данных может навсегда
+         * остаться «занятым» (сегмент активен, очередь пуста — дамп 20.11.2026 09:35:57),
+         * и тогда индикатор не гаснет никогда.
+         */
+        private static final long SOURCE_BUSY_MAX_MS = 60_000L;
+
+        /**
          * После {@code isIdle()} ещё один такт: следующая пачка маркеров часто
          * приходит через ~1 с. Не держим спиннер десятки секунд на индекс Lucene.
          */
@@ -1746,6 +1755,17 @@ public final class ProblemViewHook implements IStartup
             }
             if (!isSourceIdle(null, filterSnapshot))
             {
+                UpdateWaitIndicator.State waitState = UpdateWaitIndicator.stateOf(view);
+                long busyMs = waitState != null && waitState.waitingSince != 0
+                    ? System.currentTimeMillis() - waitState.waitingSince : 0;
+                if (busyMs > SOURCE_BUSY_MAX_MS)
+                {
+                    Global.tempLog(UpdateWaitIndicator.LOG_TOPIC, "проверки не завершились за " //$NON-NLS-1$
+                        + (SOURCE_BUSY_MAX_MS / 1000) + " с (isIdle=false), индикатор снят; отбор: " //$NON-NLS-1$
+                        + filterDescription);
+                    UpdateWaitIndicator.setWaitingForIndex(view, false);
+                    return;
+                }
                 sourceIdleSince = 0;
                 sourceIdleJob.schedule(SOURCE_IDLE_POLL_MS);
                 return;
@@ -3916,35 +3936,153 @@ public final class ProblemViewHook implements IStartup
         data.put(ValidationChecksFilterHook.OPEN_CHECK_DATA_KEY, code);
         Debug.log("openCheckSettings: " + code); //$NON-NLS-1$
         Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
-        CheckSettingsWindowTrace.log("before-create code=" + code, target);
+        CheckSettingsWindowGuard.log("before-create code=" + code, target);
         PreferenceDialog dialog =
             PreferencesUtil.createPropertyDialogOn(target, project, CHECKS_PAGE_ID, null, data);
         if (dialog == null)
         {
-            CheckSettingsWindowTrace.log("create-returned-null", target);
+            CheckSettingsWindowGuard.log("create-returned-null", target);
             return;
         }
-        CheckSettingsWindowTrace.install(dialog.getShell());
-        dialog.open();
-        CheckSettingsWindowTrace.log("open-returned", target);
+        openPropertyDialog(dialog, target);
     }
 
-    /** Временная диагностика невидимого модального окна; поведение окна не меняет. */
-    private static final class CheckSettingsWindowTrace
+    /**
+     * Открывает окно параметров проекта и держит его на экране: EDT умеет отдать
+     * модальному окну координаты за пределами рабочего стола (наблюдалось
+     * {@code y=-807} при рабочем столе до {@code y=1040}), и тогда окна не видно,
+     * а главное окно заблокировано модальностью — снаружи это «ЕДТ не отвечает»
+     * без индикатора. Исправление координат — в {@link CheckSettingsWindowGuard}.
+     */
+    private static void openPropertyDialog(PreferenceDialog dialog, Shell target)
     {
-        static void install(Shell shell)
+        CheckSettingsWindowGuard.guard(dialog);
+        dialog.open();
+        CheckSettingsWindowGuard.log("open-returned", target);
+    }
+
+    /**
+     * Держит модальное окно параметров проекта на экране.
+     * <p>
+     * Наблюдалось 20.11.2026 (окно «Свойства для АФВ»): окно существует и крутит свой
+     * модальный цикл, но его координаты — за верхней границей рабочего стола
+     * ({@code t=-807, b=-202}). Главное окно при этом заблокировано модальностью, самого
+     * окна не видно — снаружи это «ЕДТ не отвечает» без индикатора. Поэтому сразу после
+     * показа окно проверяется: если его заголовок недостижим (окно за пределами
+     * мониторов), оно возвращается на монитор владельца и активируется.
+     * <p>
+     * Диагностика безусловная: что было и что исправлено — в
+     * {@code .tmp/temp-logs/check-settings-window.log}.
+     */
+    private static final class CheckSettingsWindowGuard
+    {
+        /** Первая проверка — когда окно уже показано и модальный цикл начал крутиться. */
+        private static final int FIRST_CHECK_MS = 250;
+        /** Повторная: координаты может переставить и сама EDT уже после показа. */
+        private static final int LATE_CHECK_MS = 1500;
+        private static final String TOPIC = "check-settings-window"; //$NON-NLS-1$
+        /** Точка в заголовке окна, по которой проверяем достижимость окна мышью. */
+        private static final int TITLE_PROBE_X = 20;
+        private static final int TITLE_PROBE_Y = 5;
+
+        static void guard(PreferenceDialog dialog)
         {
-            log("created", shell);
+            if (dialog == null)
+                return;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            log("guard dialog=" + Integer.toHexString(System.identityHashCode(dialog)), dialog.getShell());
+            display.timerExec(FIRST_CHECK_MS, () -> ensureOnScreen(dialog));
+            display.timerExec(LATE_CHECK_MS, () -> ensureOnScreen(dialog));
+        }
+
+        /**
+         * Один проход: показать окно и вернуть его в пределы рабочего стола, если надо.
+         * Если заголовок уже достижим, окно не двигаем — не переставляем то, что пользователь
+         * поставил сам; трогаем только невидимое или уехавшее за экран.
+         */
+        static void ensureOnScreen(PreferenceDialog dialog)
+        {
+            Shell shell = dialog == null ? null : dialog.getShell();
             if (shell == null || shell.isDisposed())
                 return;
-            for (int type : new int[] { SWT.Show, SWT.Hide, SWT.Activate, SWT.Deactivate,
-                SWT.Close, SWT.Dispose })
-            {
-                shell.addListener(type, event -> log("event=" + event.type, shell));
-            }
             Display display = shell.getDisplay();
-            display.asyncExec(() -> log("queued-after-open", shell));
-            display.timerExec(1500, () -> log("after-1500ms", shell));
+            if (display == null || display.isDisposed())
+                return;
+            Rectangle bounds = shell.getBounds();
+            if (!shell.isVisible() && (bounds.width <= 0 || bounds.height <= 0))
+            {
+                // Окно ещё не показано (createShell/openShell не доехали) — не трогаем его.
+                log("not-open-yet", shell);
+                return;
+            }
+            Monitor monitor = monitorFor(shell);
+            Rectangle area = monitor.getClientArea();
+            boolean onScreen = titleReachable(display, bounds);
+            boolean active = display.getActiveShell() == shell;
+            StringBuilder text = new StringBuilder("check bounds=").append(bounds)
+                .append(" area=").append(area).append(" titleReachable=").append(onScreen)
+                .append(" visible=").append(shell.isVisible()).append(" active=").append(active);
+            if (onScreen && shell.isVisible())
+            {
+                // Модальное окно может остаться за главным окном: тогда его тоже не видно.
+                if (display.getActiveShell() != null && !active)
+                {
+                    shell.forceActive();
+                    text.append(" -> activated");
+                }
+                log(text.toString(), shell);
+                return;
+            }
+            Rectangle fixed = placeInside(bounds, area);
+            shell.setMinimized(false);
+            if (!fixed.equals(bounds))
+                shell.setBounds(fixed);
+            if (!shell.isVisible())
+                shell.setVisible(true);
+            shell.forceActive();
+            text.append(" -> fixed=").append(fixed);
+            log(text.toString(), shell);
+        }
+
+        /** Монитор владельца окна; владелец уничтожен — монитор, ближайший к самому окну. */
+        private static Monitor monitorFor(Shell shell)
+        {
+            Shell owner = shell.getParent() instanceof Shell parent && !parent.isDisposed() ? parent : null;
+            return owner != null ? owner.getMonitor() : shell.getMonitor();
+        }
+
+        /** Верхняя полоса окна (за неё тянут мышью) попадает в рабочий стол какого-то монитора. */
+        static boolean titleReachable(Display display, Rectangle bounds)
+        {
+            if (bounds.width <= 0 || bounds.height <= 0)
+                return false;
+            int x = bounds.x + Math.min(TITLE_PROBE_X, Math.max(1, bounds.width / 2));
+            int y = bounds.y + TITLE_PROBE_Y;
+            for (Monitor monitor : display.getMonitors())
+                if (monitor.getClientArea().contains(x, y))
+                    return true;
+            return false;
+        }
+
+        /**
+         * Координаты окна внутри рабочего стола: окно целиком за пределами — по центру монитора,
+         * иначе сдвиг к ближайшей границе с сохранением размера (размер урезается по монитору).
+         */
+        private static Rectangle placeInside(Rectangle bounds, Rectangle area)
+        {
+            int width = Math.min(Math.max(bounds.width, 1), area.width);
+            int height = Math.min(Math.max(bounds.height, 1), area.height);
+            boolean outside = bounds.width <= 0 || bounds.height <= 0
+                || bounds.x + bounds.width <= area.x || bounds.x >= area.x + area.width
+                || bounds.y + bounds.height <= area.y || bounds.y >= area.y + area.height;
+            if (outside)
+                return new Rectangle(area.x + Math.max(0, (area.width - width) / 2),
+                    area.y + Math.max(0, (area.height - height) / 2), width, height);
+            int x = Math.min(Math.max(bounds.x, area.x), area.x + Math.max(0, area.width - width));
+            int y = Math.min(Math.max(bounds.y, area.y), area.y + Math.max(0, area.height - height));
+            return new Rectangle(x, y, width, height);
         }
 
         static void log(String phase, Shell shell)
@@ -3956,10 +4094,10 @@ public final class ProblemViewHook implements IStartup
                 text.append(" active=").append(describe(display.getActiveShell()));
                 for (Shell other : display.getShells())
                     text.append(" shell=").append(describe(other));
-                for (var monitor : display.getMonitors())
+                for (Monitor monitor : display.getMonitors())
                     text.append(" monitor=").append(monitor.getClientArea());
             }
-            Global.tempLog("check-settings-window", text.toString());
+            Global.tempLog(TOPIC, text.toString());
         }
 
         private static String describe(Shell shell)
@@ -3984,9 +4122,10 @@ public final class ProblemViewHook implements IStartup
         if (project == null)
             return;
         Shell target = normalizeParentShell(shell != null ? shell : Display.getDefault().getActiveShell());
+        CheckSettingsWindowGuard.log("project-page " + pageId, target);
         PreferenceDialog dialog = PreferencesUtil.createPropertyDialogOn(target, project, pageId, null, null);
         if (dialog != null)
-            dialog.open();
+            openPropertyDialog(dialog, target);
     }
 
     /**
@@ -3998,18 +4137,33 @@ public final class ProblemViewHook implements IStartup
      * нажатию кнопки, поэтому к моменту закрытия окна параметров владелец уже уничтожен:
      * Windows активировать некого и переводит фокус на другое приложение. Поднимаемся по
      * цепочке владельцев до окна с рамкой, а если такого нет — берём окно EDT.
+     * <p>
+     * Окно за пределами экрана владельцем не берём: подсказка и другие служебные окна могут
+     * стоять вне рабочего стола, и окно, построенное относительно такого владельца, тоже
+     * окажется за экраном (20.11.2026: «Свойства для АФВ» с {@code t=-807}).
      */
     private static Shell normalizeParentShell(Shell shell)
     {
         Shell current = shell;
         while (current != null && !current.isDisposed())
         {
-            if ((current.getStyle() & SWT.TITLE) != 0 && (current.getStyle() & SWT.ON_TOP) == 0)
+            if ((current.getStyle() & SWT.TITLE) != 0 && (current.getStyle() & SWT.ON_TOP) == 0
+                && isShellOnScreen(current))
                 return current;
             current = current.getParent() instanceof Shell parent ? parent : null;
         }
         IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
         return window != null ? window.getShell() : shell;
+    }
+
+    /** Окно реально на экране: его заголовок достижим мышью. */
+    private static boolean isShellOnScreen(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return false;
+        Display display = shell.getDisplay();
+        return display != null && !display.isDisposed()
+            && CheckSettingsWindowGuard.titleReachable(display, shell.getBounds());
     }
 
     /**
@@ -4048,9 +4202,41 @@ public final class ProblemViewHook implements IStartup
         private static final String MARKER_STATS =
             "com._1c.g5.v8.dt.internal.ui.validation.MarkerStats"; //$NON-NLS-1$
 
+        /** Тема временного лога: решения заслонки и сторож зависших задач. */
+        static final String LOG_TOPIC = "problem-view-gate"; //$NON-NLS-1$
+
+        /**
+         * Сколько задача обновления панели может идти, прежде чем считаем её зависшей.
+         * <p>
+         * {@code LazyProblemView.update} ждёт {@code CountDownLatch}, который не придёт, если
+         * загрузка детей узла упала: {@code LazyTreeNodeContentProvider} не уведомляет ожидающих
+         * потребителей при ошибке задачи (20.11.2026 09:32:56 — NPE «resolvedDataCache is null»
+         * в {@code Marker.getLocation} для узла «Значительные»). Такая задача не завершается
+         * никогда, а пока она жива, EDT не создаёт следующую: панель перестаёт обновляться.
+         */
+        private static final long STUCK_JOB_MS = 60_000L;
+
+        private static final long WATCHDOG_PERIOD_MS = 5_000L;
+
+        /** Не больше стольких отмен за окно: повторяющийся сбой не должен давать цикл. */
+        private static final int STUCK_CANCEL_LIMIT = 5;
+
+        private static final long STUCK_CANCEL_WINDOW_MS = 10 * 60_000L;
+
         private static final Map<IViewPart, State> views = new WeakHashMap<>();
 
-        private static final Set<Job> tracked = ConcurrentHashMap.newKeySet();
+        /**
+         * Задача → когда началась: пока задача в наборе, список считается неполным.
+         * {@code done} у зависшей задачи не приходит, поэтому набор чистит сторож.
+         */
+        private static final Map<Job, Long> tracked = new ConcurrentHashMap<>();
+
+        private static final java.util.concurrent.atomic.AtomicInteger stuckCancels =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+        private static volatile long stuckWindowStart;
+
+        private static volatile boolean watchdogInstalled;
 
         private static volatile boolean jobListenerInstalled;
 
@@ -4291,7 +4477,7 @@ public final class ProblemViewHook implements IStartup
                     Job job = event.getJob();
                     if (!isTrackedJob(job))
                         return;
-                    tracked.add(job);
+                    tracked.put(job, System.currentTimeMillis());
                     applyAll();
                 }
 
@@ -4299,13 +4485,152 @@ public final class ProblemViewHook implements IStartup
                 public void done(IJobChangeEvent event)
                 {
                     Job job = event.getJob();
-                    if (job == null || !tracked.remove(job))
+                    if (job == null || tracked.remove(job) == null)
                         return;
                     // update() ждёт окончания UI-обновления корня через CountDownLatch.
                     // Его done — точка, где пересозданный корень уже можно переотобрать.
                     applyAll(job.getName().equals(updateJobName));
                 }
             });
+            installWatchdog();
+        }
+
+        /**
+         * Сторож зависших задач обновления панели. Пишет всегда, без флага журнала: событие
+         * редкое и нужно только при разборе зависаний.
+         */
+        private static void installWatchdog()
+        {
+            if (watchdogInstalled)
+                return;
+            watchdogInstalled = true;
+            java.util.Timer timer = new java.util.Timer("Комфорт: сторож обновления панели проблем", true); //$NON-NLS-1$
+            timer.schedule(new java.util.TimerTask()
+            {
+                @Override
+                public void run()
+                {
+                    checkStuckJobs();
+                }
+            }, WATCHDOG_PERIOD_MS, WATCHDOG_PERIOD_MS);
+        }
+
+        private static void checkStuckJobs()
+        {
+            try
+            {
+                boolean changed = false;
+                long now = System.currentTimeMillis();
+                for (Map.Entry<Job, Long> entry : tracked.entrySet())
+                {
+                    Job job = entry.getKey();
+                    if (job.getState() == Job.NONE)
+                    {
+                        // done опоздал или потерялся: задача уже не держит список
+                        tracked.remove(job);
+                        changed = true;
+                        continue;
+                    }
+                    long running = now - entry.getValue();
+                    if (running < STUCK_JOB_MS)
+                        continue;
+                    boolean update = updateJobName != null && updateJobName.equals(job.getName());
+                    String details = describeJob(job, running);
+                    tracked.remove(job);
+                    changed = true;
+                    if (!update)
+                    {
+                        // Загрузку детей отменять нельзя: update() ждёт именно её потребителя,
+                        // а сама загрузка ещё может дочитать. Держать из-за неё индикатор незачем.
+                        Global.tempLog(LOG_TOPIC, "загрузка списка идёт дольше " //$NON-NLS-1$
+                            + (STUCK_JOB_MS / 1000) + " с, индикатор снят:" + details); //$NON-NLS-1$
+                        continue;
+                    }
+                    if (!reserveStuckCancel(now))
+                    {
+                        Global.tempLog(LOG_TOPIC, "зависшая задача обновления не отменяется: " //$NON-NLS-1$
+                            + "превышен предел отмен за окно:" + details); //$NON-NLS-1$
+                        continue;
+                    }
+                    Global.tempLog(LOG_TOPIC, "зависшая задача обновления отменяется:" + details); //$NON-NLS-1$
+                    // Отмена — единственный способ разбудить update(): он ждёт CountDownLatch,
+                    // который не придёт. После done DelayedMarkerUpdateListener по отложенному
+                    // флагу сам закажет новую задачу, и раскрытая ветка перезагрузится.
+                    job.cancel();
+                    requestRefresh();
+                }
+                if (changed)
+                    applyAll();
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException(LOG_TOPIC, "сторож задач панели проблем", t); //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * Заказывает панели обновление после отмены: {@code update()} не дошёл до конца, и без
+         * этого раскрытая ветка осталась бы пустой до следующего события маркеров.
+         */
+        private static void requestRefresh()
+        {
+            List<IViewPart> snapshot;
+            synchronized (views)
+            {
+                snapshot = List.copyOf(views.keySet());
+            }
+            for (IViewPart view : snapshot)
+            {
+                if (view.getSite() == null)
+                    continue;
+                Object listener = Global.getField(view, "updateListener"); //$NON-NLS-1$
+                if (!(listener instanceof DelayedMarkerUpdateListener delayed))
+                    continue;
+                try
+                {
+                    // Не reset: обновление переиспользует дерево и зовёт viewer.refresh(),
+                    // а тот заново запрашивает детей у видимых узлов — включая раскрытую
+                    // ветку, на загрузке которой упала штатная задача. Reset пересоздал бы
+                    // корень, свернул дерево и оставил бы ветку незапрошенной до раскрытия.
+                    delayed.scheduleUpdateJob(false);
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLogException(LOG_TOPIC, "перезаказ обновления панели", e); //$NON-NLS-1$
+                }
+            }
+        }
+
+        private static boolean reserveStuckCancel(long now)
+        {
+            synchronized (stuckCancels)
+            {
+                if (stuckWindowStart == 0 || now - stuckWindowStart > STUCK_CANCEL_WINDOW_MS)
+                {
+                    stuckWindowStart = now;
+                    stuckCancels.set(0);
+                }
+                return stuckCancels.incrementAndGet() <= STUCK_CANCEL_LIMIT;
+            }
+        }
+
+        private static String describeJob(Job job, long runningMs)
+        {
+            StringBuilder text = new StringBuilder(" name=\"").append(job.getName()).append('"') //$NON-NLS-1$
+                .append(" class=").append(job.getClass().getName()) //$NON-NLS-1$
+                .append(" id=").append(Integer.toHexString(System.identityHashCode(job))) //$NON-NLS-1$
+                .append(" state=").append(job.getState()) //$NON-NLS-1$
+                .append(" runningMs=").append(runningMs); //$NON-NLS-1$
+            Thread thread = job.getThread();
+            if (thread == null)
+                return text.toString();
+            text.append(" thread=").append(thread.getName()); //$NON-NLS-1$
+            java.lang.management.ThreadInfo info = java.lang.management.ManagementFactory.getThreadMXBean()
+                .getThreadInfo(thread.getId(), 24);
+            if (info != null)
+                for (StackTraceElement element : info.getStackTrace())
+                    text.append("\n        at ").append(element); //$NON-NLS-1$
+            return text.toString();
         }
 
         private static void wrapMarkerManager(IViewPart view)
@@ -4414,6 +4739,9 @@ public final class ProblemViewHook implements IStartup
             volatile boolean retriedEmpty;
 
             volatile boolean waitingForIndex;
+
+            /** Когда проверки области стали не idle; 0 — ожидания нет. */
+            volatile long waitingSince;
 
             volatile Set<Object> lastGoodObjectIds = Set.of();
 
@@ -5018,6 +5346,7 @@ public final class ProblemViewHook implements IStartup
                 return;
             }
             state.waitingForIndex = waiting;
+            state.waitingSince = waiting ? System.currentTimeMillis() : 0;
             applyAll();
         }
 

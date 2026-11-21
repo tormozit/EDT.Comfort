@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 
 import org.eclipse.core.runtime.Plugin;
@@ -68,6 +69,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.DataProcessorTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
+import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.ReportTabularSection;
 import com._1c.g5.v8.dt.metadata.mdtype.TabularSectionTypes;
 import com._1c.g5.v8.dt.mcore.ContextDef;
@@ -96,6 +98,7 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProjectManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
@@ -149,6 +152,7 @@ public class Activator extends AbstractUIPlugin
         ProblemViewHook.AnchorLocation.start();
         MarkerCreationDates.start();
         EmptyExceptStatementFix.start();
+        NstrMainLanguageFix.start();
         DocCommentLinks.start();
         UiWaitCheckDeferral.start();
         QueryNullCastFix.start();
@@ -342,6 +346,7 @@ public class Activator extends AbstractUIPlugin
         ProblemViewHook.AnchorLocation.stop();
         MarkerCreationDates.stop();
         EmptyExceptStatementFix.stop();
+        NstrMainLanguageFix.stop();
         DocCommentLinks.stop();
         UiWaitCheckDeferral.stop();
         RightsEditDialogHook.stop();
@@ -404,7 +409,7 @@ public class Activator extends AbstractUIPlugin
                 return;
             }
             ToastNotification.show("Авторизация на сайте 1С", //$NON-NLS-1$
-                "Для доступа к этому ресурсу требуется вход через Портал 1С:ИТС. После входа повторите операцию.", //$NON-NLS-1$
+                "Для доступа к некоторым ресурсам требуется вход через Портал 1С:ИТС. После входа повторите операцию.", //$NON-NLS-1$
                 5_000, () -> login(login), "Войти через Портал 1С:ИТС"); //$NON-NLS-1$
         }
 
@@ -2300,6 +2305,82 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
+     * {@code bsl-nstr-string-literal-format} из {@code com.e1c.v8codestyle.bsl}
+     * 0.7.0.v20260515-0037 и 0.8.0.v20260915-2022 (#1071): пустой текст НСтр для неосновного
+     * языка не ошибка — платформа подставляет текст основного языка. Пустой текст основного языка
+     * остаётся ошибкой. Штатный флажок «Проверять пустой интерфейс для каждого языка»
+     * ({@code checkEmptyInterface}) возвращает прежнее поведение. Ветку проверки пустого текста
+     * вплетает ранний бандл ({@code NstrEmptyLanguageWeaving}).
+     */
+    private static final class NstrMainLanguageFix
+    {
+        private static final String CALLBACK = "tormozit.nstr.mainLanguage"; //$NON-NLS-1$
+        private static final String CHECK_EMPTY_INTERFACE = "checkEmptyInterface"; //$NON-NLS-1$
+
+        static void start()
+        {
+            System.getProperties().put(CALLBACK, (Function<Object[], Boolean>)NstrMainLanguageFix::report);
+        }
+
+        static void stop()
+        {
+            // Уже преобразованный класс продолжает обращаться к функции после остановки бандла.
+            System.getProperties().put(CALLBACK, (Function<Object[], Boolean>)args -> Boolean.TRUE);
+        }
+
+        /**
+         * @param args {@code [Map.Entry<код, текст>, Invocation, ICheckParameters]}
+         * @return {@code true} — фрагмент считается пустым и прежнее сообщение проверки остаётся
+         */
+        private static Boolean report(Object[] args)
+        {
+            if (args == null || args.length < 3 || !(args[0] instanceof Map.Entry<?, ?> entry))
+                return Boolean.FALSE;
+            // Заменённая ветка больше не вызывает isBlank сама — заполненный текст сюда не попадает.
+            Object value = entry.getValue();
+            if (value != null && !String.valueOf(value).isBlank())
+                return Boolean.FALSE;
+            String code = String.valueOf(entry.getKey());
+            String main = mainLanguageCode(args[1]);
+            boolean eachLanguage = checkEmptyInterface(args[2]);
+            return Boolean.valueOf(eachLanguage || main == null || main.equalsIgnoreCase(code));
+        }
+
+        /** Штатный флажок «Проверять пустой интерфейс для каждого языка». */
+        private static boolean checkEmptyInterface(Object parameters)
+        {
+            if (!(parameters instanceof com.e1c.g5.v8.dt.check.ICheckParameters checkParameters))
+                return false;
+            try
+            {
+                return checkParameters.getBoolean(CHECK_EMPTY_INTERFACE);
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+        }
+
+        /** Код основного языка проекта модуля; {@code null} — проект или язык недоступны. */
+        private static String mainLanguageCode(Object invocationObject)
+        {
+            if (!(invocationObject instanceof EObject object))
+                return null;
+            try
+            {
+                IV8ProjectManager manager = Global.getOsgiService(IV8ProjectManager.class);
+                IV8Project project = manager == null ? null : manager.getProject(object);
+                Language language = project == null ? null : project.getDefaultLanguage();
+                return language == null ? null : language.getLanguageCode();
+            }
+            catch (RuntimeException e)
+            {
+                return null;
+            }
+        }
+    }
+
+    /**
      * Динамическое замещение без изменения профилей: только при выполнении CheckExecutor
      * считает штатные проверки неактивными. Включённость замен на это не влияет.
      * Вызовы ICheckSettings.isEnabled() в CheckExecutor подменяет ранний бандл (CheckExecutorEnabledWeaving):
@@ -3112,6 +3193,11 @@ public class Activator extends AbstractUIPlugin
         private static final java.util.Map<Long, Long> CPU = new java.util.HashMap<>();
         private static final java.util.Set<org.eclipse.core.runtime.jobs.Job> RUNNING =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
+        /** Итоги по проверкам на входе задания: по завершении отдаём прирост — время каждой проверки. */
+        private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, java.util.Map<Object, Long>> CHECKS_AT_START =
+            new java.util.concurrent.ConcurrentHashMap<>();
+        private static final java.util.Map<org.eclipse.core.runtime.jobs.Job, Long> STARTED =
+            new java.util.concurrent.ConcurrentHashMap<>();
         private static long gcMs = -1;
 
         static void start()
@@ -3131,13 +3217,18 @@ public class Activator extends AbstractUIPlugin
                         public void running(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                         {
                             if (tracked(event.getJob()))
+                            {
                                 RUNNING.add(event.getJob());
+                                STARTED.put(event.getJob(), Long.valueOf(System.nanoTime()));
+                                CHECKS_AT_START.put(event.getJob(), checkTotals());
+                            }
                             jobEvent("running", event); //$NON-NLS-1$
                         }
 
                         @Override
                         public void done(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
                         {
+                            jobDone(event);
                             RUNNING.remove(event.getJob());
                             jobEvent("done", event); //$NON-NLS-1$
                         }
@@ -3149,7 +3240,8 @@ public class Activator extends AbstractUIPlugin
                     return thread;
                 }).scheduleWithFixedDelay(DeepCheckTrace::sample, PERIOD_MS, PERIOD_MS,
                     java.util.concurrent.TimeUnit.MILLISECONDS);
-                Global.tempLog(TOPIC, "start pid=" + PID); //$NON-NLS-1$
+                Global.tempLog(TOPIC, "start pid=" + PID + " checkDuration=" //$NON-NLS-1$
+                    + System.getProperty("tormozit.checkDuration.status")); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
@@ -3177,14 +3269,77 @@ public class Activator extends AbstractUIPlugin
                 + (result != null ? " result=" + result.getSeverity() : "") //$NON-NLS-1$ //$NON-NLS-2$
                 + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
             // Каждый запуск: отличаем штатную синхронизацию от повторного запуска плагином.
-            if ("scheduled".equals(kind) && job.getClass().getName().endsWith("ValidationJob")) //$NON-NLS-1$ //$NON-NLS-2$
+            boolean derived = job.getClass().getName().contains("DerivedDataProgressReporter"); //$NON-NLS-1$
+            if ("scheduled".equals(kind) && (derived || job.getClass().getName().endsWith("ValidationJob"))) //$NON-NLS-1$ //$NON-NLS-2$
             {
-                StringBuilder caller = new StringBuilder("validation.schedule pid=").append(PID) //$NON-NLS-1$
-                    .append(" id=").append(Integer.toHexString(System.identityHashCode(job))); //$NON-NLS-1$
+                // Кто заказал расчёт производных данных/проверку: повторный запуск ищем по стеку заказчика.
+                StringBuilder caller = new StringBuilder(derived ? "derived.schedule pid=" : "validation.schedule pid=") //$NON-NLS-1$ //$NON-NLS-2$
+                    .append(PID).append(" id=").append(Integer.toHexString(System.identityHashCode(job))) //$NON-NLS-1$
+                    .append(" class=").append(job.getClass().getName()); //$NON-NLS-1$
                 for (StackTraceElement element : Thread.currentThread().getStackTrace())
                     caller.append("\n        at ").append(element); //$NON-NLS-1$
                 Global.tempLog(TOPIC, caller.toString());
             }
+        }
+
+        /** Прирост сумм по проверкам за задание — сколько заняла каждая проверка. */
+        private static void jobDone(org.eclipse.core.runtime.jobs.IJobChangeEvent event)
+        {
+            org.eclipse.core.runtime.jobs.Job job = event.getJob();
+            java.util.Map<Object, Long> before = CHECKS_AT_START.remove(job);
+            Long started = STARTED.remove(job);
+            if (before == null)
+                return;
+            java.util.Map<Object, Long> after = checkTotals();
+            long wallMs = started == null ? -1 : (System.nanoTime() - started.longValue()) / 1_000_000L;
+            java.util.List<Object[]> top = new java.util.ArrayList<>();
+            long total = 0;
+            for (var entry : after.entrySet())
+            {
+                long nanos = entry.getValue().longValue()
+                    - before.getOrDefault(entry.getKey(), Long.valueOf(0)).longValue();
+                if (nanos <= 0)
+                    continue;
+                total += nanos;
+                top.add(new Object[] {entry.getKey(), Long.valueOf(nanos)});
+            }
+            top.sort((left, right) -> Long.compare(((Long)right[1]).longValue(), ((Long)left[1]).longValue()));
+            StringBuilder text = new StringBuilder("checks.done pid=").append(PID) //$NON-NLS-1$
+                .append(" job=\"").append(job.getName()).append("\" id=") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(Integer.toHexString(System.identityHashCode(job)))
+                .append(" wallMs=").append(wallMs).append(" totalMs=").append(total / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" top="); //$NON-NLS-1$
+            int limit = Math.min(top.size(), 8);
+            for (int i = 0; i < limit; i++)
+                text.append(i == 0 ? "" : ", ").append(checkId(top.get(i)[0])) //$NON-NLS-1$ //$NON-NLS-2$
+                    .append('=').append(((Long)top.get(i)[1]).longValue() / 1_000_000L).append("ms"); //$NON-NLS-1$
+            if (top.isEmpty())
+                text.append('-');
+            Global.tempLog(TOPIC, text.toString());
+        }
+
+        private static String checkId(Object check)
+        {
+            String type = check.getClass().getSimpleName();
+            if (check instanceof com.e1c.g5.v8.dt.check.ICheck<?> typed)
+                return type + '[' + typed.getCheckId() + ']';
+            return type;
+        }
+
+        /** Суммы собственного времени проверок по всем потокам, как их ведёт ранний бандл. */
+        private static java.util.Map<Object, Long> checkTotals()
+        {
+            Object totals = System.getProperties().get("tormozit.checkDuration.totals"); //$NON-NLS-1$
+            if (!(totals instanceof java.util.function.Supplier<?> supplier))
+                return java.util.Map.of();
+            Object value = supplier.get();
+            if (!(value instanceof java.util.Map<?, ?> map))
+                return java.util.Map.of();
+            java.util.Map<Object, Long> copy = new java.util.IdentityHashMap<>();
+            for (var entry : map.entrySet())
+                if (entry.getValue() instanceof Long nanos)
+                    copy.put(entry.getKey(), nanos);
+            return copy;
         }
 
         private static void sample()
@@ -3193,6 +3348,7 @@ public class Activator extends AbstractUIPlugin
             {
                 java.lang.management.ThreadMXBean mx = java.lang.management.ManagementFactory.getThreadMXBean();
                 StringBuilder busy = new StringBuilder();
+                java.util.Set<Long> shown = new java.util.HashSet<>();
                 int idle = 0;
                 ThreadGroup root = Thread.currentThread().getThreadGroup();
                 while (root.getParent() != null)
@@ -3210,6 +3366,7 @@ public class Activator extends AbstractUIPlugin
                         && !lowerName.contains("проверк")) //$NON-NLS-1$
                         continue;
                     long id = thread.getId();
+                    shown.add(Long.valueOf(id));
                     long cpu = mx.getThreadCpuTime(id);
                     Long previous = CPU.put(id, cpu);
                     long cpuDelta = previous == null || cpu < 0 ? -1 : (cpu - previous) / 1_000_000L;
@@ -3253,13 +3410,88 @@ public class Activator extends AbstractUIPlugin
                     jobs.append(jobs.length() == 0 ? "" : "; ").append(job.getName()); //$NON-NLS-1$ //$NON-NLS-2$
                 if (jobs.length() == 0)
                     return;
+                // Пока идёт расширенная проверка, видно, чего она ждёт: простой системы и прочие потоки.
+                String others = deepCheckRunning() ? otherThreads(mx, threads, count, shown) : ""; //$NON-NLS-1$
                 Global.tempLog(TOPIC, "sample pid=" + PID + " heapMb=" + usedMb + "/" + (runtime.maxMemory() >> 20) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " gc+=" + gcDelta + "ms jobs=[" + jobs + "] idle=" + idle + " busy:" + busy); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                    + " gc+=" + gcDelta + "ms jobs=[" + jobs + "] " + systemIdleState() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " idle=" + idle + " busy:" + busy + others); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Throwable t)
             {
                 Global.tempLogException(TOPIC, "sample", t); //$NON-NLS-1$
             }
+        }
+
+        private static boolean deepCheckRunning()
+        {
+            for (org.eclipse.core.runtime.jobs.Job job : RUNNING)
+            {
+                String name = job.getName();
+                if (name != null && name.startsWith("Расширенная проверка")) //$NON-NLS-1$
+                    return true;
+            }
+            return false;
+        }
+
+        /**
+         * Простой системы по службе активности EDT: неприоритетные задачи производных данных (проверки
+         * модулей) ждут, пока пользователь не перестанет действовать; при новой активности их снимают.
+         */
+        private static String systemIdleState()
+        {
+            try
+            {
+                org.osgi.framework.BundleContext context = Activator.getDefault().getBundle().getBundleContext();
+                if (context == null)
+                    return "systemIdle=?"; //$NON-NLS-1$
+                org.osgi.framework.ServiceReference<?> reference =
+                    context.getServiceReference("com._1c.g5.v8.activitytracking.core.ISystemIdleService"); //$NON-NLS-1$
+                if (reference == null)
+                    return "systemIdle=absent"; //$NON-NLS-1$
+                try
+                {
+                    Object service = context.getService(reference);
+                    return service == null ? "systemIdle=loggedOut" //$NON-NLS-1$
+                        : "systemIdle=" + service.getClass().getMethod("isSystemIdle").invoke(service); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                finally
+                {
+                    context.ungetService(reference);
+                }
+            }
+            catch (Throwable t)
+            {
+                return "systemIdle=!" + t; //$NON-NLS-1$
+            }
+        }
+
+        /** Все прочие живые потоки: ожидание простоя не видно по потокам пула производных данных. */
+        private static String otherThreads(java.lang.management.ThreadMXBean mx, Thread[] threads, int count,
+            java.util.Set<Long> shown)
+        {
+            StringBuilder text = new StringBuilder();
+            int limit = 30;
+            for (int i = 0; i < count; i++)
+            {
+                Thread thread = threads[i];
+                if (thread == null || !thread.isAlive() || thread == Thread.currentThread()
+                    || shown.contains(Long.valueOf(thread.getId())))
+                    continue;
+                if (limit-- <= 0)
+                    break;
+                java.lang.management.ThreadInfo info = mx.getThreadInfo(thread.getId(), 12);
+                if (info == null || info.getStackTrace().length == 0)
+                    continue;
+                StackTraceElement[] stack = info.getStackTrace();
+                text.append("\n    [other] ").append(thread.getName()).append(' ').append(info.getThreadState()); //$NON-NLS-1$
+                if (info.getLockName() != null)
+                    text.append(" lock=").append(info.getLockName()).append(" owner=") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(info.getLockOwnerName());
+                text.append(" top=").append(frame(firstOwn(stack, false))); //$NON-NLS-1$
+                for (int k = 0; k < Math.min(stack.length, 8); k++)
+                    text.append("\n        at ").append(stack[k]); //$NON-NLS-1$
+            }
+            return text.toString();
         }
 
         /** Поток пула ждёт задачу. */

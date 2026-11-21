@@ -34,6 +34,7 @@ import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.ModuleType;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
@@ -95,7 +96,9 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 + "Значение Неопределено можно присваивать и передавать параметрам любого типа. "
                 + "Значение типа-расширения (например, РасширениеТаблицыФормыДляДинамическогоСписка) "
                 + "совместимо с его базовым типом (ТаблицаФормы), значение типа-наследника "
-                + "(ОбъектМетаданныхСправочник) — с типом-предком (ОбъектМетаданных)."
+                + "(ОбъектМетаданныхСправочник) — с типом-предком (ОбъектМетаданных). "
+                + "Значение ЭтотОбъект (ЭтаФорма) в модуле формы — тип-расширение этой формы "
+                + "(РасширениеФормыКлиентскогоПриложенияДляСправочника для формы справочника и т. п.)."
                 + "<br><br>Динамически замещает штатную проверку bsl-legacy-check-expression-type.")
             .complexity(CheckComplexity.NORMAL).severity(IssueSeverity.MINOR).issueType(IssueType.WARNING)
             .parameter(OpenModulesOnly.PARAMETER, Boolean.class, "true", OpenModulesOnly.TITLE) //$NON-NLS-1$
@@ -481,6 +484,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 .allMatch(item -> "Undefined".equals(McoreUtil.getTypeName(item)))) //$NON-NLS-1$
                 return;
             List<TypeItem> actual = resolve(types.computeTypes(value, envs), value);
+            actual = formObjectTypes(value, actual);
             if (resolvedExpected == null || actual == null || actual.isEmpty())
                 return;
             List<TypeItem> concreteActual = new ArrayList<>(actual);
@@ -514,6 +518,37 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 return;
             String message = mismatchMessage(typesLine(resolvedExpected, value), typesLine(actual, value), envs);
             issue(message, value, null, WRONG_TYPE, envs, false);
+        }
+
+        /**
+         * {@code ЭтотОбъект}/{@code ЭтаФорма} модуля формы: EDT вычисляет базовый тип формы
+         * ({@code ClientApplicationForm}), а само значение относится к типу-расширению формы
+         * ({@code РасширениеФормыКлиентскогоПриложенияДляСправочника}). Тип-расширение EDT держит
+         * в {@code refContextDefs} копии базового типа. Без подмены документированный тип-расширение
+         * даёт ложное несоответствие (#1070).
+         */
+        private List<TypeItem> formObjectTypes(Expression value, List<TypeItem> actual)
+        {
+            if (actual == null || actual.isEmpty() || !(value instanceof StaticFeatureAccess access)
+                || !isFormObjectName(access.getName()))
+                return actual;
+            Module owner = EcoreUtil2.getContainerOfType(value, Module.class);
+            if (owner == null || owner.getModuleType() != ModuleType.FORM_MODULE)
+                return actual;
+            List<TypeItem> specialized = new ArrayList<>(actual);
+            for (int i = 0; i < specialized.size(); i++)
+            {
+                TypeItem extension = FormItemTypes.formExtension(specialized.get(i));
+                if (extension != null)
+                    specialized.set(i, extension);
+            }
+            return specialized;
+        }
+
+        private static boolean isFormObjectName(String name)
+        {
+            return name != null && ("ЭтотОбъект".equalsIgnoreCase(name) || "ЭтаФорма".equalsIgnoreCase(name) //$NON-NLS-1$ //$NON-NLS-2$
+                || "ThisObject".equalsIgnoreCase(name) || "ThisForm".equalsIgnoreCase(name)); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static String mismatchMessage(String expected, String actual, Environments environments)

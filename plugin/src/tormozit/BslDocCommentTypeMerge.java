@@ -1008,6 +1008,9 @@ public final class BslDocCommentTypeMerge
         if (envs != null)
             extended.setEnvironments(new Environments(envs.toArray()));
         extended.setCreatedByNewOperator(primary.isCreatedByNewOperator());
+        // Проверка «Для каждого» идёт по Type.isIterable(): объединение коллекции с не-коллекцией она
+        // пропускает, если коллекция есть хотя бы одна альтернатива, — как для составного типа EDT.
+        extended.setIterable(contexts.stream().anyMatch(Type::isIterable));
         // Штатная проверка EDT запрещает обмен, если хотя бы один вариант непередаваем.
         extended.setExchangeWithServer(contexts.stream().allMatch(Type::isExchangeWithServer));
         ContextDefWithRefItem ctx = McoreFactory.eINSTANCE.createContextDefWithRefItem();

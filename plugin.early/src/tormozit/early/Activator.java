@@ -69,6 +69,7 @@ public final class Activator
         CheckDurations.install(context);
         CheckExecutorEnabledWeaving.install(context);
         EmptyExceptStatementWeaving.install(context);
+        NstrEmptyLanguageWeaving.install(context);
         QlHubOpenModulesWeaving.install(context);
         SuppressionRangesWeaving.install(context);
         LocationCellTextWeaving.install(context);
@@ -1365,6 +1366,120 @@ public final class Activator
     }
 
     /**
+     * Уточнение {@code bsl-nstr-string-literal-format} из {@code com.e1c.v8codestyle.bsl}
+     * 0.7.0.v20260515-0037 и 0.8.0.v20260915-2022 (#1071): пустой текст НСтр для неосновного
+     * языка не ошибка — платформа подставляет основной. Байткод {@code check} у обеих версий
+     * совпадает.
+     *
+     * <p>В {@code check} ветка «пустой текст языка» (второй {@code StringUtils.isBlank}, после
+     * {@code checkcast CharSequence}) заменяется на «текст пуст И (основной язык ИЛИ штатный
+     * флажок {@code checkEmptyInterface})». Пустоту проверяет основной бандл
+     * ({@code Activator.NstrMainLanguageFix}), он же определяет основной язык
+     * ({@code IV8Project.getDefaultLanguage()}) и читает флажок из переданного
+     * {@code ICheckParameters}. Пустой текст основного языка сообщается всегда, неосновного —
+     * только с флажком «Проверять пустой интерфейс для каждого языка». Заполненный текст
+     * в заменённую ветку не попадает.
+     */
+    private static final class NstrEmptyLanguageWeaving implements WeavingHook
+    {
+        static final String CALLBACK = "tormozit.nstr.mainLanguage"; //$NON-NLS-1$
+        private static final String TARGET = "com.e1c.v8codestyle.bsl.check.NstrStringLiteralFormatCheck";
+        private static final String CHECK_DESCRIPTOR =
+            "(Ljava/lang/Object;Lcom/e1c/g5/v8/dt/check/components/BasicCheck$ResultAcceptor;"
+                + "Lcom/e1c/g5/v8/dt/check/ICheckParameters;Lorg/eclipse/core/runtime/IProgressMonitor;)V";
+        private static final String STRING_UTILS = "com/_1c/g5/v8/dt/common/StringUtils"; //$NON-NLS-1$
+        private static final String FUNCTION = "java/util/function/Function"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK,
+                (Function<Object[], Boolean>)args -> Boolean.TRUE);
+            context.registerService(WeavingHook.class, new NstrEmptyLanguageWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                boolean[] patched = { false };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"check".equals(name) || !CHECK_DESCRIPTOR.equals(descriptor)) //$NON-NLS-1$
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            /** true сразу после {@code checkcast CharSequence} — это текст фрагмента языка. */
+                            private boolean languageValue;
+
+                            @Override
+                            public void visitTypeInsn(int opcode, String type)
+                            {
+                                languageValue =
+                                    opcode == Opcodes.CHECKCAST && "java/lang/CharSequence".equals(type); //$NON-NLS-1$
+                                super.visitTypeInsn(opcode, type);
+                            }
+
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                if (languageValue && opcode == Opcodes.INVOKESTATIC && STRING_UTILS.equals(owner)
+                                    && "isBlank".equals(method) //$NON-NLS-1$
+                                    && "(Ljava/lang/CharSequence;)Z".equals(descriptor)) //$NON-NLS-1$
+                                {
+                                    languageValue = false;
+                                    if (!patched[0])
+                                    {
+                                        patched[0] = true;
+                                        // Значение уже на стеке — снимаем: пустоту решают основной язык и флажок.
+                                        mv.visitInsn(Opcodes.POP);
+                                        EarlyWeaving.emitGetProperty(mv, CALLBACK, FUNCTION);
+                                        mv.visitInsn(Opcodes.ICONST_3);
+                                        mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+                                        for (int i = 0; i < 3; i++)
+                                        {
+                                            mv.visitInsn(Opcodes.DUP);
+                                            mv.visitInsn(Opcodes.ICONST_0 + i);
+                                            // 0 — Map.Entry языка, 1 — Invocation, 2 — ICheckParameters.
+                                            mv.visitVarInsn(Opcodes.ALOAD, i == 0 ? 11 : i == 1 ? 5 : 3);
+                                            mv.visitInsn(Opcodes.AASTORE);
+                                        }
+                                        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION, "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                                        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", //$NON-NLS-1$ //$NON-NLS-2$
+                                            "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                        return;
+                                    }
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, isInterface);
+                            }
+                        };
+                    }
+                }, 0);
+                // Публикуем только полную правку известной формы класса.
+                if (patched[0])
+                    woven.setBytes(writer.toByteArray());
+                System.setProperty(CALLBACK + ".status", patched[0] ? "woven" : "bytecode differs"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable failure)
+            {
+                System.setProperty(CALLBACK + ".status", failure.toString()); //$NON-NLS-1$
+            }
+        }
+    }
+
+    /**
      * debug.ui 9.3.400.v202605050943: у объектного значения тип ещё не выбран.
      * lambda$0 вызывает getSelectedDelegate().createContent без проверки на null (#986).
      */
@@ -2124,6 +2239,30 @@ public final class Activator
 
         static volatile DerivedCheckCancellation instance;
 
+        /** Временный лог остановки: кто отменил индикатор, что отложено и когда остановка снята. */
+        private static final java.nio.file.Path CANCEL_LOG = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/temp-logs/derived-cancel.log"); //$NON-NLS-1$
+
+        private static synchronized void logCancel(String text, StackTraceElement[] stack)
+        {
+            try
+            {
+                java.nio.file.Files.createDirectories(CANCEL_LOG.getParent());
+                StringBuilder line = new StringBuilder(java.time.OffsetDateTime.now().toString())
+                    .append(" [").append(Thread.currentThread().getName()).append("] ").append(text); //$NON-NLS-1$ //$NON-NLS-2$
+                if (stack != null)
+                    for (StackTraceElement element : stack)
+                        line.append("\n        at ").append(element); //$NON-NLS-1$
+                java.nio.file.Files.writeString(CANCEL_LOG, line.append("\r\n").toString(), //$NON-NLS-1$
+                    java.nio.charset.StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // Диагностика не должна мешать остановке проверок.
+            }
+        }
+
         /** Остановленные сегменты модели и пропущенные объекты; под монитором самой записи. */
         private static final class Stop
         {
@@ -2182,6 +2321,9 @@ public final class Activator
                 Object job = args[0];
                 String internal = reporterCaller();
                 Object[] info = jobs.get(job);
+                logCancel("canceling job=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
+                    + " internal=" + internal + " registered=" + (info != null), //$NON-NLS-1$ //$NON-NLS-2$
+                    Thread.currentThread().getStackTrace());
                 if (internal != null || info == null)
                     return;
                 Object[] target = modelOf(info[0]);
@@ -2190,6 +2332,7 @@ public final class Activator
                 Object model = target[0];
                 String segment = (String) info[1];
                 Stop stop = stops.computeIfAbsent(model, key -> new Stop(target[1]));
+                logCancel("stop.begin project=" + target[1] + " segment=" + segment, null); //$NON-NLS-1$ //$NON-NLS-2$
                 stop.segments.add(segment);
                 stop.last = System.currentTimeMillis();
                 startTimer();
@@ -2236,6 +2379,7 @@ public final class Activator
                                 call(derivedContext, "getEClass"), segment, derivedContext.getClass()}); //$NON-NLS-1$
                             stop.total++;
                         }
+                        logCancel("skip segment=" + segment + " object=" + objectId, null); //$NON-NLS-1$ //$NON-NLS-2$
                         stop.last = System.currentTimeMillis();
                         return Boolean.TRUE;
                     }
@@ -2272,6 +2416,7 @@ public final class Activator
 
         private void end(Stop stop, String reason)
         {
+            logCancel("stop.end reason=" + reason + " skipped=" + stop.total, null); //$NON-NLS-1$ //$NON-NLS-2$
             flush(stop);
         }
 

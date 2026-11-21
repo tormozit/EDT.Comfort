@@ -73,6 +73,51 @@ public final class FormItemTypes
         return extensions.size() == 1 ? extensions.values().iterator().next() : item;
     }
 
+    /**
+     * Тип-расширение формы из {@code refContextDefs} копии базового типа
+     * ({@code ClientApplicationForm} → {@code ClientApplicationFormExtensionForCatalogs}).
+     * В отличие от {@link #displayType}, известная конкретная форма не мешает: модуль формы
+     * получает свой тип-расширение и тогда, когда путь к форме уже определён. {@code null},
+     * если базовый тип не форма или расширение не единственное.
+     */
+    public static TypeItem formExtension(TypeItem item)
+    {
+        if (!(item instanceof Type type) || type.eIsProxy())
+            return null;
+        String base = McoreUtil.getTypeName(item);
+        if (!FORM_BASE.equals(base) && !MANAGED_FORM.equals(base))
+            return null;
+        Map<String, TypeItem> extensions = new LinkedHashMap<>();
+        Set<ContextDef> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        collectDisplayExtensions(type.getContextDef(), base, extensions, visited);
+        return extensions.size() == 1 ? modernFormExtension(extensions.values().iterator().next()) : null;
+    }
+
+    /**
+     * В refContextDefs формы встречается и старое имя расширения
+     * ({@code ManagedFormExtensionForCatalogs} — «РасширениеУправляемойФормыДляСправочника»).
+     * Показываем современное платформенное имя ({@code ClientApplicationFormExtensionForCatalogs});
+     * если его нет в целевой платформе, остаётся старое.
+     */
+    private static TypeItem modernFormExtension(TypeItem extension)
+    {
+        String name = McoreUtil.getTypeName(extension);
+        if (name == null || !name.startsWith(MANAGED_FORM + EXTENSION_MARK))
+            return extension;
+        TypeItem modern = platformType(FORM_BASE + name.substring(MANAGED_FORM.length()));
+        if (modern == null)
+            return extension;
+        try
+        {
+            EObject resolved = EcoreUtil.resolve(modern, extension);
+            return resolved instanceof TypeItem modernType && !modernType.eIsProxy() ? modernType : extension;
+        }
+        catch (RuntimeException failure)
+        {
+            return extension;
+        }
+    }
+
     /** В явном списке «базовый + единственное расширение» показывается расширение. */
     static List<TypeItem> displayTypes(Iterable<? extends TypeItem> types)
     {
