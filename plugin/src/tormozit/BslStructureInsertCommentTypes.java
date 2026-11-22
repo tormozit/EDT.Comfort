@@ -4976,7 +4976,6 @@ public final class BslStructureInsertCommentTypes
             Set<Variable> resolving = RESOLVING.get();
             if (!resolving.add(variable))
                 return types;
-            long started = System.nanoTime();
             try
             {
                 if (!(variable.eResource() instanceof XtextResource resource))
@@ -5045,7 +5044,6 @@ public final class BslStructureInsertCommentTypes
                 resolving.remove(variable);
                 if (resolving.isEmpty())
                     RESOLVING.remove();
-                BslDocCommentTypeMerge.recordTypeSystemTiming("collection.infer", started);
             }
         }
 
@@ -5140,7 +5138,6 @@ public final class BslStructureInsertCommentTypes
 
             Plan(Method method, ICompositeNode node)
             {
-                long started = System.nanoTime();
                 this.node = node;
                 List<com._1c.g5.v8.dt.bsl.model.ForEachStatement> loops = new ArrayList<>();
                 List<SimpleStatement> statements = new ArrayList<>();
@@ -6194,27 +6191,16 @@ public final class BslStructureInsertCommentTypes
          */
         private void stockInstall(Module module, CancelIndicator cancelIndicator)
         {
-            Runnable finishTiming = BslDocCommentTypeMerge.beginTypeSystemTiming(module);
+            java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
             try
             {
-                long started = System.nanoTime();
-                java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
-                BslDocCommentTypeMerge.recordTypeSystemTiming("captureCalleeReturns", started);
-                try
-                {
-                    started = System.nanoTime();
-                    resetPartialMethodStates(module, cancelIndicator);
-                    BslDocCommentTypeMerge.recordTypeSystemTiming("resetPartialMethodStates", started);
-                    started = System.nanoTime();
-                    try { super.installTypeSystem(module, cancelIndicator); }
-                    finally { BslDocCommentTypeMerge.recordTypeSystemTiming("edt.installTypeSystem", started); }
-                }
-                finally
-                {
-                    BslDocCommentComputedTypes.releaseCalleeReturns(previous);
-                }
+                resetPartialMethodStates(module, cancelIndicator);
+                super.installTypeSystem(module, cancelIndicator);
             }
-            finally { finishTiming.run(); }
+            finally
+            {
+                BslDocCommentComputedTypes.releaseCalleeReturns(previous);
+            }
         }
 
         /**

@@ -6340,19 +6340,9 @@ return EMPTY;
 
     private boolean isCacheValidForCaret(IDocument doc, int caret)
     {
-        boolean valid = fullListReady && fullListCache.length > 0
+        return fullListReady && fullListCache.length > 0
             && doc != null && caret >= 0
             && computeFullListContextKey(doc, caret) == fullListContextKey;
-        // Временно: проверка готовой базы при старте сессии и показе из кэша.
-        Global.tempLog("assist-cache-lifecycle", "check processor=" + System.identityHashCode(this)
-            + " thread=" + Thread.currentThread().getName() + " caret=" + caret
-            + " valid=" + valid + " ready=" + fullListReady + " n=" + fullListCache.length
-            + " key=" + fullListContextKey + " liveKey="
-            + (doc != null && caret >= 0 ? computeFullListContextKey(doc, caret) : Integer.MIN_VALUE)
-            + " cachedTypes=" + fullListCacheTypesGeneration
-            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration()
-            + " stack=" + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
-        return valid;
     }
 
     private void absorbInterimIntoCache(ITextViewer viewer, int caret, ICompletionProposal[] raw)
@@ -6435,9 +6425,6 @@ return EMPTY;
         fullListReady = true;
         return true;
     }
-
-    /** Поколение типов, при котором заполнен {@link #fullListCache}. */
-    private int fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
 
     private record MemberReceiverTypes(IDocument document, int dot, String members, int generation)
     {
@@ -6607,15 +6594,6 @@ return EMPTY;
 
     private void assignFullListCache(ICompletionProposal[] cache)
     {
-        // Временно: кто записал или очистил базу между фоновым расчётом и показом.
-        Global.tempLog("assist-cache-lifecycle", "assign.before processor=" + System.identityHashCode(this)
-            + " thread=" + Thread.currentThread().getName()
-            + " old=" + fullListCache.length + " incoming=" + (cache == null ? -1 : cache.length)
-            + " key=" + fullListContextKey + " ready=" + fullListReady
-            + " cachedTypes=" + fullListCacheTypesGeneration
-            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration()
-            + " stack=" + java.util.Arrays.toString(Thread.currentThread().getStackTrace()));
-        fullListCacheTypesGeneration = BslDocCommentComputedTypes.typesGeneration();
         fullListCachePrefix = ""; //$NON-NLS-1$
         ICompletionProposal[] stock = stripIrProposals(cache != null ? cache : EMPTY);
         if (irProposals.length > 0 && irSnapshotContextKey == fullListContextKey)
@@ -6628,12 +6606,6 @@ return EMPTY;
         // счётчик нельзя использовать для инвалидации синхронного пути без разбора каждого
         // caller'а assignFullListCache(EMPTY). Не повторять без раздельного счётчика/анализа.
         rebuildMergedFullListCache();
-        Global.tempLog("assist-cache-lifecycle", "assign.after processor=" + System.identityHashCode(this)
-            + " thread=" + Thread.currentThread().getName()
-            + " n=" + fullListCache.length + " delegate=" + delegateListCache.length
-            + " key=" + fullListContextKey + " ready=" + fullListReady
-            + " cachedTypes=" + fullListCacheTypesGeneration
-            + " liveTypes=" + BslDocCommentComputedTypes.typesGeneration());
     }
 
     private void rebuildMergedFullListCache()

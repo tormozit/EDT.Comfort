@@ -82,56 +82,6 @@ public final class BslDocCommentTypeMerge
 
     private BslDocCommentTypeMerge() {}
 
-    // Временные замеры: каждый проход, без флажка журнала и порога длительности.
-    private static final ThreadLocal<TypeSystemTiming> TYPE_SYSTEM_TIMING = new ThreadLocal<>();
-
-    private static final class TypeSystemTiming
-    {
-        final long started = System.nanoTime();
-        final java.util.Map<String, long[]> stages = new LinkedHashMap<>();
-        final java.util.Map<Object, Integer> links = new java.util.IdentityHashMap<>();
-        long linkCalls;
-        long skippedLinks;
-    }
-
-    static Runnable beginTypeSystemTiming(EObject module)
-    {
-        TypeSystemTiming previous = TYPE_SYSTEM_TIMING.get();
-        TypeSystemTiming current = new TypeSystemTiming();
-        TYPE_SYSTEM_TIMING.set(current);
-        String context = "pid=" + ProcessHandle.current().pid() + " thread=" + Thread.currentThread().getName()
-            + " pass=" + Integer.toHexString(System.identityHashCode(current))
-            + " module=" + (module == null || module.eResource() == null ? "-" : module.eResource().getURI());
-        Global.tempLog("type-system-timing", "begin " + context);
-        return () -> {
-            if (previous == null)
-                TYPE_SYSTEM_TIMING.remove();
-            else
-                TYPE_SYSTEM_TIMING.set(previous);
-            StringBuilder detail = new StringBuilder("end ").append(context)
-                .append(" elapsedMs=").append((System.nanoTime() - current.started) / 1_000_000L)
-                .append(" linkCalls=").append(current.linkCalls)
-                .append(" skippedLinks=").append(current.skippedLinks);
-            current.stages.forEach((stage, values) -> detail.append(" ").append(stage)
-                .append("={calls=").append(values[0]).append(",ms=")
-                .append(values[1] / 1_000_000L).append("}"));
-            Global.tempLog("type-system-timing", detail.toString());
-        };
-    }
-
-    static void recordTypeSystemTiming(String stage, long started)
-    {
-        long elapsed = System.nanoTime() - started;
-        TypeSystemTiming current = TYPE_SYSTEM_TIMING.get();
-        if (current == null)
-        {
-            return;
-        }
-        long[] values = current.stages.computeIfAbsent(stage, ignored -> new long[2]);
-        values[0]++;
-        values[1] += elapsed;
-    }
-
     /**
      * Обработчик разбора и {@link WeavingHook} — отдельно и как можно раньше, по той же
      * причине, что и {@link BslDocCommentDescriptionFix#installWeavingHook()}: иначе
@@ -151,26 +101,11 @@ public final class BslDocCommentTypeMerge
                 afterComputeFormAttributeTypes((Collection<?>)args[0], args[1], (EObject)args[2])));
         System.getProperties().put("tormozit.formData.docDependency", //$NON-NLS-1$
             (java.util.function.Function<Object[], Object>) args -> {
-                long started = System.nanoTime();
-                try
-                {
-                    BslDocCommentComputedTypes.rememberDocReturnDependency(args[0], args[1]);
-                    // Третий аргумент — посещённые методы (ранний бандл новее 01.11.2026).
-                    Object result = args.length > 2 && args[2] instanceof Set<?> visited
-                        ? skipVisitedLinkTarget(args[0] instanceof EObject target ? target : null, visited)
-                        : args[0];
-                    TypeSystemTiming current = TYPE_SYSTEM_TIMING.get();
-                    if (current != null)
-                    {
-                        current.linkCalls++;
-                        if (args[0] != null)
-                            current.links.merge(args[0], 1, Integer::sum);
-                        if (args[0] != null && result == null)
-                            current.skippedLinks++;
-                    }
-                    return result;
-                }
-                finally { recordTypeSystemTiming("docDependency", started); }
+                BslDocCommentComputedTypes.rememberDocReturnDependency(args[0], args[1]);
+                // Третий аргумент — посещённые методы (ранний бандл новее 01.11.2026).
+                return args.length > 2 && args[2] instanceof Set<?> visited
+                    ? skipVisitedLinkTarget(args[0] instanceof EObject target ? target : null, visited)
+                    : args[0];
             });
         BslMethodParameterTypes.installReturnTypesMemo();
 
@@ -215,24 +150,19 @@ public final class BslDocCommentTypeMerge
 
     static void afterParse(Object comment)
     {
-        long started = System.nanoTime();
+        if (comment == null)
+            return;
         try
         {
-            if (comment == null)
+            String cn = comment.getClass().getName();
+            if (!TARGET_COMMENT.equals(cn))
                 return;
-            try
-            {
-                String cn = comment.getClass().getName();
-                if (!TARGET_COMMENT.equals(cn))
-                    return;
-                collectInParameters(comment);
-                collectInReturn(comment);
-            }
-            catch (Throwable ignored)
-            {
-            }
+            collectInParameters(comment);
+            collectInReturn(comment);
         }
-        finally { recordTypeSystemTiming("merge.afterParse", started); }
+        catch (Throwable ignored)
+        {
+        }
     }
 
     /**
@@ -241,7 +171,6 @@ public final class BslDocCommentTypeMerge
      */
     public static Collection<?> afterComputeTypes(Collection<?> types)
     {
-        long started = System.nanoTime();
         try
         {
             Collection<?> expanded = expandTypeSets(types);
@@ -271,7 +200,6 @@ public final class BslDocCommentTypeMerge
         {
             return types;
         }
-        finally { recordTypeSystemTiming("merge.afterComputeTypes", started); }
     }
 
     /**
