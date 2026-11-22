@@ -27,6 +27,8 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.ILeafNode;
+import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
@@ -3230,19 +3232,23 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
-     * Сужение типа выражения с точкой условием {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000) и таким же
-     * условием тернарного оператора {@code ?(ТипЗнч(А.Б) = Тип("Х"), А.Б.Член(), …)}.
+     * Сужение типа переменной или выражения с точкой условием {@code Если ТипЗнч(А.Б) = Тип("Х") Тогда} (#1000)
+     * и таким же условием тернарного оператора {@code ?(ТипЗнч(А.Б) = Тип("Х"), А.Б.Член(), …)}.
      * EDT сужает так только переменную ({@code CreatorTreeState.createTypesByPredicates}: тип из
      * {@code typeScope} по имени, разделённому точками); для {@code А.Б} внутри ветки берём тот же тип вместо
      * вычисленных. Сравнение связано с корнем условия только через «И»; присваивание пути, его начала
      * или корневой переменной в ветке до обращения сужение отменяет.
+     * <p>Самой переменной ({@code ТипЗнч(Х)}) тип сужает и EDT, но готовое состояние, которое читает подсказка
+     * при наведении, приходит из LIGHT ({@code TypeSystemUtil.getVariableTypesAtOffset} предпочитает LIGHT) —
+     * без состояния сужения, объединением с типом присваивания. Поэтому внутри ветки оставляем проверенный тип
+     * и для обращения к переменной.
      * <p>Тернарный оператор в модели — {@link Invocation} с именем метода {@code "?"} и тремя параметрами:
      * условие, ветка «Тогда», ветка «Иначе». Сужается только вторая — как ветка «Тогда»: ветку «Иначе»
      * не сужает и {@code Если} (исключение типа из набора — отдельное поведение EDT, здесь не повторяется).
      */
     private static final class TypeOfBranchNarrowing
     {
-        static List<TypeItem> narrow(List<TypeItem> types, DynamicFeatureAccess access)
+        static List<TypeItem> narrow(List<TypeItem> types, Expression access)
         {
             try
             {
@@ -3281,18 +3287,27 @@ public final class BslStructureInsertCommentTypes
         }
 
         /** @param branch ветка {@code Если} либо {@code null} — ветка «Тогда» тернарного оператора */
-        private static List<TypeItem> narrowed(List<TypeItem> types, DynamicFeatureAccess access,
+        private static List<TypeItem> narrowed(List<TypeItem> types, Expression access,
             com._1c.g5.v8.dt.bsl.model.Conditional branch, String typeName)
         {
             if (!BslDocCommentComputedTypes.isExtendedTypesEnabled(access)
                 || branch != null && reassigned(branch, access))
                 return types;
             TypeItem type = typeByName(access, typeName);
+            // #region agent log
+            ICompositeNode accessNode = NodeModelUtils.findActualNodeFor(access);
+            java.util.List<String> before = types == null ? java.util.List.of()
+                : types.stream().map(McoreUtil::getTypeName).toList();
+            Global.tempLog("typeof-narrow", "access=" + (access instanceof StaticFeatureAccess variable //$NON-NLS-1$ //$NON-NLS-2$
+                ? "var:" + variable.getName() : "path") + " offset=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (accessNode == null ? -1 : accessNode.getOffset())
+                + " type=" + typeName + " resolved=" + (type != null) + " before=" + before); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             return type == null ? types : List.of(type);
         }
 
         /** Имя типа из сравнения {@code ТипЗнч(путь) = Тип("…")} в условии, связанного с корнем только через «И». */
-        private static String typeNameFor(Expression predicate, DynamicFeatureAccess access)
+        private static String typeNameFor(Expression predicate, Expression access)
         {
             if (!(predicate instanceof BinaryExpression binary))
                 return null;
@@ -3311,7 +3326,7 @@ public final class BslStructureInsertCommentTypes
         }
 
         /** Присваивание в ветке до обращения: самому пути, его началу или корневой переменной. */
-        private static boolean reassigned(com._1c.g5.v8.dt.bsl.model.Conditional branch, DynamicFeatureAccess access)
+        private static boolean reassigned(com._1c.g5.v8.dt.bsl.model.Conditional branch, Expression access)
         {
             ICompositeNode accessNode = NodeModelUtils.findActualNodeFor(access);
             if (accessNode == null)
@@ -3387,6 +3402,43 @@ public final class BslStructureInsertCommentTypes
             EObject resolved = element == null ? null : EcoreUtil.resolve(element.getEObjectOrProxy(), context);
             return resolved instanceof TypeItem type && !type.eIsProxy() ? type : null;
         }
+    }
+
+    /**
+     * Проверенный условием тип обращения в точке {@code offset}. Нужен тем, кто читает готовые типы EDT
+     * напрямую, минуя {@link InteractiveTypes}: подсказка при наведении получает переменную как
+     * {@link Variable} и её тип в режиме без состояния сужения (готовый набор — объединение).
+     */
+    static List<TypeItem> narrowAtOffset(List<TypeItem> types, XtextResource resource, int offset)
+    {
+        if (types == null || types.isEmpty() || resource == null || offset < 0)
+            return types;
+        try
+        {
+            var parsed = resource.getParseResult();
+            if (parsed == null)
+                return types;
+            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parsed.getRootNode(), offset);
+            Expression occurrence = null;
+            for (INode node = leaf; node != null; node = node.getParent())
+                if (node.getSemanticElement() instanceof Expression expression)
+                {
+                    occurrence = expression;
+                    break;
+                }
+            return narrowFor(types, occurrence);
+        }
+        catch (RuntimeException | LinkageError failure)
+        {
+            return types;
+        }
+    }
+
+    /** Тот же проверенный тип, когда обращение уже разрешено: строка «Родитель» списка автодополнения. */
+    static List<TypeItem> narrowFor(List<TypeItem> types, Expression occurrence)
+    {
+        return types == null || types.isEmpty() || occurrence == null ? types
+            : TypeOfBranchNarrowing.narrow(types, occurrence);
     }
 
     /** Позиция обращения, переданная штатному вычислителю; используется и проверками закрытых модулей. */
@@ -4316,6 +4368,11 @@ public final class BslStructureInsertCommentTypes
                     : inferred.isEmpty() ? nativeResult : inferred;
                 if (object instanceof DynamicFeatureAccess access)
                 {
+                    result = TypeOfBranchNarrowing.narrow(result, access);
+                }
+                else if (object instanceof StaticFeatureAccess access && sourceVariable(access) != null)
+                {
+                    // Готовый тип внутри ветки уже сужен, а объединение с типом присваивания его теряет.
                     result = TypeOfBranchNarrowing.narrow(result, access);
                 }
                 result = List.copyOf(result);

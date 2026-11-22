@@ -1145,6 +1145,11 @@ final class BslExpectedTypePremiums
         Expectation expectation = complete ? expectation(resource, context, site, list) : null;
         List<TypeItem> parentTypes = context.parent().isEmpty() ? List.of()
             : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
+        // Внутри ветки ТипЗнч() список после точки — по проверенному типу, а не по объединению
+        // с типом присваивания: строка «Родитель» показывает именно его.
+        if (!parentTypes.isEmpty())
+            parentTypes = BslStructureInsertCommentTypes.narrowFor(parentTypes,
+                findExpression(resource, context.start(), context.anchor() - 1));
         String statisticsContext = statisticsContext(resource, context, parentTypes);
         String legacyStatisticsContext = statisticsContext != null && !statisticsContext.startsWith("Форма.") //$NON-NLS-1$
             && !context.parent().isEmpty() ? formStatisticsContext(resource,

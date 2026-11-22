@@ -17,9 +17,18 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
+import com._1c.g5.v8.dt.bsl.model.FunctionStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.mcore.Type;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 
 /**
  * Команда «Открыть синтакс-помощник» (Ctrl+F1) редактора модуля: подмена штатного обработчика EDT
@@ -120,6 +129,12 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
                 display.asyncExec(() -> show(queryPages, queryKeyword));
             return;
         }
+        // Гарантированное имя типа: EDT описывает такой литерал статьёй «Строковый литерал», а не
+        // типом. Статью типа ищем по имени — тем же путём, что ссылки типов в подсказках EDT.
+        String typeName = typeNameAt(element);
+        List<?> typePages = BslSyntaxAssist.typeNamePages(typeName, element);
+        if (hasErrorPage(typePages))
+            typePages = List.of();
         Object group = element != null ? BslSyntaxAssist.viewDocumentationPages(element) : null;
         List<?> rawPages = BslSyntaxAssist.pagesOf(group);
         List<?> filteredPages = rawPages.stream().filter(Objects::nonNull).toList();
@@ -129,13 +144,23 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
             ? element != null ? ParamHintHtmlModifier.collectRecoveredPages(element, element.eResource())
                 : List.of()
             : List.of();
-        List<?> pages = recoveredPages.isEmpty() ? filteredPages : recoveredPages;
-        String query = firstMeaningful(selected, BslSyntaxAssist.searchQueryOf(group),
+        List<?> pages = !typePages.isEmpty() ? typePages
+            : recoveredPages.isEmpty() ? filteredPages : recoveredPages;
+        String query = firstMeaningful(typeName, selected, BslSyntaxAssist.searchQueryOf(group),
             wordAt(document, offset));
         Global.tempLog(TEMP_TOPIC, "смещение " + offset + ", элемент=" //$NON-NLS-1$ //$NON-NLS-2$
             + (element == null ? "null" : element.eClass().getName()) //$NON-NLS-1$
+            + ", имя типа=" + typeName + ", страниц типа=" + typePages.size() //$NON-NLS-1$ //$NON-NLS-2$
             + ", страниц=" + rawPages.size() + ", непустых=" + pages.size() //$NON-NLS-1$ //$NON-NLS-2$
             + ", запрос=" + query); //$NON-NLS-1$
+        for (int i = 0; i < typePages.size(); i++)
+        {
+            Object page = typePages.get(i);
+            Global.tempLog(TEMP_TOPIC, "страница типа " + i + ": класс=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (page == null ? "null" : page.getClass().getName()) //$NON-NLS-1$
+                + ", заголовок=" + Global.invoke(page, "getExternalTitle") //$NON-NLS-1$ //$NON-NLS-2$
+                + ", ссылка=" + Global.invoke(page, "getLink")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         for (int i = 0; i < rawPages.size(); i++)
         {
             Object page = rawPages.get(i);
@@ -181,6 +206,48 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
                 return true;
         }
         return false;
+    }
+
+    /**
+     * Имя типа, если слово под кареткой — гарантированно имя типа: единственный аргумент
+     * {@code Тип("…")} / {@code Type("…")}, имя в {@code Новый("…")} или {@code Новый <Тип>}.
+     * Иначе {@code null}.
+     *
+     * <p>Строковый литерал EDT описывает статьёй «Строковый литерал»: в ней нет описания самого
+     * типа, поэтому статью типа ищем по имени ({@link BslSyntaxAssist#typeNamePages}).
+     */
+    private static String typeNameAt(EObject element)
+    {
+        if (element instanceof StringLiteral literal)
+        {
+            EObject container = literal.eContainer();
+            boolean typeName = container instanceof Invocation call && call.getParams().size() == 1
+                && call.getParams().get(0) == literal
+                && call.getMethodAccess() instanceof StaticFeatureAccess access
+                && ("Тип".equalsIgnoreCase(access.getName()) || "Type".equalsIgnoreCase(access.getName())) //$NON-NLS-1$ //$NON-NLS-2$
+                || container instanceof FunctionStyleCreator creator && creator.getTypeNameExpression() == literal;
+            return typeName ? literalTypeName(literal) : null;
+        }
+        Type type = element instanceof OperatorStyleCreator creator ? creator.getType()
+            : element instanceof Type found ? found : null;
+        if (type == null)
+            return null;
+        String name = McoreUtil.getTypeNameRu(type);
+        return name != null && !name.isBlank() ? name : McoreUtil.getTypeName(type);
+    }
+
+    /** Значение однострочного строкового литерала; многострочный — не имя типа. */
+    private static String literalTypeName(StringLiteral literal)
+    {
+        ICompositeNode node = NodeModelUtils.findActualNodeFor(literal);
+        String text = node != null ? NodeModelUtils.getTokenText(node) : null;
+        if (text == null)
+            return null;
+        text = text.trim();
+        if (text.length() < 2 || text.charAt(0) != '"' || text.charAt(text.length() - 1) != '"')
+            return null;
+        String name = text.substring(1, text.length() - 1).replace("\"\"", "\"").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        return name.isEmpty() || name.indexOf('\n') >= 0 || name.indexOf('\r') >= 0 ? null : name;
     }
 
     private static String firstMeaningful(String... values)

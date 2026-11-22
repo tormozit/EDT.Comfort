@@ -201,6 +201,52 @@ public final class BslSyntaxAssist
         return pages instanceof List<?> list ? list : List.of();
     }
 
+    /**
+     * Статья типа по его имени — по ссылке, которую EDT строит для типа в подсказках:
+     * {@code getReferenceByTypeName} → {@code linkToPlatformDocPathAndVersion} →
+     * {@code getDocByPlatformDocPath}. Так открываются и типы-объекты, и элементы языка
+     * ({@code Строка}, {@code Число}), у которых коды начинаются с 100000.
+     *
+     * <p>Пусто — тип не разрешился или статьи нет. Читает документацию платформы — вызывать не из
+     * потока UI.
+     */
+    static List<?> typeNamePages(String typeName, EObject context)
+    {
+        if (typeName == null || typeName.isBlank() || context == null)
+            return List.of();
+        try
+        {
+            Object provider = documentationProvider();
+            if (provider == null)
+                return List.of();
+            Object version = Global.invoke(provider, "getVersion", context); //$NON-NLS-1$
+            Object reference = Global.invoke(provider, "getReferenceByTypeName", typeName, //$NON-NLS-1$
+                context.eResource(), Boolean.TRUE, version, Boolean.FALSE);
+            Object href = Global.invoke(reference, "getHref"); //$NON-NLS-1$
+            Global.tempLog(TEMP_TOPIC, "имя типа «" + typeName + "»: версия=" + version //$NON-NLS-1$ //$NON-NLS-2$
+                + ", ссылка=" + href); //$NON-NLS-1$
+            Object pair = href instanceof String link && !link.isBlank()
+                ? Global.invoke(bslUiClass(DOC_UTIL), "linkToPlatformDocPathAndVersion", link) //$NON-NLS-1$
+                : null;
+            Object path = Global.invoke(pair, "getFirst"); //$NON-NLS-1$
+            Object pageVersion = Global.invoke(pair, "getSecond"); //$NON-NLS-1$
+            Global.tempLog(TEMP_TOPIC, "путь типа «" + typeName + "»: " + path //$NON-NLS-1$ //$NON-NLS-2$
+                + ", версия статьи=" + pageVersion); //$NON-NLS-1$
+            if (!(path instanceof String docPath) || docPath.isBlank() || pageVersion == null)
+                return List.of();
+            Object page = Global.invoke(provider, "getDocByPlatformDocPath", docPath, pageVersion, //$NON-NLS-1$
+                language());
+            Global.tempLog(TEMP_TOPIC, "страница типа «" + typeName + "»: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (page == null ? "null" : page.getClass().getName())); //$NON-NLS-1$
+            return page != null ? List.of(page) : List.of();
+        }
+        catch (RuntimeException | LinkageError error)
+        {
+            Global.tempLogException(TEMP_TOPIC, "страница типа «" + typeName + "»", error); //$NON-NLS-1$ //$NON-NLS-2$
+            return List.of();
+        }
+    }
+
     /** Статьи QL берутся только из раздела языка запросов, а не из документации строки BSL. */
     static List<?> queryKeywordPages(EObject context, String keyword)
     {

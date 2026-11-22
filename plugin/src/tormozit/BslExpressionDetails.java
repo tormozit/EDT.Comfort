@@ -342,6 +342,14 @@ final class BslExpressionDetails
                     : object instanceof Expression
                         ? resource.getResourceServiceProvider().get(TypesComputer.class).computeTypes(object, environments)
                         : List.of();
+            // Тип обращения внутри ветки ТипЗнч(): готовый тип переменной приходит без сужения.
+            // #region agent log
+            Global.tempLog("typeof-narrow", "describe offset=" + offset + " object=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (object == null ? "null" : object.eClass().getName()) + " before=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (types == null ? java.util.List.of() : types.stream().map(McoreUtil::getTypeName).toList()));
+            // #endregion
+            if (offset >= 0)
+                types = BslStructureInsertCommentTypes.narrowAtOffset(types, resource, position);
             if (types != null)
                 describedTypes.addAll(types);
             if (types != null && types.stream().anyMatch(type -> "ValueTable".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
