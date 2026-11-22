@@ -3227,7 +3227,20 @@ public final class BslStructureInsertCommentTypes
         public java.util.List<TypeItem> computeTypes(EObject object, Environments environments)
         {
             fillMockExportPropertyTypes(object);
-            return arrayExpressionTypes(super.computeTypes(object, environments), object, environments);
+            List<TypeItem> types = arrayExpressionTypes(super.computeTypes(object, environments), object, environments);
+            // Один и тот же тип приходит из нескольких состояний EDT: у объединения и у сужения
+            // разные экземпляры с одним именем. Сворачиваем здесь — до разрешения членов.
+            if (types != null && types.size() > 1)
+            {
+                Set<Object> distinct = new HashSet<>();
+                boolean repeated = !types.stream().allMatch(item -> distinct.add(sameTypeKey(item)));
+                if (repeated)
+                {
+                    types = new ArrayList<>(types);
+                    dropRepeatedTypes(types);
+                }
+            }
+            return types;
         }
     }
 
@@ -3294,15 +3307,6 @@ public final class BslStructureInsertCommentTypes
                 || branch != null && reassigned(branch, access))
                 return types;
             TypeItem type = typeByName(access, typeName);
-            // #region agent log
-            ICompositeNode accessNode = NodeModelUtils.findActualNodeFor(access);
-            java.util.List<String> before = types == null ? java.util.List.of()
-                : types.stream().map(McoreUtil::getTypeName).toList();
-            Global.tempLog("typeof-narrow", "access=" + (access instanceof StaticFeatureAccess variable //$NON-NLS-1$ //$NON-NLS-2$
-                ? "var:" + variable.getName() : "path") + " offset=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (accessNode == null ? -1 : accessNode.getOffset())
-                + " type=" + typeName + " resolved=" + (type != null) + " before=" + before); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             return type == null ? types : List.of(type);
         }
 
@@ -3415,23 +3419,25 @@ public final class BslStructureInsertCommentTypes
             return types;
         try
         {
-            var parsed = resource.getParseResult();
-            if (parsed == null)
-                return types;
-            ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parsed.getRootNode(), offset);
-            Expression occurrence = null;
-            for (INode node = leaf; node != null; node = node.getParent())
-                if (node.getSemanticElement() instanceof Expression expression)
-                {
-                    occurrence = expression;
-                    break;
-                }
-            return narrowFor(types, occurrence);
+            return narrowFor(types, occurrenceAt(resource, offset));
         }
         catch (RuntimeException | LinkageError failure)
         {
             return types;
         }
+    }
+
+    /** Ближайшее выражение в точке: обращение для сужения по условию. */
+    private static Expression occurrenceAt(XtextResource resource, int offset)
+    {
+        var parsed = resource.getParseResult();
+        if (parsed == null)
+            return null;
+        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parsed.getRootNode(), offset);
+        for (INode node = leaf; node != null; node = node.getParent())
+            if (node.getSemanticElement() instanceof Expression expression)
+                return expression;
+        return null;
     }
 
     /** Тот же проверенный тип, когда обращение уже разрешено: строка «Родитель» списка автодополнения. */
@@ -4891,6 +4897,9 @@ public final class BslStructureInsertCommentTypes
             // содержит колонки таблицы и их типы из комментариев, которых нет у «Новый».
             // Сохраняем готовые альтернативы без рекурсивного сравнения или копирования.
             add(result, original);
+            // Но один и тот же тип из объединения и из сужения — два экземпляра с одним именем;
+            // свёрнутый список даёт по одному члену (иначе CTRL+F1 видит два одинаковых).
+            dropRepeatedTypes(result);
             return result;
         }
 

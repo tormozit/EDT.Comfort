@@ -212,7 +212,45 @@ public final class DebugInspectorHook implements IStartup
 
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
-        DebugInspectorDebug.log("install Show/Activate filters"); //$NON-NLS-1$
+        // Фильтр Display срабатывает РАНЬШЕ слушателя shell, который PopupDialog ставит
+        // для авто-закрытия по деактивации. Сбрасываем флаги до него — окно не закрывается.
+        display.addFilter(SWT.Deactivate, event ->
+        {
+            if (event.widget instanceof Shell shell)
+                keepPopupInspectOpenOnDeactivate(shell);
+        });
+        DebugInspectorDebug.log("install Show/Activate/Deactivate filters"); //$NON-NLS-1$
+    }
+
+    /**
+     * Гасит авто-закрытие отдельного popup-инспектора по деактивации.
+     *
+     * <p>{@code PopupDialog} на деактивацию shell ставит {@code asyncClose()} в очередь, если
+     * его поле {@code listenToDeactivate} уже взведено. Первое открытие проигрывает гонку: пока
+     * наш патч не дошёл до {@code applyInspectorModeForTargets}, флаг успевает взвестись, и окно
+     * закрывается, как только освобождается UI-поток. Фильтр {@code Display} выполняется раньше
+     * слушателя shell, поэтому здесь флаг снимается до проверки и закрытие не заказывается.
+     * Hover-инспектор не трогаем — у него lifecycle EDT.
+     */
+    private static void keepPopupInspectOpenOnDeactivate(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        resetPopupInspectCloseFlags(shell);
+        // Деактивация родительского окна: PopupDialog держит отдельный слушатель на родителе.
+        for (Shell child : shell.getShells())
+            resetPopupInspectCloseFlags(child);
+    }
+
+    private static void resetPopupInspectCloseFlags(Shell shell)
+    {
+        if (shell == null || shell.isDisposed() || !isInspectorCandidateShell(shell))
+            return;
+        Object dialog = resolveElementDialog(shell, null);
+        if (!isPopupInspectDialog(dialog))
+            return;
+        Global.setField(dialog, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
+        Global.setField(dialog, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
     }
 
     private static void scheduleSessionRefresh(Display display, Shell shell, InspectorPatchSession session)

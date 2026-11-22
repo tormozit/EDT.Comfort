@@ -39,9 +39,6 @@ import com.google.inject.Injector;
  */
 public final class BslSyntaxAssist
 {
-    /** Тема временного лога — общая с потребителями. */
-    private static final String TEMP_TOPIC = "syntax-assist"; //$NON-NLS-1$
-
     private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
     private static final String BSL_ACTIVATOR =
         "com._1c.g5.v8.dt.bsl.ui.internal.BslActivator"; //$NON-NLS-1$
@@ -84,7 +81,6 @@ public final class BslSyntaxAssist
         }
         catch (ClassNotFoundException e)
         {
-            Global.tempLog(TEMP_TOPIC, "класс не найден в " + bundleId + ": " + name); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -138,11 +134,7 @@ public final class BslSyntaxAssist
             Class<?> targetClass = bslUiClass(className);
             Class<?> activatorClass = bslUiClass(BSL_ACTIVATOR);
             if (targetClass == null || activatorClass == null)
-            {
-                Global.tempLog(TEMP_TOPIC, "классы bsl.ui недоступны (" + className //$NON-NLS-1$
-                    + "=" + targetClass + ", активатор=" + activatorClass + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return null;
-            }
             Object activator = activatorClass.getMethod("getInstance").invoke(null); //$NON-NLS-1$
             Object language = activatorClass.getField("COM__1C_G5_V8_DT_BSL_BSL").get(null); //$NON-NLS-1$
             Object injector = activator != null
@@ -152,7 +144,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "инжектор: " + className, e); //$NON-NLS-1$
             return null;
         }
     }
@@ -162,11 +153,7 @@ public final class BslSyntaxAssist
     {
         IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
             .getResourceServiceProvider(URI.createURI("comfort.bsl")); //$NON-NLS-1$
-        Object provider = rsp != null ? rsp.get(providerClass) : null;
-        Global.tempLog(TEMP_TOPIC, "провайдер через реестр Xtext: rsp=" //$NON-NLS-1$
-            + (rsp == null ? "null" : rsp.getClass().getName()) //$NON-NLS-1$
-            + ", провайдер=" + (provider == null ? "null" : provider.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-        return provider;
+        return rsp != null ? rsp.get(providerClass) : null;
     }
 
     /**
@@ -189,7 +176,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "страницы для " + element, e); //$NON-NLS-1$
             return null;
         }
     }
@@ -223,26 +209,19 @@ public final class BslSyntaxAssist
             Object reference = Global.invoke(provider, "getReferenceByTypeName", typeName, //$NON-NLS-1$
                 context.eResource(), Boolean.TRUE, version, Boolean.FALSE);
             Object href = Global.invoke(reference, "getHref"); //$NON-NLS-1$
-            Global.tempLog(TEMP_TOPIC, "имя типа «" + typeName + "»: версия=" + version //$NON-NLS-1$ //$NON-NLS-2$
-                + ", ссылка=" + href); //$NON-NLS-1$
             Object pair = href instanceof String link && !link.isBlank()
                 ? Global.invoke(bslUiClass(DOC_UTIL), "linkToPlatformDocPathAndVersion", link) //$NON-NLS-1$
                 : null;
             Object path = Global.invoke(pair, "getFirst"); //$NON-NLS-1$
             Object pageVersion = Global.invoke(pair, "getSecond"); //$NON-NLS-1$
-            Global.tempLog(TEMP_TOPIC, "путь типа «" + typeName + "»: " + path //$NON-NLS-1$ //$NON-NLS-2$
-                + ", версия статьи=" + pageVersion); //$NON-NLS-1$
             if (!(path instanceof String docPath) || docPath.isBlank() || pageVersion == null)
                 return List.of();
             Object page = Global.invoke(provider, "getDocByPlatformDocPath", docPath, pageVersion, //$NON-NLS-1$
                 language());
-            Global.tempLog(TEMP_TOPIC, "страница типа «" + typeName + "»: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (page == null ? "null" : page.getClass().getName())); //$NON-NLS-1$
             return page != null ? List.of(page) : List.of();
         }
         catch (RuntimeException | LinkageError error)
         {
-            Global.tempLogException(TEMP_TOPIC, "страница типа «" + typeName + "»", error); //$NON-NLS-1$ //$NON-NLS-2$
             return List.of();
         }
     }
@@ -376,7 +355,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "открытие панели", e); //$NON-NLS-1$
             return null;
         }
     }
@@ -394,7 +372,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "поиск «" + query + "»", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -423,7 +400,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "дескриптор страницы", e); //$NON-NLS-1$
             return null;
         }
     }
@@ -446,7 +422,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "дескриптор группы страниц", e); //$NON-NLS-1$
             return null;
         }
     }
@@ -483,7 +458,6 @@ public final class BslSyntaxAssist
         }
         catch (Exception e)
         {
-            Global.tempLogException(TEMP_TOPIC, "элемент по смещению " + offset, e); //$NON-NLS-1$
             return null;
         }
     }

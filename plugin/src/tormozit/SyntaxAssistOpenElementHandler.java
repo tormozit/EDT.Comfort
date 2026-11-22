@@ -1,7 +1,10 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 
@@ -57,8 +60,6 @@ import com._1c.g5.v8.dt.mcore.util.McoreUtil;
  */
 public final class SyntaxAssistOpenElementHandler extends AbstractHandler
 {
-    private static final String TEMP_TOPIC = "syntax-assist"; //$NON-NLS-1$
-
     /** Предыдущий незавершённый разбор: команду часто жмут подряд по разным словам. */
     private volatile Future<?> running;
 
@@ -112,7 +113,6 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
         }
         catch (BadLocationException e)
         {
-            Global.tempLogException(TEMP_TOPIC, "выделение " + range, e); //$NON-NLS-1$
             return null;
         }
     }
@@ -137,39 +137,17 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
             typePages = List.of();
         Object group = element != null ? BslSyntaxAssist.viewDocumentationPages(element) : null;
         List<?> rawPages = BslSyntaxAssist.pagesOf(group);
-        List<?> filteredPages = rawPages.stream().filter(Objects::nonNull).toList();
+        List<?> filteredPages = distinctPages(rawPages.stream().filter(Objects::nonNull).toList());
         // Страница-ошибка вместо статьи (составной тип без кодов документации): берём запасной
         // источник — тот же, что у подсказки при наведении.
         List<?> recoveredPages = filteredPages.isEmpty() || hasErrorPage(filteredPages)
-            ? element != null ? ParamHintHtmlModifier.collectRecoveredPages(element, element.eResource())
+            ? element != null ? distinctPages(ParamHintHtmlModifier.collectRecoveredPages(element, element.eResource()))
                 : List.of()
             : List.of();
         List<?> pages = !typePages.isEmpty() ? typePages
             : recoveredPages.isEmpty() ? filteredPages : recoveredPages;
         String query = firstMeaningful(typeName, selected, BslSyntaxAssist.searchQueryOf(group),
             wordAt(document, offset));
-        Global.tempLog(TEMP_TOPIC, "смещение " + offset + ", элемент=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (element == null ? "null" : element.eClass().getName()) //$NON-NLS-1$
-            + ", имя типа=" + typeName + ", страниц типа=" + typePages.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", страниц=" + rawPages.size() + ", непустых=" + pages.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", запрос=" + query); //$NON-NLS-1$
-        for (int i = 0; i < typePages.size(); i++)
-        {
-            Object page = typePages.get(i);
-            Global.tempLog(TEMP_TOPIC, "страница типа " + i + ": класс=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (page == null ? "null" : page.getClass().getName()) //$NON-NLS-1$
-                + ", заголовок=" + Global.invoke(page, "getExternalTitle") //$NON-NLS-1$ //$NON-NLS-2$
-                + ", ссылка=" + Global.invoke(page, "getLink")); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        for (int i = 0; i < rawPages.size(); i++)
-        {
-            Object page = rawPages.get(i);
-            Global.tempLog(TEMP_TOPIC, "страница " + i + ": класс=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (page == null ? "null" : page.getClass().getName()) //$NON-NLS-1$
-                + ", заголовок=" + Global.invoke(page, "getExternalTitle") //$NON-NLS-1$ //$NON-NLS-2$
-                + ", ссылка=" + Global.invoke(page, "getLink") //$NON-NLS-1$ //$NON-NLS-2$
-                + ", platformId=" + Global.invoke(page, "getPlatformId")); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         if (display.isDisposed())
             return;
         display.asyncExec(() -> show(pages, query));
@@ -206,6 +184,34 @@ public final class SyntaxAssistOpenElementHandler extends AbstractHandler
                 return true;
         }
         return false;
+    }
+
+    /**
+     * Одна статья на член. Объединение типов приёмника даёт один и тот же член дважды
+     * (одинаковые {@code FeatureEntry}: владелец, имя и окружения совпадают), и EDT строит по статье
+     * на каждую запись — отсюда «Неоднозначный элемент» с двумя одинаковыми вариантами.
+     * Разные статьи (разные владельцы или разные поля) остаются — неоднозначность сохраняется.
+     */
+    private static List<?> distinctPages(List<?> pages)
+    {
+        if (pages == null || pages.size() < 2)
+            return pages;
+        List<Object> result = new ArrayList<>(pages.size());
+        Set<String> seen = new HashSet<>();
+        for (Object page : pages)
+        {
+            if (page == null)
+                continue;
+            Object platformId = Global.invoke(page, "getPlatformId"); //$NON-NLS-1$
+            Object link = Global.invoke(page, "getLink"); //$NON-NLS-1$
+            Object title = Global.invoke(page, "getExternalTitle"); //$NON-NLS-1$
+            String key = platformId != null ? "id:" + platformId //$NON-NLS-1$
+                : link != null || title != null ? page.getClass().getName() + "|" + link + "|" + title //$NON-NLS-1$ //$NON-NLS-2$
+                    : page.getClass().getName() + "|" + System.identityHashCode(page); //$NON-NLS-1$
+            if (seen.add(key))
+                result.add(page);
+        }
+        return result;
     }
 
     /**
