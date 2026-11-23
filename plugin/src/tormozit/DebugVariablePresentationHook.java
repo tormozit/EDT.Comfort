@@ -4,6 +4,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,8 +26,10 @@ import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.debug.ui.IDebugUIConstants;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.ColumnViewer;
+import org.eclipse.jface.viewers.ILazyTreePathContentProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreePath;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerLabel;
 import org.eclipse.swt.graphics.FontData;
@@ -90,6 +93,10 @@ public final class DebugVariablePresentationHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        System.getProperties().put("tormozit.debug.uniqueValueChildren",
+            (java.util.function.Function<Object, Object>) DebugVariablePresentationHook::uniqueValueChildren);
+        System.getProperties().put("tormozit.debug.valueTreeExpanded",
+            (java.util.function.BiConsumer<Object, Object>) DebugVariablePresentationHook::valueTreeExpanded);
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -107,6 +114,70 @@ public final class DebugVariablePresentationHook implements IStartup
                     "asyncExec exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
             }
         });
+    }
+
+    /** Обновление количества детей, когда единственная заглушка уже стала первой реальной строкой. */
+    private static void valueTreeExpanded(Object source, Object expanded)
+    {
+        if (!(source instanceof TreeViewer viewer) || !(expanded instanceof TreeItem item) || item.isDisposed())
+            return;
+        Object data = item.getData();
+        if (!(data instanceof IBslVariable)
+            && !(data instanceof IExpression expression && expression.getValue() instanceof IBslValue))
+            return;
+        try
+        {
+            int count = item.getItemCount();
+            boolean filledSingle = count == 1 && item.getItem(0).getData() != null;
+            if (filledSingle && viewer.getContentProvider() instanceof ILazyTreePathContentProvider provider)
+            {
+                Object path = Global.invoke(viewer, "getTreePathFromItem", item);
+                if (path instanceof TreePath treePath)
+                {
+                    provider.updateChildCount(treePath, count);
+                }
+            }
+        }
+        catch (Exception failure)
+        {
+            DebugVariablePresentationDebug.problem("child count update failed: " + failure);
+        }
+    }
+
+    /**
+     * Одинаковые адреса свойств могут прийти дважды. В виртуальном TreeViewer такие соседи
+     * вытесняют друг друга при каждом replace, заново запрашивая детей и перерисовку (#1077).
+     * Сравнение совпадает со штатным BslVariable.equals; имена сами по себе не ключ.
+     */
+    private static Object uniqueValueChildren(Object value)
+    {
+        if (!(value instanceof IBslVariable[] variables))
+            return value;
+        try
+        {
+            Set<IBslVariable> seen = new LinkedHashSet<>();
+            List<IBslVariable> unique = null;
+            for (int i = 0; i < variables.length; i++)
+            {
+                IBslVariable variable = variables[i];
+                if (variable != null && !seen.add(variable))
+                {
+                    if (unique == null)
+                    {
+                        unique = new ArrayList<>(variables.length);
+                        Collections.addAll(unique, java.util.Arrays.copyOf(variables, i));
+                    }
+                }
+                else if (unique != null)
+                    unique.add(variable);
+            }
+            return unique == null ? variables : unique.toArray(IBslVariable[]::new);
+        }
+        catch (Exception failure)
+        {
+            DebugVariablePresentationDebug.problem("child filtering failed: " + failure);
+            return variables;
+        }
     }
 
     private static void installDebugLaunchRepatch()

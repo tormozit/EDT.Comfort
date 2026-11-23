@@ -342,19 +342,16 @@ final class DebugInspectorTreeEnhancement
             {
                 if (e.button != 1)
                     return;
-                mouseDownX = e.x;
-                mouseDownY = e.y;
-                Display display = tree.getDisplay();
-                // 
-                if (display != null && !display.isDisposed())
-                    display.asyncExec(DebugInspectorTreeEnhancement.this::applyMouseDown);
+                TreeItem item = itemAt(tree, e.x, e.y);
+                if (item == null)
+                    return;
+                int column = columnAt(tree, e.x, e.y, item);
+                if (column < 0)
+                    column = 0;
+                selectCell(item, column);
             }
         };
         tree.addMouseListener(mouseListener);
-        // Разворачивание/сворачивание приходит отдельным событием — по нему applyMouseDown выходит.
-        Listener expansionListener = e -> expansionHappened = true;
-        tree.addListener(SWT.Expand, expansionListener);
-        tree.addListener(SWT.Collapse, expansionListener);
 
         ThemeAwareColors.hideGridLinesInDarkTheme(tree);
 
@@ -473,34 +470,6 @@ final class DebugInspectorTreeEnhancement
         e.gc.setBackground(bg);
         e.gc.fillRectangle(e.x, e.y, e.width, e.height);
         e.detail &= ~SWT.BACKGROUND;
-    }
-
-    /** Точка последнего нажатия — обработка выполняется в asyncExec после обновления выделения. */
-    private int mouseDownX = -1;
-    private int mouseDownY = -1;
-    /** Признак: последний клик вызвал разворачивание/сворачивание узла. */
-    private boolean expansionHappened;
-
-    /** Отложенная обработка нажатия — тот же код, что был в mouseDown. */
-    void applyMouseDown()
-    {
-        if (expansionHappened)
-        {
-            // Клик вызвал разворачивание узла — строку не активируем и ничего не перерисовываем.
-            expansionHappened = false;
-            return;
-        }
-        if (tree == null || tree.isDisposed())
-            return;
-        int x = mouseDownX;
-        int y = mouseDownY;
-        TreeItem item = itemAt(tree, x, y);
-        if (item == null)
-            return;
-        int column = columnAt(tree, x, y, item);
-        if (column < 0)
-            column = 0;
-        selectCell(item, column);
     }
 
     private TreeItem currentSelectedRow()
@@ -1682,8 +1651,6 @@ final class DebugInspectorTreeEnhancement
             if (bounds != null && bounds.contains(x, y))
                 return item;
         }
-        if (!item.getExpanded())
-            return null;
         for (TreeItem child : item.getItems())
         {
             TreeItem found = findInItem(child, x, y);

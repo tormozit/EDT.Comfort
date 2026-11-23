@@ -896,17 +896,30 @@ public final class BslDebugSourceHook implements IStartup
                 (BiFunction<Object, Object, Object>) (target, breakpoint) -> wrap(target, breakpoint, true));
             DebugPlugin.getDefault().addDebugEventListener(events ->
             {
+                Set<IRuntimeDebugClientTarget> refreshTargets = Collections.newSetFromMap(new IdentityHashMap<>());
+                boolean redraw = false;
                 for (DebugEvent event : events)
-                    if (event.getSource() instanceof org.eclipse.debug.core.model.IDebugElement element
+                {
+                    Object source = event.getSource();
+                    // Значения и переменные не меняют поколение метаданных, документ или строку точки.
+                    // Их CHANGE при раскрытии выражения раньше создавали тысячи перерисовок и фоновых задач.
+                    boolean relevant = source instanceof IRuntimeDebugClientTarget
+                        || source instanceof IRuntimeDebugTargetThread;
+                    if (relevant && source instanceof org.eclipse.debug.core.model.IDebugElement element
                         && element.getDebugTarget() instanceof IRuntimeDebugClientTarget target)
                     {
                         if (event.getKind() == DebugEvent.TERMINATE || event.getKind() == DebugEvent.CHANGE)
-                            BreakpointListHook.sourceMappingChanged();
+                            redraw = true;
                         if (event.getKind() != DebugEvent.CREATE && event.getKind() != DebugEvent.CHANGE
                             && event.getKind() != DebugEvent.SUSPEND)
                             continue;
-                        refresh(target, null);
+                        refreshTargets.add(target);
                     }
+                }
+                if (redraw)
+                    BreakpointListHook.sourceMappingChanged();
+                for (IRuntimeDebugClientTarget target : refreshTargets)
+                    refresh(target, null);
             });
         }
 

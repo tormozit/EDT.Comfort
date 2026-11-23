@@ -82,7 +82,143 @@ public final class Activator
         MarkerCreationDateWeaving.install(context);
         CommonAttributeLossDiagnostics.install(context);
         DebugBreakpointsWeaving.install(context);
+        DebugValueWeaving.install(context);
         FormAttributeSelectionWeaving.install(context);
+    }
+
+    /**
+     * Равные соседние переменные заставляют TreeViewer.replace очищать друг друга (#1077).
+     * Списки контекстных свойств — общие для количества детей и их загрузки в деревья отладчика.
+     * Индексируемые элементы коллекций не фильтруем: их позиции должны совпадать с getSize/getVariable.
+     * Фильтр основного бандла сохраняет первое вхождение; до его старта список не меняется.
+     * BslPrimitiveValue.updatePresentation вызывает valueStateChanged из конструктора BslValue,
+     * до присваивания contextVariables = EMPTY_CHILDREN. Эти уведомления ещё не готового объекта
+     * не отправляем: опубликованный результат родителя сам уведомит потребителей после расчёта.
+     * При раскрытии одной уже заполненной строки-заглушки явно запрашиваем количество детей:
+     * штатный TreeViewer делает это только для заглушки с data == null.
+     */
+    private static final class DebugValueWeaving implements WeavingHook
+    {
+        private static final String PREFIX = "com._1c.g5.v8.dt.internal.debug.core.model.values.";
+        private static final String VIEWER = "org.eclipse.debug.internal.ui.viewers.model.InternalTreeModelViewer";
+        private static final Set<String> TARGETS = Set.of(PREFIX + "BslValue", PREFIX + "BslContextValue",
+            PREFIX + "BslIndexedValue", VIEWER);
+        private static final String ARRAY = "[Lcom/_1c/g5/v8/dt/debug/core/model/IBslVariable;";
+        private static final String CALLBACK = "tormozit.debug.uniqueValueChildren";
+        private static final String STATUS = "tormozit.debug.uniqueValueChildren.patch";
+        private static final String EXPANDED = "tormozit.debug.valueTreeExpanded";
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, (Function<Object, Object>) value -> value);
+            System.getProperties().putIfAbsent(EXPANDED,
+                (java.util.function.BiConsumer<Object, Object>) (viewer, item) -> { });
+            context.registerService(WeavingHook.class, new DebugValueWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGETS.contains(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = new int[1];
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (VIEWER.equals(woven.getClassName()) && "handleTreeExpand".equals(name)
+                            && "(Lorg/eclipse/swt/events/TreeEvent;)V".equals(descriptor))
+                        {
+                            return new MethodVisitor(Opcodes.ASM9, mv)
+                            {
+                                @Override
+                                public void visitInsn(int opcode)
+                                {
+                                    if (opcode == Opcodes.RETURN)
+                                    {
+                                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                            "()Ljava/util/Properties;", false);
+                                        super.visitLdcInsn(EXPANDED);
+                                        super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                            "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                        super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiConsumer");
+                                        super.visitVarInsn(Opcodes.ALOAD, 0);
+                                        super.visitVarInsn(Opcodes.ALOAD, 1);
+                                        super.visitFieldInsn(Opcodes.GETFIELD, "org/eclipse/swt/events/TreeEvent", "item",
+                                            "Lorg/eclipse/swt/widgets/Widget;");
+                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept",
+                                            "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                        patched[0]++;
+                                    }
+                                    super.visitInsn(opcode);
+                                }
+                            };
+                        }
+                        if ((PREFIX + "BslValue").equals(woven.getClassName())
+                            && "valueStateChanged".equals(name) && "()V".equals(descriptor))
+                        {
+                            patched[0]++;
+                            return new MethodVisitor(Opcodes.ASM9, mv)
+                            {
+                                @Override
+                                public void visitCode()
+                                {
+                                    super.visitCode();
+                                    String owner = PREFIX.replace('.', '/') + "BslValue";
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, owner, "contextVariables", ARRAY);
+                                    Label initialized = new Label();
+                                    super.visitJumpInsn(Opcodes.IFNONNULL, initialized);
+                                    super.visitInsn(Opcodes.RETURN);
+                                    super.visitLabel(initialized);
+                                    super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                                }
+                            };
+                        }
+                        String method = (PREFIX + "BslIndexedValue").equals(woven.getClassName())
+                            ? "getContextVariables" : "getVariables";
+                        if (!method.equals(name) || !("()" + ARRAY).equals(descriptor))
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.ARETURN)
+                                {
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties",
+                                        "()Ljava/util/Properties;", false);
+                                    super.visitLdcInsn(CALLBACK);
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Function");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply",
+                                        "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, ARRAY);
+                                    patched[0]++;
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                System.getProperties().put(STATUS, woven.getClassName() + " sites=" + patched[0]);
+            }
+            catch (Throwable failure)
+            {
+                System.getProperties().put(STATUS, "error " + failure);
+            }
+        }
     }
 
     /**

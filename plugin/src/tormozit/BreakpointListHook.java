@@ -3,6 +3,7 @@ package tormozit;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.debug.ui.IDebugUIConstants;
@@ -64,6 +65,7 @@ public final class BreakpointListHook implements IStartup
     private static final String DIALOG_TITLE = "Сообщение исключения"; //$NON-NLS-1$
     private static final String DIALOG_MESSAGE = "Текст фильтра сообщения исключения:"; //$NON-NLS-1$
     private static final Set<Tree> SOURCE_STATUS_TREES = Collections.newSetFromMap(new WeakHashMap<>());
+    private static final AtomicBoolean SOURCE_STATUS_REDRAW_QUEUED = new AtomicBoolean();
 
     @Override
     public void earlyStartup()
@@ -158,13 +160,15 @@ public final class BreakpointListHook implements IStartup
     static void sourceMappingChanged()
     {
         Display display = Display.getDefault();
-        if (!display.isDisposed())
-            display.asyncExec(() ->
-            {
-                SOURCE_STATUS_TREES.removeIf(Tree::isDisposed);
-                for (Tree tree : SOURCE_STATUS_TREES)
-                    tree.redraw();
-            });
+        if (display.isDisposed() || !SOURCE_STATUS_REDRAW_QUEUED.compareAndSet(false, true))
+            return;
+        display.asyncExec(() ->
+        {
+            SOURCE_STATUS_REDRAW_QUEUED.set(false);
+            SOURCE_STATUS_TREES.removeIf(Tree::isDisposed);
+            for (Tree tree : SOURCE_STATUS_TREES)
+                tree.redraw();
+        });
     }
 
     private static void installSourceStatusPainting(Tree tree)
