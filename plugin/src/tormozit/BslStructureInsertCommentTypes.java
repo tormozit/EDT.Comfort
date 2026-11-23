@@ -1532,6 +1532,37 @@ public final class BslStructureInsertCommentTypes
     }
 
     /**
+     * Есть ли у присваивания боковой комментарий с типом возврата. Комментарий разбирается тем же
+     * путём, которым EDT получает типы комментария ({@code getCommentAfterObject} по узлу блока +
+     * {@code parseTemplateComment}), поэтому тип, записанный EDT в состояние переменной, и есть
+     * «голый» тип этого комментария.
+     */
+    private static boolean hasAssignmentCommentType(Expression value, Module module)
+    {
+        try
+        {
+            if (value == null)
+                return false;
+            SimpleStatement statement = EcoreUtil2.getContainerOfType(value, SimpleStatement.class);
+            Block block = statement == null ? null : EcoreUtil2.getContainerOfType(statement, Block.class);
+            ICompositeNode blockNode = block == null ? null : NodeModelUtils.findActualNodeFor(block);
+            if (statement == null || blockNode == null)
+                return false;
+            boolean oldFormat = oldCommentFormat(module);
+            List<String> lines = TypeSystemUtil.getCommentAfterObject(statement, blockNode, oldFormat);
+            if (lines == null || lines.isEmpty())
+                return false;
+            BslDocumentationComment comment = BslCommentUtils.parseTemplateComment(lines, oldFormat);
+            BslDocumentationComment.ReturnSection section = comment == null ? null : comment.getReturnSection();
+            return section != null && section.getReturnTypes() != null && !section.getReturnTypes().isEmpty();
+        }
+        catch (Throwable ignored)
+        {
+            return false;
+        }
+    }
+
+    /**
      * Ссылки «см. …» раздела возвращаемого значения — как {@code BslDocumentationComment.computeReturnTypes}:
      * типы из разделов типов, а если их нет — из ссылок в описании самого раздела
      * ({@code // см. Конструктор - описание} разбирается именно так).
@@ -3485,8 +3516,8 @@ public final class BslStructureInsertCommentTypes
                 || !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
                 return types;
             List<TypeItem> comment = BslDocCommentComputedTypes.iteratorCommentTypes(variable);
-            if (!comment.isEmpty() && BslDocCommentComputedTypes.replaceTypesByDocumentationComment(variable))
-                return comment;
+            if (!comment.isEmpty())
+                return filterTypesByCommentMask(types, comment);
             if (types.stream().anyMatch(type -> "Array".equals(McoreUtil.getTypeName(type)))) //$NON-NLS-1$
                 types = ArrayElementTypes.infer(types, variable, offset, environments);
             types = CollectionValueTypes.infer(types, variable, offset, environments);
@@ -3497,6 +3528,43 @@ public final class BslStructureInsertCommentTypes
         {
             throw failure;
         }
+    }
+
+    private static List<TypeItem> filterTypesByCommentMask(List<TypeItem> types, List<TypeItem> comment)
+    {
+        if (types == null || types.isEmpty())
+            return comment != null && !comment.isEmpty() ? comment : List.of();
+        if (comment == null || comment.isEmpty())
+            return types;
+        java.util.Set<String> allowed = new java.util.HashSet<>();
+        for (TypeItem c : comment)
+        {
+            if (c == null)
+                continue;
+            String n = McoreUtil.getTypeName(c);
+            String nr = McoreUtil.getTypeNameRu(c);
+            if (n != null && !n.isEmpty())
+                allowed.add(n.toLowerCase(java.util.Locale.ROOT));
+            if (nr != null && !nr.isEmpty())
+                allowed.add(nr.toLowerCase(java.util.Locale.ROOT));
+        }
+        if (allowed.isEmpty())
+            return comment;
+        List<TypeItem> filtered = new ArrayList<>();
+        for (TypeItem t : types)
+        {
+            if (t == null)
+                continue;
+            String tn = McoreUtil.getTypeName(t);
+            String tnr = McoreUtil.getTypeNameRu(t);
+            boolean match = (tn != null && allowed.contains(tn.toLowerCase(java.util.Locale.ROOT)))
+                || (tnr != null && allowed.contains(tnr.toLowerCase(java.util.Locale.ROOT)));
+            if (match)
+                filtered.add(t);
+        }
+        if (filtered.isEmpty())
+            return comment;
+        return filtered;
     }
 
     /**
@@ -4404,11 +4472,11 @@ public final class BslStructureInsertCommentTypes
             if (cached != null)
                 return cached;
             List<TypeItem> comment = BslDocCommentComputedTypes.iteratorCommentTypes(variable);
-            if (!comment.isEmpty() && BslDocCommentComputedTypes.replaceTypesByDocumentationComment(variable))
+            if (!comment.isEmpty())
             {
-                List<TypeItem> result = List.copyOf(comment);
-                variables.put(key, result);
-                return result;
+                List<TypeItem> filtered = List.copyOf(filterTypesByCommentMask(variableNative(variable, offset, environments, provided), comment));
+                variables.put(key, filtered.isEmpty() ? List.copyOf(comment) : filtered);
+                return filtered.isEmpty() ? List.copyOf(comment) : filtered;
             }
             if (!activeVariables.add(key))
                 return variableNative(variable, offset, environments, provided);
@@ -4449,7 +4517,14 @@ public final class BslStructureInsertCommentTypes
                     // Уточняем объединённую основу: переименование должно перенести тип
                     // готовой колонки EDT, а не создать пустую колонку у типа из «Новый».
                     List<TypeItem> nativeBasis = variableNative(variable, offset, environments, provided);
-                    List<TypeItem> basis = merge(nativeBasis, inferred);
+                    Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+                    boolean commentType = assignment != null && hasAssignmentCommentType(assignment.value, module);
+                    // Боковой комментарий накладывает маску на рассчитанные типы: из расчёта
+                    // берётся тип с тем же верхним именем, иначе — тип из комментария. Простое
+                    // объединение добавляло бы к типу комментария тип правой части («Новый»).
+                    List<TypeItem> basis = commentType
+                        ? filterTypesByCommentMask(inferred, nativeBasis)
+                        : merge(nativeBasis, inferred);
                     basis = annotatedProperties(basis, variable, offset, from, environments, plan);
                     result = localVariableTypes(basis, variable, offset, environments);
                 }

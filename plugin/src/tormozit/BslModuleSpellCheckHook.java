@@ -2939,23 +2939,25 @@ public final class BslModuleSpellCheckHook implements IStartup
             @Override
             public void apply(IDocument ignored)
             {
-                try
-                {
-                    IFile file = target.file();
-                    if (!file.exists())
+                NavigationHistoryScope.runFromActiveEditor(() -> {
+                    try
                     {
-                        // Так же недостающий модуль создаёт сама EDT (OpenHelper.getFile): пустой файл.
-                        file.create(new java.io.ByteArrayInputStream(new byte[0]), true, new org.eclipse.core.runtime.NullProgressMonitor());
+                        IFile file = target.file();
+                        if (!file.exists())
+                        {
+                            // Так же недостающий модуль создаёт сама EDT (OpenHelper.getFile): пустой файл.
+                            file.create(new java.io.ByteArrayInputStream(new byte[0]), true, new org.eclipse.core.runtime.NullProgressMonitor());
+                        }
+                        // Тот же путь, что у «Перейти к определению»: редактор объекта со страницей модуля.
+                        XtextEditor editor = GoToDefinition.openBslModuleGranularEditor(file);
+                        if (editor != null)
+                            insert(editor);
                     }
-                    // Тот же путь, что у «Перейти к определению»: редактор объекта со страницей модуля.
-                    XtextEditor editor = GoToDefinition.openBslModuleGranularEditor(file);
-                    if (editor != null)
-                        insert(editor);
-                }
-                catch (Exception e)
-                {
-                    // Правка не применена — метод не создан.
-                }
+                    catch (Exception e)
+                    {
+                        // Правка не применена — метод не создан.
+                    }
+                });
             }
 
             private void insert(XtextEditor editor)

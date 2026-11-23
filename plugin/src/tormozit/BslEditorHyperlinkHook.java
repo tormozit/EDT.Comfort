@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -48,7 +47,6 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.INavigationHistory;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -376,7 +374,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             try (HistoryScope scope = new HistoryScope(page, source))
             {
                 BslQueryLiteralSupport.openTableMember(table, common, fieldName, source, source.getSite().getShell());
-                scope.opened = true;
+                scope.markOpened();
             }
         }
     }
@@ -536,7 +534,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             try (HistoryScope scope = new HistoryScope(page, source))
             {
                 BslStructureInsertCommentTypes.openPropertySource(target);
-                scope.opened = true;
+                scope.markOpened();
             }
         }
     }
@@ -990,7 +988,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             try (HistoryScope scope = new HistoryScope(page, source))
             {
-                scope.opened = FormEditorHook.openFormElement(page, target) != null;
+                if (FormEditorHook.openFormElement(page, target) != null)
+                    scope.markOpened();
             }
         }
     }
@@ -1443,7 +1442,7 @@ public final class BslEditorHyperlinkHook implements IStartup
                     : new OpenHelper(page).openEditor(target);
                 if (editor instanceof DtGranularEditor<?> granular)
                 {
-                    scope.opened = true;
+                    scope.markOpened();
                     // Только что открытый редактор сначала показывает страницу загрузки и
                     // добавляет свои страницы позже — до этого setActivePage возвращает null.
                     if (granular.setActivePage(pageId) == null)
@@ -1552,7 +1551,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             try (HistoryScope scope = new HistoryScope(page, source))
             {
-                scope.opened = GoToDefinition.openBslModuleGranularEditor(file) != null;
+                if (GoToDefinition.openBslModuleGranularEditor(file) != null)
+                    scope.markOpened();
             }
         }
     }
@@ -1746,7 +1746,8 @@ public final class BslEditorHyperlinkHook implements IStartup
                 if (file == null)
                     return;
                 IEditorPart part = org.eclipse.ui.ide.IDE.openEditor(page, file);
-                history.opened = part != null;
+                if (part != null)
+                    history.markOpened();
                 BslXtextEditor editor = part != null ? GetRef.getActiveBslEditor(part) : null;
                 if (editor == null || !editor.isEditable())
                     return;
@@ -1806,7 +1807,8 @@ public final class BslEditorHyperlinkHook implements IStartup
         {
             try (HistoryScope scope = new HistoryScope(page, source))
             {
-                scope.opened = GoToDefinition.jump(name, source.getSite().getShell(), page, project, false);
+                if (GoToDefinition.jump(name, source.getSite().getShell(), page, project, false))
+                    scope.markOpened();
             }
         }
     }
@@ -1848,11 +1850,14 @@ public final class BslEditorHyperlinkHook implements IStartup
                 // OpenHelper.getFile использует feature именно для открытия BSL-модуля
                 // (подтверждено в .tmp/bundles/dt-ui/OpenHelper.bytecode.javap.txt).
                 if (moduleFeature != null)
-                    scope.opened = new OpenHelper(page).openEditor(target, moduleFeature) != null;
+                {
+                    if (new OpenHelper(page).openEditor(target, moduleFeature) != null)
+                        scope.markOpened();
+                }
                 else
                 {
                     CompareConfigOpenObjectHandler.openInEditor(target, source, source.getSite().getShell());
-                    scope.opened = true;
+                    scope.markOpened();
                 }
             }
         }
@@ -2540,7 +2545,7 @@ public final class BslEditorHyperlinkHook implements IStartup
             try (HistoryScope scope = new HistoryScope(page, source))
             {
                 delegate.open();
-                scope.opened = true;
+                scope.markOpened();
                 // Как двойной клик по реквизиту в навигаторе: EDT уже выделил строку в списке
                 // формы, остаётся только активировать панель «Свойства» после события UI.
                 if (formTarget)
@@ -2566,99 +2571,31 @@ public final class BslEditorHyperlinkHook implements IStartup
         }
     }
 
-    private static final class HistoryScope implements AutoCloseable
+    /** История переходов плюс гашение popup и фоновой детекции ссылок BSL-редактора. */
+    private static final class HistoryScope extends NavigationHistoryScope
     {
-        private final IWorkbenchPage page;
-        private final INavigationHistory history;
-        private Field ignoreEntries;
-        private boolean opened;
-
         HistoryScope(IWorkbenchPage page, IEditorPart source)
         {
-            this.page = page;
-            BslXtextEditor editor = GetRef.getActiveBslEditor(source);
-            ITextViewer viewer = editor == null ? null : editor.getInternalSourceViewer();
-            if (viewer != null)
-            {
-                if (Global.getField(viewer, "fHyperlinkDetectors") instanceof IHyperlinkDetector[] detectors)
-                    for (IHyperlinkDetector detector : detectors)
-                        if (detector instanceof HistoryDetector pending)
-                            pending.cancelPending();
-                // TextViewer.fHyperlinkManager и HyperlinkManager.deactivate() проверены
-                // в .tmp/bundles/jface-text/: скрывает presenter и сбрасывает fActive.
-                Object manager = Global.getField(viewer, "fHyperlinkManager");
-                Global.tempLog(BslCallingModules.LOG, "detect.navigate manager=" + (manager != null));
-                if (manager != null)
-                    Global.invoke(manager, "deactivate");
-            }
-            history = page.getNavigationHistory();
-            Global.tempLog("bsl-hyperlink-history", "begin source=" + describeEditor(source));
-            if (history == null)
-                return;
-            try
-            {
-                // NavigationHistory.addEntry/markEditor пропускают записи при
-                // ignoreEntries > 0; gotoEntry использует этот же счётчик.
-                // Проверено в .tmp/bundles/ui-workbench/NavigationHistory-c.javap.txt.
-                if (!"org.eclipse.ui.internal.NavigationHistory".equals(history.getClass().getName()))
-                    return;
-                Field field = history.getClass().getDeclaredField("ignoreEntries");
-                field.setAccessible(true);
-                Global.tempLog("bsl-hyperlink-history", "mark source ignoreEntries=" + field.getInt(history));
-                history.markLocation(source);
-                int previous = field.getInt(history);
-                field.setInt(history, previous + 1);
-                ignoreEntries = field;
-            }
-            catch (ReflectiveOperationException | RuntimeException e)
-            {
-                Global.tempLog("bsl-hyperlink-history", "begin failed: " + e);
-                // При несовместимости платформы оставляем штатную историю переходов.
-            }
+            super(page, source);
+            deactivateHyperlinks(source);
         }
+    }
 
-        @Override
-        public void close()
-        {
-            if (ignoreEntries != null)
-            {
-                try
-                {
-                    ignoreEntries.setInt(history, ignoreEntries.getInt(history) - 1);
-                    IEditorPart destination = page.getActiveEditor();
-                    // У редактора объекта отметка хранит страницу, у вложенного BSL — каретку.
-                    BslXtextEditor bsl = GetRef.getActiveBslEditor(destination);
-                    if (bsl != null)
-                        destination = bsl;
-                    Global.tempLog("bsl-hyperlink-history", "finish opened=" + opened
-                        + " ignoreEntries=" + ignoreEntries.getInt(history)
-                        + " destination=" + describeEditor(destination));
-                    if (opened && destination != null)
-                        history.markLocation(destination);
-                }
-                catch (ReflectiveOperationException | RuntimeException e)
-                {
-                    Global.tempLog("bsl-hyperlink-history", "finish failed: " + e);
-                    // Не прерываем штатное открытие ссылки из-за ошибки истории.
-                }
-            }
-        }
-
-        private static String describeEditor(IEditorPart editor)
-        {
-            if (editor == null)
-                return "null";
-            try
-            {
-                String description = editor.getClass().getName() + " input=" + editor.getEditorInput().getName();
-                if (editor instanceof BslXtextEditor bsl && bsl.getInternalSourceViewer() != null)
-                    description += " modelSelection=" + bsl.getInternalSourceViewer().getSelectedRange();
-                return description;
-            }
-            catch (RuntimeException e)
-            {
-                return editor.getClass().getName() + " unavailable: " + e;
-            }
-        }
+    private static void deactivateHyperlinks(IEditorPart source)
+    {
+        BslXtextEditor editor = GetRef.getActiveBslEditor(source);
+        ITextViewer viewer = editor == null ? null : editor.getInternalSourceViewer();
+        if (viewer == null)
+            return;
+        if (Global.getField(viewer, "fHyperlinkDetectors") instanceof IHyperlinkDetector[] detectors)
+            for (IHyperlinkDetector detector : detectors)
+                if (detector instanceof HistoryDetector pending)
+                    pending.cancelPending();
+        // TextViewer.fHyperlinkManager и HyperlinkManager.deactivate() проверены
+        // в .tmp/bundles/jface-text/: скрывает presenter и сбрасывает fActive.
+        Object manager = Global.getField(viewer, "fHyperlinkManager");
+        Global.tempLog(BslCallingModules.LOG, "detect.navigate manager=" + (manager != null));
+        if (manager != null)
+            Global.invoke(manager, "deactivate");
     }
 }

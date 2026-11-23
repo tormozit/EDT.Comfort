@@ -236,6 +236,24 @@ public final class CompareEditorCurrentLinesHook
             || name.endsWith("$ReferenceCompareInput"); //$NON-NLS-1$
     }
 
+    /** Раннее вплетение уже переставило стороны: подписи «основной/предыдущий» выставлены им. */
+    @SuppressWarnings("unchecked")
+    private static boolean isEarlyNormalized(CompareEditorInput input)
+    {
+        Object marker = System.getProperties().get("tormozit.compare.sideOrder.isNormalized"); //$NON-NLS-1$
+        if (!(marker instanceof java.util.function.Predicate<?>))
+            return false;
+        try
+        {
+            java.util.function.Predicate<Object> predicate = (java.util.function.Predicate<Object>) marker;
+            return predicate.test(input);
+        }
+        catch (Throwable ignored)
+        {
+            return false;
+        }
+    }
+
     /**
      * Сравнение коммита с предыдущим (не Local/Index):
      * <ul>
@@ -250,6 +268,8 @@ public final class CompareEditorCurrentLinesHook
         String rightLabel)
     {
         if (input == null)
+            return false;
+        if (isEarlyNormalized(input))
             return false;
 
         String name = input.getClass().getName();
@@ -1069,8 +1089,9 @@ public final class CompareEditorCurrentLinesHook
         {
             boolean leftIsWorking = isLocalWorkingCopyLabel(rawLeftLabel);
             boolean rightIsWorking = isLocalWorkingCopyLabel(rightLabel);
-            // Git: рабочая копия новее; иначе слева новее (основной коммит / Local vs HEAD).
-            final boolean semanticLeftIsNewer = leftIsWorking || !rightIsWorking;
+            boolean leftIsPrevious = rawLeftLabel != null && rawLeftLabel.endsWith(SUFFIX_PREVIOUS);
+            // Git: рабочая копия новее; при ранней перестановке слева предыдущий коммит.
+            final boolean semanticLeftIsNewer = !leftIsPrevious && (leftIsWorking || !rightIsWorking);
             Action tabularAction = new Action(CompareTabularDocumentsInIr.MENU_LABEL)
             {
                 @Override

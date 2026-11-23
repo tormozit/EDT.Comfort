@@ -42,6 +42,7 @@ public final class Activator
     {
         DocCommentLinkWeaving.install(context);
         CheckSchedulerWeaving.install(context);
+        CompareSideOrderWeaving.install(context);
         AssistLeafLookupWeaving.install(context);
         ApplicationResetDiagnostics.install(context);
         ApplicationRestorationWeaving.install(context);
@@ -176,6 +177,263 @@ public final class Activator
             }, ClassReader.EXPAND_FRAMES);
             return touched.get() ? writer.toByteArray() : null;
         }
+    }
+
+    /**
+     * Старое слева, новое справа — до создания виджетов окна сравнения.
+     *
+     * <p>EGit и Team кладут рабочую/индексную/новую ревизию в левый input, а старую — в правый.
+     * Подмена в уже открытом вьюере даёт два кадра (сначала штатный порядок, потом наш), поэтому
+     * вплетаемся в {@code CompareEditorInput.run}: там {@code prepareInput} уже заполнил
+     * {@code fInput} и подписи, но {@code createContents} ещё не вызывался. Меняем стороны в
+     * подготовленном {@code DiffNode} и в {@code CompareConfiguration}; поля editor input не
+     * трогаем — EGit читает {@code left} при сохранении и поиске ресурса. Обычный тумблер
+     * «Поменять местами» ({@code MIRRORED}) остаётся выключенным и работает штатно.
+     *
+     * <p>Сравнение двух произвольных коммитов ({@code GitCompareEditorInput}) не трогаем: порядок
+     * задаёт пользователь, надёжного признака «кто новее» нет.
+     */
+    private static final class CompareSideOrderWeaving implements WeavingHook
+    {
+        private static final String TARGET = "org.eclipse.compare.CompareEditorInput"; //$NON-NLS-1$
+        private static final String RUN_DESC = "(Lorg/eclipse/core/runtime/IProgressMonitor;)V"; //$NON-NLS-1$
+        private static final String PROP_NORMALIZE = "tormozit.compare.sideOrder.normalize"; //$NON-NLS-1$
+        private static final String PROP_IS_NORMALIZED = "tormozit.compare.sideOrder.isNormalized"; //$NON-NLS-1$
+        private static final String PROP_PATCH = "tormozit.compare.sideOrder.patch"; //$NON-NLS-1$
+        private static final String SUFFIX_MAIN = " (основной)"; //$NON-NLS-1$
+        private static final String SUFFIX_PREVIOUS = " (предыдущий)"; //$NON-NLS-1$
+        private static final String FILE_REVISION = "GitCompareFileRevisionEditorInput"; //$NON-NLS-1$
+        private static final String LOCAL_HISTORY_SUFFIX = ".CompareFileRevisionEditorInput"; //$NON-NLS-1$
+        /** Ключ — editor input, значение — подменённый результат; результат сравниваем только по идентичности. */
+        private static final Map<Object, Object> NORMALIZED =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(PROP_NORMALIZE,
+                (java.util.function.BiConsumer<Object, Object>) CompareSideOrderWeaving::normalize);
+            System.getProperties().put(PROP_IS_NORMALIZED,
+                (java.util.function.Predicate<Object>) CompareSideOrderWeaving::isNormalized);
+            context.registerService(WeavingHook.class, new CompareSideOrderWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                byte[] bytes = transform(woven.getBytes());
+                if (bytes != null)
+                    woven.setBytes(bytes);
+                System.getProperties().put(PROP_PATCH, bytes != null ? "run" : "no-run"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable failure)
+            {
+                System.getProperties().put(PROP_PATCH, "error " + failure); //$NON-NLS-1$
+            }
+        }
+
+        /** Вызов после {@code fInput = prepareInput(...)}, до {@code return} и до создания UI. */
+        private static byte[] transform(byte[] classfileBuffer)
+        {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] touched = new int[1];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null || !"run".equals(name) || !RUN_DESC.equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", //$NON-NLS-1$
+                                    "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$
+                                super.visitLdcInsn(PROP_NORMALIZE);
+                                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+                                super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiConsumer"); //$NON-NLS-1$
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, TARGET.replace('.', '/'), "fInput", //$NON-NLS-1$
+                                    "Ljava/lang/Object;"); //$NON-NLS-1$
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", //$NON-NLS-1$
+                                    "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$ //$NON-NLS-2$
+                                touched[0]++;
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+            }, 0);
+            return touched[0] == 1 ? writer.toByteArray() : null;
+        }
+
+        /** Видимость факта ранней перестановки для основного бандла (подписи «основной/предыдущий»). */
+        private static boolean isNormalized(Object editorInput)
+        {
+            if (editorInput == null)
+                return false;
+            synchronized (NORMALIZED)
+            {
+                return NORMALIZED.get(editorInput) != null;
+            }
+        }
+
+        private static void normalize(Object editorInput, Object result)
+        {
+            if (editorInput == null || result == null)
+                return;
+            String name = editorInput.getClass().getName();
+            if (!name.contains(FILE_REVISION) && !name.endsWith(LOCAL_HISTORY_SUFFIX))
+                return;
+            synchronized (NORMALIZED)
+            {
+                /* DiffNode.equals() структурная — WeakHashMap по result ложно считала повтор
+                   тем же результатом и молча пропускала второе открытие. */
+                if (NORMALIZED.get(editorInput) == result)
+                    return;
+                NORMALIZED.put(editorInput, result);
+            }
+            try
+            {
+                Object config = invoke(editorInput, "getCompareConfiguration"); //$NON-NLS-1$
+                String leftLabel = config == null ? null : string(invoke(config, "getLeftLabel", (Object) null)); //$NON-NLS-1$
+                String rightLabel = config == null ? null : string(invoke(config, "getRightLabel", (Object) null)); //$NON-NLS-1$
+                /* В истории EGit слева выбранный коммит, справа предыдущий — тоже переставляем. */
+                boolean twoCommit = isTwoCommit(editorInput, leftLabel, rightLabel);
+                boolean wasLeftEditable = config == null ? false : bool(invoke(config, "isLeftEditable")); //$NON-NLS-1$
+                boolean wasRightEditable = config == null ? false : bool(invoke(config, "isRightEditable")); //$NON-NLS-1$
+                swapNode(result);
+                /* Для пары коммитов левая сторона после подмены — предыдущая, правая — основная. */
+                String newLeftLabel = twoCommit ? appendOnce(rightLabel, SUFFIX_PREVIOUS) : rightLabel;
+                String newRightLabel = twoCommit ? appendOnce(leftLabel, SUFFIX_MAIN) : leftLabel;
+                if (config != null)
+                {
+                    invoke(config, "setLeftLabel", newLeftLabel); //$NON-NLS-1$
+                    invoke(config, "setRightLabel", newRightLabel); //$NON-NLS-1$
+                    invoke(config, "setLeftEditable", wasRightEditable); //$NON-NLS-1$
+                    invoke(config, "setRightEditable", wasLeftEditable); //$NON-NLS-1$
+                }
+                tryInvoke(result, "fireChange"); //$NON-NLS-1$
+            }
+            catch (Throwable ignored)
+            {
+                // Подмена не должна ломать открытие сравнения.
+            }
+        }
+
+        /** Признак пары «выбранный коммит ↔ предыдущий» (не Local/Index и не GitCompareEditorInput). */
+        private static boolean isTwoCommit(Object editorInput, String leftLabel, String rightLabel)
+        {
+            if (!editorInput.getClass().getName().contains(FILE_REVISION))
+                return false;
+            Object leftRev = tryInvokeResult(editorInput, "getLeftRevision"); //$NON-NLS-1$
+            Object rightRev = tryInvokeResult(editorInput, "getRightRevision"); //$NON-NLS-1$
+            if (leftRev == null && rightRev == null)
+                return false;
+            if (isLocalOrIndexLabel(leftLabel) || isLocalOrIndexLabel(rightLabel))
+                return false;
+            if (leftRev != null && rightRev != null)
+                return true;
+            String present = leftRev != null ? leftLabel : rightLabel;
+            String absent = leftRev != null ? rightLabel : leftLabel;
+            return present != null && !present.isBlank() && (absent == null || absent.isBlank());
+        }
+
+        private static boolean isLocalOrIndexLabel(String label)
+        {
+            if (label == null || label.isBlank())
+                return false;
+            return label.startsWith("Локальный") || label.startsWith("Local:") //$NON-NLS-1$ //$NON-NLS-2$
+                || label.startsWith("Index:") || label.startsWith("Индекс:"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static Object tryInvokeResult(Object target, String method)
+        {
+            try
+            {
+                return invoke(target, method);
+            }
+            catch (Throwable failure)
+            {
+                return null;
+            }
+        }
+
+        private static void swapNode(Object node) throws Exception
+        {
+            if (findMethod(node.getClass(), "setLeft", 1) == null //$NON-NLS-1$
+                || findMethod(node.getClass(), "setRight", 1) == null) //$NON-NLS-1$
+                return;
+            Object left = invoke(node, "getLeft"); //$NON-NLS-1$
+            Object right = invoke(node, "getRight"); //$NON-NLS-1$
+            invoke(node, "setLeft", right); //$NON-NLS-1$
+            invoke(node, "setRight", left); //$NON-NLS-1$
+            Object children = invoke(node, "getChildren"); //$NON-NLS-1$
+            if (children instanceof Object[] array)
+                for (Object child : array)
+                    if (child != null)
+                        swapNode(child);
+        }
+
+        private static Object invoke(Object target, String method, Object... args) throws Exception
+        {
+            java.lang.reflect.Method found = findMethod(target.getClass(), method, args.length);
+            if (found == null)
+                throw new NoSuchMethodException(target.getClass().getName() + "." + method); //$NON-NLS-1$
+            found.setAccessible(true);
+            return found.invoke(target, args);
+        }
+
+        private static void tryInvoke(Object target, String method)
+        {
+            try
+            {
+                invoke(target, method);
+            }
+            catch (Throwable ignored)
+            {
+                // fireChange — не у всех реализаций ICompareInput.
+            }
+        }
+
+        private static java.lang.reflect.Method findMethod(Class<?> type, String name, int argc)
+        {
+            for (Class<?> current = type; current != null; current = current.getSuperclass())
+                for (java.lang.reflect.Method method : current.getDeclaredMethods())
+                    if (method.getName().equals(name) && method.getParameterCount() == argc)
+                        return method;
+            return null;
+        }
+
+        private static String appendOnce(String label, String suffix)
+        {
+            if (label == null)
+                return null;
+            return label.endsWith(suffix) ? label : label + suffix;
+        }
+
+        private static String string(Object value)
+        {
+            return value instanceof String s ? s : null;
+        }
+
+        private static boolean bool(Object value)
+        {
+            return value instanceof Boolean b ? b : false;
+        }
+
     }
 
     /**

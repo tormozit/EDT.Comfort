@@ -6546,29 +6546,31 @@ public final class ParamHintHtmlModifier
                 EObject target = target(ctx, link);
                 if (action.startsWith("seeOpen:")) //$NON-NLS-1$
                 {
-                    if (target != null && !target.eIsProxy())
-                    {
-                        if (target instanceof com._1c.g5.v8.dt.bsl.model.Method)
+                    NavigationHistoryScope.runFromActiveEditor(() -> {
+                        if (target != null && !target.eIsProxy())
                         {
-                            // Тот же путь, что у штатного OpenObjectHandler.openMethodEditor.
-                            // OpenHelper(EObject) предназначен для объектов метаданных,
-                            // а для BSL Method может создать вход редактора без документа.
-                            var uri = EcoreUtil.getURI(target);
-                            var provider = IResourceServiceProvider.Registry.INSTANCE
-                                .getResourceServiceProvider(uri.trimFragment());
-                            IURIEditorOpener opener = provider != null ? provider.get(IURIEditorOpener.class) : null;
-                            if (opener != null)
+                            if (target instanceof com._1c.g5.v8.dt.bsl.model.Method)
+                            {
+                                // Тот же путь, что у штатного OpenObjectHandler.openMethodEditor.
+                                // OpenHelper(EObject) предназначен для объектов метаданных,
+                                // а для BSL Method может создать вход редактора без документа.
+                                var uri = EcoreUtil.getURI(target);
+                                var provider = IResourceServiceProvider.Registry.INSTANCE
+                                    .getResourceServiceProvider(uri.trimFragment());
+                                IURIEditorOpener opener = provider != null ? provider.get(IURIEditorOpener.class) : null;
+                                if (opener != null)
+                                {
+                                    removeStockPopupFocusClose(browser);
+                                    opener.open(uri, true);
+                                }
+                            }
+                            else
                             {
                                 removeStockPopupFocusClose(browser);
-                                opener.open(uri, true);
+                                new OpenHelper().openEditor(target);
                             }
                         }
-                        else
-                        {
-                            removeStockPopupFocusClose(browser);
-                            new OpenHelper().openEditor(target);
-                        }
-                    }
+                    });
                     return;
                 }
                 String call = callText(ctx, target);

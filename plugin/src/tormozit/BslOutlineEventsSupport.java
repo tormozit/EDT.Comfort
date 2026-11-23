@@ -207,6 +207,7 @@ public final class BslOutlineEventsSupport
         if (!(viewerObj instanceof TreeViewer))
             return false;
         TreeViewer viewer = (TreeViewer) viewerObj;
+        DragProbe.install(viewer, outlinePage);
         installEventHandlerActivation(viewer, outlinePage, null);
         installOutlinePageSubscriptionTreeLabels(viewer, outlinePage);
         return true;
@@ -230,6 +231,8 @@ public final class BslOutlineEventsSupport
         if (tree == null || tree.isDisposed())
             return;
         IBaseLabelProvider labelSource = resolveBslOutlinePageLabelSource(viewer);
+        Global.tempLog("outline-drag", "installLabels tree=" + DragProbe.id(tree) //$NON-NLS-1$
+            + " items=" + tree.getItemCount() + " lp=" + DragProbe.name(viewer.getLabelProvider())); //$NON-NLS-1$ //$NON-NLS-2$
         if (labelSource == null)
             return;
         if (!Boolean.TRUE.equals(tree.getData(SUBSCRIPTION_TREE_LABELS_PATCHED_KEY)))
@@ -3472,6 +3475,9 @@ public final class BslOutlineEventsSupport
                 if (treeLabel != null)
                     text = treeLabel;
             }
+            if (text == null || text.isEmpty())
+                DragProbe.noteEmpty(element, styled != null ? styled.getString().length() : -1,
+                    labels != null, tree);
             if (styled != null && text.equals(styled.getString()))
                 return styled;
             return new StyledString(text != null ? text : ""); //$NON-NLS-1$
@@ -3562,6 +3568,60 @@ public final class BslOutlineEventsSupport
         public void removeListener(ILabelProviderListener listener)
         {
             delegate.removeListener(listener);
+        }
+    }
+
+    /** Временная диагностика: состояние дерева ContentOutline при перетаскивании строки. */
+    private static final class DragProbe
+    {
+        private static final String TOPIC = "outline-drag"; //$NON-NLS-1$
+        private static final String KEY = "tormozit.outlineDragProbe"; //$NON-NLS-1$
+        private static boolean sawDrag;
+        private static boolean emptyLogged;
+
+        static void install(TreeViewer viewer, Object outlinePage)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed() || tree.getData(KEY) != null)
+                return;
+            tree.setData(KEY, Boolean.TRUE);
+            tree.addListener(org.eclipse.swt.dnd.DND.DragStart, e -> {
+                sawDrag = true;
+                emptyLogged = false;
+                dump("dragStart", tree, viewer, outlinePage); //$NON-NLS-1$
+            });
+            tree.addListener(org.eclipse.swt.dnd.DND.DragEnd,
+                e -> dump("dragEnd", tree, viewer, outlinePage)); //$NON-NLS-1$
+            tree.addListener(SWT.Dispose, e -> Global.tempLog(TOPIC, "tree disposed " + id(tree))); //$NON-NLS-1$
+            Global.tempLog(TOPIC, "installed tree=" + id(tree) + " page=" + name(outlinePage)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Одна строка на перетаскивание: первый пустой текст после {@code DragStart}. */
+        static void noteEmpty(Object element, int delegateLen, boolean hasLabels, Tree tree)
+        {
+            if (!sawDrag || emptyLogged || tree == null || tree.isDisposed())
+                return;
+            emptyLogged = true;
+            Global.tempLog(TOPIC, "emptyAfterDrag element=" + name(element) + " delegateLen=" + delegateLen //$NON-NLS-1$ //$NON-NLS-2$
+                + " labels=" + hasLabels + " items=" + tree.getItemCount()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void dump(String phase, Tree tree, TreeViewer viewer, Object outlinePage)
+        {
+            Global.tempLog(TOPIC, phase + " tree=" + id(tree) + " items=" + tree.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+                + " first=" + (tree.getItemCount() > 0 ? "'" + tree.getItem(0).getText() + "'" : "-") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " input=" + name(viewer.getInput()) + " page=" + name(outlinePage) //$NON-NLS-1$ //$NON-NLS-2$
+                + " lp=" + name(viewer.getLabelProvider()) + " visible=" + tree.getVisible()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        static String id(Object o)
+        {
+            return o == null ? "null" : Integer.toHexString(System.identityHashCode(o)); //$NON-NLS-1$
+        }
+
+        static String name(Object o)
+        {
+            return o == null ? "null" : o.getClass().getName() + "@" + id(o); //$NON-NLS-1$
         }
     }
 

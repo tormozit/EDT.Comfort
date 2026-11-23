@@ -92,8 +92,9 @@ public class PropertyNameIdentifierHook implements IStartup
     private static final class RenameCancelSync
     {
         private static final String SHELL_KEY = "tormozit.propertyNameCancelSync"; //$NON-NLS-1$
-        private static final String MODEL_CLASS =
-            "com._1c.g5.v8.dt.md.ui.aef.models.BmMdObjectNameModel"; //$NON-NLS-1$
+        private static final Set<String> MODEL_CLASSES = Set.of(
+            "com._1c.g5.v8.dt.md.ui.aef.models.BmMdObjectNameModel", //$NON-NLS-1$
+            "com._1c.g5.v8.dt.form.internal.ui.properties.models.BmNamedElementNameModel"); //$NON-NLS-1$
         private static final String LOG_TOPIC = "property-name-refactoring-cancel"; //$NON-NLS-1$
 
         private static void onShow(Event event)
@@ -189,7 +190,7 @@ public class PropertyNameIdentifierHook implements IStartup
             Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
             if (model != null && model.getClass().getName().contains("Name")) //$NON-NLS-1$
                 scan.nameModels.add(model.getClass().getName());
-            if (model != null && MODEL_CLASS.equals(model.getClass().getName()))
+            if (model != null && MODEL_CLASSES.contains(model.getClass().getName()))
             {
                 updates.add(() -> queueRefresh(component, model));
             }

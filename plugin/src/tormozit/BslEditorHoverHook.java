@@ -755,7 +755,7 @@ public final class BslEditorHoverHook implements IStartup
                             display.asyncExec(() -> {
                                 if (closeWindow && !shell.isDisposed())
                                     shell.setVisible(false);
-                                action.run();
+                                NavigationHistoryScope.runFromActiveEditor(action);
                             });
                             return Boolean.TRUE;
                         }
@@ -771,7 +771,7 @@ public final class BslEditorHoverHook implements IStartup
                             {
                                 if (!shell.isDisposed())
                                     shell.setVisible(false);
-                                opener.open(uri, true);
+                                NavigationHistoryScope.runFromActiveEditor(() -> opener.open(uri, true));
                             }
                         });
                         return Boolean.TRUE;

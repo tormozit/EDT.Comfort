@@ -7515,7 +7515,12 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
             }
         }
-        String result = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(path));
+        // fileFullName уже приведён GetRef.resolveFullNameOrNull к имени без вида модуля,
+        // bmPath — полное имя МД-объекта без вида модуля. Повторный срез срезал бы у формы
+        // с именем «Форма» само имя: …Форма.Форма → …Форма → … (реально видимое обрезание пути).
+        String result = canonicalizeMdPath(path);
+        if ("module".equals(source)) //$NON-NLS-1$
+            result = GetRef.stripLowValueModuleSuffix(result);
         if (result == null || result.isEmpty())
         {
             log("formatPathForTableItem: EMPTY source=" + source //$NON-NLS-1$
@@ -7547,8 +7552,11 @@ public final class ConfigSearchResultsHook implements IStartup
             return false;
         if (bmPath == null || bmPath.isEmpty())
             return true;
-        String fileCanon = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(fileFullName));
-        String bmCanon = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(bmPath));
+        // Оба аргумента уже без вида модуля: fileFullName — из resolveFullNameOrNull, bmPath —
+        // из eObjectToFullName/ownedChildFullNameFor. Повторный срез превратил бы
+        // «…Форма.Форма» в «…Форма» и проверка вложенности ниже не прошла бы.
+        String fileCanon = canonicalizeMdPath(fileFullName);
+        String bmCanon = canonicalizeMdPath(bmPath);
         if (fileCanon == null || fileCanon.isEmpty())
             return false;
         if (bmCanon == null || bmCanon.isEmpty())

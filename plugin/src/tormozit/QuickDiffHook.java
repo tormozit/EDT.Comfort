@@ -1865,8 +1865,8 @@ public final class QuickDiffHook implements IStartup
         {
             super(createConfiguration());
             String type = viewerType(fileName);
-            leftElement = new StringCompareElement(fileName, currentText, type);
-            rightElement = new StringCompareElement(fileName, referenceText, type);
+            leftElement = new StringCompareElement(fileName, referenceText, type);
+            rightElement = new StringCompareElement(fileName, currentText, type);
             setTitle(fileName);
         }
 
@@ -1875,8 +1875,8 @@ public final class QuickDiffHook implements IStartup
             CompareConfiguration config = new CompareConfiguration();
             config.setLeftEditable(false);
             config.setRightEditable(false);
-            config.setLeftLabel("Текущий"); //$NON-NLS-1$
-            config.setRightLabel("Исходный"); //$NON-NLS-1$
+            config.setLeftLabel("Исходный"); //$NON-NLS-1$
+            config.setRightLabel("Текущий"); //$NON-NLS-1$
             return config;
         }
 

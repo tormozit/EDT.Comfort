@@ -18,7 +18,9 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
@@ -122,7 +124,7 @@ public final class BslExpectedTypeQuickFix
         }
     }
 
-    /** Открывает модуль с явным типом и выделяет его текст. */
+    /** Открывает модуль с явным типом и выделяет его текст, сохраняя позицию в истории переходов. */
     public static void reveal(Target target)
     {
         if (target == null)
@@ -130,6 +132,24 @@ public final class BslExpectedTypeQuickFix
         IWorkbenchPage page = Global.getActivePage();
         if (page == null)
             return;
+        // Исправление можно вызвать и из панели «Проблемы»: историю сохраняем, только
+        // когда переход идёт из модуля — в остальных случаях отмечать нечего.
+        IWorkbenchPart part = page.getActivePart();
+        IEditorPart source = part == null ? null : GetRef.getActiveBslEditor(part);
+        if (source == null)
+        {
+            open(page, target);
+            return;
+        }
+        try (NavigationHistoryScope history = new NavigationHistoryScope(page, source))
+        {
+            open(page, target);
+            history.markOpened();
+        }
+    }
+
+    private static void open(IWorkbenchPage page, Target target)
+    {
         new OpenHelper(page).openEditor(target.uri(),
             new TextSelection(target.offset(), Math.max(target.length(), 0)));
     }

@@ -661,6 +661,7 @@ public final class WorkbenchTabsHook implements IStartup
                 return;
             hoverItem = null;
             CTabFolder folder = item.getParent();
+            Global.tempLog(TOPIC, "dragHoverActivate tab=" + item.getText()); //$NON-NLS-1$
             folder.setSelection(item);
             // setSelection не рассылает SWT.Selection — сообщаем, как при клике по вкладке.
             Event event = new Event();

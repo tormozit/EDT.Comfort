@@ -53,6 +53,7 @@ import com._1c.g5.v8.dt.bsl.model.Conditional;
 import com._1c.g5.v8.dt.bsl.model.IfStatement;
 import com._1c.g5.v8.dt.bsl.model.IfPreprocessor;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.LabeledStatement;
 import com._1c.g5.v8.dt.bsl.model.LoopStatement;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
@@ -2443,6 +2444,19 @@ public final class BslDocCommentComputedTypes
         }
     }
 
+    /**
+     * EDT bsl 28.0.1.v202605050943: {@code doInternalProcess(LabeledStatement)} только создаёт пустые состояния
+     * точек входа метки, но не обрабатывает следующую за меткой инструкцию. Из-за этого первое после
+     * {@code ~метка:} присваивание не получает тип из бокового комментария и не участвует в расчёте типов.
+     * Вызываем штатную обработку вложенной инструкции после прохода метки — как если бы EDT её не пропускал.
+     */
+    public static void afterLabeledStatement(Object creator, Object statement, Object context)
+    {
+        if (!(statement instanceof LabeledStatement labeled) || labeled.getStatement() == null)
+            return;
+        Global.invokeVoid(creator, "doInternalProcess", labeled.getStatement(), context); //$NON-NLS-1$
+    }
+
     /** Вход из графа EDT: зависимости параметров обработчиков ОписаниеОповещения. */
     public static void afterNotificationTreeStates(Object creator)
     {
@@ -2850,6 +2864,25 @@ public final class BslDocCommentComputedTypes
                                 visitVarInsn(Opcodes.ALOAD, 1);
                                 visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "probeForEach", //$NON-NLS-1$
                                     "(Ljava/lang/Object;)V", false); //$NON-NLS-1$
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                if (mv != null && "doInternalProcess".equals(name) //$NON-NLS-1$
+                    && "(Lcom/_1c/g5/v8/dt/bsl/model/Statement;Lcom/e1c/g5/dt/core/api/platform/BmOperationContext;)V".equals(descriptor)) //$NON-NLS-1$
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.RETURN)
+                            {
+                                visitVarInsn(Opcodes.ALOAD, 0);
+                                visitVarInsn(Opcodes.ALOAD, 1);
+                                visitVarInsn(Opcodes.ALOAD, 2);
+                                visitMethodInsn(Opcodes.INVOKESTATIC, SELF_INTERNAL, "afterLabeledStatement", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V", false); //$NON-NLS-1$
                                 touched.set(true);
                             }
                             super.visitInsn(opcode);

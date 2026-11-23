@@ -171,6 +171,29 @@ public final class CopyCommandSupport
         Shell shell = focus != null && !focus.isDisposed() ? focus.getShell() : null;
         if (shell == null || shell.isDisposed())
             return;
+        IWorkbenchPart part = activePart();
+        Shell partShell = null;
+        if (part != null && part.getSite() != null)
+        {
+            try
+            {
+                partShell = part.getSite().getShell();
+            }
+            catch (Throwable ignored)
+            {
+                // Часть уже закрывается — считаем, что это не диалог.
+            }
+        }
+        /*
+         * Внутри части Copy подменяется через IActionBars. Глобальный хендлер с
+         * ActiveShellExpression основного окна конфликтует с хендлером EGit,
+         * который регистрируется при открытии compare-редактора в этом же окне.
+         */
+        if (shell.equals(partShell))
+        {
+            deactivateDialogCopyHandler();
+            return;
+        }
         if (dialogCopyActivation != null && shell.equals(dialogCopyShell))
             return;
         deactivateDialogCopyHandler();
