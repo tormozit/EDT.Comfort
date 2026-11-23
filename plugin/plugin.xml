@@ -81,6 +81,7 @@
     <computers computer="tormozit.BslInvocationTypeRules" name="GetFromTempStorage" nameRu="ПолучитьИзВременногоХранилища"/>
     <computers computer="tormozit.BslInvocationTypeRules" name="ValueFromStringInternal" nameRu="ЗначениеИзСтрокиВнутр"/>
     <computers computer="tormozit.BslInvocationTypeRules" name="ReadJSONValue" nameRu="ПрочитатьЗначениеJSON"/>
+    <computers computer="tormozit.BslInvocationTypeRules$WithParameters" name="ValueTableFromSpreadsheetDocumentLks" nameRu="ТаблицаЗначенийИзТабличногоДокументаЛкс"/>
   </extension>
   <extension-point id="startup" name="Старт хуков Комфорт" schema="schema/startup.exsd"/>
   <!-- Один IStartup на плагин: Eclipse иначе обрывает остальные хуки того же расширения

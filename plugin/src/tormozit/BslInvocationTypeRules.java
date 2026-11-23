@@ -5,12 +5,14 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -77,6 +79,10 @@ import com._1c.g5.v8.dt.metadata.mdclass.DbObjectTabularSection;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
 import com._1c.g5.v8.dt.metadata.mdtype.TabularSectionTypes;
+import com._1c.g5.v8.dt.moxel.Cell;
+import com._1c.g5.v8.dt.moxel.Row;
+import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
+import com._1c.g5.v8.dt.moxel.sheet.SheetAccessor;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -112,7 +118,7 @@ public class BslInvocationTypeRules
     {
         COMMON_MODULE, ATTRIBUTES_VALUES, ATTRIBUTE_VALUE, COPY_RECURSIVE, ROW_TO_STRUCTURE, TABLE_TO_ARRAY,
         PRINT_FORM_TEMPLATE, OBJECT_MANAGER, COLLECTION_ADD, COPY_COLUMNS, UNLOAD_COLUMN, FORM_DATA_TO_VALUE,
-        READ_JSON, STORED_VALUE, READ_JSON_VALUE, STORAGE_CONTENT
+        READ_JSON, STORED_VALUE, READ_JSON_VALUE, STORAGE_CONTENT, SPREADSHEET_TO_VALUE_TABLE
     }
 
     /** Контекст правила ИР ({@code ТипКонтекста}). */
@@ -167,6 +173,7 @@ public class BslInvocationTypeRules
             "ЗначениеИзСтрокиВнутр", "ValueFromStringInternal"); //$NON-NLS-1$ //$NON-NLS-2$
         rule(Rule.READ_JSON_VALUE, Context.GLOBAL, "ПрочитатьЗначениеJSON", "ReadJSONValue"); //$NON-NLS-1$ //$NON-NLS-2$
         rule(Rule.STORAGE_CONTENT, Context.ANY, "Получить", "Get"); //$NON-NLS-1$ //$NON-NLS-2$
+        rule(Rule.SPREADSHEET_TO_VALUE_TABLE, Context.ANY, "ТаблицаЗначенийИзТабличногоДокументаЛкс"); //$NON-NLS-1$
     }
 
     /**
@@ -434,6 +441,7 @@ public class BslInvocationTypeRules
                 case STORED_VALUE -> storedValue();
                 case READ_JSON_VALUE -> readJsonValue();
                 case STORAGE_CONTENT -> storageContent();
+                case SPREADSHEET_TO_VALUE_TABLE -> spreadsheetToValueTable();
             };
         }
 
@@ -607,6 +615,187 @@ public class BslInvocationTypeRules
             String typeName = template == null ? null : templateTypeName(template.getTemplateType());
             Type type = typeName == null ? null : platformType(typeName);
             return type == null ? null : List.of(type);
+        }
+
+        /**
+         * {@code ТаблицаЗначенийИзТабличногоДокументаЛкс}: таблица значений с колонками по тексту первой строки
+         * табличного документа макета. Типы значений колонок неизвестны — правило задаёт только имена.
+         */
+        List<TypeItem> spreadsheetToValueTable()
+        {
+            SpreadsheetDocument document = params.isEmpty() ? null : tabularDocument(param(0));
+            List<String> names = document == null ? List.of() : firstRowNames(document);
+            if (names.isEmpty())
+                return null;
+            List<Property> columns = new ArrayList<>();
+            for (String name : names)
+                columns.add(newProperty(name, List.of(), true));
+            Type table = valueTableType(columns);
+            return table == null ? null : List.of(table);
+        }
+
+        /** Макет табличного документа, переданный аргументом или присвоенный переменной перед вызовом. */
+        SpreadsheetDocument tabularDocument(Expression expression)
+        {
+            for (Expression origin : origins(expression))
+            {
+                Invocation call = templateCall(origin);
+                if (call == null)
+                    continue;
+                BasicTemplate template = templateOf(call);
+                EObject content = template == null ? null : template.getTemplate();
+                if (content != null && content.eIsProxy())
+                    content = EcoreUtil.resolve(content, invocation);
+                if (content instanceof SpreadsheetDocument document)
+                    return document;
+            }
+            return null;
+        }
+
+        static Invocation templateCall(Expression expression)
+        {
+            if (!(expression instanceof Invocation call) || call.getMethodAccess() == null)
+                return null;
+            String name = lower(call.getMethodAccess().getName());
+            return Set.of("получитьмакет", "gettemplate", "получитьобщиймакет", "getcommontemplate") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                .contains(name) ? call : null;
+        }
+
+        BasicTemplate templateOf(Invocation call)
+        {
+            if (call.getParams().isEmpty())
+                return null;
+            String name = stringValue(call.getParams().get(0));
+            if (name == null || name.isBlank())
+                return null;
+            String method = lower(call.getMethodAccess().getName());
+            Configuration configuration = configuration();
+            if (Set.of("получитьобщиймакет", "getcommontemplate").contains(method)) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                if (configuration == null)
+                    return null;
+                String shortName = name.substring(name.lastIndexOf('.') + 1);
+                for (BasicTemplate common : configuration.getCommonTemplates())
+                    if (shortName.equalsIgnoreCase(common.getName()))
+                        return common;
+                return null;
+            }
+            MdObject owner = call.getMethodAccess() instanceof DynamicFeatureAccess dynamic
+                ? mdOfTypes(typesOf(dynamic.getSource())) : moduleOwner();
+            if (owner == null)
+                return null;
+            var feature = owner.eClass().getEStructuralFeature("templates"); //$NON-NLS-1$
+            if (feature == null || !(owner.eGet(feature) instanceof List<?> templates))
+                return null;
+            for (Object candidate : templates)
+                if (candidate instanceof BasicTemplate basic && name.equalsIgnoreCase(basic.getName()))
+                    return basic;
+            return null;
+        }
+
+        MdObject moduleOwner()
+        {
+            Module module = EcoreUtil2.getContainerOfType(invocation, Module.class);
+            return module != null && module.getOwner() instanceof MdObject md ? md : null;
+        }
+
+        MdObject mdOfTypes(List<TypeItem> types)
+        {
+            for (TypeItem item : types)
+            {
+                MdObject md = MdTypeUtil.getTypeProducer(resolve(item));
+                if (md != null)
+                    return md;
+                md = mdByTypeName(typeName(resolve(item)));
+                if (md != null)
+                    return md;
+            }
+            return null;
+        }
+
+        /**
+         * Объект метаданных по имени типа ({@code DataProcessor.Имя}, {@code СправочникСсылка.Имя}):
+         * поиск по папке метаданных, как в {@code BslLiteralValues.mdByKind}.
+         */
+        MdObject mdByTypeName(String type)
+        {
+            int dot = type.indexOf('.');
+            if (dot <= 0)
+                return null;
+            String prefix = type.substring(0, dot);
+            String folder = MdTypeMapping.anyToFolder(prefix);
+            if (folder == null && prefix.endsWith("Manager")) //$NON-NLS-1$
+                folder = MdTypeMapping.anyToFolder(prefix.substring(0, prefix.length() - 7));
+            Configuration configuration = folder == null ? null : configuration();
+            if (configuration == null)
+                return null;
+            String name = type.substring(dot + 1);
+            int next = name.indexOf('.');
+            if (next > 0)
+                name = name.substring(0, next);
+            var feature = configuration.eClass()
+                .getEStructuralFeature(Character.toLowerCase(folder.charAt(0)) + folder.substring(1)); //$NON-NLS-1$
+            if (feature == null || !(configuration.eGet(feature) instanceof List<?> objects))
+                return null;
+            for (Object object : objects)
+                if (object instanceof MdObject md && name.equalsIgnoreCase(md.getName()))
+                    return md;
+            return null;
+        }
+
+        /** Текст ячеек нулевой строки макета в порядке колонок. */
+        static List<String> firstRowNames(SpreadsheetDocument document)
+        {
+            Row row = document.getRows().get(Integer.valueOf(0));
+            if (row == null)
+                return List.of();
+            SheetAccessor sheet;
+            try
+            {
+                sheet = new SheetAccessor(document);
+            }
+            catch (RuntimeException failure)
+            {
+                return List.of();
+            }
+            Map<Integer, Cell> cells = new TreeMap<>();
+            for (var entry : row.getCells())
+                if (entry.getValue() != null)
+                    cells.put(entry.getKey(), entry.getValue());
+            List<String> names = new ArrayList<>();
+            Set<String> used = new HashSet<>();
+            for (Cell cell : cells.values())
+            {
+                String name = cellName(sheet, cell);
+                if (name != null && !name.isBlank() && used.add(name))
+                    names.add(name);
+            }
+            return names;
+        }
+
+        static String cellName(SheetAccessor sheet, Cell cell)
+        {
+            String text = null;
+            try
+            {
+                text = sheet.getCellText(cell);
+            }
+            catch (RuntimeException failure)
+            {
+                // Текст недоступен — берём параметр ячейки.
+            }
+            if (text == null || text.isBlank())
+                text = cell.getParameter();
+            if (text == null || text.isBlank())
+                text = cell.getDetailParameter();
+            if ((text == null || text.isBlank()) && cell.getText() != null)
+                for (String translation : cell.getText().getContent().values())
+                    if (translation != null && !translation.isBlank())
+                    {
+                        text = translation;
+                        break;
+                    }
+            return text == null ? null : text.strip();
         }
 
         /** {@code ВычислитьПолучитьМенеджерЛкс}: менеджер по ссылке или по полному имени «Справочник.Х». */
