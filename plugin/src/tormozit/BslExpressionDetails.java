@@ -196,9 +196,10 @@ final class BslExpressionDetails
     {
         Request request = REQUESTS.get(input);
         IXtextDocument document = request == null ? null : request.document.get();
+        Object currentIndex = Global.invoke(input, "getIndex"); //$NON-NLS-1$
         if (request == null || request.details.isEmpty()
             || document == null || stamp(document) != request.stamp
-            || !java.util.Objects.equals(request.index, Global.invoke(input, "getIndex"))) //$NON-NLS-1$
+            || !java.util.Objects.equals(request.index, currentIndex)) //$NON-NLS-1$
             return html;
         if (html == null)
             html = IrBslHoverHtml.readHtml(input);
@@ -333,15 +334,34 @@ final class BslExpressionDetails
                 if (hint != null && !hint.isBlank())
                     hints.add(hint);
             }
-            List<TypeItem> types = object instanceof Expression && BslStructureInsertCommentTypes.interactiveTypesActive()
-                ? BslStructureInsertCommentTypes.interactiveExpressionTypes(object, environments)
-                : object instanceof Variable variable
-                ? TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments)
-                : property != null ? BslStructureInsertCommentTypes.interactivePropertyTypes(property,
-                    resource.getContents().get(0), environments)
-                    : object instanceof Expression
-                        ? resource.getResourceServiceProvider().get(TypesComputer.class).computeTypes(object, environments)
-                        : List.of();
+            String source;
+            List<TypeItem> types;
+            if (object instanceof Expression && BslStructureInsertCommentTypes.interactiveTypesActive())
+            {
+                source = "interactiveExpression"; //$NON-NLS-1$
+                types = BslStructureInsertCommentTypes.interactiveExpressionTypes(object, environments);
+            }
+            else if (object instanceof Variable variable)
+            {
+                source = "variableState"; //$NON-NLS-1$
+                types = TypeSystemUtil.getVariableTypesAtOffset(variable, position, environments);
+            }
+            else if (property != null)
+            {
+                source = "interactiveProperty"; //$NON-NLS-1$
+                types = BslStructureInsertCommentTypes.interactivePropertyTypes(property,
+                    resource.getContents().get(0), environments);
+            }
+            else if (object instanceof Expression)
+            {
+                source = "nativeExpression"; //$NON-NLS-1$
+                types = resource.getResourceServiceProvider().get(TypesComputer.class).computeTypes(object, environments);
+            }
+            else
+            {
+                source = "empty"; //$NON-NLS-1$
+                types = List.of();
+            }
             // Тип обращения внутри ветки ТипЗнч(): готовый тип переменной приходит без сужения.
             if (offset >= 0)
                 types = BslStructureInsertCommentTypes.narrowAtOffset(types, resource, position);
@@ -351,7 +371,13 @@ final class BslExpressionDetails
                 indexes.addAll(new Indexes(environments).collect(object, position));
         }
         StringBuilder html = new StringBuilder();
-        String typeHtml = BslExpectedTypePremiums.typeItemsHtml(resource, describedTypes);
+        // Типы состояния EDT и интерактивного расчёта приходят прокси из другого ResourceSet.
+        // Без разрешения typeItemsHtml не видит имён и подсказка остаётся со штатным типом.
+        List<TypeItem> resolvedTypes = new ArrayList<>();
+        for (TypeItem item : describedTypes)
+            resolvedTypes.add(item == null ? null
+                : (TypeItem)(item.eIsProxy() ? EcoreUtil.resolve(item, resource) : item));
+        String typeHtml = BslExpectedTypePremiums.typeItemsHtml(resource, resolvedTypes);
         String type = typeHtml == null || typeHtml.isBlank() ? "" : typeHtml;
         if (!indexes.isEmpty())
             attribute(html, "Индексы", String.join(" ", indexes.stream().map(value -> "[" + value + "]").toList())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$

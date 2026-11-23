@@ -1539,26 +1539,42 @@ public final class BslStructureInsertCommentTypes
      */
     private static boolean hasAssignmentCommentType(Expression value, Module module)
     {
+        return !assignmentCommentTypeNames(value, module).isEmpty();
+    }
+
+    /** Имена типов из секции возврата бокового комментария присваивания. */
+    private static List<String> assignmentCommentTypeNames(Expression value, Module module)
+    {
         try
         {
             if (value == null)
-                return false;
+                return List.of();
             SimpleStatement statement = EcoreUtil2.getContainerOfType(value, SimpleStatement.class);
             Block block = statement == null ? null : EcoreUtil2.getContainerOfType(statement, Block.class);
             ICompositeNode blockNode = block == null ? null : NodeModelUtils.findActualNodeFor(block);
             if (statement == null || blockNode == null)
-                return false;
+                return List.of();
             boolean oldFormat = oldCommentFormat(module);
             List<String> lines = TypeSystemUtil.getCommentAfterObject(statement, blockNode, oldFormat);
             if (lines == null || lines.isEmpty())
-                return false;
+                return List.of();
             BslDocumentationComment comment = BslCommentUtils.parseTemplateComment(lines, oldFormat);
             BslDocumentationComment.ReturnSection section = comment == null ? null : comment.getReturnSection();
-            return section != null && section.getReturnTypes() != null && !section.getReturnTypes().isEmpty();
+            if (section == null || section.getReturnTypes() == null)
+                return List.of();
+            List<String> names = new ArrayList<>();
+            for (var typeSection : section.getReturnTypes())
+                for (var definition : typeSection.getTypeDefinitions())
+                {
+                    String name = definition.getTypeName();
+                    if (name != null && !name.isBlank())
+                        names.add(name.trim());
+                }
+            return List.copyOf(names);
         }
         catch (Throwable ignored)
         {
-            return false;
+            return List.of();
         }
     }
 
@@ -1904,7 +1920,7 @@ public final class BslStructureInsertCommentTypes
         Object version = Global.invoke(page, "getVersion"); //$NON-NLS-1$
         List<Object> references = new ArrayList<>();
         // Страница уже могла получить вложенный тип, но здесь её группы строятся заново.
-        // Применяем то же представление и к исходному свойству повторного построения.
+        // Типы берём из состояния EDT: в объявлении параметра это оба типа док-комментария.
         property = BslFormDataTypes.documentationProperty(property, resource.getContents().get(0));
         for (TypeItem item : property.getTypes())
         {
@@ -4232,6 +4248,19 @@ public final class BslStructureInsertCommentTypes
         return current == null ? List.of() : current.expression(object, environments, null);
     }
 
+    /**
+     * Тип переменной для подсказки при наведении. Формальный параметр описан до тела метода,
+     * поэтому в точке объявления состояние EDT ещё не знает о присваивании с боковым
+     * комментарием внутри метода: берём последнее присваивание этого параметра.
+     */
+    static List<TypeItem> interactiveVariableTypes(Variable variable, int offset, Environments environments)
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        return current == null || current.nativeRead != 0
+            ? TypeSystemUtil.getVariableTypesAtOffset(variable, offset, environments)
+            : current.variableForHint(variable, offset, environments);
+    }
+
     /** Вызывается фоновым расчётом сведений о параметрах; UI читает только его готовый кэш. */
     static List<TypeItem> callingModuleParameterTypes(Method method, int index)
     {
@@ -4459,6 +4488,23 @@ public final class BslStructureInsertCommentTypes
             }
         }
 
+        private List<TypeItem> variableForHint(Variable variable, int offset, Environments environments)
+        {
+            int effective = offset;
+            if (variable instanceof com._1c.g5.v8.dt.bsl.model.FormalParam)
+            {
+                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
+                if (method != null)
+                {
+                    Plan plan = plans.computeIfAbsent(method, Plan::new);
+                    List<Assignment> assignments = plan.assignments.getOrDefault(variable, List.of());
+                    if (!assignments.isEmpty())
+                        effective = assignments.get(assignments.size() - 1).end;
+                }
+            }
+            return variable(variable, effective, environments, null);
+        }
+
         List<TypeItem> variable(Variable variable, int offset, Environments environments, List<TypeItem> provided)
         {
             check();
@@ -4474,9 +4520,11 @@ public final class BslStructureInsertCommentTypes
             List<TypeItem> comment = BslDocCommentComputedTypes.iteratorCommentTypes(variable);
             if (!comment.isEmpty())
             {
-                List<TypeItem> filtered = List.copyOf(filterTypesByCommentMask(variableNative(variable, offset, environments, provided), comment));
-                variables.put(key, filtered.isEmpty() ? List.copyOf(comment) : filtered);
-                return filtered.isEmpty() ? List.copyOf(comment) : filtered;
+                List<TypeItem> nativeTypes = variableNative(variable, offset, environments, provided);
+                List<TypeItem> filtered = List.copyOf(filterTypesByCommentMask(nativeTypes, comment));
+                List<TypeItem> iteratorResult = filtered.isEmpty() ? List.copyOf(comment) : filtered;
+                variables.put(key, iteratorResult);
+                return iteratorResult;
             }
             if (!activeVariables.add(key))
                 return variableNative(variable, offset, environments, provided);
@@ -4518,10 +4566,11 @@ public final class BslStructureInsertCommentTypes
                     // готовой колонки EDT, а не создать пустую колонку у типа из «Новый».
                     List<TypeItem> nativeBasis = variableNative(variable, offset, environments, provided);
                     Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+                    List<String> sideNames = assignment == null ? List.of()
+                        : assignmentCommentTypeNames(assignment.value, module);
                     boolean commentType = assignment != null && hasAssignmentCommentType(assignment.value, module);
                     // Боковой комментарий накладывает маску на рассчитанные типы: из расчёта
-                    // берётся тип с тем же верхним именем, иначе — тип из комментария. Простое
-                    // объединение добавляло бы к типу комментария тип правой части («Новый»).
+                    // берётся тип с тем же верхним именем, иначе — тип из комментария.
                     List<TypeItem> basis = commentType
                         ? filterTypesByCommentMask(inferred, nativeBasis)
                         : merge(nativeBasis, inferred);
