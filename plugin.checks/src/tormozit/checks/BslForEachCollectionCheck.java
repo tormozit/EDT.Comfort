@@ -85,7 +85,7 @@ public final class BslForEachCollectionCheck extends BasicCheck<Object>
         TypesComputer types = resource.getResourceServiceProvider().get(TypesComputer.class);
         if (types == null)
             return;
-        TreeIterator<EObject> all = module.eAllContents();
+        TreeIterator<EObject> all = tormozit.BslXtextDocumentHook.validationContents(module);
         while (all.hasNext() && !monitor.isCanceled())
         {
             if (all.next() instanceof ForEachStatement loop && loop.getCollection() != null

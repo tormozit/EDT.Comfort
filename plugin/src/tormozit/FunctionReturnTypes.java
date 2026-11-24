@@ -1143,7 +1143,12 @@ final class FunctionReturnTypes
                     if ("bsl".equalsIgnoreCase(file.getFileExtension()) //$NON-NLS-1$
                         && (delta.getKind() != org.eclipse.core.resources.IResourceDelta.CHANGED
                             || (delta.getFlags() & org.eclipse.core.resources.IResourceDelta.CONTENT) != 0))
+                    {
+                        if (file.getFullPath().toString().contains("/src/CommonModules/")) //$NON-NLS-1$
+                            Global.incidentLog("module-context", "file.changed source=" + file.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
+                                + " stamp=" + file.getModificationStamp() + " flags=" + delta.getFlags()); //$NON-NLS-1$ //$NON-NLS-2$
                         otherModuleChanged(URI.createPlatformResourceURI(file.getFullPath().toString(), true));
+                    }
                     return false;
                 });
             }
@@ -1159,8 +1164,26 @@ final class FunctionReturnTypes
             bufferDisposed(buffer);
             bufferCreated(buffer);
         }
-        @Override public void stateChanging(org.eclipse.core.filebuffers.IFileBuffer buffer) {}
-        @Override public void dirtyStateChanged(org.eclipse.core.filebuffers.IFileBuffer buffer, boolean dirty) {}
+        @Override public void stateChanging(org.eclipse.core.filebuffers.IFileBuffer buffer)
+        {
+            logBuffer("buffer.stateChanging", buffer); //$NON-NLS-1$
+        }
+        @Override public void dirtyStateChanged(org.eclipse.core.filebuffers.IFileBuffer buffer, boolean dirty)
+        {
+            logBuffer("buffer.dirty=" + dirty, buffer); //$NON-NLS-1$
+        }
+
+        private static void logBuffer(String phase, org.eclipse.core.filebuffers.IFileBuffer buffer)
+        {
+            if (buffer.getLocation() == null)
+                return;
+            IFile file = org.eclipse.core.filebuffers.FileBuffers.getWorkspaceFileAtLocation(buffer.getLocation());
+            if (file != null && file.getFullPath().toString().contains("/src/CommonModules/") //$NON-NLS-1$
+                && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                Global.incidentLog("module-context", phase + " source=" + file.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " buffer=" + Integer.toHexString(System.identityHashCode(buffer)) //$NON-NLS-1$
+                    + " stamp=" + file.getModificationStamp() + " dirty=" + buffer.isDirty()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         @Override public void stateValidationChanged(org.eclipse.core.filebuffers.IFileBuffer buffer, boolean validated) {}
         @Override public void underlyingFileMoved(org.eclipse.core.filebuffers.IFileBuffer buffer, org.eclipse.core.runtime.IPath path)
         {

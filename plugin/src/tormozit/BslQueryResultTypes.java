@@ -516,7 +516,7 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
         {
             Session session = session(module.eResource(), true);
             dropStalePlans(session, module);
-            for (Method method : module.allMethods())
+            for (Method method : BslXtextDocumentHook.validationMethods(module))
             {
                 if (cancellation.isCanceled())
                     throw new org.eclipse.core.runtime.OperationCanceledException();

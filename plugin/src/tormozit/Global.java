@@ -1145,6 +1145,31 @@ public final class Global
         tempLog(topic, (context != null ? context : "") + System.lineSeparator() + sw); //$NON-NLS-1$
     }
 
+    /** Временная диагностика редких инцидентов: ограниченный журнал, сохраняемый между запусками. */
+    @SuppressWarnings("unchecked")
+    public static void incidentLog(String topic, String text)
+    {
+        Object sink = System.getProperties().get("tormozit.incident.diagnostic"); //$NON-NLS-1$
+        if (sink instanceof Consumer<?> consumer)
+            ((Consumer<Object[]>) consumer).accept(new Object[] {topic, text});
+        else
+            tempLog("incident-" + topic, text); //$NON-NLS-1$
+    }
+
+    public static void incidentLogException(String topic, String context, Throwable error)
+    {
+        StringBuilder text = new StringBuilder(context);
+        // Полное сообщение и первые кадры каждой причины; без тысяч повторных строк стека.
+        for (int cause = 0; error != null && cause < 8; cause++, error = error.getCause())
+        {
+            text.append(" cause=").append(error); //$NON-NLS-1$
+            StackTraceElement[] frames = error.getStackTrace();
+            for (int i = 0; i < Math.min(6, frames.length); i++)
+                text.append(" at ").append(frames[i]); //$NON-NLS-1$
+        }
+        incidentLog(topic, text.toString());
+    }
+
     /**
      * Сбрасывает накопленный буфер временных логов на диск (по одному append на тему).
      *

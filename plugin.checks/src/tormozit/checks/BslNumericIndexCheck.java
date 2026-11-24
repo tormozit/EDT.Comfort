@@ -64,7 +64,7 @@ public final class BslNumericIndexCheck extends BasicCheck<Object>
             return;
         TypesComputer types = resource.getResourceServiceProvider().get(TypesComputer.class);
         IBslPreferences preferences = resource.getResourceServiceProvider().get(IBslPreferences.class);
-        TreeIterator<EObject> all = module.eAllContents();
+        TreeIterator<EObject> all = tormozit.BslXtextDocumentHook.validationContents(module);
         while (all.hasNext() && !monitor.isCanceled())
         {
             if (!(all.next() instanceof IndexAccess access) || access.getSource() == null || access.getIndex() == null)

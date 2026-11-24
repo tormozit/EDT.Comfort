@@ -1762,7 +1762,7 @@ public final class ProblemViewHook implements IStartup
                     ? System.currentTimeMillis() - waitState.waitingSince : 0;
                 if (busyMs > SOURCE_BUSY_MAX_MS)
                 {
-                    Global.tempLog(UpdateWaitIndicator.LOG_TOPIC, "проверки не завершились за " //$NON-NLS-1$
+                    Global.incidentLog(UpdateWaitIndicator.LOG_TOPIC, "проверки не завершились за " //$NON-NLS-1$
                         + (SOURCE_BUSY_MAX_MS / 1000) + " с (isIdle=false), индикатор снят; отбор: " //$NON-NLS-1$
                         + filterDescription);
                     UpdateWaitIndicator.setWaitingForIndex(view, false);
@@ -3503,7 +3503,7 @@ public final class ProblemViewHook implements IStartup
         // Изменение готовности не меняет активный IProject, поэтому слушателя
         // ActiveProjectTracker недостаточно: пересчитываем область по событию EDT.
         IWorkspaceOrchestrator orchestrator = Global.getOsgiService(IWorkspaceOrchestrator.class);
-        Map<IProject, Boolean> projectReadiness = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<Object, Boolean> projectReadiness = java.util.Collections.synchronizedMap(new WeakHashMap<>());
         IWorkspaceOrchestratorListener readyListener = event ->
         {
             if (!event.isStateChanged())
@@ -3511,7 +3511,15 @@ public final class ProblemViewHook implements IStartup
             boolean started = orchestrator.isStarted(event.getProject());
             IProject workspaceProject = event.getProject().getWorkspaceProject();
             boolean ready = started && !event.isProjectClosing();
-            Boolean previous = projectReadiness.put(workspaceProject, ready);
+            Boolean previous = projectReadiness.put(workspaceProject != null ? workspaceProject : event.getProject(), ready);
+            if (!java.util.Objects.equals(previous, ready))
+                Global.incidentLog("context", "project.ready project=" + event.getProject() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " workspaceProject=" + workspaceProject + " started=" + started //$NON-NLS-1$ //$NON-NLS-2$
+                    + " closing=" + event.isProjectClosing()); //$NON-NLS-1$
+            // У события может не быть связанного IProject рабочей области.
+            // Такие события не участвуют в выборе активного проекта панели.
+            if (workspaceProject == null)
+                return;
             // Состояния конвейера меняются и при обычных операциях готового проекта.
             // Область пересчитываем только на переходе в готовность, включая перезапуск.
             if (!ready || Boolean.TRUE.equals(previous))
@@ -4271,6 +4279,9 @@ public final class ProblemViewHook implements IStartup
          */
         private static final Map<Job, Long> tracked = new ConcurrentHashMap<>();
 
+        /** Только диагностика; не участвует в отменах и управлении индикатором. */
+        private static final Map<Job, Long> diagnosticStarted = new ConcurrentHashMap<>();
+
         private static final java.util.concurrent.atomic.AtomicInteger stuckCancels =
             new java.util.concurrent.atomic.AtomicInteger();
 
@@ -4519,7 +4530,10 @@ public final class ProblemViewHook implements IStartup
                 {
                     Job job = event.getJob();
                     if (isDiagnosticJob(job))
-                        Global.tempLog(LOG_TOPIC, "job.start" + describeJob(job, 0)); //$NON-NLS-1$
+                    {
+                        diagnosticStarted.put(job, System.currentTimeMillis());
+                        Global.incidentLog(LOG_TOPIC, "job.start" + compactJob(job)); //$NON-NLS-1$
+                    }
                     if (!isTrackedJob(job))
                         return;
                     tracked.put(job, System.currentTimeMillis());
@@ -4532,13 +4546,15 @@ public final class ProblemViewHook implements IStartup
                     Job job = event.getJob();
                     if (isDiagnosticJob(job))
                     {
+                        Long started = diagnosticStarted.remove(job);
                         var result = event.getResult();
-                        Global.tempLog(LOG_TOPIC, "job.done name=\"" + job.getName() //$NON-NLS-1$
+                        Global.incidentLog(LOG_TOPIC, "job.done name=\"" + job.getName() //$NON-NLS-1$
                             + "\" id=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
+                            + " elapsedMs=" + (started == null ? -1 : System.currentTimeMillis() - started) //$NON-NLS-1$
                             + " result=" + result); //$NON-NLS-1$
                         if (result != null && result.getException() != null)
                         {
-                            Global.tempLogException(LOG_TOPIC, "job.failed " + job.getName(), //$NON-NLS-1$
+                            Global.incidentLogException(LOG_TOPIC, "job.failed " + job.getName(), //$NON-NLS-1$
                                 result.getException());
                             logPendingLoads();
                         }
@@ -4569,6 +4585,10 @@ public final class ProblemViewHook implements IStartup
         /** Только наблюдение: очередь читается под тем же монитором, что в EDT. */
         private static void logPendingLoads()
         {
+            long now = System.currentTimeMillis();
+            for (Map.Entry<Job, Long> entry : diagnosticStarted.entrySet())
+                Global.incidentLog(LOG_TOPIC, "unfinished" + compactJob(entry.getKey()) //$NON-NLS-1$
+                    + " elapsedMs=" + (now - entry.getValue())); //$NON-NLS-1$
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
@@ -4581,18 +4601,28 @@ public final class ProblemViewHook implements IStartup
                 }
                 for (IViewPart view : snapshot)
                 {
+                    TreeViewer viewer = view.getAdapter(TreeViewer.class);
+                    if (viewer == null || viewer.getTree().isDisposed())
+                        continue;
+                    Tree tree = viewer.getTree();
+                    TreeItem[] selected = tree.getSelection();
+                    Global.incidentLog(LOG_TOPIC, "tree root=" + System.identityHashCode(viewer.getInput()) //$NON-NLS-1$
+                        + " items=" + tree.getItemCount() + " selected=" + selected.length //$NON-NLS-1$ //$NON-NLS-2$
+                        + (selected.length == 0 ? "" : " selectedNode=" + selected[0].getData() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " selectedChildren=" + selected[0].getItemCount() //$NON-NLS-1$
+                            + " expanded=" + selected[0].getExpanded())); //$NON-NLS-1$
                     Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
                     Object pending = Global.getField(provider, "consumers"); //$NON-NLS-1$
-                    Global.tempLog(LOG_TOPIC, "pending.provider=" + provider); //$NON-NLS-1$
+                    Global.incidentLog(LOG_TOPIC, "pending.provider=" + provider); //$NON-NLS-1$
                     if (!(pending instanceof Map<?, ?> consumers))
                         continue;
                     synchronized (consumers)
                     {
-                        Global.tempLog(LOG_TOPIC, "pending.nodes=" + consumers.size()); //$NON-NLS-1$
+                        Global.incidentLog(LOG_TOPIC, "pending.nodes=" + consumers.size()); //$NON-NLS-1$
                         for (Map.Entry<?, ?> entry : consumers.entrySet())
                         {
                             Object children = Global.invoke(entry.getKey(), "getChildrenWithoutLoading"); //$NON-NLS-1$
-                            Global.tempLog(LOG_TOPIC, "pending.node=" + entry.getKey() //$NON-NLS-1$
+                            Global.incidentLog(LOG_TOPIC, "pending.node=" + entry.getKey() //$NON-NLS-1$
                                 + " description=" + Global.invoke(entry.getKey(), "getDescription") //$NON-NLS-1$ //$NON-NLS-2$
                                 + " children=" + (children instanceof Collection<?> loaded ? loaded.size() : children) //$NON-NLS-1$
                                 + " consumers=" + (entry.getValue() instanceof Collection<?> callbacks //$NON-NLS-1$
@@ -4629,6 +4659,7 @@ public final class ProblemViewHook implements IStartup
             {
                 boolean changed = false;
                 long now = System.currentTimeMillis();
+                diagnosticStarted.keySet().removeIf(job -> job.getState() == Job.NONE);
                 for (Map.Entry<Job, Long> entry : tracked.entrySet())
                 {
                     Job job = entry.getKey();
@@ -4651,17 +4682,17 @@ public final class ProblemViewHook implements IStartup
                     {
                         // Загрузку детей отменять нельзя: update() ждёт именно её потребителя,
                         // а сама загрузка ещё может дочитать. Держать из-за неё индикатор незачем.
-                        Global.tempLog(LOG_TOPIC, "загрузка списка идёт дольше " //$NON-NLS-1$
+                        Global.incidentLog(LOG_TOPIC, "загрузка списка идёт дольше " //$NON-NLS-1$
                             + (STUCK_JOB_MS / 1000) + " с, индикатор снят:" + details); //$NON-NLS-1$
                         continue;
                     }
                     if (!reserveStuckCancel(now))
                     {
-                        Global.tempLog(LOG_TOPIC, "зависшая задача обновления не отменяется: " //$NON-NLS-1$
+                        Global.incidentLog(LOG_TOPIC, "зависшая задача обновления не отменяется: " //$NON-NLS-1$
                             + "превышен предел отмен за окно:" + details); //$NON-NLS-1$
                         continue;
                     }
-                    Global.tempLog(LOG_TOPIC, "зависшая задача обновления отменяется:" + details); //$NON-NLS-1$
+                    Global.incidentLog(LOG_TOPIC, "зависшая задача обновления отменяется:" + details); //$NON-NLS-1$
                     // Отмена — единственный способ разбудить update(): он ждёт CountDownLatch,
                     // который не придёт. После done DelayedMarkerUpdateListener по отложенному
                     // флагу сам закажет новую задачу, и раскрытая ветка перезагрузится.
@@ -4673,7 +4704,7 @@ public final class ProblemViewHook implements IStartup
             }
             catch (Throwable t)
             {
-                Global.tempLogException(LOG_TOPIC, "сторож задач панели проблем", t); //$NON-NLS-1$
+                Global.incidentLogException(LOG_TOPIC, "сторож задач панели проблем", t); //$NON-NLS-1$
             }
         }
 
@@ -4702,11 +4733,11 @@ public final class ProblemViewHook implements IStartup
                     // ветку, на загрузке которой упала штатная задача. Reset пересоздал бы
                     // корень, свернул дерево и оставил бы ветку незапрошенной до раскрытия.
                     delayed.scheduleUpdateJob(false);
-                    Global.tempLog(LOG_TOPIC, "refresh.requested reset=false"); //$NON-NLS-1$
+                    Global.incidentLog(LOG_TOPIC, "refresh.requested reset=false"); //$NON-NLS-1$
                 }
                 catch (RuntimeException e)
                 {
-                    Global.tempLogException(LOG_TOPIC, "перезаказ обновления панели", e); //$NON-NLS-1$
+                    Global.incidentLogException(LOG_TOPIC, "перезаказ обновления панели", e); //$NON-NLS-1$
                 }
             }
         }
@@ -4741,6 +4772,12 @@ public final class ProblemViewHook implements IStartup
                 for (StackTraceElement element : info.getStackTrace())
                     text.append("\n        at ").append(element); //$NON-NLS-1$
             return text.toString();
+        }
+
+        private static String compactJob(Job job)
+        {
+            return " id=" + Integer.toHexString(System.identityHashCode(job)) + " name=\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + job.getName() + "\" state=" + job.getState(); //$NON-NLS-1$
         }
 
         private static void wrapMarkerManager(IViewPart view)

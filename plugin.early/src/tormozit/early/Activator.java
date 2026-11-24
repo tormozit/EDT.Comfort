@@ -40,6 +40,10 @@ public final class Activator
     @Override
     public void start(BundleContext context)
     {
+        IncidentDiagnostics.install(context);
+        IncrementalValidationDiagnostics.install(context);
+        IncrementalEditorValidationWeaving.install(context);
+        ModuleContextDiagnostics.install(context);
         DocCommentLinkWeaving.install(context);
         CheckSchedulerWeaving.install(context);
         CompareSideOrderWeaving.install(context);
@@ -84,6 +88,878 @@ public final class Activator
         DebugBreakpointsWeaving.install(context);
         DebugValueWeaving.install(context);
         FormAttributeSelectionWeaving.install(context);
+    }
+
+    /** Временная диагностика видимости модулей и загрузки панели: три файла по 4 МиБ. */
+    private static final class IncidentDiagnostics
+    {
+        private static final String CALLBACK = "tormozit.incident.diagnostic";
+        private static final java.nio.file.Path FILE = java.nio.file.Path.of(
+            "C:/VC/EDT.Comfort/.tmp/incident-logs/diagnostic.log");
+        private static final long FILE_LIMIT = 4L * 1024 * 1024;
+        private static IncidentDiagnostics instance;
+        private final java.util.concurrent.ConcurrentLinkedQueue<String> lines =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+        private final java.util.Timer timer = new java.util.Timer("Комфорт: диагностика инцидентов", true);
+        private final FrameworkLog fallback;
+
+        private IncidentDiagnostics(BundleContext context)
+        {
+            var reference = context.getServiceReference(FrameworkLog.class);
+            fallback = reference == null ? null : context.getService(reference);
+        }
+
+        static void install(BundleContext context)
+        {
+            var diagnostic = new IncidentDiagnostics(context);
+            instance = diagnostic;
+            System.getProperties().put(CALLBACK, (Consumer<Object[]>) event ->
+                diagnostic.record(String.valueOf(event[0]), String.valueOf(event[1])));
+            diagnostic.record("session", "start pid=" + ProcessHandle.current().pid()
+                + " workspace=" + System.getProperty("osgi.instance.area"));
+            diagnostic.timer.schedule(new java.util.TimerTask()
+            {
+                @Override public void run() { diagnostic.flush(); }
+            }, 1000, 1000);
+        }
+
+        static void stop()
+        {
+            if (instance == null)
+                return;
+            instance.timer.cancel();
+            instance.record("session", "stop");
+            instance.flush();
+        }
+
+        private void record(String topic, String text)
+        {
+            int length = text.length();
+            if (length > 4096)
+                text = text.substring(0, 4096) + " originalChars=" + length;
+            lines.add(java.time.OffsetDateTime.now() + " pid=" + ProcessHandle.current().pid() + " [" + Thread.currentThread().getName()
+                + "] " + topic + " " + text.replace('\r', ' ').replace('\n', ' ') + "\r\n");
+        }
+
+        private synchronized void flush()
+        {
+            var block = new StringBuilder();
+            String line;
+            while ((line = lines.poll()) != null)
+            {
+                block.append(line);
+                if (block.length() >= 16 * 1024)
+                {
+                    append(block.toString());
+                    block.setLength(0);
+                }
+            }
+            if (!block.isEmpty())
+                append(block.toString());
+        }
+
+        private void append(String text)
+        {
+            try
+            {
+                java.nio.file.Files.createDirectories(FILE.getParent());
+                byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                if (java.nio.file.Files.exists(FILE) && java.nio.file.Files.size(FILE) + bytes.length > FILE_LIMIT)
+                {
+                    var previous = FILE.resolveSibling("diagnostic.1.log");
+                    if (java.nio.file.Files.exists(previous))
+                        java.nio.file.Files.move(previous, FILE.resolveSibling("diagnostic.2.log"),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    java.nio.file.Files.move(FILE, previous, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                java.nio.file.Files.write(FILE, bytes, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception failure)
+            {
+                if (fallback != null)
+                    try
+                    {
+                        fallback.log(new FrameworkLogEntry("tormozit.comfort.early", FrameworkLogEntry.ERROR,
+                            0, "Incident diagnostic write failed: " + text, 0, failure, null));
+                    }
+                    catch (Throwable ignored) { /* Диагностика не меняет поведение EDT. */ }
+            }
+        }
+
+    }
+
+    /** Частичная проверка редактора: согласованные точки EDT bsl 28.0.1 / bsl.ui 22.0.0.v202605050943. */
+    private static final class IncrementalEditorValidationWeaving implements WeavingHook
+    {
+        private static final String PREFIX = "tormozit.editorValidation.";
+        private static final String RESOURCE = "com._1c.g5.v8.dt.bsl.resource.BslResource";
+        private static final String JOB = "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocumentProvider$BslValidationJob";
+        private static final String WORK = JOB + "$1";
+        private static final String DIAGNOSTICIAN = "com._1c.g5.v8.dt.bsl.validation.BslCancelableDiagnostician";
+        private static final String EXECUTOR = "com.e1c.g5.v8.dt.internal.check.CheckExecutor";
+        private static final String VALIDATOR = "com._1c.g5.v8.dt.bsl.validation.BslNotifyingResourceValidator";
+        private static final String HOLDER = "com/_1c/g5/v8/dt/bsl/validation/IBslValidationContributor$ContextHolderAdapter";
+        private static final Set<String> TARGETS = Set.of(RESOURCE, JOB, WORK, DIAGNOSTICIAN, EXECUTOR, VALIDATOR);
+
+        static void install(BundleContext context)
+        {
+            var properties = System.getProperties();
+            properties.put(PREFIX + "revision", 2);
+            properties.put(PREFIX + "before", (Consumer<Object[]>) event -> { });
+            properties.put(PREFIX + "mark", (java.util.function.BiConsumer<Object, Object>) (holder, resource) -> { });
+            properties.put(PREFIX + "filter", (BiFunction<Object, Object, Object>) (holder, resource) -> holder);
+            properties.put(PREFIX + "finish", (java.util.function.BiConsumer<Object, Object>) (resource, cancel) -> { });
+            properties.put(PREFIX + "module", (Consumer<Object[]>) event -> { });
+            properties.put(PREFIX + "replace", (BiFunction<Object, Object, Object>) (original, code) -> original);
+            properties.put(PREFIX + "position", (java.util.function.BiConsumer<Object, Object>) (document, issue) -> { });
+            properties.put(PREFIX + "stamp", (BiFunction<Object, Object, Object>) (original, resource) -> original);
+            properties.put(PREFIX + "offset", (BiFunction<Object, Object, Object>) (original, resource) -> original);
+            properties.put(PREFIX + "shift", (BiFunction<Object, Object, Object>) (original, resource) -> original);
+            properties.put(PREFIX + "graph", (BiFunction<Object, Object, Object>) (original, resource) -> original);
+            properties.put(PREFIX + "issuesBegin", (java.util.function.BiConsumer<Object, Object>) (document, monitor) -> { });
+            properties.put(PREFIX + "issuesEnd", (java.util.function.BiConsumer<Object, Object>) (document, monitor) -> { });
+            context.registerService(WeavingHook.class, new IncrementalEditorValidationWeaving(), null);
+        }
+
+        private static void callback(MethodVisitor mv, String name, String type)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false);
+            mv.visitLdcInsn(PREFIX + name);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/" + type);
+        }
+
+        @Override public void weave(WovenClass woven)
+        {
+            String target = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGETS.contains(target))
+                return;
+            try
+            {
+                String version = woven.getBundleWiring().getBundle().getVersion().toString();
+                String supported = EXECUTOR.equals(target) ? "6.0.100.v202605050943"
+                    : JOB.equals(target) || WORK.equals(target) ? "22.0.0.v202605050943" : "28.0.1.v202605050943";
+                if (!supported.equals(version))
+                {
+                    System.getProperties().put(PREFIX + "patch." + target, false);
+                    IncrementalValidationDiagnostics.log("editor.patch.unsupported target=" + target + " bundle=" + version);
+                    return;
+                }
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] sites = new int[5];
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+                        boolean update = RESOURCE.equals(target) && "update".equals(name) && "(IILjava/lang/String;)V".equals(desc);
+                        boolean work = WORK.equals(target) && "exec".equals(name)
+                            && desc.startsWith("(Lorg/eclipse/xtext/resource/XtextResource;Lorg/eclipse/xtext/util/CancelIndicator;)");
+                        boolean diagnostic = DIAGNOSTICIAN.equals(target) && "doValidateContents".equals(name);
+                        boolean issues = JOB.equals(target) && "createIssues".equals(name);
+                        boolean executor = EXECUTOR.equals(target) && "runLanguageChecks".equals(name);
+                        boolean publication = VALIDATOR.equals(target) && "notifyListeners".equals(name);
+                        if (mv == null || !(update || work || diagnostic || issues || executor || publication))
+                            return mv;
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            private boolean updateCodes;
+
+                            private void issues(String phase)
+                            {
+                                callback(this, phase, "BiConsumer"); super.visitVarInsn(Opcodes.ALOAD, 0);
+                                super.visitFieldInsn(Opcodes.GETFIELD, JOB.replace('.', '/'), "xtextDocument", "Lorg/eclipse/xtext/util/concurrent/IReadAccess;");
+                                super.visitVarInsn(Opcodes.ALOAD, 1);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                            }
+
+                            @Override public void visitCode()
+                            {
+                                super.visitCode();
+                                if (issues) { issues("issuesBegin"); sites[3]++; }
+                            }
+
+                            private void moduleCheck(boolean enter)
+                            {
+                                callback(this, "module", "Consumer");
+                                super.visitInsn(Opcodes.ICONST_4); super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_0); super.visitVarInsn(Opcodes.ALOAD, 15); super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_1); super.visitVarInsn(Opcodes.ALOAD, 2); super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_2); super.visitVarInsn(Opcodes.ALOAD, 16); super.visitInsn(Opcodes.AASTORE);
+                                super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_3);
+                                super.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/Boolean", enter ? "TRUE" : "FALSE", "Ljava/lang/Boolean;");
+                                super.visitInsn(Opcodes.AASTORE);
+                                super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                            }
+
+                            @Override public void visitFieldInsn(int opcode, String owner, String field, String descriptor)
+                            {
+                                super.visitFieldInsn(opcode, owner, field, descriptor);
+                                if (issues && opcode == Opcodes.GETSTATIC && JOB.replace('.', '/').equals(owner)
+                                    && "ALWAYS_UPDATE_ANNOTATION_ISSUE_CODE".equals(field))
+                                    updateCodes = true;
+                            }
+
+                            @Override public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean itf)
+                            {
+                                if (update && opcode == Opcodes.INVOKESPECIAL && "update".equals(method)
+                                    && "org/eclipse/xtext/resource/DerivedStateAwareResource".equals(owner)
+                                    && "(IILjava/lang/String;)V".equals(descriptor))
+                                {
+                                    callback(this, "before", "Consumer");
+                                    super.visitInsn(Opcodes.ICONST_4); super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    for (int index = 0; index < 4; index++)
+                                    {
+                                        super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_0 + index);
+                                        if (index == 0 || index == 3) super.visitVarInsn(Opcodes.ALOAD, index);
+                                        else
+                                        {
+                                            super.visitVarInsn(Opcodes.ILOAD, index);
+                                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+                                        }
+                                        super.visitInsn(Opcodes.AASTORE);
+                                    }
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                                    sites[0]++;
+                                }
+                                boolean check = executor && "com/e1c/g5/v8/dt/check/ICheck".equals(owner) && "check".equals(method);
+                                if (check)
+                                {
+                                    moduleCheck(true); sites[0]++;
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, itf);
+                                if (check) { moduleCheck(false); sites[0]++; }
+                                if ((work || diagnostic) && "com/_1c/g5/v8/dt/bsl/util/BslUtil".equals(owner)
+                                    && "getDependMethodsTree".equals(method) && descriptor.endsWith(")Ljava/util/Collection;"))
+                                {
+                                    callback(this, "graph", "BiFunction"); super.visitInsn(Opcodes.SWAP); super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Collection");
+                                    sites[4]++;
+                                }
+                                if (work && "com/_1c/g5/v8/dt/bsl/resource/BslResource".equals(owner)
+                                    && ("getLastUpdatePosition".equals(method) || "getLastUpdateContentShift".equals(method)))
+                                {
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+                                    callback(this, "getLastUpdatePosition".equals(method) ? "offset" : "shift", "BiFunction");
+                                    super.visitInsn(Opcodes.SWAP); super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Integer");
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false);
+                                    sites[3]++;
+                                }
+                                if (publication && "org/eclipse/emf/ecore/resource/Resource".equals(owner)
+                                    && "getTimeStamp".equals(method) && "()J".equals(descriptor))
+                                {
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false);
+                                    callback(this, "stamp", "BiFunction"); super.visitInsn(Opcodes.SWAP);
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Long");
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false);
+                                    sites[0]++;
+                                }
+                                if (work && opcode == Opcodes.INVOKESPECIAL && HOLDER.equals(owner)
+                                    && "<init>".equals(method) && "(Ljava/util/Map;)V".equals(descriptor))
+                                {
+                                    super.visitInsn(Opcodes.DUP); callback(this, "mark", "BiConsumer"); super.visitInsn(Opcodes.SWAP);
+                                    super.visitInsn(Opcodes.ICONST_2); super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_0); super.visitVarInsn(Opcodes.ALOAD, 1); super.visitInsn(Opcodes.AASTORE);
+                                    super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_1); super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, WORK.replace('.', '/'), "this$1", "L" + JOB.replace('.', '/') + ";");
+                                    super.visitFieldInsn(Opcodes.GETFIELD, JOB.replace('.', '/'), "xtextDocument", "Lorg/eclipse/xtext/util/concurrent/IReadAccess;");
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                    sites[0]++;
+                                }
+                                if ((work || diagnostic) && opcode == Opcodes.INVOKESTATIC && HOLDER.equals(owner)
+                                    && "getContextHolder".equals(method))
+                                {
+                                    callback(this, "filter", "BiFunction"); super.visitInsn(Opcodes.SWAP);
+                                    super.visitVarInsn(Opcodes.ALOAD, 1);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, HOLDER);
+                                    sites[1]++;
+                                }
+                                if (issues && updateCodes && "java/util/Set".equals(owner) && "contains".equals(method))
+                                {
+                                    super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+                                    callback(this, "replace", "BiFunction"); super.visitInsn(Opcodes.SWAP);
+                                    super.visitInsn(Opcodes.ICONST_2); super.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                    super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_0);
+                                    super.visitVarInsn(Opcodes.ALOAD, 6);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "org/eclipse/xtext/validation/Issue", "getCode", "()Ljava/lang/String;", true);
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitInsn(Opcodes.DUP); super.visitInsn(Opcodes.ICONST_1); super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, JOB.replace('.', '/'), "xtextDocument", "Lorg/eclipse/xtext/util/concurrent/IReadAccess;");
+                                    super.visitInsn(Opcodes.AASTORE);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                                    super.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+                                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+                                    updateCodes = false; sites[0]++;
+                                }
+                                if (issues && "org/eclipse/xtext/validation/Issue$IssueImpl".equals(owner) && "setOffset".equals(method))
+                                {
+                                    callback(this, "position", "BiConsumer"); super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, JOB.replace('.', '/'), "xtextDocument", "Lorg/eclipse/xtext/util/concurrent/IReadAccess;");
+                                    super.visitVarInsn(Opcodes.ALOAD, 6);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                    sites[1]++;
+                                }
+                            }
+
+                            @Override public void visitInsn(int opcode)
+                            {
+                                if (issues && opcode == Opcodes.ARETURN) { issues("issuesEnd"); sites[2]++; }
+                                if (work && opcode == Opcodes.ARETURN)
+                                {
+                                    callback(this, "finish", "BiConsumer"); super.visitVarInsn(Opcodes.ALOAD, 1); super.visitVarInsn(Opcodes.ALOAD, 2);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                    sites[2]++;
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                }, 0);
+                boolean complete = VALIDATOR.equals(target) ? sites[0] == 2
+                    : EXECUTOR.equals(target) ? sites[0] == 2
+                    : RESOURCE.equals(target) ? sites[0] == 1
+                    : DIAGNOSTICIAN.equals(target) ? sites[1] == 1 && sites[4] == 1
+                    : JOB.equals(target) ? sites[0] == 1 && sites[1] == 2 && sites[2] == 2 && sites[3] == 1
+                    : sites[0] == 1 && sites[1] == 1 && sites[2] == 3 && sites[3] == 2 && sites[4] == 1;
+                System.getProperties().put(PREFIX + "patch." + target, complete);
+                if (complete)
+                    woven.setBytes(writer.toByteArray());
+                IncrementalValidationDiagnostics.log("editor.patch target=" + target + " complete=" + complete
+                    + " sites=" + java.util.Arrays.toString(sites) + " bundle=" + woven.getBundleWiring().getBundle().getVersion());
+            }
+            catch (Throwable error)
+            {
+                System.getProperties().put(PREFIX + "patch." + target, false);
+                IncrementalValidationDiagnostics.log("editor.patch.failed target=" + target + " error=" + error);
+            }
+        }
+    }
+
+    /** Временные исследовательские зонды EDT 28.0.1.v202605050943; не запускают расчёты модели. */
+    private static final class IncrementalValidationDiagnostics implements WeavingHook
+    {
+        private static final String PREFIX = "tormozit.incrementalValidation.";
+        private static final String RESOURCE = "com._1c.g5.v8.dt.bsl.resource.BslResource";
+        private static final String DIAGNOSTICIAN = "com._1c.g5.v8.dt.bsl.validation.BslCancelableDiagnostician";
+        private static final String TREE_TYPES = "com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem";
+        private static final Map<String, Set<String>> TARGETS = Map.of(
+            RESOURCE, Set.of("update", "reparse"),
+            DIAGNOSTICIAN, Set.of("doValidateContents"),
+            "com._1c.g5.v8.dt.bsl.validation.BslNotifyingResourceValidator", Set.of("validate"),
+            TREE_TYPES, Set.of("computeProcessingObjects"));
+        private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
+        private record Call(long id, String phase, long start, Object receiver, String resource) { }
+        private static final ThreadLocal<java.util.Deque<Call>> CALLS =
+            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+        private static final ClassValue<Map<String, java.util.Optional<java.lang.reflect.Method>>> GETTERS = new ClassValue<>()
+        {
+            @Override protected Map<String, java.util.Optional<java.lang.reflect.Method>> computeValue(Class<?> type)
+            {
+                return new java.util.concurrent.ConcurrentHashMap<>();
+            }
+        };
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(PREFIX + "event", (Consumer<Object[]>) IncrementalValidationDiagnostics::capture);
+            System.getProperties().put(PREFIX + "blocks", (Consumer<Object>) IncrementalValidationDiagnostics::blocks);
+            context.registerService(WeavingHook.class, new IncrementalValidationDiagnostics(), null);
+            log("observer.installed targets=" + TARGETS.keySet());
+        }
+
+        private static void log(String text)
+        {
+            try
+            {
+                if (System.getProperties().get(PREFIX + "sink") instanceof Consumer<?> sink)
+                {
+                    @SuppressWarnings("unchecked") Consumer<String> typed = (Consumer<String>)sink;
+                    typed.accept("thread=" + Thread.currentThread().getName() + " " + text);
+                }
+                else
+                    IncidentDiagnostics.instance.record("bsl-incremental", text);
+            }
+            catch (Throwable error)
+            {
+                IncidentDiagnostics.instance.record("bsl-incremental", "sink.failed " + error);
+            }
+        }
+
+        /** Только публичные готовые свойства; ни getContents(), ни вычисления типов/зависимостей. */
+        private static Object read(Object target, String name)
+        {
+            if (target == null)
+                return null;
+            try
+            {
+                var getter = GETTERS.get(target.getClass()).computeIfAbsent(name, key ->
+                {
+                    try { return java.util.Optional.of(target.getClass().getMethod(key)); }
+                    catch (NoSuchMethodException absent) { return java.util.Optional.empty(); }
+                });
+                return getter.isEmpty() ? null : getter.get().invoke(target);
+            }
+            catch (Throwable error) { log("read.failed type=" + target.getClass().getName() + " getter=" + name + " error=" + error); return null; }
+        }
+
+        private static String identity(Object value)
+        {
+            return value == null ? "null" : value.getClass().getSimpleName() + "@"
+                + Integer.toHexString(System.identityHashCode(value));
+        }
+
+        private static String shortPhase(String phase)
+        {
+            int method = phase.lastIndexOf('.');
+            return phase.substring(phase.lastIndexOf('.', method - 1) + 1);
+        }
+
+        private static String resource(Object receiver, Object argument)
+        {
+            Object value = read(argument, "eResource");
+            if (value == null && read(argument, "getURI") != null)
+                value = argument;
+            if (value == null && read(receiver, "getURI") != null)
+                value = receiver;
+            if (value == null)
+                return "";
+            Object parsed = read(value, "getParseResult");
+            return " resource=" + read(value, "getURI") + " resourceId=" + identity(value)
+                + " parse=" + identity(parsed) + " partial=" + read(value, "isOnlyMethodReparse")
+                + " method=" + read(read(value, "getReparseMethod"), "getName")
+                + " context=" + identity(read(value, "getContextHolder"))
+                + " deep=" + read(value, "isDeepAnalysing")
+                + " offset=" + read(value, "getLastUpdatePosition")
+                + " shift=" + read(value, "getLastUpdateContentShift");
+        }
+
+        private static void capture(Object[] event)
+        {
+            long now = System.nanoTime();
+            try
+            {
+                String phase = (String)event[0];
+                String edge = (String)event[1];
+                Object receiver = event[2];
+                Object argument = event[3];
+                var calls = CALLS.get();
+                String state = resource(receiver, argument);
+                if (state.isEmpty() && !calls.isEmpty())
+                    state = calls.peek().resource();
+
+                if ("enter".equals(edge))
+                {
+                    // Исключение из вызванного метода может обойти RETURN/ATHROW вызывающего.
+                    // Такие незакрытые входы видны в логе; ограничиваем только служебную память зонда.
+                    if (calls.size() >= 1024)
+                    {
+                        log("unclosed.reset count=" + calls.size());
+                        calls.clear();
+                    }
+                    long parent = calls.isEmpty() ? 0 : calls.peek().id();
+                    Call call = new Call(IDS.incrementAndGet(), phase, now, receiver, state);
+                    calls.push(call);
+                    log("enter id=" + call.id() + " parent=" + parent + " phase=" + shortPhase(phase)
+                        + " receiver=" + identity(receiver) + " argument=" + identity(argument)
+                        + " name=" + read(argument, "getName") + state);
+                }
+                else if ("return".equals(edge))
+                {
+                    Call found = null;
+                    for (Call call : calls)
+                        if (call.phase().equals(phase) && call.receiver() == receiver)
+                        {
+                            found = call;
+                            break;
+                        }
+                    if (found == null)
+                        log("return.unmatched phase=" + shortPhase(phase) + state);
+                    else
+                    {
+                        while (calls.peek() != found)
+                            log("unclosed id=" + calls.pop().id());
+                        calls.pop();
+                        log("return id=" + found.id() + " phase=" + shortPhase(phase) + " elapsedUs="
+                            + (now - found.start()) / 1000 + state);
+                    }
+                    if (calls.isEmpty())
+                        CALLS.remove();
+                }
+                else
+                    // ATHROW может быть пойман внутри того же метода: это наблюдение, не выход.
+                    log("athrow phase=" + shortPhase(phase) + " current=" + (calls.isEmpty() ? 0 : calls.peek().id()) + state);
+            }
+            catch (Throwable error) { log("capture.failed " + error); }
+        }
+
+        private static void blocks(Object value)
+        {
+            try
+            {
+                var calls = CALLS.get();
+                StringBuilder text = new StringBuilder("selected.blocks current=")
+                    .append(calls.isEmpty() ? 0 : calls.peek().id())
+                    .append(" phase=").append(calls.isEmpty() ? "none" : shortPhase(calls.peek().phase()));
+                if (value instanceof Collection<?> collection)
+                {
+                    text.append(" count=").append(collection.size());
+                }
+                if (!calls.isEmpty())
+                    text.append(calls.peek().resource());
+                log(text.toString());
+            }
+            catch (Throwable error) { log("blocks.failed " + error); }
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            Set<String> methods = TARGETS.get(woven.getClassName());
+            if (woven.getState() != WovenClass.TRANSFORMING || methods == null)
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] touched = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions)
+                    {
+                        MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+                        if (mv == null || !methods.contains(name) || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0)
+                            return mv;
+                        touched[0]++;
+                        String phase = woven.getClassName() + "." + name;
+                        var arguments = org.objectweb.asm.Type.getArgumentTypes(desc);
+                        boolean reference = arguments.length > 0 && (arguments[0].getSort() == org.objectweb.asm.Type.OBJECT
+                            || arguments[0].getSort() == org.objectweb.asm.Type.ARRAY);
+                        // doValidateContents рекурсивен для каждого узла AST: снимаем только готовый список блоков.
+                        boolean selectionOnly = DIAGNOSTICIAN.equals(woven.getClassName());
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            private void emit(String edge)
+                            {
+                                callback(this, PREFIX + "event");
+                                visitInsn(Opcodes.ICONST_4);
+                                visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_0); visitLdcInsn(phase); visitInsn(Opcodes.AASTORE);
+                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_1); visitLdcInsn(edge); visitInsn(Opcodes.AASTORE);
+                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_2); visitVarInsn(Opcodes.ALOAD, 0); visitInsn(Opcodes.AASTORE);
+                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_3);
+                                if (reference) visitVarInsn(Opcodes.ALOAD, 1); else visitInsn(Opcodes.ACONST_NULL);
+                                visitInsn(Opcodes.AASTORE);
+                                visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                            }
+
+                            @Override public void visitCode() { super.visitCode(); if (!selectionOnly) emit("enter"); }
+
+                            @Override public void visitInsn(int opcode)
+                            {
+                                if (!selectionOnly && opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
+                                {
+                                    if (TREE_TYPES.equals(woven.getClassName()) && "computeProcessingObjects".equals(name)
+                                        && opcode == Opcodes.ARETURN)
+                                    {
+                                        super.visitInsn(Opcodes.DUP);
+                                        callback(this, PREFIX + "blocks");
+                                        super.visitInsn(Opcodes.SWAP);
+                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                                    }
+                                    emit("return");
+                                }
+                                else if (!selectionOnly && opcode == Opcodes.ATHROW)
+                                    emit("athrow");
+                                super.visitInsn(opcode);
+                            }
+
+                            @Override public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean itf)
+                            {
+                                if (DIAGNOSTICIAN.equals(woven.getClassName()) && "java/util/List".equals(owner)
+                                    && "iterator".equals(method) && "()Ljava/util/Iterator;".equals(descriptor))
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    callback(this, PREFIX + "blocks");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
+                                }
+                                super.visitMethodInsn(opcode, owner, method, descriptor, itf);
+                            }
+                        };
+                    }
+                }, 0);
+                woven.setBytes(writer.toByteArray());
+                String status = "woven methods=" + touched[0] + " bundle=" + woven.getBundleWiring().getBundle().getVersion();
+                System.setProperty(PREFIX + woven.getClassName(), status);
+                log("patch target=" + woven.getClassName() + " " + status);
+            }
+            catch (Throwable error) { log("weave.failed target=" + woven.getClassName() + " error=" + error); }
+        }
+
+        private static void callback(MethodVisitor mv, String key)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false);
+            mv.visitLdcInsn(key);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
+        }
+    }
+
+    /** Наблюдение за построением и публикацией контекста общего модуля; только готовые поля. */
+    private static final class ModuleContextDiagnostics implements WeavingHook
+    {
+        private static final String PREFIX = "tormozit.moduleContext.";
+        private static final String BUILDER = "com._1c.g5.v8.dt.bsl.resource.ContextDefBuilder";
+        private static final String UPDATER = "com._1c.g5.v8.dt.internal.bsl.resource.BslContextDefUpdater";
+        private static final String SAVE_DESC = "(Lcom/_1c/g5/v8/dt/bsl/model/BslContextDef;Ljava/lang/String;"
+            + "Lcom/_1c/g5/v8/bm/core/IBmTransaction;)V";
+        private static final ClassValue<java.util.Map<String, java.lang.reflect.Method>> GETTERS = new ClassValue<>()
+        {
+            @Override protected java.util.Map<String, java.lang.reflect.Method> computeValue(Class<?> type)
+            {
+                return new java.util.concurrent.ConcurrentHashMap<>();
+            }
+        };
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().put(PREFIX + "built", (java.util.function.BiConsumer<Object, Object>)
+                (module, result) -> capture(new Object[] {"build", result, null, null, module}));
+            System.getProperties().put(PREFIX + "publish", (Consumer<Object[]>) event ->
+            {
+                try
+                {
+                    capture(new Object[] {event[0], event[1], event[2], call(event[3], "getNamespace"), null});
+                }
+                catch (Throwable error) { log("publish.diagnostic.failed " + failure(error)); }
+            });
+            System.getProperties().put(PREFIX + "sample", (Consumer<Object[]>) ModuleContextDiagnostics::capture);
+            System.getProperties().put(PREFIX + "previous", (java.util.function.BiConsumer<Object, Object>) (index, next) ->
+            {
+                try
+                {
+                    Object uri = call(next, "getModuleUri");
+                    if (uri != null && uri.toString().contains("/CommonModules/"))
+                        capture(new Object[] {"publish.previous target=" + uri, call(index, "getContextDef"), null,
+                            call(index, "bmGetNamespace"), index});
+                }
+                catch (Throwable error) { log("previous.diagnostic.failed " + failure(error)); }
+            });
+            context.registerService(WeavingHook.class, new ModuleContextDiagnostics(), null);
+            log("observer.installed");
+        }
+
+        private static void log(String text)
+        {
+            IncidentDiagnostics.instance.record("module-context", text);
+        }
+
+        private static Object call(Object target, String method) throws ReflectiveOperationException
+        {
+            if (target == null)
+                return null;
+            var getters = GETTERS.get(target.getClass());
+            var getter = getters.get(method);
+            if (getter == null)
+            {
+                getter = target.getClass().getMethod(method);
+                getter.trySetAccessible();
+                getters.put(method, getter);
+            }
+            return getter.invoke(target);
+        }
+
+        private static String identity(Object value)
+        {
+            return value == null ? "null" : value.getClass().getSimpleName() + "@"
+                + Integer.toHexString(System.identityHashCode(value));
+        }
+
+        private static String failure(Throwable error)
+        {
+            var text = new StringBuilder();
+            for (int cause = 0; error != null && cause < 8; cause++, error = error.getCause())
+                text.append(" cause=").append(error);
+            return text.toString();
+        }
+
+        private static void capture(Object[] event)
+        {
+            try
+            {
+                Object context = event[1];
+                if (Boolean.TRUE.equals(call(context, "eIsProxy")))
+                {
+                    log(event[0] + " context=" + identity(context) + " proxy=" + call(context, "eProxyURI")
+                        + " fqn=" + event[2] + " namespace=" + call(event[3], "getName"));
+                    return;
+                }
+                Object uri = call(context, "getModuleUri");
+                if (uri != null && !uri.toString().contains("/CommonModules/"))
+                    return;
+                var text = new StringBuilder(String.valueOf(event[0])).append(" uri=").append(uri)
+                    .append(" context=").append(identity(context)).append(" fqn=").append(event[2])
+                    .append(" namespace=").append(call(event[3], "getName"))
+                    .append(" namespaceId=").append(identity(event[3]));
+                Object parent = call(context, "eContainer");
+                Object resource = call(context, "eResource");
+                text.append(" parent=").append(identity(parent)).append(" resource=").append(call(resource, "getURI"))
+                    .append(" resourceSet=").append(identity(call(resource, "getResourceSet")))
+                    .append(" proxy=").append(call(context, "eIsProxy"))
+                    .append(" environments=").append(call(context, "getEnvironments"));
+                Object owner = event.length > 4 ? event[4] : null;
+                if (owner != null)
+                {
+                    Object ownerResource = call(owner, "eResource");
+                    text.append(" owner=").append(identity(owner)).append(" ownerResource=")
+                        .append(call(ownerResource, "getURI"));
+                }
+                Object stored = call(context, "getMethods");
+                int count = 0;
+                int hash = 0;
+                var sources = new java.util.TreeSet<String>();
+                var sample = new java.util.ArrayList<String>();
+                if (stored instanceof Iterable<?> methods)
+                    for (Object method : methods)
+                    {
+                        Object name = call(method, "getName");
+                        Object environments = call(method, "getEnvironments");
+                        Object source;
+                        try { source = call(method, "getSourceUri"); }
+                        catch (NoSuchMethodException platformMethod) { source = null; }
+                        hash += java.util.Objects.hash(name, String.valueOf(environments));
+                        if (sample.size() < 6)
+                            sample.add(String.valueOf(name));
+                        if (source != null)
+                        {
+                            String path = source.toString();
+                            int at = path.indexOf("/src/");
+                            sources.add(at < 0 ? path : path.substring(0, at));
+                        }
+                        count++;
+                    }
+                text.append(" methods=").append(count).append(" methodsHash=").append(Integer.toHexString(hash))
+                    .append(" methodProjects=").append(sources).append(" sample=").append(sample);
+                log(text.toString());
+            }
+            catch (Throwable error) { log("capture.failed phase=" + event[0] + failure(error)); }
+        }
+
+        @Override public void weave(WovenClass woven)
+        {
+            String owner = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING || !(BUILDER.equals(owner) || UPDATER.equals(owner)))
+                return;
+            try
+            {
+                var reader = new ClassReader(woven.getBytes());
+                var writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] matches = {0};
+                boolean[] moduleField = {false};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override public FieldVisitor visitField(int access, String name, String descriptor,
+                        String signature, Object value)
+                    {
+                        if (name.equals("module") && descriptor.equals("Lcom/_1c/g5/v8/dt/bsl/model/Module;"))
+                            moduleField[0] = true;
+                        return super.visitField(access, name, descriptor, signature, value);
+                    }
+
+                    @Override public MethodVisitor visitMethod(int access, String name, String desc,
+                        String signature, String[] exceptions)
+                    {
+                        var original = super.visitMethod(access, name, desc, signature, exceptions);
+                        boolean build = BUILDER.equals(owner) && moduleField[0] && name.equals("build")
+                            && desc.equals("()Lcom/_1c/g5/v8/dt/mcore/ContextDef;");
+                        boolean save = UPDATER.equals(owner) && name.equals("doSave") && desc.equals(SAVE_DESC);
+                        if (!build && !save)
+                            return original;
+                        matches[0]++;
+                        return new MethodVisitor(Opcodes.ASM9, original)
+                        {
+                            private void emit(String phase)
+                            {
+                                EarlyWeaving.emitGetProperty(this.mv, PREFIX + "publish", "java/util/function/Consumer");
+                                mv.visitInsn(Opcodes.ICONST_4);
+                                mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+                                mv.visitInsn(Opcodes.DUP);
+                                mv.visitInsn(Opcodes.ICONST_0);
+                                mv.visitLdcInsn(phase);
+                                mv.visitInsn(Opcodes.AASTORE);
+                                for (int i = 1; i <= 3; i++)
+                                {
+                                    mv.visitInsn(Opcodes.DUP);
+                                    mv.visitLdcInsn(i);
+                                    mv.visitVarInsn(Opcodes.ALOAD, i);
+                                    mv.visitInsn(Opcodes.AASTORE);
+                                }
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept",
+                                    "(Ljava/lang/Object;)V", true);
+                            }
+
+                            @Override public void visitCode()
+                            {
+                                super.visitCode();
+                                if (save)
+                                    emit("publish.before");
+                            }
+
+                            @Override public void visitInsn(int opcode)
+                            {
+                                if (build && opcode == Opcodes.ARETURN)
+                                {
+                                    super.visitInsn(Opcodes.DUP);
+                                    EarlyWeaving.emitGetProperty(this.mv, PREFIX + "built", "java/util/function/BiConsumer");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    super.visitFieldInsn(Opcodes.GETFIELD, BUILDER.replace('.', '/'), "module",
+                                        "Lcom/_1c/g5/v8/dt/bsl/model/Module;");
+                                    super.visitInsn(Opcodes.SWAP);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept",
+                                        "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                }
+                                if (save && opcode == Opcodes.RETURN)
+                                    emit("publish.after");
+                                super.visitInsn(opcode);
+                            }
+
+                            @Override public void visitMethodInsn(int opcode, String target, String method,
+                                String descriptor, boolean isInterface)
+                            {
+                                if (save && target.equals("com/_1c/g5/v8/dt/bsl/model/ModuleContextDefIndex")
+                                    && method.equals("setContextDef")
+                                    && descriptor.equals("(Lcom/_1c/g5/v8/dt/bsl/model/BslContextDef;)V"))
+                                {
+                                    super.visitInsn(Opcodes.DUP2);
+                                    EarlyWeaving.emitGetProperty(this.mv, PREFIX + "previous", "java/util/function/BiConsumer");
+                                    super.visitInsn(Opcodes.DUP_X2);
+                                    super.visitInsn(Opcodes.POP);
+                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept",
+                                        "(Ljava/lang/Object;Ljava/lang/Object;)V", true);
+                                }
+                                super.visitMethodInsn(opcode, target, method, descriptor, isInterface);
+                            }
+                        };
+                    }
+                }, 0);
+                if (matches[0] > 0)
+                    woven.setBytes(writer.toByteArray());
+                log("hook class=" + owner + " version=" + woven.getBundleWiring().getBundle().getVersion()
+                    + " methods=" + matches[0]);
+            }
+            catch (Throwable error) { log("hook.failed class=" + owner + failure(error)); }
+        }
     }
 
     /**
@@ -1106,6 +1982,7 @@ public final class Activator
     @Override
     public void stop(BundleContext context)
     {
+        IncidentDiagnostics.stop();
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK, (Consumer<Object[]>) event -> {});
         System.getProperties().put(CheckRecomputeNotifications.CALLBACK + ".full", //$NON-NLS-1$
             (java.util.function.Predicate<Object[]>) event -> false);
@@ -3507,8 +4384,7 @@ public final class Activator
             var parts = (Collection<?>) call(context, "getParts");
             write("PART " + partId + " " + describeObject(object) + " parts=" + parts + " fullRebuild="
                 + (hasMethod(context, "isFullRebuild") ? call(context, "isFullRebuild") : "?")
-                + (CTX_DEF.equals(partId) && !parts.contains(CMN_AT_FLD)
-                    ? " LOSS: тип пересоздаётся без части CMN_AT_FLD — общие реквизиты пропадут" : ""));
+                + " explicitCommonAttributePart=" + parts.contains(CMN_AT_FLD));
         }
 
         /** Кто заказал части CTX_DEF/CMN_AT_FLD для объекта — стек сборщика контекстов. */
@@ -3545,6 +4421,7 @@ public final class Activator
             if (contextDef == null)
             {
                 write("CONTEXT " + where + " null");
+                IncidentDiagnostics.instance.record("common-attribute-context", "CONTEXT " + where + " null");
                 return;
             }
             var existing = new StringBuilder();
@@ -3578,6 +4455,16 @@ public final class Activator
             var text = new StringBuilder("CONTEXT ").append(where).append(" existing=[").append(existing)
                 .append("] effective=").append(ids.size()).append(" remove=[").append(removed)
                 .append("] add=[").append(added).append(']');
+            try
+            {
+                Object namespace = call(transaction, "getNamespace");
+                text.append(" txNamespace=").append(call(namespace, "getName"))
+                    .append(" txNamespaceId=").append(Integer.toHexString(System.identityHashCode(namespace)))
+                    .append(" transactionId=").append(Integer.toHexString(System.identityHashCode(transaction)));
+            }
+            catch (Throwable failure) { text.append(" namespaceDiagnosticFailed=").append(failure); }
+            // Тот же приёмник, что у контекстов BSL: обе потери можно сопоставить в одной хронологии.
+            IncidentDiagnostics.instance.record("common-attribute-context", text.toString());
             if (!removedAttributes.isEmpty())
             {
                 for (Object attribute : removedAttributes)
@@ -3723,7 +4610,10 @@ public final class Activator
                 Object container = call(contextDef, "eContainer");
                 String containerText = container == null ? "null" : call(call(container, "eClass"), "getName")
                     + (hasMethod(container, "getName") ? ":" + call(container, "getName") : "");
-                return call(call(contextDef, "eClass"), "getName") + "@" + containerText;
+                return call(call(contextDef, "eClass"), "getName") + "@" + containerText
+                    + " contextId=" + Integer.toHexString(System.identityHashCode(contextDef))
+                    + " ownerId=" + Integer.toHexString(System.identityHashCode(container))
+                    + " contextUri=" + uri(contextDef) + " ownerUri=" + (container == null ? "null" : uri(container));
             }
             catch (Throwable failure)
             {
@@ -3778,7 +4668,7 @@ public final class Activator
 
         private synchronized void write(String text)
         {
-            String line = java.time.OffsetDateTime.now() + " [" + Thread.currentThread().getName() + "] "
+            String line = java.time.OffsetDateTime.now() + " pid=" + ProcessHandle.current().pid() + " [" + Thread.currentThread().getName() + "] "
                 + text + "\r\n";
             String previousHeader = header.toString();
             if (text.startsWith("SESSION") || text.startsWith("WEAVE"))

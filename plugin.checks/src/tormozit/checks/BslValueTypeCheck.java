@@ -160,7 +160,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         void check(Module module, IProgressMonitor monitor)
         {
             // Сохраняем арифметику, условия, возврат, передачу клиент/сервер и остальные ветки EDT.
-            TreeIterator<EObject> all = module.eAllContents();
+            TreeIterator<EObject> all = tormozit.BslXtextDocumentHook.validationContents(module);
             while (all.hasNext() && !monitor.isCanceled())
             {
                 EObject next = all.next();
@@ -189,7 +189,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                     }
                 }
             }
-            all = module.eAllContents();
+            all = tormozit.BslXtextDocumentHook.validationContents(module);
             while (all.hasNext() && !monitor.isCanceled())
             {
                 EObject next = all.next();

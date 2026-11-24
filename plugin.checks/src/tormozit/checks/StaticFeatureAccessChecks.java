@@ -145,7 +145,7 @@ public abstract class StaticFeatureAccessChecks extends BasicCheck<Object>
         DynamicFeatureAccessComputer computer = resource == null ? null
             : resource.getResourceServiceProvider().get(DynamicFeatureAccessComputer.class);
         Group group = group();
-        TreeIterator<EObject> all = module.eAllContents();
+        TreeIterator<EObject> all = tormozit.BslXtextDocumentHook.validationContents(module);
         while (all.hasNext() && !monitor.isCanceled())
         {
             EObject next = all.next();

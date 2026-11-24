@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Supplier;
 
 import org.eclipse.core.filebuffers.FileBuffers;
@@ -26,6 +27,7 @@ import org.eclipse.core.commands.common.NotDefinedException;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextViewer;
@@ -57,6 +59,8 @@ import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.IEObjectDescription;
+import org.eclipse.xtext.resource.IResourceDescriptionsProvider;
+import org.eclipse.xtext.resource.IResourceDescriptions;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.scoping.IScope;
@@ -2097,6 +2101,8 @@ public final class BslEditorHyperlinkHook implements IStartup
             Global.tempLog("literal-common-module", "detect offset=" + (region == null ? -1 : region.getOffset()) //$NON-NLS-1$ //$NON-NLS-2$
                 + " multiple=" + multiple + " segment=" + (segment != null) + " links=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + (links == null ? "null" : "[" + linksLog + "]")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (region != null && viewer.getDocument() instanceof IXtextDocument document)
+                CommonModuleVisibilityProbe.inspect(document, region.getOffset(), linksLog.toString());
             // #endregion
             BslNodeLookup.checkCanceled();
             IHyperlink description = multiple && region != null
@@ -2146,6 +2152,171 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (pendingJob != null)
                 pendingJob.cancel();
             detected = null;
+        }
+    }
+
+    /** Временный снимок контекста одноимённых общих модулей; ничего не пересчитывает. */
+    private static final class CommonModuleVisibilityProbe
+    {
+        private static final String TOPIC = "common-module-visibility"; //$NON-NLS-1$
+
+        static void inspect(IXtextDocument document, int offset, String links)
+        {
+            try
+            {
+                int length = document.getLength();
+                if (offset < 0 || offset > length)
+                    return;
+                int start = offset;
+                while (start > 0 && Character.isJavaIdentifierPart(document.getChar(start - 1)))
+                    start--;
+                int end = offset;
+                while (end < length && Character.isJavaIdentifierPart(document.getChar(end)))
+                    end++;
+                String candidate = document.get(start, end - start);
+                URI source = document.getResourceURI();
+                if (source == null || !source.isPlatformResource() || source.segmentCount() < 2 || candidate.isEmpty())
+                    return;
+                var workspace = org.eclipse.core.resources.ResourcesPlugin.getWorkspace().getRoot();
+                if (!workspace.getProject(source.segment(1)).getFile("src/CommonModules/" + candidate + "/Module.bsl").exists()) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    // Наведение на метод в «Модуль.Метод» тоже снимает контекст модуля.
+                    int dot = start - 1;
+                    while (dot >= 0 && Character.isWhitespace(document.getChar(dot)))
+                        dot--;
+                    if (dot < 0 || document.getChar(dot) != '.')
+                        return;
+                    int moduleEnd = dot;
+                    while (moduleEnd > 0 && Character.isWhitespace(document.getChar(moduleEnd - 1)))
+                        moduleEnd--;
+                    int moduleStart = moduleEnd;
+                    while (moduleStart > 0 && Character.isJavaIdentifierPart(document.getChar(moduleStart - 1)))
+                        moduleStart--;
+                    if (moduleStart == moduleEnd)
+                        return;
+                    candidate = document.get(moduleStart, moduleEnd - moduleStart);
+                }
+                String name = candidate;
+                String modulePath = "src/CommonModules/" + name + "/Module.bsl"; //$NON-NLS-1$ //$NON-NLS-2$
+                if (!workspace.getProject(source.segment(1)).getFile(modulePath).exists())
+                    return;
+                Global.incidentLog(TOPIC, "request source=" + source + " offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " name=" + name + " links=" + links); //$NON-NLS-1$ //$NON-NLS-2$
+                Job job = Job.createSystem("Комфорт: диагностика видимости общего модуля", monitor -> //$NON-NLS-1$
+                {
+                    try
+                    {
+                        IResourceServiceProvider[] services = {null};
+                        IResourceDescriptions descriptions = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+                        {
+                            services[0] = resource.getResourceServiceProvider();
+                            var provider = resource.getResourceServiceProvider().get(IResourceDescriptionsProvider.class);
+                            Global.incidentLog(TOPIC, "snapshot source=" + resource.getURI() + " requestedSource=" //$NON-NLS-1$ //$NON-NLS-2$
+                                + source + " provider=" + (provider == null ? "null" : provider.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (provider == null || source == null || !source.isPlatformResource()
+                                || source.segmentCount() < 2)
+                                return null;
+                            return provider.getResourceDescriptions(resource.getResourceSet());
+                        });
+                        Global.incidentLog(TOPIC, "descriptions=" //$NON-NLS-1$
+                            + (descriptions == null ? "null" : descriptions.getClass().getName())); //$NON-NLS-1$
+                        // Экспорт и запись подробностей — вне монитора документа.
+                        if (descriptions != null)
+                        {
+                            for (IProject project : workspace.getProjects())
+                            {
+                                if (!project.isOpen() || !project.getFile(modulePath).exists())
+                                    continue;
+                                URI folder = URI.createPlatformResourceURI("/" + project.getName() //$NON-NLS-1$
+                                    + "/src/CommonModules/" + name, true); //$NON-NLS-1$
+                                logDescription(descriptions, folder.appendSegment("Module.bsl")); //$NON-NLS-1$
+                                logDescription(descriptions, folder.appendSegment(name + ".mdo")); //$NON-NLS-1$
+                                logContext(services[0], project, folder.appendSegment("Module.bsl").appendFragment("/0"), name); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
+                        }
+                        Global.incidentLog(TOPIC, "snapshot.finished source=" + source + " name=" + name //$NON-NLS-1$ //$NON-NLS-2$
+                            + " inspected=" + (descriptions != null)); //$NON-NLS-1$
+                    }
+                    catch (RuntimeException | LinkageError error)
+                    {
+                        Global.incidentLogException(TOPIC, "snapshot.failed source=" + source + " name=" + name, error); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                });
+                job.schedule();
+            }
+            catch (RuntimeException | org.eclipse.jface.text.BadLocationException error)
+            {
+                Global.incidentLogException(TOPIC, "request.failed offset=" + offset, error); //$NON-NLS-1$
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        private static void logContext(IResourceServiceProvider services, IProject project, URI module, String name)
+        {
+            try
+            {
+                var models = services.get(com._1c.g5.v8.dt.core.platform.IBmModelManager.class);
+                var naming = services.get(com.e1c.g5.dt.core.api.naming.INamingService.class);
+                String fqn = naming.getDependentObjectFqnAsString(module,
+                    com._1c.g5.v8.dt.bsl.model.BslIndexPackage.Literals.MODULE_CONTEXT_DEF_INDEX);
+                var namespace = models.getBmNamespace(project);
+                Global.incidentLog(TOPIC, "lookup project=" + project.getName() + " module=" + module //$NON-NLS-1$ //$NON-NLS-2$
+                    + " fqn=" + fqn + " namespace=" + (namespace == null ? null : namespace.getName())); //$NON-NLS-1$ //$NON-NLS-2$
+                if (namespace == null)
+                    return;
+                var transaction = models.getBmPlatform().beginReadOnlyTransaction(true);
+                try
+                {
+                    Object index = transaction.getTopObjectByFqn(namespace, fqn);
+                    Object context = index instanceof com._1c.g5.v8.dt.bsl.model.ModuleContextDefIndex entry
+                        ? entry.getContextDef() : null;
+                    Object observer = System.getProperties().get("tormozit.moduleContext.sample"); //$NON-NLS-1$
+                    if (observer instanceof java.util.function.Consumer<?> consumer)
+                        ((java.util.function.Consumer<Object[]>) consumer).accept(
+                            new Object[] {"lookup target=" + module, context, fqn, namespace, index}); //$NON-NLS-1$
+                    else
+                        Global.incidentLog(TOPIC, "lookup observer=missing module=" + module); //$NON-NLS-1$
+                    Object metadata = transaction.getTopObjectByFqn(namespace, "CommonModule." + name); //$NON-NLS-1$
+                    if (metadata instanceof CommonModule common)
+                        Global.incidentLog(TOPIC, "metadata project=" + project.getName() + " name=" + common.getName() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " server=" + common.isServer() + " serverCall=" + common.isServerCall() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " managedClient=" + common.isClientManagedApplication() //$NON-NLS-1$
+                            + " ordinaryClient=" + common.isClientOrdinaryApplication() + " global=" + common.isGlobal()); //$NON-NLS-1$ //$NON-NLS-2$
+                    else
+                        Global.incidentLog(TOPIC, "metadata missing project=" + project.getName() + " name=" + name); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                finally { transaction.commit(); }
+            }
+            catch (RuntimeException error) { Global.incidentLogException(TOPIC, "lookup.failed module=" + module, error); } //$NON-NLS-1$
+        }
+
+        private static void logDescription(IResourceDescriptions descriptions, URI uri)
+        {
+            var description = descriptions.getResourceDescription(uri);
+            if (description == null)
+            {
+                Global.incidentLog(TOPIC, "resource uri=" + uri + " description=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            int count = 0;
+            int fingerprint = 0;
+            var environments = new java.util.TreeSet<String>();
+            for (IEObjectDescription exported : description.getExportedObjects())
+            {
+                int dataHash = 0;
+                for (String key : exported.getUserDataKeys())
+                {
+                    String value = exported.getUserData(key);
+                    dataHash += java.util.Objects.hash(key, value);
+                    if (key.toLowerCase(Locale.ROOT).contains("environment")) //$NON-NLS-1$
+                        environments.add(key + "=" + value); //$NON-NLS-1$
+                }
+                fingerprint += java.util.Objects.hash(exported.getName(), exported.getEObjectURI(), dataHash);
+                count++;
+            }
+            Global.incidentLog(TOPIC, "resource uri=" + uri + " description=" + description.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " exports=" + count + " fingerprint=" + Integer.toHexString(fingerprint) //$NON-NLS-1$ //$NON-NLS-2$
+                + " environments=" + environments); //$NON-NLS-1$
         }
     }
 

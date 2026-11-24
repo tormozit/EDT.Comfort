@@ -13,6 +13,17 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.emf.common.notify.impl.AdapterImpl;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.nodemodel.ICompositeNode;
+import org.eclipse.xtext.nodemodel.INode;
+import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.parser.IParseResult;
+import org.eclipse.xtext.util.CancelIndicator;
+import org.eclipse.xtext.validation.Issue;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
@@ -30,6 +41,11 @@ import org.eclipse.ui.texteditor.IElementStateListener;
 import org.eclipse.ui.texteditor.IElementStateListenerExtension;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.bsl.model.Method;
+import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.resource.BslResource;
+import com._1c.g5.v8.dt.bsl.util.BslUtil;
+import com._1c.g5.v8.dt.bsl.validation.IBslValidationContributor.ContextHolderAdapter;
 
 /**
  * Штатная EDT в {@code CustomXtextDocumentLocker.waitUpdatingDataModel} на UI-потоке
@@ -91,12 +107,615 @@ public final class BslXtextDocumentHook implements IStartup
      */
     public static void install()
     {
+        IncrementalEditorValidation.install();
+        // Временный безусловный канал исследовательских зондов раннего бандла.
+        System.getProperties().put("tormozit.incrementalValidation.sink", //$NON-NLS-1$
+            (java.util.function.Consumer<String>) text -> Global.tempLog("bsl-incremental", text)); //$NON-NLS-1$
+        Global.tempLog("bsl-incremental", "sink.installed patches=" + System.getProperties().entrySet().stream() //$NON-NLS-1$ //$NON-NLS-2$
+            .filter(entry -> entry.getKey().toString().startsWith("tormozit.incrementalValidation.") //$NON-NLS-1$
+                && entry.getValue() instanceof String).toList());
         System.getProperties().put(PROP_SKIP_WAIT,
             (BooleanSupplier) BslXtextDocumentHook::skipWaitUpdatingDataModel);
         // #region agent log
         System.getProperties().put(PROP_ASSIST_READ_OBSERVER,
             (BiConsumer<String, Long>) BslXtextDocumentHook::observeAssistRead);
         // #endregion
+    }
+
+    /** Обход выражений для проверок; модель и анализ зависимостей остаются полными. */
+    public static org.eclipse.emf.common.util.TreeIterator<EObject> validationContents(Module module)
+    {
+        var contents = module.eAllContents();
+        var methods = IncrementalEditorValidation.methods(module);
+        return methods == null ? contents : new IncrementalEditorValidation.ScopedContents(contents, methods);
+    }
+
+    /** Методы, выбранные для проверки редактора; при записи возвращаются все методы. */
+    public static java.util.List<Method> validationMethods(Module module)
+    {
+        var methods = IncrementalEditorValidation.methods(module);
+        return methods == null ? module.allMethods()
+            : module.allMethods().stream().filter(methods::contains).toList();
+    }
+
+    /** Согласованный с ранним вплетением режим проверки только незаписанной модели редактора. */
+    private static final class IncrementalEditorValidation
+    {
+        private static final String PREFIX = "tormozit.editorValidation.";
+        private static final String SESSION = PREFIX + "session";
+        private static final String JOB = "com._1c.g5.v8.dt.bsl.ui.editor.BslXtextDocumentProvider$BslValidationJob";
+        private static final java.util.Map<IDocument, java.lang.ref.WeakReference<State>> DOCUMENT_STATES =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+        private static final ThreadLocal<java.lang.ref.WeakReference<Session>> CHECK_SCOPE = new ThreadLocal<>();
+
+        /** На ресурсе, а не в глобальном кэше: старые AST и закрытые редакторы не удерживаются. */
+        private static final class State extends AdapterImpl
+        {
+            int edits;
+            boolean baseline;
+            String header;
+            String editReason;
+            int methodStart = -1;
+            int originalMethodCount = -1;
+            int changePosition = -1;
+            int changeShift;
+            Session active;
+            Session prepared;
+            java.lang.ref.WeakReference<IParseResult> validatedParse;
+            String validatedHeader;
+            BodyRange range;
+            final java.util.Set<String> affectedNames = new java.util.HashSet<>();
+            final java.util.Set<String> validatedNames = new java.util.HashSet<>();
+            final java.util.Set<String> moduleChecks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            final java.util.Map<String, Long> checkStarts = new java.util.HashMap<>();
+
+            @Override public boolean isAdapterForType(Object type) { return type == State.class; }
+        }
+
+        private record Session(BslResource resource, IParseResult parse, int edits, boolean partial,
+            java.util.Set<Method> methods, int position, int shift) { }
+
+        private record BodyRange(int methodStart, int signatureEnd, int end, String header, String closing)
+        {
+            boolean matches(ICompositeNode node, INode signature, String currentHeader, String source)
+            {
+                return node != null && signature != null && methodStart == node.getOffset()
+                    && signatureEnd == signature.getEndOffset() && header != null && header.equals(currentHeader)
+                    && closing != null && !closing.isEmpty() && source.regionMatches(end, closing, 0, closing.length());
+            }
+
+            BodyRange shifted(int delta) { return new BodyRange(methodStart, signatureEnd, end + delta, header, closing); }
+        }
+
+        private static boolean scopedCheck(Object check)
+        {
+            String type = check.getClass().getName();
+            return type.startsWith("tormozit.checks.StaticFeatureAccessChecks$") || java.util.Set.of(
+                "tormozit.checks.BslValueTypeCheck", "tormozit.checks.BslNumericIndexCheck",
+                "tormozit.checks.BslForEachCollectionCheck", "tormozit.checks.BslUnknownLiteralCheck",
+                "tormozit.checks.BslGotoLabelCheck", "tormozit.checks.BslQueryResultFieldCheck").contains(type);
+        }
+
+        static void install()
+        {
+            var properties = System.getProperties();
+            properties.put(PREFIX + "before", (java.util.function.Consumer<Object[]>) IncrementalEditorValidation::beforeUpdate);
+            properties.put(PREFIX + "mark", (java.util.function.BiConsumer<Object, Object>) IncrementalEditorValidation::mark);
+            properties.put(PREFIX + "filter", (java.util.function.BiFunction<Object, Object, Object>) IncrementalEditorValidation::filter);
+            properties.put(PREFIX + "finish", (java.util.function.BiConsumer<Object, Object>) IncrementalEditorValidation::finish);
+            properties.put(PREFIX + "issuesBegin", (java.util.function.BiConsumer<Object, Object>) IncrementalEditorValidation::issuesBegin);
+            properties.put(PREFIX + "issuesEnd", (java.util.function.BiConsumer<Object, Object>) IncrementalEditorValidation::issuesEnd);
+            properties.put(PREFIX + "graph", (java.util.function.BiFunction<Object, Object, Object>) IncrementalEditorValidation::graph);
+            properties.put(PREFIX + "offset", (java.util.function.BiFunction<Object, Object, Object>) (original, target) ->
+            {
+                Session session = session(target);
+                return session == null ? original : session.position();
+            });
+            properties.put(PREFIX + "shift", (java.util.function.BiFunction<Object, Object, Object>) (original, target) ->
+            {
+                Session session = session(target);
+                return session == null ? original : session.shift();
+            });
+            properties.put(PREFIX + "module", (java.util.function.Consumer<Object[]>) event ->
+            {
+                if (!(event[1] instanceof Module module) || !(module.eResource() instanceof BslResource resource))
+                    return;
+                State state = (State)EcoreUtil.getAdapter(resource.eAdapters(), State.class);
+                if (state == null)
+                    return;
+                synchronized (state)
+                {
+                    if (state.active == null)
+                        return;
+                    String code = (String)event[0];
+                    boolean scoped = scopedCheck(event[2]);
+                    String key = Thread.currentThread().getId() + ":" + code;
+                    if (Boolean.TRUE.equals(event[3]))
+                    {
+                        if (scoped && state.active.partial()) CHECK_SCOPE.set(new java.lang.ref.WeakReference<>(state.active));
+                        else CHECK_SCOPE.remove();
+                        if (scoped) state.moduleChecks.remove(code); else state.moduleChecks.add(code);
+                        state.checkStarts.put(key, System.nanoTime());
+                        Global.tempLog("bsl-incremental", "editor.check.enter code=" + code + " scoped=" + (scoped && state.active.partial()));
+                    }
+                    else
+                    {
+                        CHECK_SCOPE.remove();
+                        Long started = state.checkStarts.remove(key);
+                        Global.tempLog("bsl-incremental", "editor.check.return code=" + code + " elapsedUs="
+                            + (started == null ? -1 : (System.nanoTime() - started) / 1000));
+                    }
+                }
+            });
+            properties.put(PREFIX + "replace", (java.util.function.BiFunction<Object, Object, Object>) (original, argument) ->
+            {
+                if (Boolean.TRUE.equals(original))
+                    return true;
+                if (argument instanceof Object[] values && values[0] instanceof String code && values[1] instanceof IDocument document)
+                {
+                    var reference = DOCUMENT_STATES.get(document);
+                    State state = reference == null ? null : reference.get();
+                    return state != null && state.moduleChecks.contains(code);
+                }
+                return false;
+            });
+            properties.put(PREFIX + "position", (java.util.function.BiConsumer<Object, Object>) IncrementalEditorValidation::position);
+            // При записи во время проверки частичный результат также не публикуется в «Проблемы».
+            properties.put(PREFIX + "stamp", (java.util.function.BiFunction<Object, Object, Object>) (original, target) ->
+            {
+                if (target instanceof BslResource resource)
+                {
+                    State state = (State)EcoreUtil.getAdapter(resource.eAdapters(), State.class);
+                    if (state != null)
+                        synchronized (state)
+                        {
+                            if (state.active != null && state.active.partial() && resource.getContextHolder() != null
+                                && resource.getContextHolder().getContext().get(SESSION) == state.active)
+                                return -1L;
+                        }
+                }
+                return original;
+            });
+        }
+
+        private static State state(BslResource resource)
+        {
+            State state = (State)EcoreUtil.getAdapter(resource.eAdapters(), State.class);
+            if (state == null)
+            {
+                state = new State();
+                resource.eAdapters().add(state);
+            }
+            return state;
+        }
+
+        private static java.util.Set<Method> methods(Module module)
+        {
+            if (!(module.eResource() instanceof BslResource resource))
+                return null;
+            State state = (State)EcoreUtil.getAdapter(resource.eAdapters(), State.class);
+            var current = CHECK_SCOPE.get();
+            if (state == null || current == null)
+                return null;
+            synchronized (state)
+            {
+                Session session = state.active;
+                return session != null && current.get() == session && session.partial() && session.parse() == resource.getParseResult()
+                    && state.edits == session.edits() && resource.getContextHolder() != null
+                    && resource.getContextHolder().getContext().get(SESSION) == session ? session.methods() : null;
+            }
+        }
+
+        private static Session session(Object target)
+        {
+            BslResource resource = target instanceof BslResource value ? value
+                : target instanceof EObject object && object.eResource() instanceof BslResource value ? value : null;
+            if (resource == null || resource.getContextHolder() == null)
+                return null;
+            Object candidate = resource.getContextHolder().getContext().get(SESSION);
+            if (!(candidate instanceof Session session) || !session.partial() || session.parse() != resource.getParseResult())
+                return null;
+            State state = state(resource);
+            synchronized (state)
+            {
+                return state.active == session && state.edits == session.edits() ? session : null;
+            }
+        }
+
+        /** И старые вызываемые методы нужны после удаления вызова в одной из накопленных правок. */
+        private static Object graph(Object original, Object target)
+        {
+            Session session = session(target);
+            if (session == null || !(original instanceof java.util.Collection<?> collection))
+                return original;
+            java.util.Set<Object> result = new java.util.LinkedHashSet<>(collection);
+            Method current = session.resource().getReparseMethod();
+            for (Method method : session.methods())
+                if (method != current && !current.getCallees().contains(method))
+                    result.add(method);
+            return result;
+        }
+
+        private static String methodKey(Method method)
+        {
+            return method.getUniqueName() == null ? method.getName() : method.getUniqueName();
+        }
+
+        private static final class ScopedContents implements org.eclipse.emf.common.util.TreeIterator<EObject>
+        {
+            private final org.eclipse.emf.common.util.TreeIterator<EObject> source;
+            private final java.util.Set<Method> methods;
+            private EObject next;
+
+            ScopedContents(org.eclipse.emf.common.util.TreeIterator<EObject> source, java.util.Set<Method> methods)
+            {
+                this.source = source;
+                this.methods = methods;
+            }
+
+            @Override public boolean hasNext()
+            {
+                while (next == null && source.hasNext())
+                {
+                    EObject candidate = source.next();
+                    if (candidate instanceof Method method && !methods.contains(method))
+                        source.prune();
+                    else
+                        next = candidate;
+                }
+                return next != null;
+            }
+
+            @Override public EObject next()
+            {
+                if (!hasNext()) throw new java.util.NoSuchElementException();
+                EObject result = next;
+                next = null;
+                return result;
+            }
+
+            @Override public void prune()
+            {
+                if (next != null) throw new IllegalStateException("prune after hasNext");
+                source.prune();
+            }
+        }
+
+        private static boolean patchesReady()
+        {
+            if (!Integer.valueOf(2).equals(System.getProperties().get(PREFIX + "revision")))
+                return false;
+            for (String target : java.util.List.of("com._1c.g5.v8.dt.bsl.resource.BslResource", JOB, JOB + "$1",
+                "com._1c.g5.v8.dt.bsl.validation.BslCancelableDiagnostician",
+                "com._1c.g5.v8.dt.bsl.validation.BslNotifyingResourceValidator",
+                "com.e1c.g5.v8.dt.internal.check.CheckExecutor"))
+                if (!Boolean.TRUE.equals(System.getProperties().get(PREFIX + "patch." + target)))
+                    return false;
+            return true;
+        }
+
+        private static String header(Method method)
+        {
+            ICompositeNode node = NodeModelUtils.findActualNodeFor(method);
+            INode end = BslUtil.getMethodSignatureLastNode(method);
+            if (node == null || end == null)
+                return null;
+            return node.getRootNode().getText().substring(node.getOffset(), end.getEndOffset());
+        }
+
+        /** Keyword конца метода; для горячего разбора согласовано исключение ExtName после точки с новой строки. */
+        private static int bodyEnd(Method method, ICompositeNode node)
+        {
+            if (node == null) return -1;
+            boolean function = method instanceof com._1c.g5.v8.dt.bsl.model.Function;
+            String ruleName = function ? "Function" : "Procedure";
+            String english = function ? "EndFunction" : "EndProcedure";
+            String russian = function ? "КонецФункции" : "КонецПроцедуры";
+            int end = -1;
+            for (var leaf : node.getLeafNodes())
+                if (!leaf.isHidden() && leaf.getGrammarElement() instanceof org.eclipse.xtext.Keyword keyword
+                    && (english.equalsIgnoreCase(keyword.getValue()) || russian.equalsIgnoreCase(keyword.getValue())))
+                {
+                    var rule = EcoreUtil2.getContainerOfType(keyword, org.eclipse.xtext.ParserRule.class);
+                    if (rule != null && ruleName.equals(rule.getName()))
+                        end = leaf.getOffset();
+                    else if (rule != null && "ExtName".equals(rule.getName())
+                        && afterDotOnNewLine(node.getRootNode().getText(), leaf.getOffset()))
+                    {
+                        end = leaf.getOffset();
+                        Global.tempLog("bsl-incremental", "editor.boundary.hot-member offset=" + end
+                            + " keyword=" + leaf.getText() + " method=" + method.getName());
+                    }
+                }
+            return end;
+        }
+
+        private static boolean afterDotOnNewLine(String source, int offset)
+        {
+            int lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+            if (lineStart == 0)
+                return false;
+            for (int index = lineStart; index < offset; index++)
+                if (!Character.isWhitespace(source.charAt(index)))
+                    return false;
+            int previous = offset - 1;
+            while (previous >= 0 && Character.isWhitespace(source.charAt(previous)))
+                previous--;
+            return previous >= 0 && source.charAt(previous) == '.';
+        }
+
+        /** Вызов внутри updateWriteLock, непосредственно перед штатным обновлением ресурса. */
+        private static void beforeUpdate(Object[] event)
+        {
+            if (!(event[0] instanceof BslResource resource))
+                return;
+            State state = state(resource);
+            synchronized (state)
+            {
+                try
+                {
+                    int offset = (Integer)event[1];
+                    int removed = (Integer)event[2];
+                    String inserted = event[3] instanceof String text ? text : "";
+                    ICompositeNode root = resource.getParseResult() == null ? null : resource.getParseResult().getRootNode();
+                    // То же условие isNullEdit, что у штатного BslPartialParsingHelper.
+                    // Синхронизация автодополнения вызывает также update(0, 0, "").
+                    if (removed == inserted.length() && (removed == 0 || root != null
+                        && root.getText().regionMatches(offset, inserted, 0, removed)))
+                    {
+                        Global.tempLog("bsl-incremental", "editor.update.unchanged offset=" + offset + " length=" + removed
+                            + " pending=" + state.edits + " shift=" + state.changeShift + " resource=" + resource.getURI());
+                        return;
+                    }
+                    String previousHeader = state.header;
+                    BodyRange previousRange = state.range;
+                    state.edits++;
+                    if (state.edits == 1 && resource.getParseResult() != null
+                        && resource.getParseResult().getRootASTElement() instanceof Module module)
+                        state.originalMethodCount = module.allMethods().size();
+                    state.header = null;
+                    state.range = null;
+                    state.editReason = "baseline-or-previous-unsafe-edit";
+                    state.changePosition = state.changePosition < 0 ? offset : Math.min(state.changePosition, offset);
+                    state.changeShift += inserted.length() - removed;
+                    if (!state.baseline || resource.getParseResult() == null || state.edits > 1 && previousHeader == null)
+                        return;
+                    state.editReason = "comment-or-missing-leaf";
+                    var leaf = NodeModelUtils.findLeafNodeAtOffset(root, offset);
+                    if (leaf == null || leaf.getText().stripLeading().startsWith("//"))
+                        return;
+                    Method method = EcoreUtil2.getContainerOfType(NodeModelUtils.findActualSemanticObjectFor(leaf), Method.class);
+                    // При неполном операторе semantic object может отсутствовать; родительский
+                    // узел метода в node model при этом остаётся (в том числе у пустого метода).
+                    if (method == null)
+                        for (INode owner = leaf.getParent(); owner != null; owner = owner.getParent())
+                            if (owner.getSemanticElement() instanceof Method value) { method = value; break; }
+                    state.editReason = "method-node";
+                    if (method == null)
+                        return;
+                    ICompositeNode methodNode = NodeModelUtils.findActualNodeFor(method);
+                    INode signature = BslUtil.getMethodSignatureLastNode(method);
+                    String currentHeader = header(method);
+                    int parsedEnd = bodyEnd(method, methodNode);
+                    BodyRange range = previousRange;
+                    if (parsedEnd >= 0 && methodNode != null && signature != null)
+                    {
+                        var closing = NodeModelUtils.findLeafNodeAtOffset(root, parsedEnd);
+                        if (closing != null)
+                            range = new BodyRange(methodNode.getOffset(), signature.getEndOffset(), parsedEnd, currentHeader, closing.getText());
+                    }
+                    boolean verified = range != null && range.matches(methodNode, signature, currentHeader, root.getText());
+                    int end = range == null ? -1 : range.end();
+                    state.editReason = "method-body-range";
+                    Global.tempLog("bsl-incremental", "editor.edit.range offset=" + offset + " removed=" + removed
+                        + " signatureEnd=" + (signature == null ? -1 : signature.getEndOffset()) + " bodyEnd=" + end
+                        + " parsedEnd=" + parsedEnd + " tracked=" + (parsedEnd < 0) + " verified=" + verified
+                        + " method=" + method.getName() + " resource=" + resource.getURI());
+                    if (!verified || end < 0 || offset < range.signatureEnd() || offset + removed > end)
+                        return;
+                    String deleted = root.getText().substring(offset, offset + removed);
+                    state.editReason = "directive-text";
+                    if (directives(inserted) || directives(deleted))
+                        return;
+                    int methodStart = methodNode.getOffset();
+                    if (state.edits > 1 && (!java.util.Objects.equals(previousHeader, currentHeader) || state.methodStart != methodStart))
+                    {
+                        state.editReason = "different-methods";
+                        return;
+                    }
+                    state.methodStart = methodStart;
+                    for (var caller : BslUtil.getDependMethodsTree(method))
+                        if (caller instanceof Method dependent) state.affectedNames.add(methodKey(dependent));
+                    for (Method callee : method.getCallees()) state.affectedNames.add(methodKey(callee));
+                    state.affectedNames.add(methodKey(method));
+                    state.header = currentHeader;
+                    state.range = range.shifted(inserted.length() - removed);
+                    state.editReason = "body";
+                }
+                catch (RuntimeException error)
+                {
+                    state.baseline = false;
+                    state.header = null;
+                    state.range = null;
+                    Global.tempLog("bsl-incremental", "editor.before.failed resource=" + resource.getURI() + " error=" + error);
+                }
+            }
+        }
+
+        private static boolean directives(String text)
+        {
+            return text.indexOf('#') >= 0 || text.indexOf('&') >= 0 || text.contains("//");
+        }
+
+        /** Вызывается только для нового адаптера, созданного самой BslValidationJob. */
+        private static void mark(Object candidate, Object target)
+        {
+            if (!(candidate instanceof ContextHolderAdapter holder) || !(target instanceof Object[] values)
+                || !(values[0] instanceof BslResource resource) || !(values[1] instanceof IDocument document))
+                return;
+            State state = state(resource);
+            DOCUMENT_STATES.put(document, new java.lang.ref.WeakReference<>(state));
+            synchronized (state)
+            {
+                try
+                {
+                    long stamp = resource.getTimeStamp();
+                    Method method = resource.getReparseMethod();
+                    boolean unchanged = state.edits == 0 && state.validatedParse != null
+                        && state.validatedParse.get() == resource.getParseResult() && state.validatedHeader != null
+                        && method != null && state.validatedHeader.equals(header(method));
+                    String expectedHeader = unchanged ? state.validatedHeader : state.header;
+                    String reason = !patchesReady() ? "patches" : !state.baseline ? "baseline"
+                        : expectedHeader == null ? "outside-body"
+                        : stamp != 0 && stamp != -1 ? "persisted-resource"
+                        : resource.getResourceSet() == null || BslUtil.isBuildOperationResourceSet(resource.getResourceSet()) ? "build"
+                        : !resource.isOnlyMethodReparse() || method == null ? "full-parse"
+                        : state.edits > 0 && state.originalMethodCount >= 0
+                            && resource.getParseResult().getRootASTElement() instanceof Module module
+                            && module.allMethods().size() != state.originalMethodCount ? "method-set"
+                        : resource.getParseResult().getRootASTElement() instanceof Module module && !module.getStatements().isEmpty() ? "module-statements"
+                        : !expectedHeader.equals(header(method)) ? "signature" : unchanged ? "unchanged-model" : "body";
+                    java.util.Set<Method> methods = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                    boolean partial = "body".equals(reason) || "unchanged-model".equals(reason);
+                    if (partial)
+                    {
+                        for (var block : BslUtil.getDependMethodsTree(method))
+                            if (block instanceof Method dependent) methods.add(dependent);
+                        methods.addAll(method.getCallees());
+                        methods.add(method);
+                        if (resource.getParseResult().getRootASTElement() instanceof Module module)
+                            for (Method candidateMethod : module.allMethods())
+                                if ((unchanged ? state.validatedNames : state.affectedNames).contains(methodKey(candidateMethod)))
+                                    methods.add(candidateMethod);
+                    }
+                    Session session = new Session(resource, resource.getParseResult(), state.edits, partial, methods,
+                        unchanged ? 0 : Math.max(0, state.changePosition), unchanged ? 0 : state.changeShift);
+                    state.active = session;
+                    state.checkStarts.clear();
+                    holder.getContext().put(SESSION, session);
+                    Global.tempLog("bsl-incremental", "editor.scope mode=" + (session.partial() ? "partial" : "full")
+                        + " reason=" + reason + " editReason=" + state.editReason + " methods=" + methods.size()
+                        + " edits=" + state.edits + " stamp=" + stamp
+                        + " position=" + session.position() + " shift=" + session.shift()
+                        + " syntaxErrors=" + resource.getParseResult().hasSyntaxErrors()
+                        + " method=" + (method == null ? null : method.getName()) + " resource=" + resource.getURI());
+                }
+                catch (RuntimeException error)
+                {
+                    state.active = null;
+                    Global.tempLog("bsl-incremental", "editor.scope.failed resource=" + resource.getURI() + " error=" + error);
+                }
+            }
+        }
+
+        /** Меняет только ответ двух условий выбора охвата; настоящий контекст остаётся установленным. */
+        private static Object filter(Object original, Object target)
+        {
+            if (!(original instanceof ContextHolderAdapter holder))
+                return original;
+            BslResource resource = target instanceof BslResource value ? value
+                : target instanceof EObject object && object.eResource() instanceof BslResource value ? value : null;
+            if (!(holder.getContext().get(SESSION) instanceof Session session) || session.resource() != resource || !session.partial())
+                return original;
+            State state = state(resource);
+            synchronized (state)
+            {
+                return state.active == session && state.edits == session.edits() && resource.getParseResult() == session.parse()
+                    ? null : original;
+            }
+        }
+
+        private static void finish(Object target, Object indicator)
+        {
+            if (!(target instanceof BslResource resource) || !(indicator instanceof CancelIndicator cancel))
+                return;
+            State state = state(resource);
+            synchronized (state)
+            {
+                Session session = state.active;
+                state.active = null;
+                if (session == null)
+                    return;
+                boolean complete = !cancel.isCanceled() && resource.getParseResult() == session.parse() && state.edits == session.edits();
+                state.prepared = complete ? session : null;
+                if (!complete)
+                    state.baseline = false;
+                Global.tempLog("bsl-incremental", "editor.finish complete=" + complete + " partial=" + session.partial()
+                    + " resource=" + resource.getURI());
+            }
+        }
+
+        private static State documentState(Object source)
+        {
+            var reference = source instanceof IDocument document ? DOCUMENT_STATES.get(document) : null;
+            return reference == null ? null : reference.get();
+        }
+
+        private static void issuesBegin(Object source, Object monitor)
+        {
+            State state = documentState(source);
+            if (state == null) return;
+            synchronized (state)
+            {
+                // Предыдущий createIssues не вернул результат: его слияние могло оборваться.
+                if (state.prepared != null) state.baseline = false;
+                state.prepared = null;
+            }
+        }
+
+        /** Baseline принимается после слияния Issues, а не после одного расчёта модели. */
+        private static void issuesEnd(Object source, Object indicator)
+        {
+            State state = documentState(source);
+            if (state == null || !(indicator instanceof org.eclipse.core.runtime.IProgressMonitor monitor)) return;
+            synchronized (state)
+            {
+                Session session = state.prepared;
+                state.prepared = null;
+                if (session == null) return;
+                boolean complete = !monitor.isCanceled() && session.resource().getParseResult() == session.parse()
+                    && state.edits == session.edits();
+                state.baseline = complete;
+                if (complete)
+                {
+                    state.validatedParse = new java.lang.ref.WeakReference<>(session.parse());
+                    Method method = session.resource().getReparseMethod();
+                    state.validatedHeader = method == null ? null : header(method);
+                    state.validatedNames.clear();
+                    for (Method checked : session.methods()) state.validatedNames.add(methodKey(checked));
+                    state.affectedNames.clear();
+                    state.edits = 0;
+                    state.header = null;
+                    state.changePosition = -1;
+                    state.changeShift = 0;
+                    state.originalMethodCount = -1;
+                }
+                Global.tempLog("bsl-incremental", "editor.issues complete=" + complete + " partial=" + session.partial()
+                    + " resource=" + session.resource().getURI());
+            }
+        }
+
+        /** EDT сдвигает offset, но оставляет старые line/column; пересчитываем их по текущему документу. */
+        private static void position(Object source, Object candidate)
+        {
+            if (!(source instanceof IDocument document) || !(candidate instanceof Issue.IssueImpl issue) || issue.getOffset() == null)
+                return;
+            try
+            {
+                int offset = issue.getOffset();
+                int end = Math.min(document.getLength(), offset + (issue.getLength() == null ? 0 : issue.getLength()));
+                int line = document.getLineOfOffset(offset);
+                int endLine = document.getLineOfOffset(end);
+                issue.setLineNumber(line + 1);
+                issue.setColumn(offset - document.getLineOffset(line) + 1);
+                issue.setLineNumberEnd(endLine + 1);
+                issue.setColumnEnd(end - document.getLineOffset(endLine) + 1);
+            }
+            catch (org.eclipse.jface.text.BadLocationException error)
+            {
+                Global.tempLog("bsl-incremental", "editor.position.failed offset=" + issue.getOffset() + " error=" + error);
+            }
+        }
     }
 
     @Override

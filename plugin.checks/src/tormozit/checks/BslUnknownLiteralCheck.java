@@ -67,7 +67,7 @@ public final class BslUnknownLiteralCheck extends BasicCheck<Object>
         try (var analysis = BslLiteralValues.validationPass(module,
             () -> monitor.isCanceled() || !TypeUtil.isStringLiteralContentTypesEnabled(), getCheckId()))
         {
-            TreeIterator<EObject> all = module.eAllContents();
+            TreeIterator<EObject> all = tormozit.BslXtextDocumentHook.validationContents(module);
             while (all.hasNext() && !monitor.isCanceled() && TypeUtil.isStringLiteralContentTypesEnabled())
             {
                 EObject next = all.next();

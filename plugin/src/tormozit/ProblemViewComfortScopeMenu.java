@@ -11,9 +11,9 @@ import org.eclipse.swt.widgets.MenuItem;
  * рядом со штатными радио «Области возникновения».
  *
  * <p>Режим хранит {@link ProblemViewComfortScope}, применяет {@link ProblemViewHook}.
- * Пункты — флажки. Под нашим режимом панель работает в штатной области
- * «Текущий элемент»/«Текущий проект», поэтому при открытии меню штатные радио
- * визуально снимаются (иначе отмеченными выглядят сразу два «альтернативных» режима).
+ * Пункты выбирают область без отключения при повторном выборе. Под нашим режимом
+ * панель работает в штатной области «Текущий элемент»/«Текущий проект», поэтому
+ * при открытии меню штатные радио визуально снимаются, чтобы не отмечать две области.
  * Сброс нашего режима при выборе штатного радио делает {@code IExecutionListener}
  * в {@link ProblemViewHook}.
  *
@@ -41,9 +41,9 @@ public final class ProblemViewComfortScopeMenu extends ContributionItem
         navigator.setSelection(mode == ProblemViewComfortScope.Mode.NAVIGATOR);
         activeSets.setSelection(mode == ProblemViewComfortScope.Mode.ACTIVE_SETS);
 
-        navigator.addListener(SWT.Selection, e -> onToggle(navigator, activeSets,
+        navigator.addListener(SWT.Selection, e -> onSelect(navigator, activeSets,
             ProblemViewComfortScope.Mode.NAVIGATOR));
-        activeSets.addListener(SWT.Selection, e -> onToggle(activeSets, navigator,
+        activeSets.addListener(SWT.Selection, e -> onSelect(activeSets, navigator,
             ProblemViewComfortScope.Mode.ACTIVE_SETS));
 
         // Штатные радио «Области возникновения» заполняются раньше нас (мы — перед
@@ -75,12 +75,13 @@ public final class ProblemViewComfortScopeMenu extends ContributionItem
         }
     }
 
-    private static void onToggle(MenuItem self, MenuItem other, ProblemViewComfortScope.Mode mode)
+    private static void onSelect(MenuItem self, MenuItem other, ProblemViewComfortScope.Mode mode)
     {
-        boolean on = self.getSelection();
-        if (on && !other.isDisposed())
+        // SWT.CHECK снимает отметку при повторном клике, но область остаётся выбранной.
+        self.setSelection(true);
+        if (!other.isDisposed())
             other.setSelection(false);
-        ProblemViewComfortScope.setMode(on ? mode : ProblemViewComfortScope.Mode.NONE);
+        ProblemViewComfortScope.setMode(mode);
     }
 
     private static MenuItem create(Menu menu, int index, String text)

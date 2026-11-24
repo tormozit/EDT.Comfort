@@ -5,7 +5,6 @@ import java.util.List;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
-import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.XtextResource;
@@ -66,10 +65,13 @@ public final class BslGotoLabelCheck extends BasicCheck<Object>
     {
         if (!(object instanceof Module module) || !(module.eResource() instanceof XtextResource))
             return;
-        for (GotoStatement goTo : EcoreUtil2.getAllContentsOfType(module, GotoStatement.class))
+        var contents = tormozit.BslXtextDocumentHook.validationContents(module);
+        while (contents.hasNext())
         {
             if (monitor.isCanceled())
                 return;
+            if (!(contents.next() instanceof GotoStatement goTo))
+                continue;
             Label label = goTo.getLabel();
             if (label == null)
                 continue;
