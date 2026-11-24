@@ -104,6 +104,7 @@ public final class BslFormatterHook implements IStartup
     public static final String KEY_COMPRESS_BLANK_LINES = "comfortCompressBlankLines"; //$NON-NLS-1$
     public static final String KEY_KEEP_INVOCATION = "comfortKeepInvocation"; //$NON-NLS-1$
     public static final String KEY_AND_OR_TREE = "comfortAndOrTree"; //$NON-NLS-1$
+    public static final String KEY_AND_OR_TREE_NEUTRAL = "comfortAndOrTreeNeutral"; //$NON-NLS-1$
     public static final String KEY_AND_OR_TREE_MIN_OPS = "comfortAndOrTreeMinOps"; //$NON-NLS-1$
 
     public static final boolean DEFAULT_CONTINUATION_INDENT = true;
@@ -111,6 +112,7 @@ public final class BslFormatterHook implements IStartup
     public static final boolean DEFAULT_COMPRESS_BLANK_LINES = false;
     public static final boolean DEFAULT_KEEP_INVOCATION = true;
     public static final boolean DEFAULT_AND_OR_TREE = false;
+    public static final boolean DEFAULT_AND_OR_TREE_NEUTRAL = true;
     public static final int DEFAULT_AND_OR_TREE_MIN_OPS = 3;
 
     private static final String FORMAT_COMMAND_ID = "org.eclipse.xtext.ui.FormatAction"; //$NON-NLS-1$
@@ -201,6 +203,7 @@ public final class BslFormatterHook implements IStartup
         boolean compressBlankLines = DEFAULT_COMPRESS_BLANK_LINES;
         boolean keepInvocation = DEFAULT_KEEP_INVOCATION;
         boolean andOrTree = DEFAULT_AND_OR_TREE;
+        boolean andOrTreeNeutral = DEFAULT_AND_OR_TREE_NEUTRAL;
         int andOrTreeMinOps = DEFAULT_AND_OR_TREE_MIN_OPS;
         int margin = 120;
         int tabWidth = 4;
@@ -238,6 +241,7 @@ public final class BslFormatterHook implements IStartup
             options.compressBlankLines = reader.ownBoolean(KEY_COMPRESS_BLANK_LINES, DEFAULT_COMPRESS_BLANK_LINES);
             options.keepInvocation = reader.ownBoolean(KEY_KEEP_INVOCATION, DEFAULT_KEEP_INVOCATION);
             options.andOrTree = reader.ownBoolean(KEY_AND_OR_TREE, DEFAULT_AND_OR_TREE);
+            options.andOrTreeNeutral = reader.ownBoolean(KEY_AND_OR_TREE_NEUTRAL, DEFAULT_AND_OR_TREE_NEUTRAL);
             options.andOrTreeMinOps = reader.ownInteger(KEY_AND_OR_TREE_MIN_OPS, DEFAULT_AND_OR_TREE_MIN_OPS);
             return options;
         }
@@ -785,9 +789,10 @@ public final class BslFormatterHook implements IStartup
         AndOrGroup tree = buildGroup(binary, text);
         if (tree == null)
             return null;
-        removeNeutral(tree);
-        if (operationCount(tree) < options.andOrTreeMinOps)
+        int operations = operationCount(tree);
+        if (operations < options.andOrTreeMinOps)
             return null;
+        removeNeutral(tree);
         int start = node.getOffset();
         int end = node.getEndOffset();
         List<AndOrLeaf> leaves = new ArrayList<>();
@@ -809,7 +814,8 @@ public final class BslFormatterHook implements IStartup
         String statementIndent = BslTextFormatter.leadingWhitespace(text.substring(lineStart, start));
         List<String> lines = new ArrayList<>();
         int[] nextComment = { 0 };
-        renderGroup(tree, 0, "", "", lines, text, comments, nextComment, words, statementIndent, options.indentUnit()); //$NON-NLS-1$ //$NON-NLS-2$
+        renderGroup(tree, 0, "", "", lines, text, comments, nextComment, words, statementIndent, //$NON-NLS-1$ //$NON-NLS-2$
+            options.indentUnit(), options.andOrTreeNeutral);
         String replacement = String.join(delimiter, lines);
         int replaceEnd = end;
         EObject owner = binary.eContainer();
@@ -945,20 +951,24 @@ public final class BslFormatterHook implements IStartup
 
     private static void renderGroup(AndOrGroup group, int depth, String firstIndent, String firstPrefix,
         List<String> lines, String text, List<GapComment> comments, int[] nextComment, TreeWords words,
-        String statementIndent, String unit)
+        String statementIndent, String unit, boolean neutral)
     {
-        lines.add(firstIndent + firstPrefix + words.neutral(group.operation));
+        if (neutral)
+            lines.add(firstIndent + firstPrefix + words.neutral(group.operation));
         String childIndent = statementIndent + unit.repeat(depth + 1);
         String operation = words.operation(group.operation) + " "; //$NON-NLS-1$
+        boolean first = !neutral;
         for (Object child : group.children)
         {
+            String indent = first ? firstIndent : childIndent;
+            String prefix = first ? firstPrefix : operation;
             int childStart = firstLeafStart(child);
             while (nextComment[0] < comments.size() && comments.get(nextComment[0]).offset() < childStart)
                 lines.add(childIndent + comments.get(nextComment[0]++).text());
             if (child instanceof AndOrGroup sub)
             {
-                renderGroup(sub, depth + 1, childIndent, operation + "(", lines, text, comments, nextComment, //$NON-NLS-1$
-                    words, statementIndent, unit);
+                renderGroup(sub, depth + 1, indent, prefix + "(", lines, text, comments, nextComment, //$NON-NLS-1$
+                    words, statementIndent, unit, neutral);
                 int last = lines.size() - 1;
                 lines.set(last, lines.get(last) + ")"); //$NON-NLS-1$
             }
@@ -966,7 +976,7 @@ public final class BslFormatterHook implements IStartup
             {
                 AndOrLeaf leaf = (AndOrLeaf)child;
                 String[] leafLines = text.substring(leaf.start(), leaf.end()).split("\r?\n"); //$NON-NLS-1$
-                lines.add(childIndent + operation + BslTextFormatter.trimRight(leafLines[0]));
+                lines.add(indent + prefix + BslTextFormatter.trimRight(leafLines[0]));
                 for (int i = 1; i < leafLines.length; i++)
                 {
                     String continuation = BslTextFormatter.trim(leafLines[i]);
@@ -974,6 +984,7 @@ public final class BslFormatterHook implements IStartup
                         lines.add(childIndent + unit + continuation);
                 }
             }
+            first = false;
         }
     }
 
@@ -1231,13 +1242,19 @@ public final class BslFormatterHook implements IStartup
             Global.setField(provider, "showWhitespaceCharacters", Global.getField(sample, "showWhitespaceCharacters")); //$NON-NLS-1$ //$NON-NLS-2$
             Object treeOption = option(loader, "BooleanOption", KEY_AND_OR_TREE, //$NON-NLS-1$
                 "Строить И-ИЛИ дерево логических выражений", manager); //$NON-NLS-1$
+            Object neutralOption = option(loader, "BooleanOption", KEY_AND_OR_TREE_NEUTRAL, //$NON-NLS-1$
+                "Начинать группу с нейтрального элемента", manager); //$NON-NLS-1$
             Object minOpsOption = option(loader, "IntegerOption", KEY_AND_OR_TREE_MIN_OPS, //$NON-NLS-1$
                 "Минимальное число логических операций", manager); //$NON-NLS-1$
             if (booleanOptions != null)
+            {
                 booleanOptions.put(KEY_AND_OR_TREE, treeOption);
+                booleanOptions.put(KEY_AND_OR_TREE_NEUTRAL, neutralOption);
+            }
             if (integerOptions != null)
                 integerOptions.put(KEY_AND_OR_TREE_MIN_OPS, minOpsOption);
             Global.invoke(provider, "addOption", null, treeOption); //$NON-NLS-1$
+            Global.invoke(provider, "addOption", null, neutralOption); //$NON-NLS-1$
             Global.invoke(provider, "addOption", null, minOpsOption); //$NON-NLS-1$
             Class<?> optionProviderClass = Class.forName(PAGE_OPTION_PROVIDER_CLASS, true, loader);
             Constructor<?> optionProviderConstructor = optionProviderClass.getDeclaredConstructor(abstractPage);
@@ -1254,11 +1271,13 @@ public final class BslFormatterHook implements IStartup
             setTooltips(item.getControl(), Map.of(
                 "Строить И-ИЛИ дерево логических выражений", //$NON-NLS-1$
                 "Условие «Если», «ИначеЕсли», «Пока», присваивание и «Возврат» с логическими операциями " //$NON-NLS-1$
-                + "записывать деревом: каждый операнд на своей строке, группа «И» начинается с «Истина», " //$NON-NLS-1$
-                + "группа «ИЛИ» — с «Ложь», «Тогда»/«Цикл» — на отдельной строке.", //$NON-NLS-1$
+                + "записывать деревом: каждый операнд на своей строке, «Тогда»/«Цикл» — на отдельной строке.", //$NON-NLS-1$
+                "Начинать группу с нейтрального элемента", //$NON-NLS-1$
+                "Группу «И» начинать с «Истина», группу «ИЛИ» — с «Ложь». " //$NON-NLS-1$
+                + "Если пометка снята, группа начинается с первого операнда без начального И/ИЛИ.", //$NON-NLS-1$
                 "Минимальное число логических операций", //$NON-NLS-1$
-                "Дерево строится, только если в выражении не меньше указанного числа операций И/ИЛИ " //$NON-NLS-1$
-                + "(не считая начальных «Истина»/«Ложь» уже построенного дерева).")); //$NON-NLS-1$
+                "Дерево строится, только если в выражении не меньше указанного числа операций И/ИЛИ, " //$NON-NLS-1$
+                + "включая операции с начальными «Истина»/«Ложь».")); //$NON-NLS-1$
             addArticleLink(optionsHost(provider, folder));
             return provider;
         }
@@ -1356,6 +1375,8 @@ public final class BslFormatterHook implements IStartup
                 Boolean.valueOf(DEFAULT_KEEP_INVOCATION));
             Global.invoke(manager, "setDefaultBooleanPreference", KEY_AND_OR_TREE, //$NON-NLS-1$
                 Boolean.valueOf(DEFAULT_AND_OR_TREE));
+            Global.invoke(manager, "setDefaultBooleanPreference", KEY_AND_OR_TREE_NEUTRAL, //$NON-NLS-1$
+                Boolean.valueOf(DEFAULT_AND_OR_TREE_NEUTRAL));
             Global.invoke(manager, "setDefaultIntegerPreference", KEY_AND_OR_TREE_MIN_OPS, //$NON-NLS-1$
                 Integer.valueOf(DEFAULT_AND_OR_TREE_MIN_OPS));
         }
