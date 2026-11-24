@@ -624,12 +624,6 @@ public final class BslFormatterHook implements IStartup
             lineAbove = document.get(above.getOffset(), above.getLength());
         }
         List<String> formatted = BslTextFormatter.format(lines, lineAbove, settings);
-        Global.tempLog("bsl-format-preprocessor", "noIndent=" + options.noIndentPreprocessor //$NON-NLS-1$ //$NON-NLS-2$
-            + " reindent=" + reindent + " before=" //$NON-NLS-1$ //$NON-NLS-2$
-            + lines.stream().filter(line -> line.stripLeading().startsWith("#")).toList() //$NON-NLS-1$
-            + " after=" + formatted.stream().filter(line -> line.stripLeading().startsWith("#")).toList()); //$NON-NLS-1$ //$NON-NLS-2$
-        Global.tempLog("bsl-format-options", "stockFormatted=" + stockFormatted + " reindent=" + reindent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " wrapType=" + options.wrapType + " before=" + lines + " after=" + formatted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (formatted.equals(lines))
             return 0;
         IRegion region = lineRegion(document, startLine, endLine);
@@ -1282,7 +1276,8 @@ public final class BslFormatterHook implements IStartup
                 addBoolean(indentProvider, folder, loader, manager, booleanOptions, KEY_CONTINUATION_INDENT,
                     "Сдвигать непервые строки инструкции по вложенности скобок", //$NON-NLS-1$
                     "Строка, продолжающая инструкцию, получает отступ по числу незакрытых скобок, и он всегда " //$NON-NLS-1$
-                    + "больше отступа первой строки инструкции. Отступы строк пересчитываются по ключевым словам."); //$NON-NLS-1$
+                    + "больше отступа первой строки инструкции. Штатное выравнивание переносов и строки " //$NON-NLS-1$
+                    + "многострочных литералов сохраняются. Пример — процедура «ПродолжениеИнструкции» ниже."); //$NON-NLS-1$
                 addBoolean(indentProvider, folder, loader, manager, booleanOptions, KEY_COMPRESS_INNER_SPACES,
                     "Сжимать пустоты внутри строки", //$NON-NLS-1$
                     "Пробелы и табуляции подряд внутри строки (до первого строкового литерала) заменять одним " //$NON-NLS-1$
@@ -1747,16 +1742,16 @@ public final class BslFormatterHook implements IStartup
 
         private static final String INDENT_PREVIEW_RU = """
             Процедура ПродолжениеИнструкции(Количество, Цена, СтавкаНДС)
-            Сумма = Количество * Цена
-            + СуммаНДС(Количество * Цена,
+            Сумма = Количество * Цена // Стоимость
+            + СуммаНДС(Количество * Цена, // База расчёта НДС
             СтавкаНДС);
             Итог   =   Сумма  +  1;
             КонецПроцедуры""";
 
         private static final String INDENT_PREVIEW_EN = """
             Procedure StatementContinuation(Quantity, Price, VATRate)
-            Amount = Quantity * Price
-            + VATAmount(Quantity * Price,
+            Amount = Quantity * Price // Amount before VAT
+            + VATAmount(Quantity * Price, // VAT calculation base
             VATRate);
             Total   =   Amount  +  1;
             EndProcedure""";
