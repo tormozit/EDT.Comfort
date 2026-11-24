@@ -2,6 +2,10 @@ package tormozit;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -22,12 +26,15 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.core.runtime.preferences.IScopeContext;
+import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
@@ -57,6 +64,7 @@ import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPropertyPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
@@ -64,6 +72,7 @@ import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.parser.IParseResult;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
@@ -100,6 +109,7 @@ public final class BslFormatterHook implements IStartup
     public static final String NODE = "com.e1c.g5.v8.dt.formatter.bsl"; //$NON-NLS-1$
 
     public static final String KEY_CONTINUATION_INDENT = "comfortContinuationIndent"; //$NON-NLS-1$
+    public static final String KEY_IGNORE_PROJECT = "comfortIgnoreProjectSettings"; //$NON-NLS-1$
     public static final String KEY_COMPRESS_INNER_SPACES = "comfortCompressInnerSpaces"; //$NON-NLS-1$
     public static final String KEY_COMPRESS_BLANK_LINES = "comfortCompressBlankLines"; //$NON-NLS-1$
     public static final String KEY_KEEP_INVOCATION = "comfortKeepInvocation"; //$NON-NLS-1$
@@ -132,6 +142,7 @@ public final class BslFormatterHook implements IStartup
             return;
         display.asyncExec(() ->
         {
+            WorkspaceOptionProvider.installBsl();
             ICommandService commands = PlatformUI.getWorkbench().getService(ICommandService.class);
             if (commands != null)
                 commands.addExecutionListener(new FormatCommandListener());
@@ -194,6 +205,87 @@ public final class BslFormatterHook implements IStartup
         Global.tempLog(TEMP_LOG, "install viewer=" + viewer.getClass().getSimpleName() + " ok=" + done); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    /** Флажок читается только из общих настроек, независимо от проекта. */
+    private static boolean ignoreProjectSettings()
+    {
+        return InstanceScope.INSTANCE.getNode(NODE).getBoolean(KEY_IGNORE_PROJECT, false);
+    }
+
+    /** Общий поставщик штатного форматтера; API проверен в бандле formatter в .tmp/bundles. */
+    private static final class WorkspaceOptionProvider implements InvocationHandler
+    {
+        private final Object delegate;
+
+        private WorkspaceOptionProvider(Object delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        static void installBsl()
+        {
+            try
+            {
+                IResourceServiceProvider resourceProvider = IResourceServiceProvider.Registry.INSTANCE
+                    .getResourceServiceProvider(URI.createURI("*.bsl")); //$NON-NLS-1$
+                Class<?> serviceType = Platform.getBundle("com.e1c.g5.v8.dt.formatter").loadClass( //$NON-NLS-1$
+                    "com.e1c.g5.v8.dt.formatter.preferences.manager.ServiceProvider"); //$NON-NLS-1$
+                if (resourceProvider != null)
+                    install(resourceProvider.get(serviceType));
+            }
+            catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+            {
+                if (Global.isLogEnabled())
+                    Global.log("BslFormatterHook: option provider install failed: " + e); //$NON-NLS-1$
+            }
+        }
+
+        static void install(Object service)
+        {
+            if (service == null)
+                return;
+            Object current = Global.invoke(service, "getOptionProvider"); //$NON-NLS-1$
+            if (current == null || FormatterPageInjector.isPageOptionProvider(current.getClass())
+                || (Proxy.isProxyClass(current.getClass())
+                    && Proxy.getInvocationHandler(current) instanceof WorkspaceOptionProvider))
+                return;
+            try
+            {
+                Class<?> optionType = Class.forName("com.e1c.g5.v8.dt.formatter.preferences.IOptionProvider", //$NON-NLS-1$
+                    true, service.getClass().getClassLoader());
+                Object proxy = Proxy.newProxyInstance(optionType.getClassLoader(), new Class<?>[] { optionType },
+                    new WorkspaceOptionProvider(current));
+                service.getClass().getMethod("setOptionProvider", optionType).invoke(service, proxy); //$NON-NLS-1$
+            }
+            catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+            {
+                if (Global.isLogEnabled())
+                    Global.log("BslFormatterHook: option provider wrap failed: " + e); //$NON-NLS-1$
+            }
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable
+        {
+            boolean project = args != null && args.length == 2 && args[1] instanceof IScopeContext context
+                && ProjectScope.SCOPE.equals(context.getName());
+            boolean ignore = ignoreProjectSettings();
+            Object[] effectiveArgs = args;
+            if (project && ignore)
+            {
+                effectiveArgs = args.clone();
+                effectiveArgs[1] = null;
+            }
+            try
+            {
+                return method.invoke(delegate, effectiveArgs);
+            }
+            catch (InvocationTargetException e)
+            {
+                throw e.getCause();
+            }
+        }
+    }
+
     /** Значения опций для одного форматирования. */
     private static final class Options
     {
@@ -224,11 +316,12 @@ public final class BslFormatterHook implements IStartup
         {
             Options options = new Options();
             Object serviceProvider = Global.getField(delegate, "serviceProvider"); //$NON-NLS-1$
+            WorkspaceOptionProvider.install(serviceProvider);
             Object provider = serviceProvider == null ? null : Global.invoke(serviceProvider, "getOptionProvider"); //$NON-NLS-1$
             boolean page = provider != null && FormatterPageInjector.isPageOptionProvider(provider.getClass());
             IScopeContext scope = null;
             IProject project = projectOf(document);
-            if (project != null)
+            if (project != null && (page || !ignoreProjectSettings()))
                 scope = new ProjectScope(project);
             Reader reader = new Reader(provider, page, scope);
             options.formattingOn = reader.stockBoolean("formattingOn", true); //$NON-NLS-1$
@@ -1040,7 +1133,7 @@ public final class BslFormatterHook implements IStartup
 
         private static final WeakHashMap<Shell, Boolean> wiredShells = new WeakHashMap<>();
 
-        private enum Tab { INDENT, BLANK_LINES, AUTOWRAP }
+        private enum Tab { GENERAL, INDENT, BLANK_LINES, AUTOWRAP }
 
         static void install(Display display)
         {
@@ -1140,6 +1233,7 @@ public final class BslFormatterHook implements IStartup
 
             List<Object> providers = new ArrayList<>();
             Object indentProvider = null;
+            Object generalProvider = null;
             Object blankProvider = null;
             Object autowrapProvider = null;
             for (TabItem item : folder.getItems())
@@ -1151,7 +1245,9 @@ public final class BslFormatterHook implements IStartup
                     continue;
                 providers.add(provider);
                 Tab tab = tabOf(provider, item.getText());
-                if (tab == Tab.INDENT)
+                if (tab == Tab.GENERAL)
+                    generalProvider = provider;
+                else if (tab == Tab.INDENT)
                     indentProvider = provider;
                 else if (tab == Tab.BLANK_LINES)
                     blankProvider = provider;
@@ -1161,6 +1257,13 @@ public final class BslFormatterHook implements IStartup
 
             Map<String, Object> booleanOptions = map(page, "booleanOptionMap"); //$NON-NLS-1$
             Map<String, Object> integerOptions = map(page, "integerOptionMap"); //$NON-NLS-1$
+            if (page instanceof IWorkbenchPropertyPage)
+                addProjectIndicator(page);
+            else if (generalProvider != null)
+                addBoolean(generalProvider, folder, loader, manager, booleanOptions, KEY_IGNORE_PROJECT,
+                    "Игнорировать настройки проекта", //$NON-NLS-1$
+                    "При форматировании модулей использовать общие параметры вместо настроек проекта. " //$NON-NLS-1$
+                    + "Настройки проекта сохраняются и снова применяются после снятия пометки."); //$NON-NLS-1$
             if (indentProvider != null)
             {
                 addBoolean(indentProvider, folder, loader, manager, booleanOptions, KEY_CONTINUATION_INDENT,
@@ -1229,6 +1332,60 @@ public final class BslFormatterHook implements IStartup
             Global.tempLog(TEMP_LOG, "page inject done tabs=" + providers.size() //$NON-NLS-1$
                 + " indent=" + (indentProvider != null) + " blank=" + (blankProvider != null) //$NON-NLS-1$ //$NON-NLS-2$
                 + " autowrap=" + (autowrapProvider != null) + " logic=" + (logicProvider != null)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Индикатор на проектной странице с обновлением после применения общих настроек. */
+        private static void addProjectIndicator(IPreferencePage page)
+        {
+            if (!(page.getControl() instanceof Composite content))
+                return;
+            // То же место и оформление, что у ProjectPropertyDialogHook.ProjectOverrideNote.
+            Composite buttonBar = null;
+            for (Control child : content.getChildren())
+                if (child instanceof Composite composite && composite.getLayout() instanceof GridLayout
+                    && Arrays.stream(composite.getChildren()).anyMatch(Button.class::isInstance))
+                    buttonBar = composite;
+            if (buttonBar == null)
+                return;
+            Display display = content.getDisplay();
+            Link indicator = new Link(buttonBar, SWT.NONE);
+            indicator.setText("Настройки проекта игнорируются"); //$NON-NLS-1$
+            indicator.setFont(JFaceResources.getFontRegistry().getBold(JFaceResources.DIALOG_FONT));
+            indicator.setToolTipText(TooltipText.wrap(indicator,
+                "Используются общие параметры форматирования: включена пометка «Игнорировать настройки проекта». " //$NON-NLS-1$
+                + "Настройки проекта сохраняются и снова применяются после снятия пометки." //$NON-NLS-1$
+                + Global.pluginSignForTooltip()));
+            GridData data = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            data.widthHint = 0;
+            indicator.setLayoutData(data);
+            indicator.moveAbove(buttonBar.getChildren()[0]);
+            GridLayout layout = (GridLayout) buttonBar.getLayout();
+            layout.numColumns++;
+            if (buttonBar.getLayoutData() instanceof GridData barData)
+            {
+                barData.horizontalAlignment = SWT.FILL;
+                barData.grabExcessHorizontalSpace = true;
+            }
+            Runnable update = () ->
+            {
+                if (indicator.isDisposed())
+                    return;
+                boolean ignored = ignoreProjectSettings();
+                if (data.exclude == ignored)
+                    layout.numColumns += ignored ? 1 : -1;
+                data.exclude = !ignored;
+                indicator.setVisible(ignored);
+                content.layout(true, true);
+            };
+            IEclipsePreferences preferences = InstanceScope.INSTANCE.getNode(NODE);
+            IEclipsePreferences.IPreferenceChangeListener listener = event ->
+            {
+                if (KEY_IGNORE_PROJECT.equals(event.getKey()))
+                    display.asyncExec(update);
+            };
+            preferences.addPreferenceChangeListener(listener);
+            indicator.addDisposeListener(event -> preferences.removePreferenceChangeListener(listener));
+            update.run();
         }
 
         /** Новая вкладка «Логические выражения» со своим примером. */
@@ -1365,6 +1522,7 @@ public final class BslFormatterHook implements IStartup
         /** Без умолчаний штатные {@code uploadValue}/{@code restoreDefault} получают {@code null}. */
         private static void registerDefaults(Object manager)
         {
+            Global.invoke(manager, "setDefaultBooleanPreference", KEY_IGNORE_PROJECT, Boolean.FALSE); //$NON-NLS-1$
             Global.invoke(manager, "setDefaultBooleanPreference", KEY_CONTINUATION_INDENT, //$NON-NLS-1$
                 Boolean.valueOf(DEFAULT_CONTINUATION_INDENT));
             Global.invoke(manager, "setDefaultBooleanPreference", KEY_COMPRESS_INNER_SPACES, //$NON-NLS-1$
@@ -1385,6 +1543,8 @@ public final class BslFormatterHook implements IStartup
         private static Tab tabOf(Object provider, String title)
         {
             Set<String> keys = optionKeys(provider);
+            if (keys.contains("formattingOn")) //$NON-NLS-1$
+                return Tab.GENERAL;
             if (keys.contains("indentMethodInternal") || keys.contains("indentInsideConditional")) //$NON-NLS-1$ //$NON-NLS-2$
                 return Tab.INDENT;
             if (keys.contains("newLineGapMax") || keys.contains("newLineGapMin")) //$NON-NLS-1$ //$NON-NLS-2$
