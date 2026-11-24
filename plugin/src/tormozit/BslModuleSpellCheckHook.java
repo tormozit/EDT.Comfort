@@ -3358,7 +3358,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
         }
         if (annotation instanceof XtextAnnotation liveAnnotation)
+        {
             base = ModuleAccessibilityAtClientFix.withLiveProposal(base, liveAnnotation, fallbackIcon);
+            base = FormModuleMissingPragmaFix.withLiveProposal(base, liveAnnotation, fallbackIcon);
+        }
         if (annotation instanceof XtextAnnotation createAnnotation)
         {
             for (ICompletionProposal create : CreateMethodFix.proposals(createAnnotation, fallbackIcon))
@@ -3567,7 +3570,9 @@ public final class BslModuleSpellCheckHook implements IStartup
                     if (new CheckUid(ComfortCheckIds.BSL_QUERY_RESULT_FIELD, "tormozit.comfort.checks").equals(uid) //$NON-NLS-1$
                         || new CheckUid(ComfortCheckIds.BSL_DYNAMIC_PROPERTY, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
                         return 1;
-                    if (new CheckUid(ComfortCheckIds.BSL_UNKNOWN_LITERAL, "tormozit.comfort.checks").equals(uid)) //$NON-NLS-1$
+                    // Имя обработчика оповещения исправляется по тем же допустимым значениям литерала.
+                    if (new CheckUid(ComfortCheckIds.BSL_UNKNOWN_LITERAL, "tormozit.comfort.checks").equals(uid) //$NON-NLS-1$
+                        || new CheckUid("notify-description-to-server-procedure", "com.e1c.v8codestyle.bsl").equals(uid)) //$NON-NLS-1$ //$NON-NLS-2$
                         return 2;
                     if (project != null && CreateMethodFix.isUnknownMethodCheck(code, project))
                         return 3;

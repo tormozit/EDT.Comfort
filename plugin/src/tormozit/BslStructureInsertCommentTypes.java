@@ -4859,16 +4859,12 @@ public final class BslStructureInsertCommentTypes
                             {
                                 frame = previous;
                             }
-                            Global.tempLog(BslCallingModules.LOG, "call target=" + key + " caller=" + uri
-                                + " offset=" + position(call) + " types=" + found);
                         }
                         return found;
                     });
                     if (read.value() != null)
                         for (int parameter = 0; parameter < result.size(); parameter++)
                             add(result.get(parameter), read.value().get(parameter));
-                    Global.tempLog(BslCallingModules.LOG, "incoming target=" + key + " caller=" + uri
-                        + " source=" + read.source() + " types=" + read.value());
                 }
                 callingModuleTypes.put(key, result.stream().map(List::copyOf).toList());
                 BslCallingModules.rememberTypes(method, stamp, result);
@@ -4876,7 +4872,6 @@ public final class BslStructureInsertCommentTypes
             }
             catch (RuntimeException error)
             {
-                Global.tempLog(BslCallingModules.LOG, "incoming.error target=" + key + " error=" + error);
                 throw error;
             }
             finally

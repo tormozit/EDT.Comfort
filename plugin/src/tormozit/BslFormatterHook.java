@@ -500,6 +500,8 @@ public final class BslFormatterHook implements IStartup
                     log.append(" text=").append(pass(() -> textPass(document, startLine, //$NON-NLS-1$
                         document.getNumberOfLines() - 1 - linesAfter, options, true, options.continuationIndent, false)));
                 }
+                log.append(" annotations=").append(pass(() -> AnnotationIndent.apply(xtextDocument, //$NON-NLS-1$
+                    startLine, document.getNumberOfLines() - 1 - linesAfter)));
             }
             finally
             {
@@ -508,6 +510,102 @@ public final class BslFormatterHook implements IStartup
                 log.append(" ms=").append((System.nanoTime() - started) / 1_000_000); //$NON-NLS-1$
                 Global.tempLog(TEMP_LOG, log.toString());
             }
+        }
+
+    }
+
+    /** Аннотации получают итоговый отступ объявления метода; без пригодного АСТ — разбор по строкам. */
+    private static final class AnnotationIndent
+    {
+        private static final Pattern DECLARATION = Pattern.compile(
+            "^(?:(?:Асинх|Async)\\s+)?(?:Процедура|Функция|Procedure|Function)\\s+[_\\p{L}][\\p{L}\\p{N}_]*\\s*\\(", //$NON-NLS-1$
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+        static int apply(IXtextDocument document, int startLine, int endLine) throws BadLocationException
+        {
+            List<int[]> pairs = null;
+            String reason;
+            try
+            {
+                reason = treeProblem(document, startLine, endLine);
+            }
+            catch (RuntimeException e)
+            {
+                reason = e.toString();
+            }
+            if (reason == null)
+            {
+                try
+                {
+                    pairs = document.readOnly(resource ->
+                    {
+                        if (resource == null || resource.getParseResult() == null
+                            || BslAstCompleteness.isTruncated(resource))
+                            return null;
+                        EObject root = resource.getParseResult().getRootASTElement();
+                        if (root == null)
+                            return null;
+                        List<int[]> result = new ArrayList<>();
+                        for (com._1c.g5.v8.dt.bsl.model.Method method : EcoreUtil2.getAllContentsOfType(root,
+                            com._1c.g5.v8.dt.bsl.model.Method.class))
+                        {
+                            if (method.getPragmas().isEmpty())
+                                continue;
+                            var feature = method.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
+                            if (feature == null)
+                                return null;
+                            List<INode> names = NodeModelUtils.findNodesForFeature(method, feature);
+                            if (names.isEmpty())
+                                return null;
+                            int declaration = names.get(0).getStartLine() - 1;
+                            for (var pragma : method.getPragmas())
+                            {
+                                INode node = NodeModelUtils.getNode(pragma);
+                                if (node == null)
+                                    return null;
+                                result.add(new int[] { node.getStartLine() - 1, declaration });
+                            }
+                        }
+                        return result;
+                    });
+                }
+                catch (RuntimeException e)
+                {
+                    // Недоступное дерево: ниже используется текстовый путь.
+                }
+            }
+            String[] lines = document.get().split("\\r\\n|\\r|\\n", -1); //$NON-NLS-1$
+            if (pairs == null)
+            {
+                pairs = new ArrayList<>();
+                for (int declaration = 0; declaration < lines.length; declaration++)
+                {
+                    if (!DECLARATION.matcher(BslTextFormatter.trimLeft(lines[declaration])).find())
+                        continue;
+                    for (int line = declaration - 1; line >= 0; line--)
+                    {
+                        String text = BslTextFormatter.trimLeft(lines[line]);
+                        if (text.startsWith("&")) //$NON-NLS-1$
+                            pairs.add(new int[] { line, declaration });
+                        else if (!text.isEmpty() && !text.startsWith("//")) //$NON-NLS-1$
+                            break;
+                    }
+                }
+            }
+            List<Edit> edits = new ArrayList<>();
+            Set<Integer> seen = new HashSet<>();
+            for (int[] pair : pairs)
+            {
+                int line = pair[0];
+                if (line < startLine || line > endLine || !seen.add(line))
+                    continue;
+                String oldIndent = BslTextFormatter.leadingWhitespace(lines[line]);
+                String indent = BslTextFormatter.leadingWhitespace(lines[pair[1]]);
+                boolean annotation = BslTextFormatter.trimLeft(lines[line]).startsWith("&"); //$NON-NLS-1$
+                if (annotation && !oldIndent.equals(indent))
+                    edits.add(new Edit(document.getLineOffset(line), oldIndent.length(), indent));
+            }
+            return applyEdits(document, edits);
         }
     }
 

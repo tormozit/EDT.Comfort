@@ -115,8 +115,6 @@ final class BslExpressionDetails
             request = new Request(index, stamp, document, viewer, member, offset);
             REQUESTS.put(input, request);
         }
-        Global.tempLog(BslCallingModules.LOG, "hint.request input=" + System.identityHashCode(input)
-            + " offset=" + offset + " refresh=" + refresh + " stamp=" + stamp);
         Display display = viewer.getTextWidget().getDisplay();
         Job job = new Job("Comfort: индексы и подсказка выражения") //$NON-NLS-1$
         {
@@ -132,8 +130,6 @@ final class BslExpressionDetails
                     if (details == null || stamp(document) != stamp || REQUESTS.get(input) != request)
                         return Status.OK_STATUS;
                     request.details = details;
-                    Global.tempLog(BslCallingModules.LOG, "hint.done input=" + System.identityHashCode(input)
-                        + " offset=" + offset + " targets=" + request.callingTargets + " type=" + details.type());
                     if (!details.isEmpty() && !display.isDisposed())
                         display.asyncExec(() -> {
                             if (stamp(document) == stamp && REQUESTS.get(input) == request)
@@ -146,8 +142,6 @@ final class BslExpressionDetails
                 }
                 catch (Throwable failure)
                 {
-                    Global.tempLog(BslCallingModules.LOG, "hint.error input=" + System.identityHashCode(input)
-                        + " offset=" + offset + " error=" + failure);
                 }
                 return Status.OK_STATUS;
             }
@@ -179,8 +173,6 @@ final class BslExpressionDetails
                     || document == null || stamp(document) != previous.stamp || REQUESTS.get(input) != previous
                     || !java.util.Objects.equals(previous.index, Global.invoke(input, "getIndex")))
                     continue;
-                Global.tempLog(BslCallingModules.LOG, "hint.ready input=" + System.identityHashCode(input)
-                    + " target=" + target + " offset=" + previous.offset);
                 request(input, previous.member.get(), viewer, previous.offset, true);
             }
         });

@@ -66,6 +66,7 @@ import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
 import tormozit.FormItemTypes;
 import tormozit.Global;
+import tormozit.PlatformTemplateTypes;
 import tormozit.TypeDescriptionPresentationHook;
 
 /**
@@ -97,6 +98,8 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
                 + "Значение типа-расширения (например, РасширениеТаблицыФормыДляДинамическогоСписка) "
                 + "совместимо с его базовым типом (ТаблицаФормы), значение типа-наследника "
                 + "(ОбъектМетаданныхСправочник) — с типом-предком (ОбъектМетаданных). "
+                + "Шаблонный тип (СправочникОбъектИмяСправочника) совместим со своим общим типом "
+                + "(СправочникОбъект) в обоих направлениях; аналогично для других видов метаданных. "
                 + "Значение ЭтотОбъект (ЭтаФорма) в модуле формы — тип-расширение этой формы "
                 + "(РасширениеФормыКлиентскогоПриложенияДляСправочника для формы справочника и т. п.)."
                 + "<br><br>Динамически замещает штатную проверку bsl-legacy-check-expression-type.")
@@ -628,7 +631,9 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
         {
             for (TypeItem target : expected)
                 for (TypeItem value : actual)
-                    if (FormItemTypes.isExtensionOfBase(value, target) || descends(value, target, context))
+                    if (PlatformTemplateTypes.isTemplateOf(value, target, context)
+                        || PlatformTemplateTypes.isTemplateOf(target, value, context)
+                        || FormItemTypes.isExtensionOfBase(value, target) || descends(value, target, context))
                         return true;
             boolean dateConversion = hasType(expected, "Date") //$NON-NLS-1$
                 && (hasType(actual, "Number") || hasType(actual, "Boolean")) //$NON-NLS-1$ //$NON-NLS-2$

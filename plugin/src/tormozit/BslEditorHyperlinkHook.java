@@ -1564,7 +1564,6 @@ public final class BslEditorHyperlinkHook implements IStartup
             return links;
         IFile caller = source.getEditorInput().getAdapter(IFile.class);
         String name = BslCallingModules.moduleName(caller);
-        Global.tempLog(BslCallingModules.LOG, "menu.detect file=" + caller + " name=" + name + " links=" + links.length);
         if (name == null || !(viewer.getDocument() instanceof IXtextDocument document))
             return links;
         List<CallingModuleCandidate> candidates = readModel(document, true, resource -> {
@@ -1581,14 +1580,10 @@ public final class BslEditorHyperlinkHook implements IStartup
                 EObject at = BslNodeLookup.resolveContainedElementAt(resource, link.getHyperlinkRegion().getOffset());
                 var call = org.eclipse.xtext.EcoreUtil2.getContainerOfType(at,
                     com._1c.g5.v8.dt.bsl.model.Invocation.class);
-                Global.tempLog(BslCallingModules.LOG, "menu.link uri=" + xtext.getURI() + " invocation=" + (call != null));
                 if (call == null || call.getParams().stream().noneMatch(java.util.Objects::nonNull))
                     continue;
                 EObject target = resource.getResourceSet().getEObject(xtext.getURI(), true);
                 var method = ParamHintHtmlModifier.ParameterSeeLinks.sourceMethod(target);
-                Global.tempLog(BslCallingModules.LOG, "menu.resolve uri=" + xtext.getURI()
-                    + " target=" + (target == null ? null : target.eClass().getName())
-                    + " method=" + (method == null ? null : method.getName()));
                 if (method == null || method.eIsProxy() || method.eResource() == null)
                     continue;
                 found.add(new CallingModuleCandidate(link, xtext, method));
@@ -1629,12 +1624,9 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (availability == null)
             {
                 context.incomplete = true;
-                Global.tempLog(BslCallingModules.LOG, "menu.modelNotReady file=" + targetFile);
             }
             boolean eligible = availability != null && availability.eligible();
             boolean exists = availability != null && availability.exists();
-            Global.tempLog(BslCallingModules.LOG, "menu target=" + EcoreUtil.getURI(method)
-                + " caller=" + name + " eligible=" + eligible + " exists=" + exists);
             if (eligible && !exists && added.add(EcoreUtil.getURI(method).toString()))
                 result.add(new AddCallingModuleHyperlink(link.getHyperlinkRegion(),
                     EcoreUtil.getURI(method), method.getName(), name, source, page));
@@ -1687,8 +1679,6 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (dependency == null)
                 dependency = new Dependency(file, null, ForeignModuleModel.stamp(file, null));
             used.put(file, dependency);
-            Global.tempLog(BslCallingModules.LOG, "menu.source file=" + file + " stamp=" + dependency.stamp()
-                + " document=" + System.identityHashCode(dependency.document()));
             return dependency.document();
         }
 
@@ -1703,9 +1693,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                 String stamp = ForeignModuleModel.stamp(dependency.file(), document);
                 if (document != dependency.document() || !stamp.equals(dependency.stamp()))
                 {
-                    Global.tempLog(BslCallingModules.LOG, "menu.invalidate file=" + dependency.file()
-                        + " previous=" + dependency.stamp() + " current=" + stamp
-                        + " sameDocument=" + (document == dependency.document()));
                     return false;
                 }
             }
@@ -1761,7 +1748,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                             return BslCallingModules.addition(method, document, caller);
                     return null;
                 });
-                Global.tempLog(BslCallingModules.LOG, "add target=" + target + " caller=" + caller + " edit=" + edit);
                 if (edit != null)
                 {
                     document.replace(edit.offset(), 0, edit.text());
@@ -1770,7 +1756,6 @@ public final class BslEditorHyperlinkHook implements IStartup
             }
             catch (Exception error)
             {
-                Global.tempLog(BslCallingModules.LOG, "add.error target=" + target + " error=" + error);
                 ToastNotification.show("Вызывающие модули", "Не удалось изменить комментарий: " + error.getMessage(), 5000);
             }
         }
@@ -2002,19 +1987,14 @@ public final class BslEditorHyperlinkHook implements IStartup
                         () -> detect(viewer, region, multiple, () -> stock));
                     if (monitor.isCanceled() || document.getModificationStamp() != stamp)
                         return;
-                    Global.tempLog(BslCallingModules.LOG, "detect.primaryReady offset=" + region.getOffset()
-                        + " links=" + (links == null ? 0 : links.length));
                     if (context != null && links != null && links.length > 0)
                     {
                         queuePublish(viewer, document,
                             new DetectedLinks(stamp, region.getOffset(), multiple, links, context),
                             shown, requestedGeneration, true);
                         IHyperlink[] primary = links;
-                        Global.tempLog(BslCallingModules.LOG, "detect.menuStart offset=" + region.getOffset());
                         links = BslNodeLookup.compute(monitor,
                             () -> callingModuleLinks(viewer, primary, source, page, context));
-                        Global.tempLog(BslCallingModules.LOG, "detect.menuReady offset=" + region.getOffset()
-                            + " links=" + links.length);
                     }
                 }
                 catch (OperationCanceledException canceled)
@@ -2023,7 +2003,6 @@ public final class BslEditorHyperlinkHook implements IStartup
                 }
                 catch (RuntimeException | LinkageError failure)
                 {
-                    Global.tempLog(BslCallingModules.LOG, "menu.detect.error error=" + failure);
                     return;
                 }
                 finally
@@ -2083,11 +2062,8 @@ public final class BslEditorHyperlinkHook implements IStartup
                         new IHyperlink[] { new HistoryHyperlink(query, source, page) }, result.context());
             }
             detected = result;
-            Global.tempLog(BslCallingModules.LOG, "detect.publish offset=" + result.offset()
-                + " primary=" + primary + " links=" + (result.links() == null ? 0 : result.links().length));
             if (!text.isFocusControl())
             {
-                Global.tempLog(BslCallingModules.LOG, "detect.publish.noFocus offset=" + result.offset());
                 return;
             }
             relabelShownLinks(text, shown, result.links());
@@ -2170,7 +2146,6 @@ public final class BslEditorHyperlinkHook implements IStartup
             if (pendingJob != null)
                 pendingJob.cancel();
             detected = null;
-            Global.tempLog(BslCallingModules.LOG, "detect.cancel generation=" + generation);
         }
     }
 
@@ -2594,7 +2569,6 @@ public final class BslEditorHyperlinkHook implements IStartup
         // TextViewer.fHyperlinkManager и HyperlinkManager.deactivate() проверены
         // в .tmp/bundles/jface-text/: скрывает presenter и сбрасывает fActive.
         Object manager = Global.getField(viewer, "fHyperlinkManager");
-        Global.tempLog(BslCallingModules.LOG, "detect.navigate manager=" + (manager != null));
         if (manager != null)
             Global.invoke(manager, "deactivate");
     }

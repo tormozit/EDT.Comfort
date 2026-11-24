@@ -2193,6 +2193,7 @@
   <!-- Исправление проблемы EDT 2026; в EDT 2025 её идентификатор не возникает. -->
   <extension point="com.e1c.g5.v8.dt.check.fixes">
     <fix class="tormozit.ModuleAccessibilityAtClientFix"/>
+    <fix class="tormozit.FormModuleMissingPragmaFix"/>
   </extension>
 
   <!--

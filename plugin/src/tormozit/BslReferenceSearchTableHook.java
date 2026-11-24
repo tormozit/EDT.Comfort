@@ -141,6 +141,13 @@ public final class BslReferenceSearchTableHook implements IStartup
     public void earlyStartup()
     {
         installSearchResultCallbacks();
+        // В русской локализации Xtext 2.33 префикс заканчивается на «на» без пробела.
+        // ReferenceQueryExecutor.getLabel() дописывает имя непосредственно после префикса.
+        String prefix = org.eclipse.xtext.ui.editor.findrefs.Messages.FindReferencesHandler_labelPrefix;
+        if (prefix != null && !prefix.isEmpty() && !Character.isWhitespace(prefix.charAt(prefix.length() - 1)))
+            org.eclipse.xtext.ui.editor.findrefs.Messages.FindReferencesHandler_labelPrefix = prefix + " "; //$NON-NLS-1$
+        Global.tempLog("reference-search-label", "prefixBefore=[" + prefix + "] prefixAfter=[" //$NON-NLS-1$ //$NON-NLS-2$
+            + org.eclipse.xtext.ui.editor.findrefs.Messages.FindReferencesHandler_labelPrefix + "]"); //$NON-NLS-1$
         // earlyStartup идёт НЕ в UI-потоке — вся работа с Display только через asyncExec.
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())

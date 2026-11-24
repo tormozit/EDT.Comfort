@@ -19,6 +19,7 @@ import org.eclipse.xtext.ui.editor.hover.html.XtextBrowserInformationControlInpu
 
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.Type;
+import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.TypeSet;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
@@ -30,7 +31,7 @@ import com._1c.g5.v8.dt.platform.version.Version;
  * объединение всех дочерних типов. Связь берётся из модели EDT: шаблон — базовый тип своего
  * набора. Имя шаблона не начало имени реального типа.
  */
-final class PlatformTemplateTypes
+public final class PlatformTemplateTypes
 {
     private static final String NOTE_CLASS = "comfort-template-type"; //$NON-NLS-1$
     private static final String TYPE_SETS_SCHEME = "v8"; //$NON-NLS-1$
@@ -70,6 +71,30 @@ final class PlatformTemplateTypes
         URI uri = EcoreUtil.getURI(set);
         return uri != null && TYPE_SETS_SCHEME.equals(uri.scheme()) && uri.segmentCount() >= 2
             && "TypeSets".equals(uri.segment(0)) && "Md".equals(uri.segment(1)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Шаблон совместим со своим набором вида метаданных; связь задана в baseTypes модели EDT. */
+    public static boolean isTemplateOf(TypeItem template, TypeItem collection, EObject context)
+    {
+        if (!(template instanceof Type) || !(collection instanceof TypeSet set) || !isMdTypeSet(set))
+            return false;
+        String name = McoreUtil.getTypeName(template);
+        if (name == null)
+            return false;
+        List<String> bases = new ArrayList<>();
+        boolean matches = false;
+        for (Type base : set.getBaseTypes())
+        {
+            if (EcoreUtil.resolve(base, context) instanceof Type resolved && !resolved.eIsProxy())
+            {
+                String baseName = McoreUtil.getTypeName(resolved);
+                bases.add(baseName);
+                matches |= name.equals(baseName);
+            }
+        }
+        Global.tempLog("value-type-template", "template=" + name + " set=" + McoreUtil.getTypeName(set) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " bases=" + bases + " compatible=" + matches); //$NON-NLS-1$ //$NON-NLS-2$
+        return matches;
     }
 
     /** Шаблоны набора без конкретных типов; {@code null} — типы есть или набор не разрешился. */

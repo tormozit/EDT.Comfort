@@ -26,7 +26,6 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 final class BslCallingModules
 {
     static final String TITLE = "Вызывающие модули:";
-    static final String LOG = "calling-modules";
     private static final Pattern MODULE_NAME = Pattern.compile(
         "[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)*");
     private static final java.util.Map<URI, List<IFile>> DEPENDENCIES = new java.util.concurrent.ConcurrentHashMap<>();
@@ -84,9 +83,6 @@ final class BslCallingModules
         var comment = BslStructureInsertCommentTypes.parseMethodComment(method, module);
         if (comment != null && (comment.getParametersSection() != null || comment.getReturnSection() != null))
         {
-            Global.tempLog(LOG, "canAdd.comment target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                + " parameters=" + (comment.getParametersSection() != null)
-                + " returns=" + (comment.getReturnSection() != null));
             return false;
         }
         // ResourceSet вызывающего редактора может хранить старый AST чужого модуля.
@@ -96,8 +92,6 @@ final class BslCallingModules
             IFile file = ForeignModuleModel.fileOf(method.eResource().getURI());
             if (file == null)
             {
-                Global.tempLog(LOG, "canAdd.source target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                    + " file=null");
                 return false;
             }
             URI uri = method.eResource().getURI().trimFragment();
@@ -107,8 +101,6 @@ final class BslCallingModules
                 && cached.document().get() == document)
             {
                 boolean blocked = cached.blockedMethods().contains(method.getName().toLowerCase(java.util.Locale.ROOT));
-                Global.tempLog(LOG, "canAdd.cache target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                    + " stamp=" + stamp + " localCall=" + blocked);
                 return !blocked;
             }
             Set<String> blocked;
@@ -117,9 +109,7 @@ final class BslCallingModules
                 var resource = method.eResource() instanceof XtextResource xtext ? xtext : null;
                 var parsed = resource == null ? null : resource.getParseResult();
                 boolean current = parsed != null && parsed.getRootNode().getText().equals(document.get());
-                Global.tempLog(LOG, "canAdd.source uri=" + uri + " source=editor stamp=" + stamp
-                    + " document=" + System.identityHashCode(document) + " current=" + current);
-                blocked = current ? blockingLocalCalls(module, uri) : null;
+                blocked = current ? blockingLocalCalls(module) : null;
             }
             else
             {
@@ -133,15 +123,11 @@ final class BslCallingModules
                 }
                 Object parsed = BslModuleStructureParser.parseBslModuleContent(text);
                 var result = parsed instanceof org.eclipse.xtext.parser.IParseResult parse ? parse : null;
-                Global.tempLog(LOG, "canAdd.source uri=" + uri + " source=disk stamp=" + stamp
-                    + " length=" + text.length() + " textHash=" + text.hashCode()
-                    + " syntaxErrors=" + (result == null || result.hasSyntaxErrors()));
                 blocked = result != null && result.getRootASTElement() instanceof Module fresh
-                    ? blockingLocalCalls(fresh, uri) : null;
+                    ? blockingLocalCalls(fresh) : null;
             }
             if (blocked == null || stamp == null || !stamp.equals(localCallsStamp(file, document)))
             {
-                Global.tempLog(LOG, "canAdd.source.unavailable uri=" + uri + " stamp=" + stamp);
                 return false;
             }
             LOCAL_CALLS.put(uri, new ReadyLocalCalls(stamp, new java.lang.ref.WeakReference<>(document), blocked));
@@ -153,8 +139,6 @@ final class BslCallingModules
         }
         catch (Exception error)
         {
-            Global.tempLog(LOG, "canAdd.source.error target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                + " error=" + error);
             return false;
         }
     }
@@ -165,32 +149,23 @@ final class BslCallingModules
             ? "d" + extension.getModificationStamp() : document == null ? "f" + file.getModificationStamp() : null;
     }
 
-    private static Set<String> blockingLocalCalls(Module module, URI uri)
+    private static Set<String> blockingLocalCalls(Module module)
     {
         Set<String> blocked = new java.util.HashSet<>();
-        int calls = 0;
         for (var iterator = module.eAllContents(); iterator.hasNext();)
         {
             BslNodeLookup.checkCanceled();
             if (!(iterator.next() instanceof Invocation call))
                 continue;
-            calls++;
             // Локальный вызов определяется синтаксисом, как в MoveMethodToModuleHandler.
             if (!(call.getMethodAccess() instanceof StaticFeatureAccess access) || access.getName() == null)
                 continue;
             boolean arguments = call.getParams().stream().anyMatch(java.util.Objects::nonNull);
             Method owner = EcoreUtil2.getContainerOfType(call, Method.class);
             boolean recursive = owner != null && access.getName().equalsIgnoreCase(owner.getName());
-            var node = NodeModelUtils.findActualNodeFor(call);
-            Global.tempLog(LOG, "canAdd.call uri=" + uri + " name=" + access.getName()
-                + " offset=" + (node == null ? -1 : node.getOffset())
-                + " arguments=" + arguments + " recursive=" + recursive
-                + " owner=" + (owner == null ? null : owner.getName())
-                + " text=" + (node == null ? null : node.getText().replace('\r', ' ').replace('\n', ' ')));
             if (arguments && !recursive)
                 blocked.add(access.getName().toLowerCase(java.util.Locale.ROOT));
         }
-        Global.tempLog(LOG, "canAdd.index uri=" + uri + " calls=" + calls + " blockedMethods=" + blocked);
         return Set.copyOf(blocked);
     }
 
@@ -208,7 +183,6 @@ final class BslCallingModules
         else if (name.endsWith(".Форма"))
         {
             name = GetRef.stripLowValueModuleSuffix(name);
-            Global.tempLog(LOG, "moduleName.form file=" + file + " raw=" + ref.modulePath + " name=" + name);
         }
         return ref.extensionName == null ? name : null;
     }
@@ -240,9 +214,7 @@ final class BslCallingModules
         }
         catch (CoreException error)
         {
-            Global.tempLog(LOG, "resolve.error target=" + target + " error=" + error);
         }
-        Global.tempLog(LOG, "resolve method=" + method.getName() + " names=" + names + " files=" + result);
         DEPENDENCIES.compute(method.eResource().getURI().trimFragment(), (uri, previous) -> {
             List<IFile> all = new ArrayList<>(previous == null ? List.of() : previous);
             for (IFile file : result)
@@ -288,8 +260,6 @@ final class BslCallingModules
             return List.of();
         ReadyTypes ready = READY_TYPES.get(org.eclipse.emf.ecore.util.EcoreUtil.getURI(method));
         String stamp = typesStamp(method);
-        Global.tempLog(LOG, "types.peek target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-            + " index=" + index + " cachedStamp=" + (ready == null ? null : ready.stamp()) + " stamp=" + stamp);
         if (ready != null && ready.stamp().equals(stamp) && index < ready.parameters().size())
             return copyTypes(ready.parameters().get(index));
         ParamHintHtmlModifier.expectedParameterTypes(method, method.getFormalParams().get(index).getName());
@@ -298,8 +268,6 @@ final class BslCallingModules
 
     static void rememberTypes(Method method, String stamp, List<List<com._1c.g5.v8.dt.mcore.TypeItem>> parameters)
     {
-        Global.tempLog(LOG, "types.remember target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-            + " stamp=" + stamp + " currentStamp=" + typesStamp(method) + " parameters=" + parameters.size());
         if (stamp != null && stamp.equals(typesStamp(method)))
         {
             READY_TYPES.put(org.eclipse.emf.ecore.util.EcoreUtil.getURI(method),
@@ -333,14 +301,10 @@ final class BslCallingModules
     {
         if (!canAdd(method, document))
         {
-            Global.tempLog(LOG, "addition.skip target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                + " reason=notEligible document=" + System.identityHashCode(document));
             return null;
         }
         if (names(method).stream().anyMatch(moduleName::equalsIgnoreCase))
         {
-            Global.tempLog(LOG, "addition.skip target=" + org.eclipse.emf.ecore.util.EcoreUtil.getURI(method)
-                + " reason=alreadyListed caller=" + moduleName);
             return null;
         }
         XtextResource resource = (XtextResource)method.eResource();

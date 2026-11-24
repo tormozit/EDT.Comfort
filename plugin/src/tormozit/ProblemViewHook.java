@@ -94,6 +94,8 @@ import org.eclipse.ui.handlers.RegistryToggleState;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestrator;
+import com._1c.g5.v8.dt.core.platform.IWorkspaceOrchestratorListener;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
@@ -3497,6 +3499,36 @@ public final class ProblemViewHook implements IStartup
         };
         ActiveProjectTracker.addListener(page, projectListener);
 
+        // При восстановлении панели контекст проекта ещё может загружаться.
+        // Изменение готовности не меняет активный IProject, поэтому слушателя
+        // ActiveProjectTracker недостаточно: пересчитываем область по событию EDT.
+        IWorkspaceOrchestrator orchestrator = Global.getOsgiService(IWorkspaceOrchestrator.class);
+        Map<IProject, Boolean> projectReadiness = new java.util.concurrent.ConcurrentHashMap<>();
+        IWorkspaceOrchestratorListener readyListener = event ->
+        {
+            if (!event.isStateChanged())
+                return;
+            boolean started = orchestrator.isStarted(event.getProject());
+            IProject workspaceProject = event.getProject().getWorkspaceProject();
+            boolean ready = started && !event.isProjectClosing();
+            Boolean previous = projectReadiness.put(workspaceProject, ready);
+            // Состояния конвейера меняются и при обычных операциях готового проекта.
+            // Область пересчитываем только на переходе в готовность, включая перезапуск.
+            if (!ready || Boolean.TRUE.equals(previous))
+                return;
+            Display.getDefault().asyncExec(() ->
+            {
+                if (view.getSite() == null || view.getSite().getPage() == null
+                    || ProblemViewComfortScope.mode() == ProblemViewComfortScope.Mode.NONE)
+                    return;
+                IProject active = ActiveProjectTracker.resolveContextProject(page);
+                if (workspaceProject.equals(active))
+                    applyComfortScope(view, filters, loader);
+            });
+        };
+        if (orchestrator != null)
+            orchestrator.addListener(readyListener);
+
         // Метку установки снять при закрытии панели (иначе следующий её экземпляр
         // не переустановит хук).
         if (view.getAdapter(TreeViewer.class) instanceof TreeViewer viewer
@@ -3505,6 +3537,8 @@ public final class ProblemViewHook implements IStartup
             viewer.getTree().addDisposeListener(e ->
             {
                 ActiveProjectTracker.removeListener(page, projectListener);
+                if (orchestrator != null)
+                    orchestrator.removeListener(readyListener);
                 synchronized (comfortInstalled)
                 {
                     comfortInstalled.remove(view);
@@ -3624,6 +3658,12 @@ public final class ProblemViewHook implements IStartup
         // Панель отбирает по одному проекту (getCurrentProject), поэтому область
         // ограничивается активным проектом.
         IProject active = ActiveProjectTracker.resolveContextProject(page);
+        IWorkspaceOrchestrator orchestrator = Global.getOsgiService(IWorkspaceOrchestrator.class);
+        boolean started = active == null || orchestrator == null || orchestrator.isStarted(active);
+        // Отсутствующая при загрузке модель не означает пустой отбор.
+        // Повторное применение закажет readyListener после запуска контекста EDT.
+        if (!started)
+            return;
         Map<String, List<String>> refs = ProblemViewComfortScope.collectRefs();
 
         // Нечем сузить: «Отобранное в проекте навигатора» без активного отбора —
@@ -3898,7 +3938,7 @@ public final class ProblemViewHook implements IStartup
         Runnable[] tick = new Runnable[1];
         tick[0] = () ->
         {
-            if (view.getSite() == null)
+            if (view.getSite() == null || view.getSite().getPage() == null)
                 return;
             if (ProblemViewComfortScope.mode() != ProblemViewComfortScope.Mode.NONE
                 && view.getSite().getPage().isPartVisible(view))
@@ -4244,6 +4284,8 @@ public final class ProblemViewHook implements IStartup
 
         private static volatile String loadJobName;
 
+        private static volatile String loadNodeJobName;
+
         private static volatile String zeroItemsText;
 
         private static final ThreadLocal<Boolean> PEEKING = new ThreadLocal<>();
@@ -4431,6 +4473,7 @@ public final class ProblemViewHook implements IStartup
                 Class<?> lazy = loader.loadClass(LAZY_MESSAGES);
                 updateJobName = stringField(lazy, "LazyProblemView_UpdateJobName"); //$NON-NLS-1$
                 loadJobName = stringField(lazy, "LazyTreeNodeContentProvider_LoadMarkersJobName"); //$NON-NLS-1$
+                loadNodeJobName = stringField(lazy, "LazyTreeNodeContentProvider_LoadNodeMarkersJobName"); //$NON-NLS-1$
                 Class<?> stats = loader.loadClass(STATS_MESSAGES);
                 zeroItemsText = stringField(stats, "MarkerStats_0_items"); //$NON-NLS-1$
             }
@@ -4475,6 +4518,8 @@ public final class ProblemViewHook implements IStartup
                 public void aboutToRun(IJobChangeEvent event)
                 {
                     Job job = event.getJob();
+                    if (isDiagnosticJob(job))
+                        Global.tempLog(LOG_TOPIC, "job.start" + describeJob(job, 0)); //$NON-NLS-1$
                     if (!isTrackedJob(job))
                         return;
                     tracked.put(job, System.currentTimeMillis());
@@ -4485,6 +4530,19 @@ public final class ProblemViewHook implements IStartup
                 public void done(IJobChangeEvent event)
                 {
                     Job job = event.getJob();
+                    if (isDiagnosticJob(job))
+                    {
+                        var result = event.getResult();
+                        Global.tempLog(LOG_TOPIC, "job.done name=\"" + job.getName() //$NON-NLS-1$
+                            + "\" id=" + Integer.toHexString(System.identityHashCode(job)) //$NON-NLS-1$
+                            + " result=" + result); //$NON-NLS-1$
+                        if (result != null && result.getException() != null)
+                        {
+                            Global.tempLogException(LOG_TOPIC, "job.failed " + job.getName(), //$NON-NLS-1$
+                                result.getException());
+                            logPendingLoads();
+                        }
+                    }
                     if (job == null || tracked.remove(job) == null)
                         return;
                     // update() ждёт окончания UI-обновления корня через CountDownLatch.
@@ -4493,6 +4551,56 @@ public final class ProblemViewHook implements IStartup
                 }
             });
             installWatchdog();
+        }
+
+        /** Временная диагностика включает также задачи загрузки именованных веток. */
+        private static boolean isDiagnosticJob(Job job)
+        {
+            if (isTrackedJob(job))
+                return true;
+            String template = loadNodeJobName;
+            if (job == null || template == null)
+                return false;
+            int argument = template.indexOf("{0}"); //$NON-NLS-1$
+            return argument >= 0 && job.getName().startsWith(template.substring(0, argument))
+                && job.getName().endsWith(template.substring(argument + 3));
+        }
+
+        /** Только наблюдение: очередь читается под тем же монитором, что в EDT. */
+        private static void logPendingLoads()
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                List<IViewPart> snapshot;
+                synchronized (views)
+                {
+                    snapshot = List.copyOf(views.keySet());
+                }
+                for (IViewPart view : snapshot)
+                {
+                    Object provider = Global.getField(view, "contentProvider"); //$NON-NLS-1$
+                    Object pending = Global.getField(provider, "consumers"); //$NON-NLS-1$
+                    Global.tempLog(LOG_TOPIC, "pending.provider=" + provider); //$NON-NLS-1$
+                    if (!(pending instanceof Map<?, ?> consumers))
+                        continue;
+                    synchronized (consumers)
+                    {
+                        Global.tempLog(LOG_TOPIC, "pending.nodes=" + consumers.size()); //$NON-NLS-1$
+                        for (Map.Entry<?, ?> entry : consumers.entrySet())
+                        {
+                            Object children = Global.invoke(entry.getKey(), "getChildrenWithoutLoading"); //$NON-NLS-1$
+                            Global.tempLog(LOG_TOPIC, "pending.node=" + entry.getKey() //$NON-NLS-1$
+                                + " description=" + Global.invoke(entry.getKey(), "getDescription") //$NON-NLS-1$ //$NON-NLS-2$
+                                + " children=" + (children instanceof Collection<?> loaded ? loaded.size() : children) //$NON-NLS-1$
+                                + " consumers=" + (entry.getValue() instanceof Collection<?> callbacks //$NON-NLS-1$
+                                    ? callbacks.size() : entry.getValue()));
+                        }
+                    }
+                }
+            });
         }
 
         /**
@@ -4536,6 +4644,7 @@ public final class ProblemViewHook implements IStartup
                         continue;
                     boolean update = updateJobName != null && updateJobName.equals(job.getName());
                     String details = describeJob(job, running);
+                    logPendingLoads();
                     tracked.remove(job);
                     changed = true;
                     if (!update)
@@ -4593,6 +4702,7 @@ public final class ProblemViewHook implements IStartup
                     // ветку, на загрузке которой упала штатная задача. Reset пересоздал бы
                     // корень, свернул дерево и оставил бы ветку незапрошенной до раскрытия.
                     delayed.scheduleUpdateJob(false);
+                    Global.tempLog(LOG_TOPIC, "refresh.requested reset=false"); //$NON-NLS-1$
                 }
                 catch (RuntimeException e)
                 {

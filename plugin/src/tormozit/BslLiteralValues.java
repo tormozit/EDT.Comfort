@@ -57,8 +57,10 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 import com._1c.g5.modeling.xtext.scoping.IIndexSlicePredicateService;
 import com._1c.g5.v8.dt.bsl.common.DefaultStringLiteralTextProvider;
+import com._1c.g5.v8.dt.bsl.common.IBslPreferences;
 import com._1c.g5.v8.dt.bsl.model.BinaryExpression;
 import com._1c.g5.v8.dt.bsl.model.BinaryOperation;
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.bsl.model.Conditional;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
@@ -87,6 +89,7 @@ import com._1c.g5.v8.dt.bsl.stringliteral.contenttypes.TypeUtil;
 import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.AbstractStringLiteralProposalProvider;
+import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.bsl.ui.contentassist.stringliteral.IStringLiteralProposalProvider.IBslStringLiteralProposalImageProvider;
 import com._1c.g5.v8.dt.core.platform.IConfigurationAware;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -101,6 +104,7 @@ import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.Event;
+import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.DerivedField;
 import com._1c.g5.v8.dt.mcore.Field;
 import com._1c.g5.v8.dt.mcore.FieldSource;
@@ -145,6 +149,16 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     /** {@code МаксВызываемыхМетодов}. */
     private static final int MAX_CALLS = 4;
     private static final int MAX_LITERAL_LENGTH = 200;
+    /**
+     * MdContextDefInferrer.isDynamicProperty, com._1c.g5.v8.dt.md 27.0.0.v202605050943:
+     * EDT заменяет эти свойства при специализации контекста по метаданным, даже без dependsOnMetadata.
+     * Если в составе осталась платформенная декларация, специализация не завершена.
+     */
+    private static final Set<String> METADATA_DYNAMIC_PROPERTIES = Set.of(
+        "AttributeName", "CommonAttributeName", "TabularSectionName", "DimensionName", "ResourceName", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "ColumnName", "EnumValueName", "ThisObject", "RegisterRecords", "Filter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "NameOfAPredefinedCatalogItem", "PredefinedCharacteristicTypeName", "RecalculationName", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "HeadTask", "BusinessProcess", "IntegrationServiceChannelName"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     private static final String GLOBAL_CONTEXT = "Глобальный"; //$NON-NLS-1$
     /** {@code ИмяПеременнойВозвращаемогоЗначения}. */
     private static final String RETURN_VARIABLE = "Воз073"; //$NON-NLS-1$
@@ -653,7 +667,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         Map<String, Analysis> byParent = new HashMap<>();
         byParent.put("", analysis); //$NON-NLS-1$
         List<String> unknown = new ArrayList<>();
-        if (!analysis.full || analysis.values.isEmpty())
+        if (!analysis.full || analysis.values.isEmpty() && !analysis.completeHandlerNames)
             return unknown;
         String[] parts = value.split(",", -1); //$NON-NLS-1$
         for (String part : parts)
@@ -675,7 +689,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     current = analyzeLiteral(resource, literal, parent, canceled, pass);
                     byParent.put(parent, current);
                 }
-                if (!current.full || current.values.isEmpty())
+                if (!current.full || current.values.isEmpty() && !current.completeHandlerNames)
                     break;
                 String name = segment.trim();
                 if (!current.values.containsKey(lower(name)))
@@ -765,6 +779,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Готовые свойства колонок; язык и оформление применяет конкретный Analysis. */
         private final Map<Type, List<Property>> columnProperties = new IdentityHashMap<>();
         private final Map<EObject, Map<String, Boolean>> unknownMemberAdds = new IdentityHashMap<>();
+        /** Подтверждённые условием ключи по тексту получателя; только на текущий проход проверки. */
+        private final Map<Conditional, Map<String, List<String>>> guardedStructureKeys = new IdentityHashMap<>();
 
         /** Один набор сервисов строковых провайдеров на ресурс и проход проверки. */
         StockServices stockServices(XtextResource resource)
@@ -1165,6 +1181,99 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
     /** @param infos описания строк (свойство с типом или {@code null}) в порядке {@code names} */
     private record Added(List<String> names, List<EObject> infos, int segmentOffset) {}
+
+    /** Подтверждённые условием свойства после точки; только готовая модель, без пересчёта типов. */
+    static ICompletionProposal[] mergeGuardedMembers(ITextViewer viewer, int offset, ICompletionProposal[] raw)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return raw;
+        int dot = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(document, offset);
+        if (dot < 0)
+            return raw;
+        boolean stockStructure = false;
+        if (raw != null)
+            for (ICompletionProposal proposal : raw)
+            {
+                ICompletionProposal plain = SmartContentAssistProcessor.unwrapProposal(proposal);
+                if (plain instanceof ConfigurableCompletionProposal configurable
+                    && isStructureMember(Global.getField(configurable, "additionalProposalInfo"))) //$NON-NLS-1$
+                {
+                    stockStructure = true;
+                    break;
+                }
+            }
+        boolean structureFromStock = stockStructure;
+        try
+        {
+            ICompletionProposal[] merged = ContentAssistSessionReloader.readOnlyPeekAst(document, resource ->
+            {
+                if (resource == null)
+                    return raw;
+                Expression receiver = SmartContentAssistProcessor.ReceiverTypeLabel.receiverInResource(resource,
+                    dot, offset);
+                if (receiver == null || !structureFromStock && receiver.getTypes().stream().noneMatch(item -> !item.eIsProxy()
+                    && (in(item.getName(), "Structure", "FixedStructure", "FormDataStructure") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        || item.getName() != null && (item.getName().startsWith("Structure.") //$NON-NLS-1$
+                            || item.getName().startsWith("FixedStructure."))))) //$NON-NLS-1$
+                    return raw;
+                Analysis analysis = new Analysis(resource, false, false, "", offset); //$NON-NLS-1$
+                analysis.addGuardedStructureKeys(receiver, receiver);
+                if (analysis.values.isEmpty())
+                    return raw;
+                List<ICompletionProposal> result = new ArrayList<>();
+                Set<String> names = new HashSet<>();
+                if (raw != null)
+                    for (ICompletionProposal proposal : raw)
+                    {
+                        result.add(proposal);
+                        ICompletionProposal plain = SmartContentAssistProcessor.unwrapProposal(proposal);
+                        if (plain instanceof ConfigurableCompletionProposal configurable)
+                            names.add(lower(configurable.getReplacementString()));
+                        else if (plain instanceof BslAddedWordProposal added)
+                            names.add(lower(added.getWord()));
+                    }
+                for (String name : analysis.values.values())
+                    if (names.add(lower(name)))
+                    {
+                        // Это член получателя, а не слово снимка премий: withAddedWords его сохраняет.
+                        ConfigurableCompletionProposal proposal = new ConfigurableCompletionProposal(name,
+                            dot + 1, Math.max(0, offset - dot - 1), name.length(),
+                            BslSharedImages.getImage(BslSharedImages.IMG_EXTERNAL_PROPERTY),
+                            new StyledString(name), null, null);
+                        var services = resource.getResourceServiceProvider();
+                        describeProposal(proposal, valueDescription(name, List.of()), viewer, resource,
+                            services != null ? services.get(IEObjectHover.class) : null);
+                        result.add(proposal);
+                    }
+                return result.toArray(ICompletionProposal[]::new);
+            });
+            return merged != null ? merged : raw;
+        }
+        catch (RuntimeException failure)
+        {
+            return raw;
+        }
+    }
+
+    /** Владелец штатного члена: те же ProposalElement/ParamSet, которые читает список EDT. */
+    private static boolean isStructureMember(Object info)
+    {
+        if (info instanceof FeatureEntry entry)
+            return isStructureMember(entry.getFeature());
+        if (info instanceof com._1c.g5.v8.dt.bsl.model.ProposalElement element)
+        {
+            for (EObject member : element.getList())
+                if (isStructureMember(member))
+                    return true;
+            return false;
+        }
+        if (!(info instanceof EObject member) || member.eIsProxy())
+            return false;
+        for (EObject owner = member.eContainer(); owner != null; owner = owner.eContainer())
+            if (owner instanceof Type type && !type.eIsProxy())
+                return in(type.getName(), "Structure", "FixedStructure", "FormDataStructure"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return false;
+    }
 
     /**
      * Ответ штатного расчёта в строковом литерале: значения литерала вне вызова ({@code Вид = "…"}) и без
@@ -1635,12 +1744,16 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         final List<String> branches = new ArrayList<>();
         /** {@code ЛиНаборЗначенийПолный}. */
         boolean full;
+        /** Полный список обработчиков может быть пустым после отбора по контекстам компиляции. */
+        private boolean completeHandlerNames;
         /** Значения взяты из реквизитов формы, которые модуль создаёт кодом: список заведомо неполный. */
         private boolean dynamicFormAttributes;
         /** Элементы и команды могут добавляться при выполнении; даже непустой список не полный. */
         private boolean dynamicFormCollection;
         /** Колонки добавляются с неизвестным именем: полноту нельзя восстановить следующей веткой. */
         private boolean incompleteColumns;
+        /** Исключён шаблон произвольного свойства: оставшиеся имена не образуют полный список. */
+        private boolean incompleteProperties;
         /** Ограничивать полноту по веткам только при поиске роли в вызываемом методе. */
         ParameterSearch parameterSearch;
         boolean sortDirection;
@@ -1852,12 +1965,12 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
 
         void finish()
         {
-            if (validation && values.isEmpty() && stockContext != null && !dynamicFormCollection)
+            if (validation && values.isEmpty() && stockContext != null && !dynamicFormCollection
+                && !completeHandlerNames)
                 addStockValues();
-            if (dynamicFormAttributes || dynamicFormCollection || incompleteColumns)
+            if (dynamicFormAttributes || dynamicFormCollection || incompleteColumns || incompleteProperties)
                 full = false;
             // Защита всех веток: шаблон имени не является значением и не подтверждает полноту.
-            List<String> excluded = new ArrayList<>();
             for (var iterator = values.entrySet().iterator(); iterator.hasNext();)
             {
                 String key = iterator.next().getKey();
@@ -1865,7 +1978,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (property != null && (isPropertyNameTemplate(property)
                     || values.size() == 1 && BslDocCommentTypeMerge.isStructureKeyPlaceholder(property)))
                 {
-                    excluded.add(key);
                     iterator.remove();
                     valueProperties.remove(key);
                     valueTypes.remove(key);
@@ -1877,8 +1989,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 values.clear();
                 full = false;
             }
-            Global.tempLog("literal-property-templates", "finish position=" + position + " validation=" + validation
-                + " branches=" + branches + " excluded=" + excluded + " full=" + full + " values=" + values.values());
         }
 
         // ---- ЗаполнитьТаблицуВозможныхЗначенийЛитерала: литерал-параметр вызова ----
@@ -2188,6 +2298,62 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         {
             return hasType(ownerTypes, "Structure", "FixedStructure", "FormDataStructure") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 && in(method, "Свойство", "Property"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Только охватывающие ветки Тогда; Иначе и соседние ветки сюда не попадают. */
+        void addGuardedStructureKeys(Call call)
+        {
+            if (call.source == null || !parent.isEmpty()
+                || validation && (!(call.args.get(call.index) instanceof StringLiteral literal)
+                    || values.containsKey(lower(literalText(literal)))))
+                return;
+            addGuardedStructureKeys(call.target, call.source);
+        }
+
+        void addGuardedStructureKeys(EObject location, Expression source)
+        {
+            String receiver = lower(withoutSpaces(text(source)));
+            if (receiver.isEmpty())
+                return;
+            for (EObject child = location; child != null && !(child instanceof Method)
+                && !(child instanceof Module); child = child.eContainer())
+            {
+                checkCanceled();
+                if (child.eContainer() instanceof Conditional conditional
+                    && child.eContainingFeature() == BslPackage.Literals.CONDITIONAL__STATEMENTS)
+                {
+                    Map<String, List<String>> keys = pass.guardedStructureKeys.get(conditional);
+                    if (keys == null)
+                    {
+                        keys = new HashMap<>();
+                        collectGuardedStructureKeys(conditional.getPredicate(), keys);
+                        pass.guardedStructureKeys.put(conditional, keys);
+                    }
+                    List<String> names = keys.get(receiver);
+                    if (names != null)
+                        addAll(names);
+                }
+            }
+        }
+
+        /** Положительный вызов Свойство и его конъюнкции; без разрешения ссылок и расчёта типов. */
+        void collectGuardedStructureKeys(Expression predicate, Map<String, List<String>> keys)
+        {
+            checkCanceled();
+            if (predicate instanceof BinaryExpression binary && binary.getOperation() == BinaryOperation.AND)
+            {
+                collectGuardedStructureKeys(binary.getLeft(), keys);
+                collectGuardedStructureKeys(binary.getRight(), keys);
+            }
+            else if (predicate instanceof Invocation probe && !probe.getParams().isEmpty()
+                && probe.getParams().get(0) instanceof StringLiteral key
+                && probe.getMethodAccess() instanceof DynamicFeatureAccess access
+                && in(access.getName(), "Свойство", "Property")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                String receiver = lower(withoutSpaces(text(access.getSource())));
+                if (!receiver.isEmpty())
+                    keys.computeIfAbsent(receiver, ignored -> new ArrayList<>()).add(literalText(key));
+            }
         }
 
         /**
@@ -2587,6 +2753,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 List<String> keys = hasTabularSection(objectTypes) ? elementProperties(objectTypes)
                     : structureKeyNames(objectTypes);
                 addAll(keys);
+                if (hasType(objectTypes, "Structure", "FixedStructure")) //$NON-NLS-1$ //$NON-NLS-2$
+                    addGuardedStructureKeys(call);
                 // Ключ с неизвестным именем (Вставить(Ключ, …)) EDT в тип не заносит — набор неполный.
                 if (hasStructureInsertWithUnknownKey(call))
                     full = false;
@@ -2760,6 +2928,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             else
                 targets.add(moduleOf(call.source));
             boolean found = false;
+            Environmental environmental = EcoreUtil2.getContainerOfType(call.target, Environmental.class);
+            Environments required = environmental != null ? environmental.environments() : Environments.EMPTY;
+            IBslPreferences preferences = resource.getResourceServiceProvider() != null
+                ? resource.getResourceServiceProvider().get(IBslPreferences.class) : null;
+            if (preferences != null)
+                required = required.intersect(preferences.getLoadEnvs(call.target));
+            Map<String, Environments> available = new HashMap<>();
             for (Module target : targets)
             {
                 if (target == null)
@@ -2771,9 +2946,20 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         continue;
                     if (idle && (!method.getFormalParams().isEmpty() || isServerOnly(method)))
                         continue;
+                    Environments environments = method.environments();
+                    available.merge(lower(method.getName()), environments, Environments::add);
                     addMethod(method);
                 }
             }
+            // Одно имя может иметь несколько объявлений в разных ветках препроцессора.
+            // Их совокупная доступность должна покрывать все контексты места вызова.
+            for (var entry : available.entrySet())
+                if (!entry.getValue().containsAll(required))
+                {
+                    values.remove(entry.getKey());
+                    valueMethods.remove(entry.getKey());
+                }
+            completeHandlerNames = found && !required.isEmpty();
             if (!found)
                 full = false;
         }
@@ -3453,6 +3639,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             for (TypeItem item : types)
             {
                 Type type = resolve(item);
+                observePropertyComposition(type);
                 if (type == null || type.getContextDef() == null)
                     continue;
                 Set<String> platform = platformPropertyNames(type);
@@ -3684,15 +3871,29 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             return names;
         }
 
+        /** Неполнота проверяется до отсева платформенных свойств и до обращения к кэшу колонок. */
+        void observePropertyComposition(Type type)
+        {
+            ContextDef context = type != null ? type.getContextDef() : null;
+            if (context == null)
+                incompleteProperties = true;
+            else
+                for (Property property : context.allProperties())
+                    if (isMetadataDependentProperty(property))
+                    {
+                        incompleteProperties = true;
+                    }
+        }
+
         /** Свойства контекста типов ({@code ТаблицаСловИзСтруктурыТипа} со словами-свойствами). */
         List<String> properties(List<TypeItem> types)
         {
             List<String> names = new ArrayList<>();
-            List<String> templates = new ArrayList<>();
             // Неспециализированный элемент формы: члены всех расширений его вида
             for (TypeItem item : FormItemTypes.expand(types))
             {
                 Type type = resolve(item);
+                observePropertyComposition(type);
                 ContextDef def = type != null ? type.getContextDef() : null;
                 if (def != null)
                     for (Property property : def.allProperties())
@@ -3700,15 +3901,13 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                         // Шаблон платформы описывает произвольное имя, а не реальное свойство.
                         if (isPropertyNameTemplate(property))
                         {
-                            templates.add(EcoreUtil.getURI(property).toString());
+                            incompleteProperties = true;
                             continue;
                         }
                         addUnique(names, dualName(property));
                         rememberProperty(property);
                     }
             }
-            Global.tempLog("literal-property-templates", "position=" + position + " validation=" + validation
-                + " types=" + types.stream().map(this::typeName).toList() + " excluded=" + templates + " names=" + names);
             return names;
         }
 
@@ -3796,6 +3995,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 for (TypeItem rowItem : rowTypes)
                 {
                     Type row = resolve(rowItem);
+                    observePropertyComposition(row);
                     if (row == null)
                         continue;
                     List<Property> known = pass.columnProperties.get(row);
@@ -4495,6 +4695,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static boolean isEmptyArgument(Expression expression)
     {
         return expression == null || text(expression).isEmpty();
+    }
+
+    /** Неспециализированная зависимость от метаданных: флаг или правило MdContextDefInferrer. */
+    private static boolean isMetadataDependentProperty(Property property)
+    {
+        if (isPropertyNameTemplate(property))
+            return true;
+        // Сгенерированное свойство проекта с тем же именем — настоящее, а не шаблон платформы.
+        return METADATA_DYNAMIC_PROPERTIES.contains(property.getName())
+            && property.eContainer() instanceof ContextDef context
+            && context.eContainer() instanceof Type declaration
+            && EcoreUtil.getURI(declaration).isPlatformPlugin();
     }
 
     /**

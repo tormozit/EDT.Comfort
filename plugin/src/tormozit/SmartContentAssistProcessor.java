@@ -9822,6 +9822,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         {
             raw = TextNameProposals.merge(viewer, off, raw);
             raw = BslLiteralValues.merge(viewer, off, raw);
+            raw = BslLiteralValues.mergeGuardedMembers(viewer, off, raw);
         }
         // Ключевые слова — в каретке, из контекстов этого же опроса. После «&» грамматика
         // допускает только аннотации, и ответ EDT там окончательный. Грамматика EDT
