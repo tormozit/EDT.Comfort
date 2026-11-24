@@ -300,6 +300,8 @@ public final class BslFormatterHook implements IStartup
         int margin = 120;
         int tabWidth = 4;
         boolean spacesForTabs;
+        boolean noIndentPreprocessor;
+        String wrapType = "indent_on_wrap"; //$NON-NLS-1$
         String keywordStandard = "CamelCase"; //$NON-NLS-1$
 
         String indentUnit()
@@ -328,6 +330,8 @@ public final class BslFormatterHook implements IStartup
             options.margin = reader.stockInteger("printMarginColumn", 120); //$NON-NLS-1$
             options.tabWidth = Math.max(1, reader.stockInteger("tabWidth", 4)); //$NON-NLS-1$
             options.spacesForTabs = reader.stockBoolean("spacesForTabs", false); //$NON-NLS-1$
+            options.noIndentPreprocessor = reader.stockBoolean("noindent_preprocessor", false); //$NON-NLS-1$
+            options.wrapType = reader.stockString("wrapType", "indent_on_wrap"); //$NON-NLS-1$ //$NON-NLS-2$
             options.keywordStandard = reader.stockString("keywordStandard", "CamelCase"); //$NON-NLS-1$ //$NON-NLS-2$
             options.continuationIndent = reader.ownBoolean(KEY_CONTINUATION_INDENT, DEFAULT_CONTINUATION_INDENT);
             options.compressInnerSpaces = reader.ownBoolean(KEY_COMPRESS_INNER_SPACES, DEFAULT_COMPRESS_INNER_SPACES);
@@ -488,13 +492,13 @@ public final class BslFormatterHook implements IStartup
                             startLine, document.getNumberOfLines() - 1 - linesAfter, options)));
                     if (options.continuationIndent || options.compressInnerSpaces || options.compressBlankLines)
                         log.append(" text=").append(pass(() -> textPass(document, startLine, //$NON-NLS-1$
-                            document.getNumberOfLines() - 1 - linesAfter, options, options.continuationIndent, true)));
+                            document.getNumberOfLines() - 1 - linesAfter, options, options.continuationIndent, true, true)));
                 }
                 else
                 {
                     log.append(" engine=text reason=").append(problem); //$NON-NLS-1$
                     log.append(" text=").append(pass(() -> textPass(document, startLine, //$NON-NLS-1$
-                        document.getNumberOfLines() - 1 - linesAfter, options, true, options.continuationIndent)));
+                        document.getNumberOfLines() - 1 - linesAfter, options, true, options.continuationIndent, false)));
                 }
             }
             finally
@@ -595,7 +599,7 @@ public final class BslFormatterHook implements IStartup
 
     /** Порт ИР по строкам области. @return 1, если текст изменился */
     private static int textPass(IDocument document, int startLine, int endLine, Options options,
-        boolean reindent, boolean continuationShift) throws BadLocationException
+        boolean reindent, boolean continuationShift, boolean stockFormatted) throws BadLocationException
     {
         BslTextFormatter.Settings settings = new BslTextFormatter.Settings();
         settings.reindent = reindent;
@@ -604,6 +608,9 @@ public final class BslFormatterHook implements IStartup
         settings.compressBlankLines = options.compressBlankLines;
         settings.indentUnit = options.indentUnit();
         settings.tabWidth = options.tabWidth;
+        settings.noIndentPreprocessor = options.noIndentPreprocessor;
+        settings.preserveStructureIndent = stockFormatted;
+        settings.alignContinuation = "alignment_on_wrap".equals(options.wrapType); //$NON-NLS-1$
         List<String> lines = new ArrayList<>();
         for (int line = startLine; line <= endLine; line++)
         {
@@ -617,6 +624,12 @@ public final class BslFormatterHook implements IStartup
             lineAbove = document.get(above.getOffset(), above.getLength());
         }
         List<String> formatted = BslTextFormatter.format(lines, lineAbove, settings);
+        Global.tempLog("bsl-format-preprocessor", "noIndent=" + options.noIndentPreprocessor //$NON-NLS-1$ //$NON-NLS-2$
+            + " reindent=" + reindent + " before=" //$NON-NLS-1$ //$NON-NLS-2$
+            + lines.stream().filter(line -> line.stripLeading().startsWith("#")).toList() //$NON-NLS-1$
+            + " after=" + formatted.stream().filter(line -> line.stripLeading().startsWith("#")).toList()); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.tempLog("bsl-format-options", "stockFormatted=" + stockFormatted + " reindent=" + reindent //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " wrapType=" + options.wrapType + " before=" + lines + " after=" + formatted); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (formatted.equals(lines))
             return 0;
         IRegion region = lineRegion(document, startLine, endLine);

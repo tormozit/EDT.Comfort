@@ -575,7 +575,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 Type type = analysis.resolve(item);
                 if (type != null && type.getContextDef() != null)
                     for (Property property : type.getContextDef().allProperties())
-                        if (!property.isDependsOnMetadata() && (access.getName().equalsIgnoreCase(property.getName())
+                        if (!isPropertyNameTemplate(property) && (access.getName().equalsIgnoreCase(property.getName())
                             || access.getName().equalsIgnoreCase(property.getNameRu())))
                             found = true;
             }
@@ -1856,18 +1856,29 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 addStockValues();
             if (dynamicFormAttributes || dynamicFormCollection || incompleteColumns)
                 full = false;
-            // Единственный шаблонный член не задаёт полный список допустимых имён.
-            if (values.size() == 1)
+            // Защита всех веток: шаблон имени не является значением и не подтверждает полноту.
+            List<String> excluded = new ArrayList<>();
+            for (var iterator = values.entrySet().iterator(); iterator.hasNext();)
             {
-                Property property = valueProperties.get(values.keySet().iterator().next());
-                if (property != null && BslDocCommentTypeMerge.isStructureKeyPlaceholder(property))
+                String key = iterator.next().getKey();
+                Property property = valueProperties.get(key);
+                if (property != null && (isPropertyNameTemplate(property)
+                    || values.size() == 1 && BslDocCommentTypeMerge.isStructureKeyPlaceholder(property)))
+                {
+                    excluded.add(key);
+                    iterator.remove();
+                    valueProperties.remove(key);
+                    valueTypes.remove(key);
                     full = false;
+                }
             }
             if (!parent.isEmpty() && !pathAware)
             {
                 values.clear();
                 full = false;
             }
+            Global.tempLog("literal-property-templates", "finish position=" + position + " validation=" + validation
+                + " branches=" + branches + " excluded=" + excluded + " full=" + full + " values=" + values.values());
         }
 
         // ---- ЗаполнитьТаблицуВозможныхЗначенийЛитерала: литерал-параметр вызова ----
@@ -3446,7 +3457,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     continue;
                 Set<String> platform = platformPropertyNames(type);
                 for (Property property : type.getContextDef().allProperties())
-                    if (!property.isDependsOnMetadata() && !platform.contains(lower(property.getName())))
+                    if (!isPropertyNameTemplate(property) && !platform.contains(lower(property.getName())))
                     {
                         addUnique(names, dualName(property));
                         rememberProperty(property);
@@ -3677,6 +3688,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         List<String> properties(List<TypeItem> types)
         {
             List<String> names = new ArrayList<>();
+            List<String> templates = new ArrayList<>();
             // Неспециализированный элемент формы: члены всех расширений его вида
             for (TypeItem item : FormItemTypes.expand(types))
             {
@@ -3686,12 +3698,17 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     for (Property property : def.allProperties())
                     {
                         // Шаблон платформы описывает произвольное имя, а не реальное свойство.
-                        if (property.isDependsOnMetadata())
-                        continue;
+                        if (isPropertyNameTemplate(property))
+                        {
+                            templates.add(EcoreUtil.getURI(property).toString());
+                            continue;
+                        }
                         addUnique(names, dualName(property));
                         rememberProperty(property);
                     }
             }
+            Global.tempLog("literal-property-templates", "position=" + position + " validation=" + validation
+                + " types=" + types.stream().map(this::typeName).toList() + " excluded=" + templates + " names=" + names);
             return names;
         }
 
@@ -3792,7 +3809,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                     Set<String> platform = platformPropertyNames(row);
                     if (row.getContextDef() != null)
                         for (Property property : row.getContextDef().allProperties())
-                            if (!property.isDependsOnMetadata() && !platform.contains(lower(property.getName())))
+                            if (!isPropertyNameTemplate(property) && !platform.contains(lower(property.getName())))
                             {
                                 calculated.add(property);
                             }
@@ -4478,6 +4495,22 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
     private static boolean isEmptyArgument(Expression expression)
     {
         return expression == null || text(expression).isEmpty();
+    }
+
+    /**
+     * Образец произвольного имени, а не член конкретного значения. В описаниях EDT у EnumValueName
+     * в EnumManagerEnumerationName (включая $EnumManager$.type) пропущен dependsOnMetadata.
+     * Проверяем декларацию платформы: реальное свойство проекта с таким именем допустимо.
+     */
+    private static boolean isPropertyNameTemplate(Property property)
+    {
+        if (property.isDependsOnMetadata())
+            return true;
+        return "EnumValueName".equals(property.getName()) //$NON-NLS-1$
+            && property.eContainer() instanceof ContextDef context
+            && context.eContainer() instanceof Type declaration
+            && "EnumManagerEnumerationName".equals(declaration.getName()) //$NON-NLS-1$
+            && EcoreUtil.getURI(declaration).isPlatformPlugin();
     }
 
     /** Выражение записано так же, как {@code name} (без учёта регистра и пробелов). */

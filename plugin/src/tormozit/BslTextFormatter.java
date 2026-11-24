@@ -31,6 +31,12 @@ final class BslTextFormatter
         boolean compressInnerSpaces;
         /** {@code СжиматьПустыеСтроки}. */
         boolean compressBlankLines;
+        /** Штатная опция «Не учитывать отступ для препроцессора». */
+        boolean noIndentPreprocessor;
+        /** Сохранять отступы инструкций, уже расставленные штатным форматтером. */
+        boolean preserveStructureIndent;
+        /** Сохранять штатное выравнивание продолжений вместо сдвига по вложенности скобок. */
+        boolean alignContinuation;
         /** Один уровень отступа. */
         String indentUnit = "\t"; //$NON-NLS-1$
         /** Ширина табуляции в пробелах ({@code ЧислоПробеловВТабуляции}). */
@@ -107,6 +113,7 @@ final class BslTextFormatter
             document.add(0, lineAbove);
 
         State state = new State();
+        int statementLevel = baseLevel;
         String previousLine = null;
         Integer commentedBlockLevel = null;
         for (int index = 0; index < document.size(); index++)
@@ -169,6 +176,7 @@ final class BslTextFormatter
                 bare = INNER_SPACES.matcher(head).replaceAll(" ") + (quote < 0 ? "" : bare.substring(quote)); //$NON-NLS-1$ //$NON-NLS-2$
             }
             int levelShift = 0;
+            int previousExpressionLevel = state.expressionLevel;
             boolean keywordFound = findFormattingKeywords(code, state, previousLine);
             state.instructionLevel = Math.max(-baseLevel, state.instructionLevel);
             if (index > 0)
@@ -183,13 +191,27 @@ final class BslTextFormatter
                         levelShift = Math.min(levelShift, 1);
                 }
                 int lineLevel = baseLevel + state.instructionLevel + levelShift;
-                document.set(index, lineWithIndent(line, bare, lineLevel, settings));
+                if (settings.preserveStructureIndent)
+                {
+                    boolean continuation = previousExpressionLevel > 0 && !keywordFound;
+                    if (!continuation)
+                        statementLevel = leadingWhitespace(line).replace("\t", " ".repeat(settings.tabWidth)).length() //$NON-NLS-1$ //$NON-NLS-2$
+                            / Math.max(1, settings.tabWidth);
+                    if (lineTrimmedLeft.startsWith("|")) //$NON-NLS-1$
+                        document.set(index, line);
+                    else if (continuation && settings.continuationShift && !settings.alignContinuation)
+                        document.set(index, lineWithIndent(line, bare, statementLevel + levelShift, settings));
+                    else
+                        document.set(index, leadingWhitespace(line) + bare);
+                }
+                else
+                    document.set(index, lineWithIndent(line, bare, lineLevel, settings));
             }
             else
             {
                 if (keywordFound)
                     state.instructionLevel = 0;
-                if (!hasLineAbove)
+                if (!hasLineAbove && !settings.preserveStructureIndent)
                     document.set(index, lineWithIndent(line, bare, baseLevel, settings));
             }
             state.instructionLevel += state.nextLevelShift;
@@ -351,6 +373,8 @@ final class BslTextFormatter
             return bare;
         if (!settings.reindent)
             return leadingWhitespace(original) + bare;
+        if (settings.noIndentPreprocessor && bare.startsWith("#")) //$NON-NLS-1$
+            return bare;
         return settings.indentUnit.repeat(Math.max(0, level)) + bare;
     }
 
