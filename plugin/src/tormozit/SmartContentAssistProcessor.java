@@ -541,14 +541,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         private final QueryTypesPreparation previous = CURRENT.get();
         private final ITextViewer viewer;
         private final int offset;
+        private final int memberDot;
         private final SmartContentAssistProcessor processor;
         private boolean prepared;
         private boolean shown;
 
-        QueryTypesPreparation(ITextViewer viewer, int offset, SmartContentAssistProcessor processor)
+        QueryTypesPreparation(ITextViewer viewer, int offset, int memberDot, SmartContentAssistProcessor processor)
         {
             this.viewer = viewer;
             this.offset = offset;
+            this.memberDot = memberDot;
             this.processor = processor;
             CURRENT.set(this);
         }
@@ -559,12 +561,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 || !(viewer.getDocument() instanceof IXtextDocument document))
                 return;
             prepared = true;
+            if (memberDot >= 0 && resource != null)
+                BslStructureInsertCommentTypes.prepareMemberCompletionTypes(
+                    ReceiverTypeLabel.findReceiverExpression(resource, memberDot, offset));
             BslStructureInsertCommentTypes.refreshQueryTypesForAssist(resource, offset, status ->
             {
                 shown = true;
                 ContentAssistPopupUi.setRecomputeStatus(viewer, processor, status);
             });
             BslTempTableSessions.refreshDocument(document, resource, offset);
+            BslExpectedTypePremiums.rememberInitialContext(document, offset, resource);
         }
 
         @Override
@@ -3070,6 +3076,8 @@ return;
         wordListBackgroundKey = key;
         final int gen = memberStockContextGen;
         final int epoch = wordListEpoch;
+        var choiceProject = BslExpectedTypePremiums.projectOf(viewer instanceof SourceViewer source
+            ? ContentAssistSessionReloader.forViewer(source) : null);
         // Слово набирают вплотную перед уже стоящей «.» — это не точка, набранная вдогонку.
         final boolean dotAhead = isDotAt(doc, caret);
         final boolean inspectJob = DebugInspectorHook.isInspectExpressionViewer(viewer);
@@ -3091,13 +3099,13 @@ return;
                 // Дождавшись замка, считать уже незачем, если контекст сменился (точка).
                 DELEGATE_STALE_CHECK.set(() -> epoch != wordListEpoch
                     || gen != memberStockContextGen);
+                BslExpectedTypePremiums.beginInitialContextRead();
                 try
                 {
                 ICompletionProposal[] raw = EMPTY;
                 java.util.Map<Object, Object> events = java.util.Collections.emptyMap();
                 int attempts = 0;
                 int lastProbe = offset;
-                boolean[] premiumsPrepared = { false };
                 // «Новый <тип>»: список типов зависит только от контекстов компиляции,
                 // поэтому он считается один раз на набор и лежит в общем каталоге.
                 boolean ctorProbe = false;
@@ -3164,35 +3172,13 @@ return;
                     {
                         final int probeOffset = probe;
                         final int probeAttempt = attempts;
-                        premiumsPrepared[0] = false;
                         provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
-                        // Не отпускать модель между предложениями и премиями: иначе EDT
-                        // запускает синхронизацию, которую премии тут же вынуждены ждать.
                         // Как у списка членов: достаточно готового префикса до зонда.
                         // Хвост набираемого слова не должен заставлять ждать всю очередь sync.
                         raw = ContentAssistSessionReloader.withMemberModelReady(xtextDocument, probeOffset,
                             () -> monitor.isCanceled() || epoch != wordListEpoch || gen != memberStockContextGen,
-                            () -> {
-                                ICompletionProposal[] proposals = BslDataEventGuard.runIsolated(
-                                    () -> computeMemberStockViaSelectionProxy(viewer, probeOffset));
-                                if (proposals != null && proposals.length > 0 && delegateAssistMode() != 2
-                                    && !monitor.isCanceled() && epoch == wordListEpoch && gen == memberStockContextGen)
-                                {
-                                    GHOST_DOC.set(doc);
-                                    GHOST_CARET.set(Integer.valueOf(probeOffset));
-                                    try
-                                    {
-                                        BslExpectedTypePremiums.ensure(doc, probeOffset, proposals);
-                                        premiumsPrepared[0] = true;
-                                    }
-                                    finally
-                                    {
-                                        GHOST_DOC.remove();
-                                        GHOST_CARET.remove();
-                                    }
-                                }
-                                return proposals;
-                            });
+                            () -> BslDataEventGuard.runIsolated(
+                                () -> computeMemberStockViaSelectionProxy(viewer, probeOffset)));
                         provisionalModel |= !ContentAssistSessionReloader.isModelCurrent(doc);
                         events = BslDataEventGuard.drainIsolated(doc);
                         if (ctorKey != null && raw != null && countNoLinkModelProposals(raw) > 0)
@@ -3281,6 +3267,7 @@ return;
                 IDocument liveDoc = viewer.getDocument();
                 if (result.length > 0 && liveDoc != null)
                 {
+                    BslExpectedTypePremiums.prepareInitialPremiums(liveDoc, lastProbe, result, choiceProject);
                     // Фильтр и ghost-каретка — по зонду задания. По живой каретке список
                     // выходил «почти правильным»: на UI он проходил сверку префикса и
                     // попадал в окно вместе с позициями замены для другого места.
@@ -3289,18 +3276,14 @@ return;
                     GHOST_CARET.set(Integer.valueOf(lastProbe));
                     try
                     {
-                        // Премии ожидаемого типа — здесь, в фоне: в UI-потоке они только читаются.
-                        if (!premiumsPrepared[0])
-                        {
-                            BslExpectedTypePremiums.ensure(liveDoc, lastProbe, result);
-                        }
+                        // Первый показ использует готовый снимок. Новый снимок пересортирует открытый список.
                         long tFilter = System.nanoTime();
                         popup = popupFilter.isEmpty()
-                            ? buildDelegateOrderedList(result) : filterAndSort(result, popupFilter);
+                            ? buildDelegateOrderedList(result, true) : filterAndSort(result, popupFilter, true);
                         uiBlockLog("wordListBackground.filter", //$NON-NLS-1$
                             "ms=" + ((System.nanoTime() - tFilter) / 1_000_000L) //$NON-NLS-1$
                                 + " raw=" + result.length + " n=" + popup.length //$NON-NLS-1$ //$NON-NLS-2$
-                                + " filter=" + popupFilter); //$NON-NLS-1$
+                                + " filter=" + popupFilter + " deferExpectedType=true"); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                     finally
                     {
@@ -3345,6 +3328,7 @@ return;
                 }
                 finally
                 {
+                    BslExpectedTypePremiums.endInitialContextRead();
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
                     restoreAssistWorkerPriority(worker, workerPriority);
@@ -9770,30 +9754,34 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         if (!onUi)
             resetDelegateAssistMode();
         KeywordProbe keywordProbe = beginKeywordProbe(viewer, off);
-        QueryTypesPreparation preparation = new QueryTypesPreparation(viewer, off, this);
         boolean delegateCompleted = false;
         // Провайдер значений литерала (issue 888) отвечает только внутри этого расчёта.
         BslLiteralValues.beginAssist(Boolean.TRUE.equals(CTRL_SPACE_INVOCATION.get()));
         IDocument completionDocument = viewer != null ? viewer.getDocument() : null;
+        int memberDot = !onUi ? ReceiverTypeLabel.findMemberAccessDot(completionDocument, off) : -1;
+        boolean receiverOnly = memberDot >= 0
+            && delegate instanceof org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor xtext
+            && xtext.getContextFactory() != null;
+        QueryTypesPreparation preparation = new QueryTypesPreparation(viewer, off, receiverOnly ? memberDot : -1, this);
         // В общем словаре EDT спрашивает типы сотен ещё не выбранных слов.
         // Уточнение каждого из них обходило тела почти всего модуля (471 метод,
         // 725–799 мс в логе). Здесь нужен тот же штатный словарь, что в 1.0.9.
         // Уточняем конкретного получателя после точки и аргумент внутри литерала;
         // сведения выбранной строки и ожидаемый тип считаются своими фоновыми путями.
         boolean expressionTypes = !onUi && completionDocument != null
-            && (ReceiverTypeLabel.findMemberAccessDot(completionDocument, off) >= 0
-                || isStringLiteralAssistContext(completionDocument, off));
+            && (memberDot >= 0 || isStringLiteralAssistContext(completionDocument, off));
         try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = expressionTypes
-            ? BslStructureInsertCommentTypes.interactiveTypes("completion", DELEGATE_STALE_CHECK.get()) : null)
+            ? BslStructureInsertCommentTypes.interactiveTypes("completion", DELEGATE_STALE_CHECK.get(), receiverOnly) : null)
         {
             long nativeStarted = System.nanoTime();
             try
             {
-                raw = delegate.computeCompletionProposals(viewer, off);
+                raw = BslNodeLookup.assistRead(() -> delegate.computeCompletionProposals(viewer, off));
             }
             finally
             {
                 Global.tempLog("assist-native-phase", "offset=" + off + " expressionTypes=" + expressionTypes
+                    + " receiverOnly=" + receiverOnly
                     + " elapsedNs=" + (System.nanoTime() - nativeStarted)
                     + " count=" + (raw == null ? -1 : raw.length)
                     + " mode=" + delegateAssistMode() + " thread=" + Thread.currentThread().getName());
@@ -10406,6 +10394,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         memberStockBackgroundGen = contextGen;
         ContentAssistSessionReloader.armShowGate(viewer);
         final int probeOffset = dotContextKey + 1;
+        var choiceProject = BslExpectedTypePremiums.projectOf(viewer instanceof SourceViewer source
+            ? ContentAssistSessionReloader.forViewer(source) : null);
         Job job = new Job("SCAP member stock") { //$NON-NLS-1$
             @Override
             protected IStatus run(IProgressMonitor monitor)
@@ -10420,6 +10410,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 BslXtextDocumentHook.markAssistBackground(true);
                 // Дождавшись замка, считать уже незачем, если контекст сменился.
                 DELEGATE_STALE_CHECK.set(() -> contextGen != memberStockContextGen);
+                BslExpectedTypePremiums.beginInitialContextRead();
                 try
                 {
                     uiBlockLog("memberStock.bg.run", "dot=" + dotContextKey); //$NON-NLS-1$ //$NON-NLS-2$
@@ -10465,10 +10456,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                                         + " receiver=" + contextReceiver + " count=" + (list == null ? -1 : list.length)
                                         + " templatesOnly=" + containsOnlyTemplateProposals(list)
                                         + " mode=" + delegateAssistMode() + " stale=" + stale.getAsBoolean());
-                                    if (list != null && list.length > 0 && !containsOnlyTemplateProposals(list)
-                                        && !stale.getAsBoolean()
-                                        && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
-                                        list = BslExpectedTypePremiums.prepareMemberList(doc, probeOffset, list);
                                     return list;
                                 });
                             dataEvents = BslDataEventGuard.drainIsolated(doc);
@@ -10521,11 +10508,6 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                             }
                         }
                     }
-                    // До снятия метки задания и публикации: повторный запрос не должен
-                    // запустить второй расчёт, пока готовится базовая часть списка.
-                    if (group != null && raw != null && !monitor.isCanceled()
-                        && dependencyRevision == FunctionReturnTypes.localContextRevision(doc))
-                        raw = BslExpectedTypePremiums.prepareMemberList(doc, probeOffset, raw);
                     // Метку «идёт расчёт для этой точки» снимаем в любом исходе, иначе после
                     // неудачи повторный расчёт для той же точки уже не запустится.
                     if (memberStockBackgroundGen == contextGen
@@ -10537,7 +10519,8 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         return Status.CANCEL_STATUS;
                     }
                     Global.tempLog("member-stock-empty", "result dot=" + dotContextKey
-                        + " receiver=" + contextReceiver + " attempts=" + attempts + " count=" + raw.length);
+                        + " receiver=" + contextReceiver + " attempts=" + attempts + " count=" + raw.length
+                        + " deferExpectedType=true");
                     if (raw.length == 0)
                     {
                         runWordListOnUi(viewer, display, "member", //$NON-NLS-1$
@@ -10546,6 +10529,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                         return Status.CANCEL_STATUS;
                     }
                     final ICompletionProposal[] result = raw;
+                    BslExpectedTypePremiums.prepareInitialPremiums(doc, probeOffset, result, choiceProject);
                     final java.util.Map<Object, Object> events = dataEvents;
                     // Результат кладём в поля до постановки в UI: пока Display занят
                     // подсветкой, asyncExec стоит секундами (лог 11.09.2026: probe n=5 в 00:19:00,
@@ -10562,6 +10546,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 }
                 finally
                 {
+                    BslExpectedTypePremiums.endInitialContextRead();
                     DELEGATE_STALE_CHECK.remove();
                     BslXtextDocumentHook.markAssistBackground(false);
                     restoreAssistWorkerPriority(worker, workerPriority);
@@ -10723,6 +10708,10 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
                 + " n=" + memberStockFullList.length + " caller=" + uiBlockCaller()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             ContentAssistSessionReloader.openPopupForBackgroundMemberList(viewer);
         }
+        // Готовый список уже показан. Строка «Родитель» и дополнительные варианты
+        // обновятся по снимку ожидаемого типа, который считает фоновый читатель.
+        if (isPopupVisible())
+            BslExpectedTypePremiums.ensure(liveDoc, liveCaret, result, true);
     }
 
     private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
@@ -11620,6 +11609,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      */
     private ICompletionProposal[] buildDelegateOrderedList(ICompletionProposal[] raw)
     {
+        return buildDelegateOrderedList(raw, false);
+    }
+
+    private ICompletionProposal[] buildDelegateOrderedList(ICompletionProposal[] raw, boolean deferExpectedType)
+    {
         if (isSortDirectionList(raw))
             return filterSortDirections(raw, "");
         {
@@ -11628,7 +11622,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
 
         // Пустой префикс: премия контекста впереди, внутри равной премии — порядок EDT. Номер
         // строки EDT сохраняется — по нему досортировывает и штатный sorter окна.
-        ensureContextPremiums(raw);
+        ensureContextPremiums(raw, deferExpectedType);
         // Слова, которых нет у EDT (генераторы, конструкции, копии строк выше), — в конец, дальше по премии
         ICompletionProposal[] list = BslExpectedTypePremiums.withAddedWords(raw);
         Integer[] order = new Integer[list.length];
@@ -11678,7 +11672,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
      * Снимок премий ожидаемого типа ({@link BslExpectedTypePremiums}) для сортируемого списка; документ и
      * каретка — как у {@link #dropTypedIdentifierGhostInPlace}.
      */
-    private static void ensureContextPremiums(ICompletionProposal[] list)
+    private static void ensureContextPremiums(ICompletionProposal[] list, boolean deferExpectedType)
     {
         IDocument doc = GHOST_DOC.get();
         Integer ghostCaret = GHOST_CARET.get();
@@ -11691,7 +11685,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             doc = viewer != null ? viewer.getDocument() : null;
             caret = resolveWidgetCaret(viewer);
         }
-        BslExpectedTypePremiums.ensure(doc, caret, list);
+        BslExpectedTypePremiums.ensure(doc, caret, list, deferExpectedType);
     }
 
     /** Полный список при выключенном smart-фильтре: все элементы, алфавит (legacy). */
@@ -11931,6 +11925,11 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
+        return filterAndSort(raw, filter, false);
+    }
+
+    private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter, boolean deferExpectedType)
+    {
         logWordListComposition("filter.input", -1, filter, raw);
         if (isSortDirectionList(raw))
             return filterSortDirections(raw, filter);
@@ -11989,7 +11988,7 @@ if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
         ICompletionProposal[] result = EMPTY;
         try
         {
-        ensureContextPremiums(raw);
+        ensureContextPremiums(raw, deferExpectedType);
         raw = BslExpectedTypePremiums.withAddedWords(raw);
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);

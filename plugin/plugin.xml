@@ -45,6 +45,9 @@
       <adapter type="org.eclipse.debug.core.commands.ISuspendHandler"/>
     </factory>
   </extension>
+  <extension point="bm.launch.lifecycleListenerContributor">
+    <contributor class="tormozit.BslXtextDocumentHook$CommonModuleLifecycleContributor"/>
+  </extension>
   <extension point="com._1c.g5.v8.dt.bsl.stringLiteralProposals">
     <stringLiteralProposals class="tormozit.BslQueryResultTypes$ColumnProposals"/>
     <stringLiteralProposals class="tormozit.BslLiteralValues"/>

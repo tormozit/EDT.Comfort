@@ -2,15 +2,24 @@ package tormozit;
 
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.JFaceTextUtil;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.LineNumberRulerColumn;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.internal.win32.OS;
+import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
+import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -86,7 +95,13 @@ public class BslEditorRevealScrollFixHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
-            Display.getDefault().addFilter(SWT.Paint, BslEditorRevealScrollFixHook::beforeTextPaint);
+            Display display = Display.getDefault();
+            display.addFilter(SWT.Paint, BslEditorRevealScrollFixHook::beforeTextPaint);
+            if ("win32".equals(SWT.getPlatform())) //$NON-NLS-1$
+            {
+                display.addFilter(SWT.MouseDown, LineNumberDragScroll::beforeMouseDown);
+                display.addFilter(SWT.MouseMove, LineNumberDragScroll::beforeMouseMove);
+            }
             for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
                 hookWindow(window);
         });
@@ -187,7 +202,7 @@ public class BslEditorRevealScrollFixHook implements IStartup
             Display.getDefault().asyncExec(() -> attachToTextEditor(editor, attempt + 1));
             return;
         }
-        attachToViewer(viewer);
+        attachToViewer(viewer, false);
     }
 
     private void hookGranularEditor(DtGranularEditor<?> editor)
@@ -253,16 +268,18 @@ public class BslEditorRevealScrollFixHook implements IStartup
             return;
         }
 
-        attachToViewer(viewer);
+        attachToViewer(viewer, true);
     }
 
     /** Общая часть подключения к полю редактора — одинакова для BSL и прочих редакторов. */
-    private static void attachToViewer(ISourceViewer viewer)
+    private static void attachToViewer(ISourceViewer viewer, boolean bslEditor)
     {
         StyledText textWidget = viewer.getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
             return;
 
+        if (bslEditor)
+            textWidget.setData(LineNumberDragScroll.BSL_MARKER, Boolean.TRUE);
         if (Boolean.TRUE.equals(textWidget.getData(INSTALLED_MARKER)))
             return;
         textWidget.setData(INSTALLED_MARKER, Boolean.TRUE);
@@ -377,5 +394,171 @@ public class BslEditorRevealScrollFixHook implements IStartup
         }
 
         textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
+    }
+
+    /**
+     * JFace 3.24 считает шаг прокрутки от строки полной модели, а к ней прибавляет
+     * высоту окна в видимых строках. При свёртках шаг может остаться на месте,
+     * а выделение — уйти к строке выше видимого края. Считаем обе границы
+     * в строках виджета и переводим их в модель по отдельности.
+     */
+    private static final class LineNumberDragScroll
+    {
+        private static final String BSL_MARKER = "tormozit.bslLineNumberDragText"; //$NON-NLS-1$
+        private static final String RULER_MARKER = "tormozit.bslLineNumberDragScroll"; //$NON-NLS-1$
+        private static final int SCROLL_INTERVAL_MS = 50;
+
+        private final Canvas ruler;
+        private final StyledText text;
+        private final ITextViewer viewer;
+        private final Object mouseHandler;
+        private final Display display;
+        private final Runnable tick = this::scrollStep;
+        private IDocument dragDocument;
+        private int anchor;
+
+        static void beforeMouseDown(Event event)
+        {
+            if (event.button != 1 || !(event.widget instanceof Canvas ruler)
+                || ruler.getClass().getEnclosingClass() != LineNumberRulerColumn.class
+                || ruler.getData(RULER_MARKER) != null)
+                return;
+            for (Listener listener : ruler.getListeners(SWT.MouseMove))
+            {
+                if (!(listener instanceof TypedListener typed))
+                    continue;
+                Object handler = typed.getEventListener();
+                if (handler.getClass().getEnclosingClass() != LineNumberRulerColumn.class)
+                    continue;
+                Object column = Global.getField(handler, "this$0"); //$NON-NLS-1$
+                Object candidate = Global.getField(column, "fCachedTextViewer"); //$NON-NLS-1$
+                if (candidate instanceof ITextViewer viewer)
+                {
+                    StyledText text = viewer.getTextWidget();
+                    if (text != null && !text.isDisposed())
+                    {
+                        boolean bsl = Boolean.TRUE.equals(text.getData(BSL_MARKER));
+                        if (bsl)
+                            ruler.setData(RULER_MARKER, new LineNumberDragScroll(ruler, text, viewer, handler));
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+
+        static void beforeMouseMove(Event event)
+        {
+            if (event.widget instanceof Canvas ruler && ruler.getData(RULER_MARKER) instanceof LineNumberDragScroll drag)
+                drag.onMouseMove(event);
+        }
+
+        private LineNumberDragScroll(Canvas ruler, StyledText text, ITextViewer viewer, Object mouseHandler)
+        {
+            this.ruler = ruler;
+            this.text = text;
+            this.viewer = viewer;
+            this.mouseHandler = mouseHandler;
+            display = ruler.getDisplay();
+            ruler.addListener(SWT.MouseUp, event ->
+            {
+                if (event.button == 1)
+                    stop();
+            });
+            ruler.addListener(SWT.MouseDoubleClick, event -> stop());
+            ruler.addListener(SWT.Dispose, event -> stop());
+        }
+
+        private void onMouseMove(Event event)
+        {
+            if ((event.stateMask & SWT.BUTTON1) == 0 || scrollDirection(event.y) == 0
+                || !Boolean.TRUE.equals(Global.getField(mouseHandler, "fIsListeningForMove"))) //$NON-NLS-1$
+            {
+                stop();
+                return;
+            }
+            if (dragDocument == null)
+            {
+                IDocument document = viewer.getDocument();
+                Object offset = Global.getField(mouseHandler, "fStartLineOffset"); //$NON-NLS-1$
+                if (document == null || !(offset instanceof Integer start) || start < 0 || start > document.getLength())
+                    return;
+                anchor = start;
+                dragDocument = document;
+                display.timerExec(0, tick);
+            }
+            // За краем работает наш таймер. Внутри колонки движение обрабатывает JFace.
+            event.type = SWT.None;
+        }
+
+        private int scrollDirection(int y)
+        {
+            if (y < 0)
+                return -1;
+            return y >= ruler.getClientArea().height ? 1 : 0;
+        }
+
+        private void scrollStep()
+        {
+            if (dragDocument == null)
+                return;
+            if (ruler.isDisposed() || text.isDisposed() || OS.GetCapture() != ruler.handle
+                || OS.GetKeyState(OS.VK_LBUTTON) >= 0 || viewer.getDocument() != dragDocument
+                || anchor > dragDocument.getLength())
+            {
+                stop();
+                return;
+            }
+            int direction = scrollDirection(ruler.toControl(display.getCursorLocation()).y);
+            if (direction == 0)
+            {
+                stop();
+                return;
+            }
+
+            int oldPixel = text.getTopPixel();
+            int lastLine = text.getLineCount() - 1;
+            int topLine = Math.max(0, JFaceTextUtil.getPartialTopIndex(text));
+            int nextTopLine = Math.max(0, Math.min(lastLine, topLine + direction));
+            int nextModelLine = JFaceTextUtil.widgetLine2ModelLine(viewer, nextTopLine);
+            if (nextModelLine >= 0)
+                viewer.setTopIndex(nextModelLine);
+
+            int edgeLine = direction < 0 ? JFaceTextUtil.getPartialTopIndex(text)
+                : JFaceTextUtil.getPartialBottomIndex(text);
+            int edgeModelLine = JFaceTextUtil.widgetLine2ModelLine(viewer, Math.max(0, edgeLine));
+            int newPixel = text.getTopPixel();
+            if (edgeModelLine < 0)
+            {
+                stop();
+                return;
+            }
+            try
+            {
+                int textBottom = text.getClientArea().height - text.getBottomMargin();
+                int end = direction > 0 && edgeLine == lastLine && text.getLinePixel(lastLine + 1) <= textBottom
+                    ? dragDocument.getLength() : dragDocument.getLineOffset(edgeModelLine);
+                int length = end - anchor;
+                Point selected = viewer.getSelectedRange();
+                if (selected.x != Math.min(anchor, end) || selected.y != Math.abs(length))
+                    viewer.setSelectedRange(anchor, length);
+            }
+            catch (BadLocationException ignored)
+            {
+                stop();
+                return;
+            }
+
+            if (dragDocument != null && oldPixel != newPixel)
+                display.timerExec(SCROLL_INTERVAL_MS, tick);
+        }
+
+        private void stop()
+        {
+            if (dragDocument == null)
+                return;
+            dragDocument = null;
+            display.timerExec(-1, tick);
+        }
     }
 }

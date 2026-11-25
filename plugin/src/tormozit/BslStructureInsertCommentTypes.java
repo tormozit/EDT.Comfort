@@ -30,6 +30,7 @@ import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.parser.ParseResult;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.util.OnChangeEvictingCache;
@@ -68,6 +69,7 @@ import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.IndexAccess;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
+import com._1c.g5.v8.dt.bsl.model.PropertyType;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Statement;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
@@ -476,6 +478,28 @@ public final class BslStructureInsertCommentTypes
                 if (restore != null)
                     restore.run();
             }
+            return true;
+        });
+    }
+
+    /** Сохраняет AST и сбрасывает производную модель целиком после изменения контекстов компиляции. */
+    static boolean relinkModuleForChangedContexts(com._1c.g5.v8.dt.bsl.resource.BslResource resource)
+    {
+        Object lock = resource.getLock();
+        if (lock == null)
+            return false;
+        return ComfortTreeTypeSystem.underLinkLock(resource, lock, () ->
+        {
+            var parse = resource.getParseResult();
+            if (parse == null || !(parse.getRootASTElement() instanceof Module))
+                return false;
+            // Частичный результат сузил бы сброс типов и следующую проверку до одного метода.
+            if (resource.isOnlyMethodReparse())
+                resource.setParseResult(new ParseResult(parse.getRootASTElement(), parse.getRootNode(), parse.hasSyntaxErrors()));
+            resource.skipCachedMethods();
+            BslQueryResultTypes.invalidatePlans(resource);
+            resource.relink();
+            BslDocCommentComputedTypes.bumpTypesGeneration();
             return true;
         });
     }
@@ -2840,7 +2864,7 @@ public final class BslStructureInsertCommentTypes
      * от каждого: у {@code ДанныеФайла.ПодписанЭП} — «Булево» 13 раз, по справочнику
      * присоединённых файлов, и так в подсказке при наведении и в разделе возврата «см.».
      * Одинаковым считается тот же объект, та же ссылка-заглушка или то же имя у типа без
-     * выведенных свойств; структуры с полями различаются полями и не сворачиваются.
+     * выведенных свойств и пути свойства. Типы с таким контекстом сравниваются по экземпляру.
      */
     private static void dropRepeatedTypes(List<TypeItem> types)
     {
@@ -2862,6 +2886,9 @@ public final class BslStructureInsertCommentTypes
         if (item.eIsProxy())
             return ((org.eclipse.emf.ecore.InternalEObject)item).eProxyURI();
         String name = McoreUtil.getTypeName(item);
+        // У коллекций метаданных одно имя типа, а путь определяет, какие имена добавит EDT.
+        if (item instanceof PropertyType propertyType && !propertyType.getPropertyName().isEmpty())
+            return new IdentityKey(item);
         if (name == null || item instanceof Type type && type.getContextDef() != null
             && type.getContextDef().getProperties().stream().anyMatch(DerivedProperty.class::isInstance))
             return new IdentityKey(item);
@@ -3480,7 +3507,7 @@ public final class BslStructureInsertCommentTypes
         var parsed = resource.getParseResult();
         if (parsed == null)
             return null;
-        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(parsed.getRootNode(), offset);
+        ILeafNode leaf = BslNodeLookup.findLeafNodeAtOffset(parsed.getRootNode(), offset);
         for (INode node = leaf; node != null; node = node.getParent())
             if (node.getSemanticElement() instanceof Expression expression)
                 return expression;
@@ -3499,7 +3526,8 @@ public final class BslStructureInsertCommentTypes
     {
         InteractiveTypes interactive = INTERACTIVE_TYPES.get();
         if (interactive != null && interactive.nativeRead == 0 && types != null
-            && (object instanceof Expression || object instanceof com._1c.g5.v8.dt.bsl.model.Function))
+            && (object instanceof Expression || object instanceof com._1c.g5.v8.dt.bsl.model.Function)
+            && interactive.acceptsExpression(object))
             return interactive.expression(object, environments, types);
         if (object instanceof com._1c.g5.v8.dt.bsl.model.Function function)
             return ColumnRenames.inferReturn(types, function, environments);
@@ -3518,7 +3546,8 @@ public final class BslStructureInsertCommentTypes
         Environments environments)
     {
         InteractiveTypes interactive = INTERACTIVE_TYPES.get();
-        if (interactive != null && interactive.nativeRead == 0 && types != null && variable != null && offset >= 0)
+        if (interactive != null && interactive.nativeRead == 0 && types != null && variable != null && offset >= 0
+            && interactive.acceptsVariable(variable, offset))
             return interactive.variable(variable, offset, environments, types);
         return localVariableTypes(types, variable, offset, environments);
     }
@@ -3592,6 +3621,8 @@ public final class BslStructureInsertCommentTypes
     {
         private static final BslSourceModelCache PLANS = new BslSourceModelCache();
         private static final BslSourceModelCache BOUND_PLANS = new BslSourceModelCache(true);
+        private static final java.util.regex.Pattern IDENTIFIER =
+            java.util.regex.Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*"); //$NON-NLS-1$
         private static final ThreadLocal<Set<EObject>> RETURNING = ThreadLocal.withInitial(
             () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
@@ -3610,14 +3641,18 @@ public final class BslStructureInsertCommentTypes
                 return types;
             try
             {
-                for (com._1c.g5.v8.dt.bsl.model.ReturnStatement exit : EcoreUtil2.getAllContentsOfType(function,
-                    com._1c.g5.v8.dt.bsl.model.ReturnStatement.class))
+                var exits = PLANS.get(new ReturnIndexKey(function), function.eResource(),
+                    () -> EcoreUtil2.getAllContentsOfType(function, com._1c.g5.v8.dt.bsl.model.ReturnStatement.class));
+                for (var exit : exits)
                 {
                     Variable variable = exit.getExpression() instanceof StaticFeatureAccess access
                         ? sourceVariable(access) : null;
-                    ICompositeNode node = NodeModelUtils.findActualNodeFor(exit);
-                    if (variable != null && node != null)
-                        types = infer(types, variable, node.getOffset(), environments);
+                    if (variable != null)
+                    {
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(exit);
+                        if (node != null)
+                            types = infer(types, variable, node.getOffset(), environments);
+                    }
                 }
             }
             finally
@@ -3669,16 +3704,18 @@ public final class BslStructureInsertCommentTypes
                     new CallIndexKey(module), module.eResource(), () -> callIndex(module));
                 for (com._1c.g5.v8.dt.bsl.model.Invocation call : callsByName.getOrDefault(method.getName(), List.of()))
                 {
-                    if (!(call.getMethodAccess() instanceof StaticFeatureAccess access)
-                        || access.getFeatureEntries().stream().noneMatch(entry -> entry.getFeature() == method)
-                        || call.getParams().size() <= index)
+                    if (call.getParams().size() <= index
+                        || !(call.getParams().get(index) instanceof StaticFeatureAccess value)
+                        || !(call.getMethodAccess() instanceof StaticFeatureAccess access)
+                        || access.getFeatureEntries().stream().noneMatch(entry -> entry.getFeature() == method))
                         continue;
-                    Variable argument = call.getParams().get(index) instanceof StaticFeatureAccess value
-                        ? sourceVariable(value) : null;
-                    ICompositeNode node = NodeModelUtils.findActualNodeFor(call);
-                    if (argument == null || node == null)
-                        continue;
-                    types = infer(types, argument, node.getOffset(), environments);
+                    Variable argument = sourceVariable(value);
+                    if (argument != null)
+                    {
+                        ICompositeNode node = NodeModelUtils.findActualNodeFor(call);
+                        if (node != null)
+                            types = infer(types, argument, node.getOffset(), environments);
+                    }
                 }
             }
             finally
@@ -3691,6 +3728,8 @@ public final class BslStructureInsertCommentTypes
         }
 
         private record CallIndexKey(Module module) {}
+        private record ReturnIndexKey(Method method) {}
+        private record Rename(SimpleStatement statement, String name, String oldName) {}
 
         /**
          * Вызовы модуля по имени метода, без учёта регистра, в порядке текста. Без индекса каждый
@@ -3732,30 +3771,36 @@ public final class BslStructureInsertCommentTypes
             if (method == null || method.eResource() == null)
                 return types;
             Method owner = method;
-            List<SimpleStatement> statements = PLANS.get(owner, owner.eResource(),
-                () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class));
             StatementPlan plan = BOUND_PLANS.get(new StatementPlanKey(owner), owner.eResource(),
-                () -> new StatementPlan(statements));
+                () -> new StatementPlan(PLANS.get(owner, owner.eResource(),
+                    () -> EcoreUtil2.getAllContentsOfType(owner, SimpleStatement.class))));
             int from = 0;
             SimpleStatement assignment = null;
             for (SimpleStatement statement : plan.assignments.getOrDefault(variable, List.of()))
-                if (end(statement) <= offset && end(statement) > from)
+            {
+                int position = end(statement);
+                if (position <= offset && position > from)
                 {
-                    from = end(statement);
+                    from = position;
                     assignment = statement;
                 }
+            }
             types = assignment == null && variable instanceof com._1c.g5.v8.dt.bsl.model.FormalParam param
                 ? callerRenames(types, param, owner, environments)
                 : calleeRenames(types, assignment, environments);
-            List<SimpleStatement> renames = new ArrayList<>();
+            List<Rename> renames = new ArrayList<>();
             for (SimpleStatement statement : plan.renames.getOrDefault(variable, List.of()))
             {
-                if (end(statement) <= from || end(statement) > offset)
+                int position = end(statement);
+                if (position <= from || position > offset)
                     continue;
                 Environmental environment = EcoreUtil2.getContainerOfType(statement, Environmental.class);
                 if (environment == null || !environment.environments().containsAny(environments))
                     continue;
-                renames.add(statement);
+                String name = stringValue(statement.getRight(), plan, environments);
+                if (name != null && IDENTIFIER.matcher(name).matches())
+                    renames.add(new Rename(statement, name,
+                        unconditional(statement, owner) ? oldName(statement.getLeft()) : null));
             }
             if (renames.isEmpty())
                 return types;
@@ -3764,15 +3809,11 @@ public final class BslStructureInsertCommentTypes
             {
                 Type copy = null;
                 if (isTable(item))
-                    for (SimpleStatement rename : renames)
+                    for (Rename rename : renames)
                     {
-                        String name = stringValue(rename.getRight(), statements, environments);
-                        if (name == null || !name.matches("[\\p{L}_][\\p{L}\\p{N}_]*")) //$NON-NLS-1$
-                            continue;
                         if (copy == null)
                             copy = EcoreUtil2.cloneWithProxies((Type)EcoreUtil.resolve(item, variable));
-                        add(copy, name, unconditional(rename, owner) ? oldName(rename.getLeft()) : null, rename,
-                            owner);
+                        add(copy, rename.name(), rename.oldName(), rename.statement(), owner);
                     }
                 result.add(copy == null ? item : copy);
             }
@@ -3862,15 +3903,14 @@ public final class BslStructureInsertCommentTypes
         }
 
         /** Литерал, сложение строк или предшествующее присваивание переменной в том же методе. */
-        private static String stringValue(Expression expression, List<SimpleStatement> statements,
-            Environments environments)
+        private static String stringValue(Expression expression, StatementPlan plan, Environments environments)
         {
             if (expression instanceof StringLiteral literal)
                 return new DefaultStringLiteralTextProvider(literal).getText();
             if (expression instanceof BinaryExpression binary && binary.getOperation() == BinaryOperation.PLUS)
             {
-                String left = stringValue(binary.getLeft(), statements, environments);
-                String right = left == null ? null : stringValue(binary.getRight(), statements, environments);
+                String left = stringValue(binary.getLeft(), plan, environments);
+                String right = left == null ? null : stringValue(binary.getRight(), plan, environments);
                 return right == null ? null : left + right;
             }
             if (!(expression instanceof StaticFeatureAccess access))
@@ -3880,16 +3920,21 @@ public final class BslStructureInsertCommentTypes
             if (variable == null || node == null)
                 return null;
             SimpleStatement latest = null;
-            for (SimpleStatement statement : statements)
+            int latestEnd = -1;
+            int start = node.getOffset();
+            for (SimpleStatement statement : plan.assignments.getOrDefault(variable, List.of()))
             {
+                int position = end(statement);
+                if (position >= start || position <= latestEnd)
+                    continue;
                 Environmental owner = EcoreUtil2.getContainerOfType(statement, Environmental.class);
-                if (statement.getLeft() instanceof StaticFeatureAccess target
-                    && sourceVariable(target) == variable && end(statement) < node.getOffset()
-                    && owner != null && owner.environments().containsAny(environments)
-                    && (latest == null || end(statement) > end(latest)))
+                if (owner != null && owner.environments().containsAny(environments))
+                {
                     latest = statement;
+                    latestEnd = position;
+                }
             }
-            return latest == null ? null : stringValue(latest.getRight(), statements, environments);
+            return latest == null ? null : stringValue(latest.getRight(), plan, environments);
         }
 
         private record EndOffsetKey(EObject object) {}
@@ -4209,10 +4254,32 @@ public final class BslStructureInsertCommentTypes
     /** Только фоновый запрос редактора. Обычные читатели типов эту область не открывают. */
     static InteractiveTypesScope interactiveTypes(String purpose, java.util.function.BooleanSupplier canceled)
     {
+        return interactiveTypes(purpose, canceled, false);
+    }
+
+    static InteractiveTypesScope interactiveTypes(String purpose, java.util.function.BooleanSupplier canceled,
+        boolean receiverOnly)
+    {
         InteractiveTypes previous = INTERACTIVE_TYPES.get();
-        InteractiveTypes current = previous != null ? previous : new InteractiveTypes(canceled);
+        InteractiveTypes current = previous != null && !receiverOnly ? previous : new InteractiveTypes(canceled);
+        if (receiverOnly)
+            current.receiverOnly = true;
         INTERACTIVE_TYPES.set(current);
-        return new InteractiveTypesScope(previous, previous == null ? current : null, purpose);
+        return new InteractiveTypesScope(previous, previous != current ? current : null, purpose);
+    }
+
+    /** Получатель из той же модели, которую штатный процессор использует для построения контекста. */
+    static void prepareMemberCompletionTypes(Expression receiver)
+    {
+        InteractiveTypes current = INTERACTIVE_TYPES.get();
+        if (current == null || !current.receiverOnly)
+            return;
+        ICompositeNode node = receiver != null ? NodeModelUtils.findActualNodeFor(receiver) : null;
+        if (node == null)
+            return;
+        current.receiver = receiver;
+        current.receiverStart = node.getOffset();
+        current.receiverEnd = node.getEndOffset();
     }
 
     /** Последовательные проверки одной модели используют один вычислитель, без сохранения монитора проверки. */
@@ -4338,6 +4405,15 @@ public final class BslStructureInsertCommentTypes
                 INTERACTIVE_TYPES.remove();
             else
                 INTERACTIVE_TYPES.set(previous);
+            if (observed != null)
+                Global.tempLog("assist-interactive-types", "purpose=" + purpose //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ms=" + ((System.nanoTime() - observed.started) / 1_000_000L) //$NON-NLS-1$
+                    + " expressions=" + observed.expressionRequests + " hits=" + observed.expressionHits //$NON-NLS-1$ //$NON-NLS-2$
+                    + " incoming=" + observed.incomingRequests + " candidates=" + observed.incomingCandidates //$NON-NLS-1$ //$NON-NLS-2$
+                    + " callIndexNodes=" + observed.callIndexNodes + " callIndexEntries=" + observed.callIndexEntries //$NON-NLS-1$ //$NON-NLS-2$
+                    + " receiverOnly=" + observed.receiverOnly + " receiverFound=" + (observed.receiver != null) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " receiverRequests=" + observed.receiverRequests //$NON-NLS-1$
+                    + " skipped=" + observed.skippedOutsideReceiver); //$NON-NLS-1$
         }
     }
 
@@ -4387,10 +4463,35 @@ public final class BslStructureInsertCommentTypes
         private long callIndexEntries;
         private Frame frame = new Frame();
         private int nativeRead;
+        private boolean receiverOnly;
+        private Expression receiver;
+        private int receiverStart;
+        private int receiverEnd;
+        private long receiverRequests;
+        private long skippedOutsideReceiver;
 
         InteractiveTypes(java.util.function.BooleanSupplier canceled)
         {
             this.canceled = canceled;
+        }
+
+        private boolean acceptsExpression(EObject object)
+        {
+            if (receiver == object)
+                receiverRequests++;
+            if (receiver == null || receiver == object || EcoreUtil.isAncestor(receiver, object))
+                return true;
+            skippedOutsideReceiver++;
+            return false;
+        }
+
+        private boolean acceptsVariable(Variable variable, int offset)
+        {
+            if (receiver == null || variable.eResource() == receiver.eResource()
+                && offset >= receiverStart && offset < receiverEnd)
+                return true;
+            skippedOutsideReceiver++;
+            return false;
         }
 
         private void check()
@@ -6310,6 +6411,7 @@ public final class BslStructureInsertCommentTypes
          */
         private void stockInstall(Module module, CancelIndicator cancelIndicator)
         {
+            long started = System.nanoTime();
             java.util.Map<EObject, List<?>> previous = BslDocCommentComputedTypes.captureCalleeReturns(module);
             try
             {
@@ -6319,6 +6421,8 @@ public final class BslStructureInsertCommentTypes
             finally
             {
                 BslDocCommentComputedTypes.releaseCalleeReturns(previous);
+                Global.tempLog("assist-type-install", "stock ms=" + ((System.nanoTime() - started) / 1_000_000L) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " canceled=" + isCanceled(cancelIndicator) + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 

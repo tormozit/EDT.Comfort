@@ -881,18 +881,22 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
      */
     private static void scheduleTypesRefresh(Resource resource, int offset)
     {
-        URI uri = resource.getURI();
-        List<IXtextDocument> documents;
+        List<XtextDocument> documents = openDocuments(resource.getURI());
+        if (!documents.isEmpty())
+            scheduleTypesRefresh(documents.get(0), offset, true);
+    }
+
+    /** Документы BSL с живым виджетом редактора, в том числе вложенного. */
+    static List<XtextDocument> openDocuments(URI uri)
+    {
+        List<XtextDocument> documents = new ArrayList<>();
         synchronized (WATCHED_DOCUMENTS)
         {
-            documents = new ArrayList<>(WATCHED_DOCUMENTS.keySet());
+            for (IXtextDocument document : WATCHED_DOCUMENTS.keySet())
+                if (document instanceof XtextDocument xtext && uri.equals(xtext.getResourceURI()))
+                    documents.add(xtext);
         }
-        for (IXtextDocument document : documents)
-            if (document instanceof XtextDocument xtext && uri.equals(xtext.getResourceURI()))
-            {
-                scheduleTypesRefresh(document, offset, true);
-                return;
-            }
+        return documents;
     }
 
     /**
@@ -932,6 +936,13 @@ public final class BslQueryResultTypes implements IInvocationTypesComputerExtens
                 watchMetadata(module);
             return session;
         }
+    }
+
+    static void invalidatePlans(Resource resource)
+    {
+        Session session = session(resource, false);
+        if (session != null)
+            session.plans.clear();
     }
 
     /**

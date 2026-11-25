@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -11,10 +13,14 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.notify.impl.AdapterImpl;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.xtext.EcoreUtil2;
@@ -22,6 +28,7 @@ import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.parser.IParseResult;
+import org.eclipse.xtext.ui.editor.model.XtextDocument;
 import org.eclipse.xtext.util.CancelIndicator;
 import org.eclipse.xtext.validation.Issue;
 import org.eclipse.swt.SWT;
@@ -40,12 +47,22 @@ import org.eclipse.ui.texteditor.IDocumentProviderExtension;
 import org.eclipse.ui.texteditor.IElementStateListener;
 import org.eclipse.ui.texteditor.IElementStateListenerExtension;
 
-import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.event.BmEvent;
+import com._1c.g5.v8.bm.integration.IBmLifecycleListener;
+import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.bm.integration.event.IBmSyncEventListener;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.resource.BslResource;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.bsl.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.validation.IBslValidationContributor.ContextHolderAdapter;
+import com._1c.g5.v8.dt.core.bm.launch.IBmLaunchLifecycleListenerContributor;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IResourceLookup;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 
 /**
  * Штатная EDT в {@code CustomXtextDocumentLocker.waitUpdatingDataModel} на UI-потоке
@@ -726,7 +743,7 @@ public final class BslXtextDocumentHook implements IStartup
     }
 
     /** Поток сейчас внутри вплетённого {@code readOnlyForContentAssist} (стек — в раннем бандле). */
-    private static boolean isInsideAssistRead()
+    static boolean isInsideAssistRead()
     {
         return System.getProperties().get(PROP_ASSIST_READ_DEPTH) instanceof IntSupplier depth
             && depth.getAsInt() > 0;
@@ -756,6 +773,141 @@ public final class BslXtextDocumentHook implements IStartup
             SaveDebug.step("modal", (modal ? "modal " : "") + title //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + " jobs=" + runningJobsBrief()); //$NON-NLS-1$
         });
+    }
+
+    public static final class CommonModuleLifecycleContributor implements IBmLaunchLifecycleListenerContributor
+    {
+        @Override
+        public IBmLifecycleListener getListener(IBmModel model)
+        {
+            return new CommonModuleContexts(model);
+        }
+    }
+
+    /** Смена контекстов общего модуля приходит от BM без изменения файла BSL. */
+    private static final class CommonModuleContexts implements IBmLifecycleListener, IBmSyncEventListener
+    {
+        private static final MdClassPackage MD = MdClassPackage.eINSTANCE;
+        private static final Set<EStructuralFeature> CONTEXT_FEATURES = Set.of(
+            MD.getCommonModule_ClientManagedApplication(), MD.getCommonModule_ClientOrdinaryApplication(),
+            MD.getCommonModule_Server(), MD.getCommonModule_ExternalConnection());
+        private static final Path MODULE_FILE = new Path("Module.bsl"); //$NON-NLS-1$
+
+        private final IBmModel model;
+
+        CommonModuleContexts(IBmModel model)
+        {
+            this.model = model;
+        }
+
+        @Override
+        public void onAfterStart(boolean fresh)
+        {
+            model.addSyncEventListener(this);
+        }
+
+        @Override
+        public void onBeforeClose(boolean suspended)
+        {
+            model.removeSyncEventListener(this);
+        }
+
+        /** Та же доставка BM-события, на которой EDT собирает контексты в BmRawEventHandler. */
+        @Override
+        public void handleSyncEvent(BmEvent event)
+        {
+            if (event.getChangeEvents() == null)
+                return;
+            Set<Long> moduleIds = new LinkedHashSet<>();
+            for (var change : event.getChangeEvents().values())
+            {
+                EObject changed = change.getObject();
+                if (!(changed instanceof CommonModule) || !(changed instanceof IBmObject module))
+                    continue;
+                if (!java.util.Collections.disjoint(change.getFeatures(), CONTEXT_FEATURES))
+                    moduleIds.add(module.bmGetId());
+            }
+            if (moduleIds.isEmpty())
+                return;
+            Job job = Job.create("Пересчёт проверок общего модуля", monitor -> //$NON-NLS-1$
+            {
+                if (monitor.isCanceled())
+                    return;
+                IBmModelManager manager = Global.getOsgiService(IBmModelManager.class);
+                IProject project = manager == null ? null : manager.getProject(model);
+                if (project == null || !project.isAccessible())
+                    return;
+                for (IFile file : resolveModuleFiles(project, manager, moduleIds))
+                {
+                    if (monitor.isCanceled())
+                        return;
+                    refresh(file);
+                }
+            });
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private static Set<IFile> resolveModuleFiles(IProject project, IBmModelManager manager, Set<Long> moduleIds)
+        {
+            try
+            {
+                IResourceLookup lookup = Global.getOsgiService(IResourceLookup.class);
+                Set<IFile> files = lookup == null ? null : manager.executeReadOnlyTask(project, transaction ->
+                {
+                    Set<IFile> result = new LinkedHashSet<>();
+                    for (long id : moduleIds)
+                    {
+                        EObject object = transaction.getObjectById(id);
+                        IFile metadata = object instanceof CommonModule ? lookup.getPlatformResource(object) : null;
+                        IFile file = metadata == null ? null : metadata.getParent().getFile(MODULE_FILE);
+                        if (file != null && file.isAccessible())
+                            result.add(file);
+                    }
+                    return result;
+                });
+                return files == null ? Set.of() : files;
+            }
+            catch (RuntimeException ignored)
+            {
+                return Set.of();
+            }
+        }
+
+        private static void refresh(IFile file)
+        {
+            URI uri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+            var documents = BslQueryResultTypes.openDocuments(uri);
+            for (XtextDocument document : documents)
+                refreshDocument(document, uri);
+            try
+            {
+                ComfortCheckRecompute.invalidateModuleChecks(file);
+            }
+            catch (RuntimeException ignored)
+            {
+                // Проект мог закрыться, пока обновлялись документы.
+            }
+        }
+
+        private static void refreshDocument(XtextDocument document, URI uri)
+        {
+            try
+            {
+                Boolean updated = document.internalModify(resource ->
+                {
+                    if (!(resource instanceof BslResource bsl) || !uri.equals(bsl.getURI()) || bsl.getParseResult() == null)
+                        return false;
+                    return BslStructureInsertCommentTypes.relinkModuleForChangedContexts(bsl);
+                });
+                if (Boolean.TRUE.equals(updated))
+                    ContentAssistSessionReloader.restartEditorValidation(document);
+            }
+            catch (RuntimeException ignored)
+            {
+                // Редактор мог закрыться между поиском документа и его обновлением.
+            }
+        }
     }
 
     private static boolean looksLikeJobsDialog(String title)

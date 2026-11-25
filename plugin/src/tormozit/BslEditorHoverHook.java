@@ -67,7 +67,7 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 
 /**
  * Дополняет doc-hover BSL описанием из ИР при подключённой сессии.
- * Подавляет подсказку при наведении без Ctrl на ключевых словах языка, строковых
+ * Подавляет подсказку при наведении без Ctrl на ключевых словах вне аргументов вызова, строковых
  * литералах, в комментариях и на пустом месте; аннотация проблемы в позиции
  * подавление отменяет. Вызов от каретки (Ctrl+F2) приравнен к наведению мышью:
  * сначала аннотация, потом описание, но справка по ключевому слову и литералу
@@ -904,7 +904,7 @@ public final class BslEditorHoverHook implements IStartup
     /**
      * Обёртка штатного {@link ITextHover}: асинхронно дополняет HTML описанием из ИР.
      * Вариант для наведения мышью ({@code suppressPointerHover}) подавляет подсказку
-     * на ключевых словах языка (EDT показывает по ним синтаксическую справку всей
+     * на ключевых словах вне аргументов вызова (EDT показывает по ним синтаксическую справку всей
      * конструкции) и на пустом месте (подсказка соседнего слова); Ctrl+наведение
      * и Ctrl+F2 (осознанный вызов) не подавляются.
      */
@@ -1199,7 +1199,11 @@ public final class BslEditorHoverHook implements IStartup
                             reason = token != null && token.isBlank() ? "blank" : "hidden"; //$NON-NLS-1$ //$NON-NLS-2$
                         else if (!caret && keywordValue != null && !keywordValue.isEmpty()
                             && Character.isLetter(keywordValue.charAt(0)) && !whitelisted)
-                            reason = "keyword"; //$NON-NLS-1$
+                        {
+                            ParamHintHtmlModifier.CallSiteInfo site =
+                                ParamHintHtmlModifier.findCallSiteAt(resource, offset);
+                            reason = site != null && site.contains(offset) ? null : "keyword"; //$NON-NLS-1$
+                        }
                         // SEMICOLON — терминал, а не Keyword: на нём EDT возвращает
                         // справку по внешней конструкции (например, Если).
                         else if (!caret && ";".equals(token)) //$NON-NLS-1$

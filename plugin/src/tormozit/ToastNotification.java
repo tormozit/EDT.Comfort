@@ -427,8 +427,8 @@ public final class ToastNotification
         final int[] currentAlpha = { 255 };
         final int[] remainingMs = { hideDurationMs };
 
-        // Временная диагностика: потерянный MouseExit удерживает отсчёт на полном времени.
-        // Только жизненный цикл, события наведения и первое расхождение; без лога тиков.
+        // Временная диагностика: события наведения могут расходиться с положением указателя.
+        // Пишем жизненный цикл, события и коррекции состояния.
         final String diagnosticId = Integer.toHexString(System.identityHashCode(shell));
         final long diagnosticStarted = System.nanoTime();
         final boolean[] hoverMismatchLogged = { false };
@@ -456,18 +456,18 @@ public final class ToastNotification
             if (shell.isDisposed())
                 return;
 
-            Point diagnosticCursor = display.getCursorLocation();
-            Rectangle diagnosticBounds = shell.getBounds();
-            boolean coordinatesInside = diagnosticBounds.contains(diagnosticCursor);
-            if (isHovered[0] && !coordinatesInside && !hoverMismatchLogged[0])
+            Point cursor = display.getCursorLocation();
+            Rectangle bounds = shell.getBounds();
+            boolean pointerInside = bounds.contains(cursor);
+            if (isHovered[0] && !pointerInside)
             {
                 hoverMismatchLogged[0] = true;
                 Global.tempLog("toast-hover", "hover-outside id=" + diagnosticId
                     + " ageMs=" + (System.nanoTime() - diagnosticStarted) / 1_000_000
                     + " hovered=" + isHovered[0] + " remainingMs=" + remainingMs[0]
-                    + " bounds=" + diagnosticBounds + " cursor=" + diagnosticCursor);
+                    + " bounds=" + bounds + " cursor=" + cursor);
+                isHovered[0] = false;
             }
-            boolean pointerInside = isHovered[0] || coordinatesInside;
             if (pointerInside)
             {
                 everHovered[0] = true;
@@ -530,24 +530,18 @@ public final class ToastNotification
         {
             if (shell.isDisposed())
                 return;
+            Point cursor = display.getCursorLocation();
+            Rectangle bounds = shell.getBounds();
+            boolean pointerInside = bounds.contains(cursor);
             Global.tempLog("toast-hover", "event id=" + diagnosticId
                 + " ageMs=" + (System.nanoTime() - diagnosticStarted) / 1_000_000
                 + " type=" + (e.type == SWT.MouseEnter ? "enter" : "exit")
                 + " widget=" + e.widget.getClass().getSimpleName()
                 + " hoveredBefore=" + isHovered[0]
-                + " bounds=" + shell.getBounds() + " cursor=" + display.getCursorLocation());
-            if (e.type == SWT.MouseEnter)
-            {
-                isHovered[0] = true;
-                if (stickyUntilToastHover && !armed[0])
-                    return;
+                + " bounds=" + bounds + " cursor=" + cursor + " pointerInside=" + pointerInside);
+            isHovered[0] = pointerInside;
+            if (e.type == SWT.MouseEnter && pointerInside && (!stickyUntilToastHover || armed[0]))
                 startTimedHide.run();
-            }
-            else if (e.type == SWT.MouseExit
-                && !shell.getBounds().contains(display.getCursorLocation()))
-            {
-                isHovered[0] = false;
-            }
         };
         addHoverListeners(shell, hoverListener);
 
@@ -590,9 +584,7 @@ public final class ToastNotification
             if (shell.isDisposed())
                 return;
             armed[0] = true;
-            boolean inside = isHovered[0]
-                || shell.getBounds().contains(display.getCursorLocation());
-            if (!inside)
+            if (!shell.getBounds().contains(display.getCursorLocation()))
                 return;
             isHovered[0] = true;
             startTimedHide.run();

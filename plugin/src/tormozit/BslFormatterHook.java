@@ -20,8 +20,10 @@ import java.util.regex.Pattern;
 
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.IExecutionListenerWithChecks;
+import org.eclipse.core.commands.NotEnabledException;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.commands.common.NotDefinedException;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -40,6 +42,8 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.IRewriteTarget;
 import org.eclipse.jface.text.ITextViewerExtension;
+import org.eclipse.jface.text.ITextViewerExtension5;
+import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.TextUtilities;
 import org.eclipse.jface.text.formatter.IContentFormatter;
@@ -131,6 +135,7 @@ public final class BslFormatterHook implements IStartup
         "com.e1c.g5.v8.dt.formatter.bsl.ui.BslContentFormatter"; //$NON-NLS-1$
 
     private static final String TEMP_LOG = "bsl-format"; //$NON-NLS-1$
+    private static final String REDRAW_LOG = "bsl-format-redraw"; //$NON-NLS-1$
 
     private static final String SYNTAX_ERROR = "syntaxError@"; //$NON-NLS-1$
 
@@ -150,9 +155,11 @@ public final class BslFormatterHook implements IStartup
         });
     }
 
-    /** Перед штатной командой «Форматировать» оборачивает форматтер активного модуля. */
-    private static final class FormatCommandListener implements IExecutionListener
+    /** Подключает форматтер и сохраняет видимую область на время штатной команды. */
+    private static final class FormatCommandListener implements IExecutionListenerWithChecks
     {
+        private FormatViewport viewport;
+
         @Override
         public void preExecute(String commandId, ExecutionEvent event)
         {
@@ -160,13 +167,18 @@ public final class BslFormatterHook implements IStartup
                 return;
             try
             {
+                finish(commandId, false);
                 IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
                 IWorkbenchPage page = window == null ? null : window.getActivePage();
                 BslXtextEditor editor = page == null ? null : GetRef.getActiveBslEditor(page.getActivePart());
                 if (editor != null)
-                    install(editor.getInternalSourceViewer());
+                {
+                    ISourceViewer viewer = editor.getInternalSourceViewer();
+                    if (install(viewer))
+                        viewport = FormatViewport.capture(viewer);
+                }
             }
-            catch (RuntimeException e)
+            catch (BadLocationException | RuntimeException e)
             {
                 Global.tempLog(TEMP_LOG, "preExecute failed: " + e); //$NON-NLS-1$
             }
@@ -175,34 +187,131 @@ public final class BslFormatterHook implements IStartup
         @Override
         public void notHandled(String commandId, NotHandledException exception)
         {
-            // не нужно
+            finish(commandId, false);
+        }
+
+        @Override
+        public void notEnabled(String commandId, NotEnabledException exception)
+        {
+            finish(commandId, false);
+        }
+
+        @Override
+        public void notDefined(String commandId, NotDefinedException exception)
+        {
+            finish(commandId, false);
         }
 
         @Override
         public void postExecuteFailure(String commandId, ExecutionException exception)
         {
-            // не нужно
+            finish(commandId, false);
         }
 
         @Override
         public void postExecuteSuccess(String commandId, Object returnValue)
         {
-            // не нужно
+            finish(commandId, true);
+        }
+
+        private void finish(String commandId, boolean restore)
+        {
+            if (!FORMAT_COMMAND_ID.equals(commandId) || viewport == null)
+                return;
+            FormatViewport saved = viewport;
+            viewport = null;
+            try
+            {
+                saved.finish(restore);
+            }
+            catch (BadLocationException | RuntimeException e)
+            {
+                Global.tempLog(TEMP_LOG, "viewport finish failed: " + e); //$NON-NLS-1$
+            }
+        }
+
+        private record FormatViewport(ISourceViewer viewer, ITextViewerExtension5 mapping, StyledText text,
+            IDocument document, Position anchor, int linePixel, int topPixel)
+        {
+            static FormatViewport capture(ISourceViewer viewer) throws BadLocationException
+            {
+                StyledText text = viewer.getTextWidget();
+                IDocument document = viewer.getDocument();
+                if (text == null || text.isDisposed() || document == null
+                    || !(viewer instanceof ITextViewerExtension5 mapping))
+                    return null;
+                int widgetLine = text.getTopIndex();
+                int modelLine = mapping.widgetLine2ModelLine(widgetLine);
+                Position anchor = modelLine < 0 ? null : new Position(document.getLineOffset(modelLine));
+                int linePixel = text.getLinePixel(widgetLine);
+                int topPixel = text.getTopPixel();
+                if (anchor != null)
+                    document.addPosition(anchor);
+                Global.tempLog(TEMP_LOG, "viewport before widgetLine=" + widgetLine + " modelLine=" + modelLine //$NON-NLS-1$ //$NON-NLS-2$
+                    + " linePixel=" + linePixel + " topPixel=" + topPixel); //$NON-NLS-1$ //$NON-NLS-2$
+                // SWT откладывает отрисовку, пока JFace обновляет текст, выделение и прокрутку.
+                text.setRedraw(false);
+                Global.tempLog(REDRAW_LOG, "suspended topPixel=" + topPixel); //$NON-NLS-1$
+                return new FormatViewport(viewer, mapping, text, document, anchor, linePixel, topPixel);
+            }
+
+            void finish(boolean restore) throws BadLocationException
+            {
+                try
+                {
+                    if (anchor != null)
+                        document.removePosition(anchor);
+                    restoreScroll(restore);
+                }
+                finally
+                {
+                    if (text.isDisposed())
+                    {
+                        Global.tempLog(REDRAW_LOG, "widget disposed"); //$NON-NLS-1$
+                    }
+                    else
+                    {
+                        text.setRedraw(true);
+                        Global.tempLog(REDRAW_LOG, "resumed restore=" + restore + " topPixel=" + text.getTopPixel()); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+            }
+
+            private void restoreScroll(boolean restore) throws BadLocationException
+            {
+                if (!restore || text.isDisposed() || viewer.getDocument() != document)
+                {
+                    Global.tempLog(TEMP_LOG, "viewport skipped restore=" + restore); //$NON-NLS-1$
+                    return;
+                }
+                // После завершения сеанса правок JFace уже восстановил выделение и свою прокрутку.
+                int before = text.getTopPixel();
+                int modelLine = anchor == null || anchor.isDeleted() ? -1 : document.getLineOfOffset(anchor.offset);
+                int widgetLine = modelLine < 0 ? -1 : mapping.modelLine2WidgetLine(modelLine);
+                boolean visible = widgetLine >= 0 && mapping.widgetLine2ModelLine(widgetLine) == modelLine;
+                int desired = visible ? Math.max(0, before + text.getLinePixel(widgetLine) - linePixel) : topPixel;
+                if (desired != before)
+                    text.setTopPixel(desired);
+                Global.tempLog(TEMP_LOG, "viewport after modelLine=" + modelLine + " widgetLine=" + widgetLine //$NON-NLS-1$ //$NON-NLS-2$
+                    + " mapped=" + visible + " before=" + before + " desired=" + desired //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " actual=" + text.getTopPixel()); //$NON-NLS-1$
+            }
         }
     }
 
     /** Оборачивает штатный форматтер BSL просмотрщика (повторный вызов ничего не меняет). */
-    static void install(ISourceViewer viewer)
+    static boolean install(ISourceViewer viewer)
     {
         if (viewer == null)
-            return;
+            return false;
         Object current = Global.getField(viewer, "fContentFormatter"); //$NON-NLS-1$
-        if (current instanceof ComfortFormatter || !(current instanceof IContentFormatter delegate))
-            return;
-        if (!STOCK_FORMATTER_CLASS.equals(delegate.getClass().getName()))
-            return;
+        if (current instanceof ComfortFormatter)
+            return true;
+        if (!(current instanceof IContentFormatter delegate) || !STOCK_FORMATTER_CLASS.equals(delegate.getClass().getName()))
+            return false;
         boolean done = Global.setFieldForce(viewer, "fContentFormatter", new ComfortFormatter(delegate, viewer)); //$NON-NLS-1$
         Global.tempLog(TEMP_LOG, "install viewer=" + viewer.getClass().getSimpleName() + " ok=" + done); //$NON-NLS-1$ //$NON-NLS-2$
+        return done;
     }
 
     /** Флажок читается только из общих настроек, независимо от проекта. */

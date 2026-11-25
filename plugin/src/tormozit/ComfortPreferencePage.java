@@ -10,6 +10,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
@@ -1379,7 +1380,7 @@ public class ComfortPreferencePage
     }
 
     /**
-     * Текст тела GitHub-заявки: окружение, свёрнутые доп. плагины и флажки.
+     * Техническая информация для GitHub-заявки.
      */
     private static final class NewIssueReport
     {
@@ -1421,6 +1422,17 @@ public class ComfortPreferencePage
                 + (irInfo == null ? "нет данных" : irInfo.length() + " симв.")); //$NON-NLS-1$ //$NON-NLS-2$
             if (irInfo != null && !irInfo.isBlank())
                 body.append("**ИР:**\n```\n").append(irInfo.strip()).append("\n```\n"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            Object weavingReport = System.getProperties().get("tormozit.weaving.failures"); //$NON-NLS-1$
+            if (weavingReport instanceof Supplier<?> report && report.get() instanceof String failures)
+            {
+                if (failures.isBlank())
+                    body.append("**Несостоявшиеся вплетения:** нет\n"); //$NON-NLS-1$
+                else
+                    appendCollapsed(body, "Несостоявшиеся вплетения", failures); //$NON-NLS-1$
+            }
+            else
+                body.append("**Несостоявшиеся вплетения:** данные недоступны\n"); //$NON-NLS-1$
 
             String plugins = extraPluginsText();
             Global.log(LOG_TAG, "установленные плагины: " + plugins.length() + " симв."); //$NON-NLS-1$ //$NON-NLS-2$

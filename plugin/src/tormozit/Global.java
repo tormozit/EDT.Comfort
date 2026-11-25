@@ -1083,7 +1083,14 @@ public final class Global
     private static final String SOURCE_ROOT = "C:\\VC\\EDT.Comfort"; //$NON-NLS-1$
 
     /** Папка временных логов — очищается целиком при каждом старте плагина, см. {@link #clearTempLogs()}. */
-    private static final String TEMP_LOG_DIR = SOURCE_ROOT + "\\.tmp\\temp-logs"; //$NON-NLS-1$
+    private static final String TEMP_LOG_DIR = tempLogDirectory();
+
+    private static String tempLogDirectory()
+    {
+        Object auditRoot = System.getProperties().get("tormozit.weaving.auditLogRoot"); //$NON-NLS-1$
+        return auditRoot instanceof java.nio.file.Path path ? path.resolve("temp-logs").toString() //$NON-NLS-1$
+            : SOURCE_ROOT + "\\.tmp\\temp-logs"; //$NON-NLS-1$
+    }
 
     /** Раз в сколько миллисекунд буфер временных логов сбрасывается на диск, см. {@link #tempLog}. */
     private static final long TEMP_LOG_FLUSH_INTERVAL_MS = 1000;

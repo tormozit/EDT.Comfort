@@ -111,6 +111,8 @@ public final class BslFormTypeContextEnrichment
     private static final AtomicBoolean attributeTransformerInstalled = new AtomicBoolean();
     private static final String ATTRIBUTE_INFERRER =
         "com._1c.g5.v8.dt.form.resource.FormImplicitRefInferrer"; //$NON-NLS-1$
+    private static final String INTERNAL_ATTRIBUTE_INFERRER =
+        "com._1c.g5.v8.dt.internal.form.resource.FormImplicitRefInferrer";
     private static final String PROPERTY_COMPUTER =
         "com._1c.g5.v8.dt.bsl.resource.TypesComputer"; //$NON-NLS-1$
     private static final String ATTRIBUTE_CALLBACK = "tormozit.formAttribute.types"; //$NON-NLS-1$
@@ -148,7 +150,7 @@ public final class BslFormTypeContextEnrichment
             return;
         }
         boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(new AttributeTypesTransformer(),
-            ATTRIBUTE_INFERRER, PROPERTY_COMPUTER);
+            ATTRIBUTE_INFERRER, INTERNAL_ATTRIBUTE_INFERRER, PROPERTY_COMPUTER);
         if (!ok)
             attributeTransformerInstalled.set(false);
     }
@@ -289,10 +291,15 @@ public final class BslFormTypeContextEnrichment
         }
     }
 
-    /** Точки возврата подтверждены FormImplicitRefInferrer/TypesComputer из EDT 28.0.1.v202605050943. */
+    private static boolean isFormInferrer(String className)
+    {
+        return ATTRIBUTE_INFERRER.equals(className) || INTERNAL_ATTRIBUTE_INFERRER.equals(className);
+    }
+
+    /** Точки возврата FormImplicitRefInferrer и TypesComputer в EDT 2026.1 и 2026.2. */
     static byte[] transformAttributeTypes(String className, byte[] bytes)
     {
-        boolean inferrer = ATTRIBUTE_INFERRER.equals(className);
+        boolean inferrer = isFormInferrer(className);
         String descriptor = inferrer
             ? "(Lcom/_1c/g5/v8/dt/form/model/FormAttribute;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Lcom/_1c/g5/v8/dt/mcore/DerivedProperty;" //$NON-NLS-1$
             : "(Lcom/_1c/g5/v8/dt/mcore/Property;Lcom/_1c/g5/v8/dt/mcore/util/Environments;)Ljava/util/List;"; //$NON-NLS-1$
@@ -316,7 +323,7 @@ public final class BslFormTypeContextEnrichment
             byte[] bytes)
         {
             String className = name == null ? "" : name.replace('/', '.'); //$NON-NLS-1$
-            return ATTRIBUTE_INFERRER.equals(className) || PROPERTY_COMPUTER.equals(className)
+            return isFormInferrer(className) || PROPERTY_COMPUTER.equals(className)
                 ? transformAttributeTypes(className, bytes) : null;
         }
     }

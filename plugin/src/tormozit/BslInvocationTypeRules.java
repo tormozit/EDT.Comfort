@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import org.eclipse.emf.common.util.URI;
@@ -48,6 +49,7 @@ import com._1c.g5.v8.dt.bsl.model.NumberLiteral;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
+import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.model.VariablesScopeSpec;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
@@ -197,6 +199,49 @@ public class BslInvocationTypeRules
     private static final ThreadLocal<Set<Invocation>> COMPUTING =
         ThreadLocal.withInitial(() -> Collections.newSetFromMap(new IdentityHashMap<>()));
 
+    private static final BslSourceModelCache ASSIGNMENTS = new BslSourceModelCache();
+    private static final ThreadLocal<RootTypes> ROOT_TYPES = new ThreadLocal<>();
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+"); //$NON-NLS-1$
+
+    /** Типы живут в границах одного защищённого чтения готовой модели. */
+    static <T> T readWithRootTypes(Resource resource, Supplier<T> read)
+    {
+        RootTypes previous = ROOT_TYPES.get();
+        RootTypes current = new RootTypes(resource);
+        ROOT_TYPES.set(current);
+        try
+        {
+            return read.get();
+        }
+        finally
+        {
+            if (previous == null)
+                ROOT_TYPES.remove();
+            else
+                ROOT_TYPES.set(previous);
+            SmartContentAssistProcessor.uiBlockLog("expectedType.moduleTypes", //$NON-NLS-1$
+                "hits=" + current.hits + " expressions=" + current.expressions.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " metadataTypes=" + current.metadata.size()); //$NON-NLS-1$
+        }
+    }
+
+    private record RootExpression(Expression expression, Environments environments) {}
+
+    private record AssignmentScope(EObject owner) {}
+
+    private static final class RootTypes
+    {
+        final Resource resource;
+        final Map<RootExpression, List<TypeItem>> expressions = new java.util.HashMap<>();
+        final Map<URI, Type> metadata = new java.util.HashMap<>();
+        int hits;
+
+        RootTypes(Resource resource)
+        {
+            this.resource = resource;
+        }
+    }
+
     /**
      * EDT bsl 28.0.1.v202605050943: UnloadRecordSetInvocationTypesComputer.getTypes возвращает
      * таблицу по первому найденному методу коллекции, игнорируя маску. Исправляем его результат
@@ -339,9 +384,25 @@ public class BslInvocationTypeRules
                 McorePackage.Literals.TYPE_DESCRIPTION__TYPES, null);
         String name = comment.strip().split("\\s+", 2)[0]; //$NON-NLS-1$
         var element = scope.getSingleElement(QualifiedName.create(name.split("\\."))); //$NON-NLS-1$
-        EObject resolved = element == null ? null : EcoreUtil.resolve(element.getEObjectOrProxy(), scopeContext);
-        Type content = resolved instanceof Type type && !type.eIsProxy() ? type : null;
-        return content;
+        if (element == null)
+            return null;
+        RootTypes cache = ROOT_TYPES.get();
+        EObject target = element.getEObjectOrProxy();
+        if (target == null || !target.eIsProxy())
+            return target instanceof Type type ? type : null;
+        URI key = cache != null && cache.resource == scopeContext.eResource() ? element.getEObjectURI() : null;
+        Type cached = key == null ? null : cache.metadata.get(key);
+        if (cached != null)
+        {
+            cache.hits++;
+            return cached;
+        }
+        EObject resolved = EcoreUtil.resolve(target, scopeContext);
+        if (!(resolved instanceof Type type) || type.eIsProxy())
+            return null;
+        if (key != null)
+            cache.metadata.put(key, type);
+        return type;
     }
 
     /** Сервисы системы типов BSL: одни на всю среду, берутся при первом вызове. */
@@ -948,7 +1009,7 @@ public class BslInvocationTypeRules
          */
         List<TypeItem> storedValue()
         {
-            List<TypeItem> types = writtenTypes(origins(param(0)));
+            List<TypeItem> types = writtenTypes(param(0), origins(param(0)));
             if (types.isEmpty())
                 types = annotatedContents(param(0), "String"); //$NON-NLS-1$
             return types.isEmpty() ? null : types;
@@ -957,11 +1018,13 @@ public class BslInvocationTypeRules
         /** Сам реквизит остаётся хранилищем; комментарий задаёт только результат Получить(). */
         List<TypeItem> storageContent()
         {
-            List<TypeItem> receivers = receiverTypes();
-            if (!(access instanceof DynamicFeatureAccess dynamic) || !params.isEmpty()
-                || receivers.stream().noneMatch(type -> "ValueStorage".equals(typeName(resolve(type))))) //$NON-NLS-1$
+            if (!(access instanceof DynamicFeatureAccess dynamic) || !params.isEmpty())
                 return null;
-            return annotatedContents(dynamic.getSource(), "ValueStorage"); //$NON-NLS-1$
+            Expression receiver = dynamic.getSource();
+            List<TypeItem> receivers = typesOf(receiver, ROOT_TYPES.get() != null && moduleMember(receiver) != null);
+            if (receivers.stream().noneMatch(type -> "ValueStorage".equals(typeName(resolve(type))))) //$NON-NLS-1$
+                return null;
+            return annotatedContents(receiver, "ValueStorage"); //$NON-NLS-1$
         }
 
         /** ИР: первое слово комментария реквизита — имя типа содержимого. */
@@ -998,7 +1061,7 @@ public class BslInvocationTypeRules
         List<TypeItem> readJsonValue()
         {
             List<Expression> origins = origins(param(0));
-            List<TypeItem> types = writtenTypes(origins);
+            List<TypeItem> types = writtenTypes(param(0), origins);
             if (types.isEmpty())
                 types = annotatedContents(param(0), "String"); //$NON-NLS-1$
             if (!types.isEmpty())
@@ -1016,12 +1079,13 @@ public class BslInvocationTypeRules
             return null;
         }
 
-        List<TypeItem> writtenTypes(List<Expression> origins)
+        List<TypeItem> writtenTypes(Expression source, List<Expression> origins)
         {
             List<TypeItem> types = new ArrayList<>();
+            boolean moduleRoot = ROOT_TYPES.get() != null && moduleMember(source) != null;
             for (Expression origin : origins)
                 if (origin instanceof Invocation call && isWriter(call) && !call.getParams().isEmpty())
-                    types.addAll(typesOf(call.getParams().get(0)));
+                    types.addAll(typesOf(call.getParams().get(0), moduleRoot));
             return types;
         }
 
@@ -1033,8 +1097,8 @@ public class BslInvocationTypeRules
 
         /**
          * Выражения, от которых получено значение {@code expression}: само выражение или правые части присваиваний
-         * той же переменной (того же пути {@code А.Б}) до места чтения, рекурсивно. Присваиваний в методе нет —
-         * ищутся во всём модуле (реквизит формы, переменная модуля).
+         * той же переменной (того же пути {@code А.Б}) до места чтения, рекурсивно. Поиск в других
+         * методах разрешён только для подтверждённого члена модуля и той же ссылки на него.
          */
         List<Expression> origins(Expression expression)
         {
@@ -1057,25 +1121,84 @@ public class BslInvocationTypeRules
             Method method = EcoreUtil2.getContainerOfType(expression, Method.class);
             List<SimpleStatement> assignments = assignments(method, target, before);
             if (assignments.isEmpty())
-                assignments = assignments(EcoreUtil2.getContainerOfType(expression, Module.class), target,
-                    Integer.MAX_VALUE);
+            {
+                EObject member = moduleMember(expression);
+                if (member != null)
+                {
+                    Module module = EcoreUtil2.getContainerOfType(expression, Module.class);
+                    List<SimpleStatement> candidates = assignments(module, target, Integer.MAX_VALUE);
+                    assignments = candidates.stream()
+                        .filter(statement -> moduleMember(statement.getLeft()) == member).toList();
+                    SmartContentAssistProcessor.uiBlockLog("typeRules.moduleAssignmentMatches", //$NON-NLS-1$
+                        "candidates=" + candidates.size() + " matched=" + assignments.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
             if (assignments.isEmpty())
                 result.add(expression);
             for (SimpleStatement statement : assignments)
                 collectOrigins(statement.getRight(), offsetOf(statement), visited, result);
         }
 
+        private static EObject moduleMember(Expression expression)
+        {
+            while (expression instanceof DynamicFeatureAccess dynamic)
+                expression = dynamic.getSource();
+            if (!(expression instanceof StaticFeatureAccess root))
+                return null;
+            Module module = EcoreUtil2.getContainerOfType(root, Module.class);
+            if (module == null)
+                return null;
+            Variable implicit = root.getImplicitVariable();
+            if (implicit != null)
+                return EcoreUtil2.getContainerOfType(implicit, Module.class) == module
+                    && EcoreUtil2.getContainerOfType(implicit, Method.class) == null ? implicit : null;
+            EObject member = null;
+            for (var entry : root.getFeatureEntries())
+            {
+                EObject feature = entry == null ? null : entry.getFeature();
+                if (feature == null || feature.eIsProxy())
+                    continue;
+                if (!(feature instanceof Property || feature instanceof Variable
+                    && EcoreUtil2.getContainerOfType(feature, Module.class) == module
+                    && EcoreUtil2.getContainerOfType(feature, Method.class) == null))
+                    return null;
+                if (feature instanceof DerivedProperty property && property.getSource() instanceof BasicFeature source
+                    && !source.eIsProxy())
+                    feature = source;
+                if (member != null && member != feature)
+                    return null;
+                member = feature;
+            }
+            return member;
+        }
+
         static List<SimpleStatement> assignments(EObject scope, String target, int before)
         {
-            List<SimpleStatement> result = new ArrayList<>();
             if (scope == null || target.isEmpty())
-                return result;
+                return List.of();
+            Resource resource = scope.eResource();
+            var index = resource == null ? indexAssignments(scope)
+                : ASSIGNMENTS.get(new AssignmentScope(scope), resource, () -> indexAssignments(scope));
+            return index.getOrDefault(target, List.of()).stream()
+                .filter(statement -> offsetOf(statement) < before).toList();
+        }
+
+        private static Map<String, List<SimpleStatement>> indexAssignments(EObject scope)
+        {
+            long started = System.nanoTime();
+            Map<String, List<SimpleStatement>> result = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
             scope.eAllContents().forEachRemaining(object -> {
+                BslNodeLookup.checkCanceled();
                 if (object instanceof SimpleStatement statement && statement.getRight() != null
-                    && statement.getLeft() != null && offsetOf(statement) < before
-                    && target.equalsIgnoreCase(withoutSpaces(text(statement.getLeft()))))
-                    result.add(statement);
+                    && statement.getLeft() != null)
+                {
+                    String left = withoutSpaces(text(statement.getLeft()));
+                    result.computeIfAbsent(left, ignored -> new ArrayList<>()).add(statement);
+                }
             });
+            if (scope instanceof Module)
+                SmartContentAssistProcessor.uiBlockLog("typeRules.moduleAssignments", //$NON-NLS-1$
+                    "names=" + result.size() + " ms=" + ((System.nanoTime() - started) / 1_000_000L)); //$NON-NLS-1$ //$NON-NLS-2$
             return result;
         }
 
@@ -1138,9 +1261,25 @@ public class BslInvocationTypeRules
 
         List<TypeItem> typesOf(Expression expression)
         {
+            return typesOf(expression, false);
+        }
+
+        List<TypeItem> typesOf(Expression expression, boolean moduleRoot)
+        {
             if (expression == null)
                 return List.of();
+            RootTypes cache = moduleRoot ? ROOT_TYPES.get() : null;
+            RootExpression key = cache != null && expression.eResource() == cache.resource
+                ? new RootExpression(expression, environments) : null;
+            List<TypeItem> cached = key == null ? null : cache.expressions.get(key);
+            if (cached != null)
+            {
+                cache.hits++;
+                return cached;
+            }
             List<TypeItem> types = services.types().computeTypes(expression, environments);
+            if (key != null && types != null && !types.isEmpty())
+                cache.expressions.put(key, List.copyOf(types));
             return types == null ? List.of() : types;
         }
 
@@ -1576,7 +1715,7 @@ public class BslInvocationTypeRules
 
         static String withoutSpaces(String text)
         {
-            return text.replaceAll("\\s+", ""); //$NON-NLS-1$ //$NON-NLS-2$
+            return WHITESPACE.matcher(text).replaceAll(""); //$NON-NLS-1$
         }
 
         static int parseIndex(String text)

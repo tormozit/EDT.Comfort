@@ -1163,6 +1163,24 @@ public final class ComfortCheckRecompute
         }
     }
 
+    /** Смена контекстов компиляции затрагивает все языковые проверки одного файла. */
+    static void invalidateModuleChecks(IFile moduleFile)
+    {
+        IProject project = moduleFile.getProject();
+        IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+        IDerivedDataManager manager = provider == null ? null : provider.get(project);
+        if (manager == null)
+            return;
+        Set<String> checkIds = enabledCheckIds(project);
+        if (checkIds.isEmpty())
+            return;
+        manager.updateDerivedData((session, model) ->
+        {
+            markLanguageFullRebuild(session, moduleFile, L_CHECKS_SEGMENT, checkIds);
+            markLanguageFullRebuild(session, moduleFile, CL_CHECKS_SEGMENT, checkIds);
+        }, 0L, "comfort-module-context-checks"); //$NON-NLS-1$
+    }
+
     /** Класс контекста языковых проверок из непубличного пакета бандла проверок. */
     private static Class<?> languageContextClass()
     {

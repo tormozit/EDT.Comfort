@@ -40,7 +40,7 @@ import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.util.Environments;
 import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
 
-/** Общий каталог проверки и штатного автодополнения; bsl.ui 22.0.0.v202605050943. */
+/** Общий каталог проверки и штатного автодополнения. */
 final class BslTypeCatalog
 {
     private static final boolean ENABLED = true;
@@ -222,12 +222,6 @@ final class BslTypeCatalog
             boolean constructor = name.equals(PROVIDERS + "StringLiteralProposalProviderFuncCtor");
             boolean description = name.equals(PROVIDERS + "StringLiteralProposalProviderTypeDescription");
             if (!constructor && !description && !name.equals(PROVIDERS + "StringLiteralProposalProviderMethodType"))
-                return null;
-            var bundle = org.osgi.framework.FrameworkUtil.getBundle(provider.getClass());
-            if (bundle == null)
-                return null;
-            var version = bundle.getVersion();
-            if (version.getMajor() != 22 || version.getMinor() != 0 || version.getMicro() != 0)
                 return null;
             EObject context = (EObject)args[1];
             if (!(context.eResource() instanceof XtextResource resource) || !(args[2] instanceof String typed))

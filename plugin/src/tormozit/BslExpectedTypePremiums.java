@@ -404,7 +404,7 @@ final class BslExpectedTypePremiums
 
     /** @param added слова, которых нет у EDT ({@link AddedWords}) */
     private record Snapshot(Context context, Scene scene, IProject project, Map<String, List<String>> variableTypes,
-        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added, boolean complete,
+        Premiums premiums, Set<String> evaluated, List<BslAddedWordProposal> added,
         Set<ICompletionProposal> knownProposals, Map<ICompletionProposal, Boolean> assignmentAllowed)
     {
         /** Только ссылки: getDisplayString может запускать дорогое построение StyledString EDT. */
@@ -485,6 +485,15 @@ final class BslExpectedTypePremiums
     /** Место последнего запроса. */
     private static volatile Context requested;
     private static volatile Context pending;
+    private static final ThreadLocal<InitialContextRead> INITIAL_CONTEXT_READ = new ThreadLocal<>();
+    private static volatile Snapshot initialSnapshot;
+
+    private record InitialContext(Context context, Scene scene) {}
+
+    private static final class InitialContextRead
+    {
+        InitialContext captured;
+    }
 
     private BslExpectedTypePremiums()
     {
@@ -504,10 +513,10 @@ final class BslExpectedTypePremiums
         // Отдельное «Знач» выше шаблона «Знач …», в том числе до готовности снимка премий.
         if (BslCompletionTemplates.isByValueKeyword(proposal))
             literal++;
-        Snapshot snapshot = active;
-        if (snapshot == null || snapshot.premiums().values().isEmpty() || proposal == null)
+        Map<String, Integer> values = rankingPremiums();
+        if (values.isEmpty() || proposal == null)
             return literal;
-        Integer premium = snapshot.premiums().values().get(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
+        Integer premium = values.get(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
         return literal + (premium != null ? premium.intValue() : 0);
     }
 
@@ -524,8 +533,16 @@ final class BslExpectedTypePremiums
     /** Есть ли для текущего места хоть одна премия. */
     static boolean hasPremiums()
     {
+        return !rankingPremiums().isEmpty();
+    }
+
+    private static Map<String, Integer> rankingPremiums()
+    {
+        Context context = requested;
         Snapshot snapshot = active;
-        return snapshot != null && !snapshot.premiums().values().isEmpty();
+        if (snapshot != null && snapshot.context().sameAs(context))
+            return snapshot.premiums().values();
+        return Map.of();
     }
 
     /**
@@ -690,42 +707,13 @@ final class BslExpectedTypePremiums
         return parent;
     }
 
-    /** Родитель, независимые особые члены и статистика до первого показа фонового списка членов. */
-    static ICompletionProposal[] prepareMemberList(IDocument document, int caret, ICompletionProposal[] list)
+    /** Возвращает в работу готовый снимок или запускает расчёт премий для текущего места. */
+    static void ensure(IDocument document, int caret, ICompletionProposal[] list)
     {
-        try
-        {
-            // Вызывается фоновым расчётом членов до публикации списка в UI.
-            if (Display.getCurrent() != null || !(document instanceof IXtextDocument) || caret < 0
-                || list == null)
-                return list;
-            Context context = contextAt(document, caret);
-            if (context == null || context.parent().isEmpty())
-                return list;
-            requested = context;
-            Snapshot snapshot = current;
-            if (snapshot != null && snapshot.context().sameAs(context))
-            {
-                Snapshot extended = extend(snapshot, list);
-                publish(extended);
-                return withAddedWords(list, extended);
-            }
-            active = null;
-            Snapshot computed = compute(context, activeProject(), list, false);
-            publish(computed);
-            return computed != null ? withAddedWords(list, computed) : list;
-        }
-        catch (Exception error)
-        {
-            return list;
-        }
+        ensure(document, caret, list, false);
     }
 
-    /**
-     * Готовит полный снимок премий. Базовый снимок доступен сразу, ожидаемый тип догружается в фоне.
-     * Без базового снимка фоновый поток считает сразу, UI-поток только запускает расчёт.
-     */
-    static void ensure(IDocument document, int caret, ICompletionProposal[] list)
+    static void ensure(IDocument document, int caret, ICompletionProposal[] list, boolean deferExpectedType)
     {
         if (!(document instanceof IXtextDocument) || caret < 0 || list == null)
             return;
@@ -748,28 +736,27 @@ final class BslExpectedTypePremiums
             return;
         requested = context;
         Snapshot snapshot = current;
+        boolean deferred = deferExpectedType || Display.getCurrent() != null;
         if (snapshot != null && snapshot.context().sameAs(context))
         {
-            if (Display.getCurrent() != null)
+            if (deferred)
             {
                 boolean covered = snapshot.covers(list);
                 active = snapshot;
                 // Восстановленный полный список может содержать тысячи новых строк.
                 // UI только читает снимок; их премии считает существующий фоновый Job.
-                if (!snapshot.complete())
-                    schedule(context, snapshot.project(), list.clone());
-                else if (!covered)
+                if (!covered)
                     schedule(context, snapshot.project(), list.clone(), snapshot);
                 return;
             }
             publish(extend(snapshot, list));
-            if (!snapshot.complete())
-                schedule(context, snapshot.project(), list.clone());
             return;
         }
-        active = null;
-        IProject project = activeProject();
-        if (Display.getCurrent() != null)
+        Snapshot initial = initialSnapshot;
+        boolean initialReady = initial != null && initial.context().sameAs(context);
+        active = initialReady ? initial : null;
+        IProject project = initialReady && initial.project() != null ? initial.project() : activeProject();
+        if (deferred)
         {
             schedule(context, project, list.clone());
             return;
@@ -784,10 +771,6 @@ final class BslExpectedTypePremiums
     private static void publish(Snapshot computed)
     {
         if (computed == null || !computed.context().sameAs(requested))
-            return;
-        Snapshot previous = current;
-        if (!computed.complete() && previous != null && previous.complete()
-            && previous.context().sameAs(computed.context()))
             return;
         current = computed;
         active = computed;
@@ -828,11 +811,118 @@ final class BslExpectedTypePremiums
 
     private static IProject activeProject()
     {
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        return projectOf(ContentAssistSessionReloader.getActiveReloader());
+    }
+
+    static IProject projectOf(ContentAssistSessionReloader reloader)
+    {
         BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
         IFile file = editor != null && editor.getEditorInput() != null
             ? editor.getEditorInput().getAdapter(IFile.class) : null;
         return file != null ? file.getProject() : null;
+    }
+
+    static void beginInitialContextRead()
+    {
+        INITIAL_CONTEXT_READ.set(new InitialContextRead());
+    }
+
+    static void endInitialContextRead()
+    {
+        INITIAL_CONTEXT_READ.remove();
+    }
+
+    /** Базовые данные читаются внутри штатной фабрики контекста EDT, под уже взятой блокировкой. */
+    static void rememberInitialContext(IDocument document, int caret, XtextResource resource)
+    {
+        InitialContextRead read = INITIAL_CONTEXT_READ.get();
+        if (read == null)
+            return;
+        read.captured = null;
+        long started = System.nanoTime();
+        boolean insideRead = BslXtextDocumentHook.isInsideAssistRead();
+        boolean ready = false;
+        var previous = READ_RESOURCE.get();
+        try
+        {
+            if (!insideRead)
+                return;
+            Context context = initialContextAt(document, caret);
+            if (context == null || !(BslNodeLookup.rootAst(resource) instanceof Module))
+                return;
+            READ_RESOURCE.set(resource);
+            read.captured = new InitialContext(context, scene(resource, context, new ICompletionProposal[0], false));
+            ready = true;
+        }
+        catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (RuntimeException failure)
+        {
+            Global.tempLog("assist-context-initial", "error=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            if (previous == null)
+                READ_RESOURCE.remove();
+            else
+                READ_RESOURCE.set(previous);
+            Global.tempLog("assist-context-initial", "caret=" + caret + " ready=" + ready //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " insideRead=" + insideRead + " ms=" + ((System.nanoTime() - started) / 1_000_000L)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Ранжирование штатных вариантов и добавление базовых слов, после освобождения чтения EDT. */
+    static void prepareInitialPremiums(IDocument document, int caret, ICompletionProposal[] list, IProject project)
+    {
+        long started = System.nanoTime();
+        Context context = initialContextAt(document, caret);
+        InitialContextRead read = INITIAL_CONTEXT_READ.get();
+        InitialContext initial = read != null ? read.captured : null;
+        boolean known = initial != null && initial.context().sameAs(context);
+        Premiums result = Premiums.empty();
+        Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
+        try
+        {
+            if (known)
+            {
+                result = premiums(context, initial.scene(), project, list, Map.of(), added, false);
+                initialSnapshot = new Snapshot(context, initial.scene(), project, Map.of(), result, Set.of(),
+                    List.copyOf(added.values()), Set.of(), Map.of());
+            }
+        }
+        catch (java.util.concurrent.CancellationException | org.eclipse.core.runtime.OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (RuntimeException failure)
+        {
+            Global.tempLog("assist-choice-initial", "error=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            Global.tempLog("assist-choice-initial", "caret=" + caret + " contextReady=" + known //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " ranked=" + result.values().size() + " count=" + list.length //$NON-NLS-1$ //$NON-NLS-2$
+                + " added=" + added.size() //$NON-NLS-1$
+                + " base=true ms=" + ((System.nanoTime() - started) / 1_000_000L)); //$NON-NLS-1$
+        }
+    }
+
+    private static Context initialContextAt(IDocument document, int caret)
+    {
+        try
+        {
+            Context context = contextAt(document, caret);
+            if (context != null && context.selected().isEmpty()
+                && !SmartContentAssistProcessor.isCommentAssistContext(document, caret)
+                && !SmartContentAssistProcessor.isStringLiteralAssistContext(document, caret))
+                return context;
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
     }
 
     /** Язык определяется и по самим предложениям: активный просмотрщик может ещё указывать на другое место. */
@@ -986,20 +1076,45 @@ final class BslExpectedTypePremiums
         long revision = foreignParameterRevision;
         Job job = new Job("Комфорт: ожидаемый тип") //$NON-NLS-1$
         {
+            private int retries;
+
             @Override
             protected IStatus run(IProgressMonitor monitor)
             {
+                boolean retry = false;
                 try
                 {
-                    if (!context.sameAs(requested) || revision != foreignParameterRevision)
+                    if (monitor.isCanceled() || !context.sameAs(requested) || revision != foreignParameterRevision)
                         return Status.CANCEL_STATUS;
                     Snapshot latest = current;
-                    Snapshot basis = extensionBase != null && latest != null && latest.complete()
+                    Snapshot basis = extensionBase != null && latest != null
                         && latest.context().sameAs(context) ? latest : extensionBase;
-                    Snapshot computed = basis == null ? compute(context, project, list) : extend(basis, list);
+                    IProgressMonitor readMonitor = new org.eclipse.core.runtime.NullProgressMonitor()
+                    {
+                        @Override
+                        public boolean isCanceled()
+                        {
+                            return super.isCanceled() || monitor.isCanceled()
+                                || !context.sameAs(requested) || revision != foreignParameterRevision;
+                        }
+                    };
+                    Snapshot computed = basis == null ? compute(context, project, list, readMonitor)
+                        : extend(basis, list);
+                    // Готовая модель может появиться только после нескольких коротких синхронизаций EDT.
+                    retry = readMonitor.isCanceled() && !monitor.isCanceled()
+                        && context.sameAs(requested) && revision == foreignParameterRevision && retries < 10;
+                    SmartContentAssistProcessor.uiBlockLog("expectedType.background", //$NON-NLS-1$
+                        "caret=" + context.caret() + " ready=" + (computed != null) //$NON-NLS-1$ //$NON-NLS-2$
+                            + " canceled=" + readMonitor.isCanceled() + " retry=" + retry); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (retry)
+                    {
+                        retries++;
+                        schedule(100);
+                        return Status.OK_STATUS;
+                    }
                     if (computed == null)
                         return Status.OK_STATUS;
-                    if (!context.sameAs(requested) || revision != foreignParameterRevision)
+                    if (readMonitor.isCanceled())
                         return Status.CANCEL_STATUS;
                     publish(computed);
                     if (active == computed && (basis == null || computed.premiums() != basis.premiums()))
@@ -1007,14 +1122,14 @@ final class BslExpectedTypePremiums
                 }
                 finally
                 {
-                    if (pending == context)
+                    if (!retry && pending == context)
                         pending = null;
                 }
                 return Status.OK_STATUS;
             }
         };
         job.setSystem(true);
-        job.setPriority(Job.INTERACTIVE);
+        job.setPriority(Job.DECORATE);
         job.schedule();
     }
 
@@ -1039,7 +1154,7 @@ final class BslExpectedTypePremiums
         }
         if (!unseen)
             return new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(), snapshot.variableTypes(),
-                snapshot.premiums(), snapshot.evaluated(), snapshot.added(), snapshot.complete(),
+                snapshot.premiums(), snapshot.evaluated(), snapshot.added(),
                 proposalIdentities(list, snapshot), snapshot.assignmentAllowed());
         // Новые слова среза не нужны: они уже в снимке (премии считаются и для них)
         Premiums added = premiums(snapshot.context(), snapshot.scene(), snapshot.project(), list,
@@ -1052,17 +1167,18 @@ final class BslExpectedTypePremiums
         for (ICompletionProposal proposal : list)
             evaluated.add(lower(SmartContentAssistProcessor.filterMatchName(proposal)));
         Snapshot extended = new Snapshot(snapshot.context(), snapshot.scene(), snapshot.project(),
-            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(), snapshot.complete(),
+            snapshot.variableTypes(), new Premiums(merged, autoOpen), evaluated, snapshot.added(),
             proposalIdentities(list, snapshot), snapshot.assignmentAllowed());
         return extended;
     }
 
     private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list)
     {
-        return compute(context, project, list, true);
+        return compute(context, project, list, null);
     }
 
-    private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list, boolean complete)
+    private static Snapshot compute(Context context, IProject project, ICompletionProposal[] list,
+        IProgressMonitor monitor)
     {
         long parameterRevision = foreignParameterRevision;
         Scene[] scene = new Scene[1];
@@ -1070,17 +1186,19 @@ final class BslExpectedTypePremiums
         Map<ICompletionProposal, Boolean> assignmentAllowed = new java.util.IdentityHashMap<>();
         Boolean read;
         try (BslStructureInsertCommentTypes.InteractiveTypesScope ignored = Display.getCurrent() != null ? null
-            : BslStructureInsertCommentTypes.interactiveTypes("completion-context", () -> !context.sameAs(requested)))
+            : BslStructureInsertCommentTypes.interactiveTypes("completion-context", //$NON-NLS-1$
+                () -> !context.sameAs(requested) || monitor != null && monitor.isCanceled()))
         {
-            read = ContentAssistSessionReloader.readOnlyForContentAssist((IXtextDocument)context.document(),
-                resource -> BslNodeLookup.read(state ->
+            IXtextDocument document = (IXtextDocument)context.document();
+            org.eclipse.xtext.util.concurrent.IUnitOfWork<Boolean, XtextResource> work =
+                resource -> BslNodeLookup.read(state -> BslInvocationTypeRules.readWithRootTypes(state, () ->
                 {
                     if (resource == null)
                         return Boolean.FALSE;
                     READ_RESOURCE.set(resource);
                     try
                     {
-                        scene[0] = scene(resource, context, list, complete);
+                        scene[0] = scene(resource, context, list);
                         if (scene[0].expectation() != null)
                             collectVariableTypes(resource, context, list, variableTypes);
                         prepareAssignmentDecisions(context, list, resource, assignmentAllowed);
@@ -1090,7 +1208,22 @@ final class BslExpectedTypePremiums
                         READ_RESOURCE.remove();
                     }
                     return Boolean.TRUE;
-                }, resource));
+                }), resource);
+            read = monitor == null ? ContentAssistSessionReloader.readOnlyForContentAssist(document, work)
+                : BslNodeLookup.compute(monitor, () ->
+                    ContentAssistSessionReloader.readOnlyPeekAstLowPriority(document, monitor, resource ->
+                    {
+                        boolean ready = ContentAssistSessionReloader.isAssistModelReadyUpTo(
+                            document, resource, context.caret());
+                        SmartContentAssistProcessor.uiBlockLog("expectedType.peek", //$NON-NLS-1$
+                            "caret=" + context.caret() + " modelReady=" + ready); //$NON-NLS-1$ //$NON-NLS-2$
+                        if (!ready)
+                        {
+                            monitor.setCanceled(true);
+                            return Boolean.FALSE;
+                        }
+                        return work.exec(resource);
+                    }));
         }
         catch (RuntimeException e)
         {
@@ -1107,7 +1240,7 @@ final class BslExpectedTypePremiums
         if (parameterRevision != foreignParameterRevision)
             return null;
         return new Snapshot(context, scene[0], project, variableTypes, premiums, evaluated,
-            List.copyOf(added.values()), complete, proposalIdentities(list, null),
+            List.copyOf(added.values()), proposalIdentities(list, null),
             Collections.unmodifiableMap(assignmentAllowed));
     }
 
@@ -1116,7 +1249,23 @@ final class BslExpectedTypePremiums
         return scene(resource, context, list, true);
     }
 
-    private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list, boolean complete)
+    private static Scene scene(XtextResource resource, Context context, ICompletionProposal[] list, boolean detailed)
+    {
+        // Оперативный проход читает только уже проставленные типы. Вычислитель EDT и обход тел — в полном снимке.
+        if (!detailed)
+            READY_TYPES_ONLY.set(Boolean.TRUE);
+        try
+        {
+            return buildScene(resource, context, list, detailed);
+        }
+        finally
+        {
+            if (!detailed)
+                READY_TYPES_ONLY.remove();
+        }
+    }
+
+    private static Scene buildScene(XtextResource resource, Context context, ICompletionProposal[] list, boolean detailed)
     {
         Matcher literal = TYPE_LITERAL.matcher(context.preceding());
         if (literal.find())
@@ -1139,21 +1288,20 @@ final class BslExpectedTypePremiums
                 String.join(", ", names), //$NON-NLS-1$
                 Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of(), null, null);
         }
-        ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
-        if (site != null && !site.contains(context.start()))
-            site = null;
-        Expectation expectation = complete ? expectation(resource, context, site, list) : null;
+        ParamHintHtmlModifier.CallSiteInfo site = contextCallSite(resource, context);
+        Expectation expectation = expectation(resource, context, site, list);
+        Expression parent = context.parent().isEmpty() ? null : findExpression(resource, context.start(), context.anchor() - 1);
         List<TypeItem> parentTypes = context.parent().isEmpty() ? List.of()
-            : expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent());
+            : detailed ? expressionTypeItems(resource, context.start(), context.anchor() - 1, context.parent())
+                : readyExpressionTypes(parent);
         // Внутри ветки ТипЗнч() список после точки — по проверенному типу, а не по объединению
         // с типом присваивания: строка «Родитель» показывает именно его.
         if (!parentTypes.isEmpty())
-            parentTypes = BslStructureInsertCommentTypes.narrowFor(parentTypes,
-                findExpression(resource, context.start(), context.anchor() - 1));
-        String statisticsContext = statisticsContext(resource, context, parentTypes);
+            parentTypes = BslStructureInsertCommentTypes.narrowFor(parentTypes, parent);
+        String statisticsContext = statisticsContext(resource, context, parentTypes, detailed);
         String legacyStatisticsContext = statisticsContext != null && !statisticsContext.startsWith("Форма.") //$NON-NLS-1$
             && !context.parent().isEmpty() ? formStatisticsContext(resource,
-                findExpression(resource, context.start(), context.anchor() - 1), context.anchor() - 1) : null;
+                parent, context.anchor() - 1, detailed) : null;
         boolean insideExpression = insideExpression(context, site);
         // В комментарии слово — не выражение, приёмника у него нет.
         // После точки проверяем саму точку: каретка может стоять на границе комментария.
@@ -1167,7 +1315,7 @@ final class BslExpectedTypePremiums
         Map<String, Integer> frequencies = comment || typeName || context.parent().isEmpty()
             ? Collections.emptyMap() : memberFrequencies(resource, context, memberNames);
         excludeKnownProcedures(resource, parentTypes, memberNames);
-        Map<String, List<String>> memberTypes = complete && !memberNames.isEmpty()
+        Map<String, List<String>> memberTypes = detailed && !memberNames.isEmpty()
             ? collectMemberTypes(resource, context, memberNames, list) : Map.of();
         String receiverLine = comment ? null : receiverTypeLine(expectation, resource, context);
         String expectedTypeText = expectation == null || expectation.typeItems().isEmpty()
@@ -1175,7 +1323,7 @@ final class BslExpectedTypePremiums
                     : "<" + String.join(" | ", receiverTypes(expectation)) + ">" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 : FunctionReturnTypes.typeSetText(expectation.typeItems());
         Map<String, String> predefined = predefinedTypes(resource, expectation, list);
-        Facts facts = facts(resource, context, expectation, site, parentTypes);
+        Facts facts = facts(resource, context, expectation, site, parentTypes, detailed);
         List<String> parentDisplayTypes = displayTypeNames(parentTypes, resource);
         Set<String> specializedParents = new LinkedHashSet<>();
         for (TypeItem item : parentTypes)
@@ -1192,6 +1340,41 @@ final class BslExpectedTypePremiums
         return new Scene(expectation, statisticsContext, insideExpression, frequencies, receiverLine, expectedTypeText,
             predefined, facts, List.of(), parentDisplayTypes, memberNames, memberTypes, legacyStatisticsContext,
             specializedParentLabel);
+    }
+
+    private static List<TypeItem> readyExpressionTypes(Expression expression)
+    {
+        return expression == null ? List.of()
+            : expression.getTypes().stream().filter(item -> item != null && !item.eIsProxy()).toList();
+    }
+
+    /** Оперативный проход: не звать вычислитель типов и не обходить тела модуля. */
+    private static final ThreadLocal<Boolean> READY_TYPES_ONLY = new ThreadLocal<>();
+
+    private static boolean readyTypesOnly()
+    {
+        return Boolean.TRUE.equals(READY_TYPES_ONLY.get());
+    }
+
+    /** Типы, которые EDT уже проставила на узле или на переменной. Без {@link TypesComputer}. */
+    private static List<TypeItem> readyExpressionTypeItems(XtextResource resource, Expression expression, int offset)
+    {
+        if (expression instanceof StaticFeatureAccess access)
+        {
+            for (FeatureEntry entry : access.getFeatureEntries())
+            {
+                if (entry != null && entry.getFeature() instanceof Variable variable)
+                {
+                    List<TypeItem> types = variableTypeItemsAt(variable, offset, environmentsOf(resource, variable));
+                    if (!types.isEmpty())
+                        return types;
+                }
+            }
+        }
+        List<TypeItem> ready = readyExpressionTypes(expression);
+        if (!ready.isEmpty())
+            return new ArrayList<>(ready);
+        return featureTypes(resource, expression, offset);
     }
 
     /** Приставка ключа {@link Scene#predefinedTypes} для предопределённых значений ссылочного типа. */
@@ -1787,7 +1970,7 @@ final class BslExpectedTypePremiums
         if (!(expression instanceof FeatureAccess access))
             return result;
         List<FeatureEntry> entries = featureEntries(access);
-        if (entries.isEmpty() && access instanceof DynamicFeatureAccess)
+        if (entries.isEmpty() && access instanceof DynamicFeatureAccess && !readyTypesOnly())
         {
             var provider = resource.getResourceServiceProvider();
             DynamicFeatureAccessComputer computer = provider != null
@@ -1809,6 +1992,8 @@ final class BslExpectedTypePremiums
     /** Типы выражения AST: переменная — по состоянию в точке {@code offset}, иначе — тип узла. */
     private static List<TypeItem> expressionTypeItems(XtextResource resource, Expression expression, int offset)
     {
+        if (readyTypesOnly())
+            return readyExpressionTypeItems(resource, expression, offset);
         if (BslStructureInsertCommentTypes.interactiveTypesActive())
         {
             List<TypeItem> deep = BslStructureInsertCommentTypes.interactiveExpressionTypes(expression,
@@ -2258,15 +2443,15 @@ final class BslExpectedTypePremiums
 
     /** {@link Facts} места, включая имена переменных для генератора запроса после {@code Новый}. */
     private static Facts facts(XtextResource resource, Context context, Expectation expectation,
-        ParamHintHtmlModifier.CallSiteInfo site, List<TypeItem> parentItems)
+        ParamHintHtmlModifier.CallSiteInfo site, List<TypeItem> parentItems, boolean detailed)
     {
         Expression selectionExpression = selectedExpression(resource, context);
         String preceding = stripEnd(context.preceding());
         IDocument document = context.document();
-        Module module = !resource.getContents().isEmpty() && resource.getContents().get(0) instanceof Module m
-            ? m : null;
+        EObject root = BslNodeLookup.rootAst(resource);
+        Module module = root instanceof Module m ? m : null;
         com._1c.g5.v8.dt.bsl.model.Method method = methodAt(resource, context.start());
-        Environments environments = method != null ? method.environments() : moduleEnvironments(resource);
+        Environments environments = method != null ? method.environments() : module != null ? module.environments() : null;
         boolean queryAllowed = environments != null
             && (!environments.contains(Environment.MNG_CLIENT) || environments.contains(Environment.CLIENT));
         // После «Новый» нужны только занятые имена, остальные премии здесь не рассчитываются.
@@ -2302,8 +2487,9 @@ final class BslExpectedTypePremiums
         if (typeOf.find())
         {
             int start = context.precedingStart() + typeOf.start(1);
-            nestedTypes.addAll(typeNames(expressionTypeItems(resource, start, start + typeOf.group(1).length(),
-                typeOf.group(1))));
+            int end = start + typeOf.group(1).length();
+            nestedTypes.addAll(typeNames(detailed ? expressionTypeItems(resource, start, end, typeOf.group(1))
+                : readyExpressionTypes(findExpression(resource, start, end))));
         }
         boolean formClient = module != null && module.getModuleType() == ModuleType.FORM_MODULE
             && method != null && environments != null && environments.contains(Environment.MNG_CLIENT);
@@ -2321,7 +2507,7 @@ final class BslExpectedTypePremiums
         {
             fillProperties = false;
         }
-        List<Local> locals = locals(resource, module, method, context.start(), fillProperties);
+        List<Local> locals = locals(resource, module, method, context.start(), detailed && fillProperties);
         List<Local> receiverProperties = new ArrayList<>();
         if (expectation != null && "=".equals(expectation.token()) && expectation.receiver().indexOf('.') > 0 //$NON-NLS-1$
             && !context.parent().isEmpty())
@@ -2335,10 +2521,10 @@ final class BslExpectedTypePremiums
             String trimmed = text.strip();
             selectionTypes.addAll(typeNames(expressionTypeItems(resource, start, start + trimmed.length(), trimmed)));
         }
-        List<String> queryTotals = "РезультатЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
+        List<String> queryTotals = detailed && "РезультатЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
             ? BslQueryResultTypes.totalColumnsOf(findExpression(resource, context.start(), context.anchor() - 1))
             : null;
-        List<String> tempTableColumns = "КолонкиВременнойТаблицыЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
+        List<String> tempTableColumns = detailed && "КолонкиВременнойТаблицыЗапроса".equals(typeName(parentType)) //$NON-NLS-1$
             ? BslTempTableSessions.columnNames(findExpression(resource, context.start(), context.anchor() - 1),
                 org.eclipse.xtext.util.CancelIndicator.NullImpl)
             : null;
@@ -2699,7 +2885,8 @@ final class BslExpectedTypePremiums
     // ------------------------------------------------------------------------------------------
 
     /** {@code ТипКонтекстаСтатистики}: без родителя — {@value #GLOBAL_CONTEXT}, иначе тип родителя. */
-    private static String statisticsContext(XtextResource resource, Context context, List<TypeItem> parentTypes)
+    private static String statisticsContext(XtextResource resource, Context context, List<TypeItem> parentTypes,
+        boolean detailed)
     {
         if (context.parent().isEmpty())
             return GLOBAL_CONTEXT;
@@ -2730,7 +2917,7 @@ final class BslExpectedTypePremiums
             if (members != null && members.dynamicProperties() && !members.formCollection())
                 return name;
         }
-        String form = formStatisticsContext(resource, parent, context.anchor() - 1);
+        String form = formStatisticsContext(resource, parent, context.anchor() - 1, detailed);
         if (form != null)
             return form;
         List<String> names = typeNames(parentTypes);
@@ -2814,12 +3001,13 @@ final class BslExpectedTypePremiums
     }
 
     /** Конкретная форма и путь свойств от неё, независимо от имени переменной формы. */
-    private static String formStatisticsContext(XtextResource resource, Expression expression, int offset)
+    private static String formStatisticsContext(XtextResource resource, Expression expression, int offset,
+        boolean detailed)
     {
         if (expression == null)
             return null;
         Set<ContextDef> visited = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-        for (TypeItem item : expressionTypeItems(resource, expression, offset))
+        for (TypeItem item : detailed ? expressionTypeItems(resource, expression, offset) : readyExpressionTypes(expression))
         {
             Type type = resolveType(resource, item);
             AbstractForm form = type != null ? statisticsForm(type.getContextDef(), visited) : null;
@@ -2829,7 +3017,7 @@ final class BslExpectedTypePremiums
         }
         if (expression instanceof DynamicFeatureAccess access)
         {
-            String source = formStatisticsContext(resource, access.getSource(), offset);
+            String source = formStatisticsContext(resource, access.getSource(), offset, detailed);
             if (source == null)
                 return null;
             for (FeatureEntry entry : access.getFeatureEntries())
@@ -2886,6 +3074,12 @@ final class BslExpectedTypePremiums
             return "Форма." + MdTypeMapping.anyToRu(owner.eClass().getName()) + '.' + owner.getName() //$NON-NLS-1$
                 + ".Форма." + md.getName(); //$NON-NLS-1$
         return "Форма.ОбщаяФорма." + md.getName(); //$NON-NLS-1$
+    }
+
+    private static ParamHintHtmlModifier.CallSiteInfo contextCallSite(XtextResource resource, Context context)
+    {
+        ParamHintHtmlModifier.CallSiteInfo site = ParamHintHtmlModifier.findCallSiteAt(resource, context.start());
+        return site != null && site.contains(context.start()) ? site : null;
     }
 
     /** {@code ЛиВнутриВыражения} для встроенного языка. */
@@ -3013,6 +3207,12 @@ final class BslExpectedTypePremiums
     private static Premiums premiums(Context context, Scene scene, IProject project, ICompletionProposal[] list,
         Map<String, List<String>> variableTypes, Map<String, BslAddedWordProposal> added)
     {
+        return premiums(context, scene, project, list, variableTypes, added, true);
+    }
+
+    private static Premiums premiums(Context context, Scene scene, IProject project, ICompletionProposal[] list,
+        Map<String, List<String>> variableTypes, Map<String, BslAddedWordProposal> added, boolean detailed)
+    {
         Premiums result = Premiums.empty();
         Matcher literal = TYPE_LITERAL.matcher(context.preceding());
         if (literal.find())
@@ -3042,6 +3242,7 @@ final class BslExpectedTypePremiums
                 scene.insideExpression(), MODULE_LANGUAGE), literalWords.size(), true);
             return result;
         }
+        // Типы строк списка уже есть в предложениях: это не чтение модели и нужно до первого показа.
         Map<String, Word> words = words(list, variableTypes, scene.predefinedTypes());
         // После «Перейти » автооткрытие даёт только наличие меток: обычные слова места
         // (статистика, даже ключевые слова) не должны открывать список без меток.
@@ -3049,7 +3250,7 @@ final class BslExpectedTypePremiums
         {
             // Наличие меток берём из модели, а не из переданного списка: премия
             // вычисляется и до того, как в список добавлены предложения меток.
-            boolean hasLabels = SmartContentAssistProcessor.hasMethodLabels(
+            boolean hasLabels = detailed && SmartContentAssistProcessor.hasMethodLabels(
                 context.document(), context.caret());
             for (ICompletionProposal proposal : list)
             {
@@ -3106,7 +3307,8 @@ final class BslExpectedTypePremiums
             weightPremiums(result, words, scene.frequencies(), words.size(), true);
         if (scene.statisticsContext() != null)
         {
-            ChoiceStatistics.migrateFormContext(project, scene.legacyStatisticsContext(), scene.statisticsContext());
+            if (detailed)
+                ChoiceStatistics.migrateFormContext(project, scene.legacyStatisticsContext(), scene.statisticsContext());
             if (!GLOBAL_CONTEXT.equals(scene.statisticsContext()))
             {
                 Map<String, Integer> weights = ChoiceStatistics.weights(project, scene.statisticsContext(),
@@ -3118,7 +3320,8 @@ final class BslExpectedTypePremiums
                     if (sharedContext.equals(scene.statisticsContext()))
                         continue;
                     Map<String, Integer> shared = sharedWeights.computeIfAbsent(sharedContext, key -> {
-                        ChoiceStatistics.migrateFormContext(project, scene.statisticsContext(), key);
+                        if (detailed)
+                            ChoiceStatistics.migrateFormContext(project, scene.statisticsContext(), key);
                         return ChoiceStatistics.weights(project, key, scene.insideExpression(), MODULE_LANGUAGE);
                     });
                     String word = lower(SmartContentAssistProcessor.filterMatchName(proposal));
@@ -5079,6 +5282,12 @@ final class BslExpectedTypePremiums
     private static Map<String, Word> words(ICompletionProposal[] list, Map<String, List<String>> variableTypes,
         Map<String, String> predefinedTypes)
     {
+        return words(list, variableTypes, predefinedTypes, true);
+    }
+
+    private static Map<String, Word> words(ICompletionProposal[] list, Map<String, List<String>> variableTypes,
+        Map<String, String> predefinedTypes, boolean withTypes)
+    {
         Map<String, Word> words = new LinkedHashMap<>();
         for (ICompletionProposal proposal : list)
         {
@@ -5093,9 +5302,9 @@ final class BslExpectedTypePremiums
             boolean method = IrBslExpressionHtmlSupport.KIND_METHOD.equals(
                 BslCompletionSideHintResolver.resolveElementKind(proposal));
             // Значения, которые EDT подставила под ожидаемый тип места, — слова этого места, как локальные
-            boolean placeValue = predefinedTypeIn(proposal, predefinedTypes) != null;
-            words.put(key, new Word(key, name, local != null ? local : proposalTypes(proposal, predefinedTypes),
-                method, local != null || placeValue));
+            boolean placeValue = withTypes && predefinedTypeIn(proposal, predefinedTypes) != null;
+            List<String> types = local != null ? local : withTypes ? proposalTypes(proposal, predefinedTypes) : List.of();
+            words.put(key, new Word(key, name, types, method, local != null || placeValue));
         }
         return words;
     }

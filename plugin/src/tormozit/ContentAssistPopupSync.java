@@ -1270,9 +1270,8 @@ if (processor != null && processor.isIrWordsResolvedForContext()
 
     private static boolean shouldResetSelectionOnRefresh(SavedSelection saved)
     {
-        // Общее правило прежнего слияния с ИР: первые строки следуют за новым
-        // приоритетом; выбранное ниже предложение сохраняется при любом обновлении.
-        return saved == null || saved.index <= 1;
+        // За новым приоритетом следует только исходная строка автодополнения.
+        return saved == null || saved.initial;
     }
 
     private static int tableItemCount(Object popup)
@@ -4635,11 +4634,13 @@ ensureFilterPending(popup);
     {
         final int index;
         final String displayKey;
+        final boolean initial;
 
-        SavedSelection(int index, String displayKey)
+        SavedSelection(int index, String displayKey, boolean initial)
         {
             this.index = index;
             this.displayKey = displayKey;
+            this.initial = initial;
         }
     }
 
@@ -4675,16 +4676,15 @@ ensureFilterPending(popup);
             initPopupReflection(popup);
             Table table = getProposalTable(popup);
             int index = table != null && !table.isDisposed() ? table.getSelectionIndex() : -1;
-            if (index < 0)
-                index = 0;
             List<ICompletionProposal> list =
                 (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
             String key = proposalDisplayKey(list, index);
-            return new SavedSelection(index, key);
+            return new SavedSelection(Math.max(0, index), key,
+                key == null || index == NaparnikAssistRow.defaultIndex(list));
         }
         catch (Exception ignored)
         {
-            return new SavedSelection(0, null);
+            return new SavedSelection(0, null, true);
         }
     }
 
@@ -4701,13 +4701,13 @@ ensureFilterPending(popup);
             {
                 int prefixIdx = findFirstPrefixMatchIndex(list, prefix);
                 if (prefixIdx >= 0)
-                    return new SavedSelection(prefixIdx, proposalDisplayKey(list, prefixIdx));
+                    return new SavedSelection(prefixIdx, proposalDisplayKey(list, prefixIdx), false);
             }
             return saveSelection(popup);
         }
         catch (Exception ignored)
         {
-            return new SavedSelection(0, null);
+            return new SavedSelection(0, null, true);
         }
     }
 
@@ -4760,6 +4760,10 @@ ensureFilterPending(popup);
             selectProposalAtIndex(popup, NaparnikAssistRow.defaultIndex(list));
         else
             restoreSelection(popup, saved, list);
+        Table table = getProposalTable(popup);
+        Global.tempLog("completion-selection", "refresh before=" + (saved == null ? -1 : saved.index) //$NON-NLS-1$ //$NON-NLS-2$
+            + " after=" + (table == null || table.isDisposed() ? -1 : table.getSelectionIndex()) //$NON-NLS-1$
+            + " resetToFirst=" + resetToFirst + " filter=" + SmartFilterTracker.getCurrentFilter()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void restoreSelection(Object popup, SavedSelection saved,
@@ -4770,17 +4774,8 @@ ensureFilterPending(popup);
 
         int index = findProposalIndex(list, saved);
         String prefix = SmartFilterTracker.getCurrentFilter();
-        if (prefix != null && !prefix.isEmpty())
-        {
-            int prefixIdx = findFirstPrefixMatchIndex(list, prefix);
-            if (prefixIdx >= 0)
-            {
-                boolean savedMatchesPrefix = index >= 0
-                    && proposalNameStartsWithPrefix(list.get(index), prefix);
-                if (!savedMatchesPrefix)
-                    index = prefixIdx;
-            }
-        }
+        if (index < 0 && prefix != null && !prefix.isEmpty())
+            index = findFirstPrefixMatchIndex(list, prefix);
         if (index < 0 && saved != null && saved.index >= 0 && saved.index < list.size())
             index = saved.index;
         // Строка Напарника остаётся текущей, только если пользователь сам на неё перешёл.

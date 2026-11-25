@@ -2608,7 +2608,7 @@ boolean inLiteral = endCaret >= 0
     static <T> T readOnlyLowPriority(IXtextDocument doc, org.eclipse.core.runtime.IProgressMonitor monitor,
         IUnitOfWork<T, XtextResource> work)
     {
-        return readOnlyLowPriority(doc, monitor, work, false);
+        return readOnlyLowPriority(doc, monitor, withQueryCalculationScope(work), false);
     }
 
     /** Тот же порядок блокировок для досчёта по уже готовому AST, без смены штатного способа чтения. */
@@ -2991,7 +2991,7 @@ boolean inLiteral = endCaret >= 0
                     outcome = "cap"; //$NON-NLS-1$
                     return null;
                 }
-                attempts++;
+                int attempt = ++attempts;
                 MemberModelResult<T> result = withModelSyncHeld(doc, abort, true, () ->
                 {
                     if (abort != null && abort.getAsBoolean())
@@ -3012,6 +3012,9 @@ boolean inLiteral = endCaret >= 0
                         return resolved || (System.nanoTime() - matchedAt[0]) / 1_000_000L
                             >= LOCAL_RESOLVE_GRACE_MS;
                     });
+                    SmartContentAssistProcessor.uiBlockLog("modelReady.attempt", //$NON-NLS-1$
+                        "end=" + end + " attempt=" + attempt + " state=" + state[0] //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + " ready=" + ready + " ms=" + ((System.nanoTime() - started) / 1_000_000L)); //$NON-NLS-1$ //$NON-NLS-2$
                     if (!Boolean.TRUE.equals(ready))
                         return null;
                     return new MemberModelResult<>(body.get());
@@ -3046,7 +3049,12 @@ boolean inLiteral = endCaret >= 0
             }
             return null;
         }
-
+        finally
+        {
+            SmartContentAssistProcessor.uiBlockLog("modelReady.done", //$NON-NLS-1$
+                "end=" + end + " outcome=" + outcome + " attempts=" + attempts //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " ms=" + ((System.nanoTime() - started) / 1_000_000L)); //$NON-NLS-1$
+        }
     }
 
     private record MemberModelResult<T>(T value) {}
@@ -3085,6 +3093,18 @@ boolean inLiteral = endCaret >= 0
     {
         if (!(Global.getField(doc, "resource") instanceof XtextResource resource)) //$NON-NLS-1$
             return true;
+        return modelTextMatchesUpTo(doc, resource, end);
+    }
+
+    /** Под защищённым чтением: модель уже соответствует набранному префиксу и локальные ссылки разрешены. */
+    static boolean isAssistModelReadyUpTo(IDocument doc, XtextResource resource, int end)
+    {
+        return resource != null && modelTextMatchesUpTo(doc, resource, end)
+            && !Boolean.FALSE.equals(Global.invoke(resource, "isLocalResolveCrossReference")); //$NON-NLS-1$
+    }
+
+    private static boolean modelTextMatchesUpTo(IDocument doc, XtextResource resource, int end)
+    {
         org.eclipse.xtext.parser.IParseResult parse = resource.getParseResult();
         ICompositeNode root = parse != null ? parse.getRootNode() : null;
         if (root == null)

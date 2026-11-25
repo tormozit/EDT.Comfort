@@ -8,8 +8,11 @@ import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.core.expressions.IEvaluationContext;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.egit.ui.internal.dialogs.MergeTargetSelectionDialog;
+import org.eclipse.egit.ui.internal.repository.tree.RepositoryNode;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.transport.TrackingRefUpdate;
@@ -53,7 +56,9 @@ import org.eclipse.ui.navigator.CommonViewer;
  *
  * <p>Команды выполняются штатными обработчиками EGit через
  * {@link IHandlerService#executeCommandInContext}: в снимок контекста подставляется выделение
- * из одного узла дерева панели «Репозитории Git» ({@code RefNode}). Это работает потому, что
+ * из одного узла дерева панели «Репозитории Git» ({@code RefNode}). Для слияния передаётся
+ * узел репозитория, чтобы EGit открыл диалог с параметрами, и в нём выделяется исходная ссылка.
+ * Подстановка выделения работает потому, что
  * {@code LegacyHandlerService.executeCommandInContext} создаёт дочерний {@code IEclipseContext}
  * и переносит в него переменные переданного контекста — по ним заново вычисляются и
  * {@code activeWhen} обработчика, и {@code HandlerUtil.getCurrentSelection} внутри
@@ -75,6 +80,8 @@ public final class FetchResultDialogHook implements IStartup
 
     private static final String REPOSITORIES_VIEW_ID = "org.eclipse.egit.ui.RepositoriesView"; //$NON-NLS-1$
     private static final String EGIT_UI_BUNDLE = "org.eclipse.egit.ui"; //$NON-NLS-1$
+    private static final String MERGE_COMMAND_ID = "org.eclipse.egit.ui.team.Merge"; //$NON-NLS-1$
+    private static final String MERGE_LOG = "fetch-result-merge"; //$NON-NLS-1$
 
     private static final String HOOKED_KEY = "tormozit.fetchResultDialogHooked"; //$NON-NLS-1$
 
@@ -101,7 +108,7 @@ public final class FetchResultDialogHook implements IStartup
     private static final BranchCommand[] BRANCH_COMMANDS = {
         new BranchCommand("org.eclipse.egit.ui.CheckoutCommand", "RepoViewCheckout.label", //$NON-NLS-1$ //$NON-NLS-2$
             "&Извлечь (checkout)"), //$NON-NLS-1$
-        new BranchCommand("org.eclipse.egit.ui.team.Merge", "MergeAction_label", "&Слить (merge)..."), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        new BranchCommand(MERGE_COMMAND_ID, "MergeAction_label", "&Слить (merge)..."), //$NON-NLS-1$ //$NON-NLS-2$
         new BranchCommand("org.eclipse.egit.ui.team.Rebase", "RebaseAction_label", "Перебазировать"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         SEPARATOR,
         new BranchCommand("org.eclipse.egit.ui.RepositoriesViewCreateBranch", //$NON-NLS-1$
@@ -239,7 +246,7 @@ public final class FetchResultDialogHook implements IStartup
 
             MenuItem item = new MenuItem(menu, SWT.PUSH);
             item.setText(commandLabel(command));
-            item.addListener(SWT.Selection, e -> runCommand(command, repo, refName));
+            item.addListener(SWT.Selection, e -> runCommand(command, repo, refName, tree.getShell()));
         }
     }
 
@@ -303,7 +310,7 @@ public final class FetchResultDialogHook implements IStartup
         viewer.setSelection(new StructuredSelection(node), true);
     }
 
-    private static Object findRefNode(CommonViewer viewer, Repository repo, String refName)
+    private static Object findRefNode(TreeViewer viewer, Repository repo, String refName)
     {
         if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
             return null;
@@ -382,27 +389,17 @@ public final class FetchResultDialogHook implements IStartup
 
     // --- выполнение штатных команд EGit --------------------------------------------------------
 
-    private static void runCommand(BranchCommand command, Repository repo, String refName)
+    private static void runCommand(BranchCommand command, Repository repo, String refName, Shell sourceShell)
     {
-        IWorkbenchPage page = activePage();
-        if (page == null)
+        if (repo == null)
+        {
+            unavailable(command, refName);
             return;
-
-        // Обработчики EGit ищут панель через RepositoriesView.getView(event) — без неё возможен
-        // отказ; создаём панель, не забирая фокус у окна результата.
-        IViewPart view = page.findView(REPOSITORIES_VIEW_ID);
-        try
-        {
-            if (view == null)
-                view = page.showView(REPOSITORIES_VIEW_ID, null, IWorkbenchPage.VIEW_VISIBLE);
-        }
-        catch (Exception e)
-        {
-            Global.logError(TAG, "showView (visible)", e); //$NON-NLS-1$
         }
 
-        Object node = view instanceof CommonNavigator navigator && navigator.getCommonViewer() != null
-            ? findRefNode(navigator.getCommonViewer(), repo, refName) : null;
+        boolean merge = MERGE_COMMAND_ID.equals(command.commandId());
+        // С RefNode/TagNode штатный MergeCommand может начать слияние сразу.
+        Object node = merge ? new RepositoryNode(null, repo) : findCommandNode(repo, refName);
         if (node == null)
         {
             ToastNotification.show("Результат получения изменений", //$NON-NLS-1$
@@ -430,13 +427,80 @@ public final class FetchResultDialogHook implements IStartup
 
         try
         {
-            handlers.executeCommandInContext(new ParameterizedCommand(cmd, null), null, context);
+            ParameterizedCommand parameterized = new ParameterizedCommand(cmd, null);
+            if (merge)
+                executeMergeCommand(handlers, parameterized, context, sourceShell, repo, refName);
+            else
+                handlers.executeCommandInContext(parameterized, null, context);
         }
         catch (Exception e)
         {
             Global.logError(TAG, "execute " + command.commandId(), e); //$NON-NLS-1$
             unavailable(command, refName);
         }
+    }
+
+    private static Object findCommandNode(Repository repo, String refName)
+    {
+        IWorkbenchPage page = activePage();
+        if (page == null)
+            return null;
+
+        // Обработчики EGit могут искать панель через RepositoriesView.getView(event).
+        IViewPart view = page.findView(REPOSITORIES_VIEW_ID);
+        try
+        {
+            if (view == null)
+                view = page.showView(REPOSITORIES_VIEW_ID, null, IWorkbenchPage.VIEW_VISIBLE);
+        }
+        catch (Exception e)
+        {
+            Global.logError(TAG, "showView (visible)", e); //$NON-NLS-1$
+        }
+        return view instanceof CommonNavigator navigator && navigator.getCommonViewer() != null
+            ? findRefNode(navigator.getCommonViewer(), repo, refName) : null;
+    }
+
+    private static void executeMergeCommand(IHandlerService handlers, ParameterizedCommand command,
+        IEvaluationContext context, Shell sourceShell, Repository repo, String refName) throws Exception
+    {
+        context.addVariable(ISources.ACTIVE_SHELL_NAME, sourceShell);
+        Display display = sourceShell.getDisplay();
+        // Window.open() вызывает create() до Shell.open(): на SWT.Show дерево уже заполнено.
+        Listener selectRef = event -> {
+            if (event.widget instanceof Shell shell && shell.getParent() == sourceShell
+                && shell.getData() instanceof MergeTargetSelectionDialog dialog)
+            {
+                selectMergeRef(dialog, repo, refName);
+            }
+        };
+        Global.tempLog(MERGE_LOG, "execute ref=" + refName); //$NON-NLS-1$
+        display.addFilter(SWT.Show, selectRef);
+        try
+        {
+            handlers.executeCommandInContext(command, null, context);
+        }
+        finally
+        {
+            if (!display.isDisposed())
+                display.removeFilter(SWT.Show, selectRef);
+            Global.tempLog(MERGE_LOG, "finished ref=" + refName); //$NON-NLS-1$
+        }
+    }
+
+    private static void selectMergeRef(MergeTargetSelectionDialog dialog, Repository repo, String refName)
+    {
+        if (Global.getField(dialog, "repo") != repo //$NON-NLS-1$
+            || !(Global.getField(dialog, "branchTree") instanceof TreeViewer viewer)) //$NON-NLS-1$
+        {
+            Global.tempLog(MERGE_LOG, "dialog repository or tree unavailable ref=" + refName); //$NON-NLS-1$
+            return;
+        }
+
+        Object node = findRefNode(viewer, repo, refName);
+        viewer.setSelection(node == null ? StructuredSelection.EMPTY : new StructuredSelection(node), true);
+        Global.tempLog(MERGE_LOG, "requested=" + refName //$NON-NLS-1$
+            + " selected=" + refNameOf(viewer.getStructuredSelection().getFirstElement())); //$NON-NLS-1$
     }
 
     private static void unavailable(BranchCommand command, String refName)
