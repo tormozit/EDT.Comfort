@@ -108,12 +108,6 @@ public final class BslXtextDocumentHook implements IStartup
     public static void install()
     {
         IncrementalEditorValidation.install();
-        // Временный безусловный канал исследовательских зондов раннего бандла.
-        System.getProperties().put("tormozit.incrementalValidation.sink", //$NON-NLS-1$
-            (java.util.function.Consumer<String>) text -> Global.tempLog("bsl-incremental", text)); //$NON-NLS-1$
-        Global.tempLog("bsl-incremental", "sink.installed patches=" + System.getProperties().entrySet().stream() //$NON-NLS-1$ //$NON-NLS-2$
-            .filter(entry -> entry.getKey().toString().startsWith("tormozit.incrementalValidation.") //$NON-NLS-1$
-                && entry.getValue() instanceof String).toList());
         System.getProperties().put(PROP_SKIP_WAIT,
             (BooleanSupplier) BslXtextDocumentHook::skipWaitUpdatingDataModel);
         // #region agent log
@@ -154,7 +148,6 @@ public final class BslXtextDocumentHook implements IStartup
             int edits;
             boolean baseline;
             String header;
-            String editReason;
             int methodStart = -1;
             int originalMethodCount = -1;
             int changePosition = -1;
@@ -167,7 +160,6 @@ public final class BslXtextDocumentHook implements IStartup
             final java.util.Set<String> affectedNames = new java.util.HashSet<>();
             final java.util.Set<String> validatedNames = new java.util.HashSet<>();
             final java.util.Set<String> moduleChecks = java.util.concurrent.ConcurrentHashMap.newKeySet();
-            final java.util.Map<String, Long> checkStarts = new java.util.HashMap<>();
 
             @Override public boolean isAdapterForType(Object type) { return type == State.class; }
         }
@@ -229,21 +221,15 @@ public final class BslXtextDocumentHook implements IStartup
                         return;
                     String code = (String)event[0];
                     boolean scoped = scopedCheck(event[2]);
-                    String key = Thread.currentThread().getId() + ":" + code;
                     if (Boolean.TRUE.equals(event[3]))
                     {
                         if (scoped && state.active.partial()) CHECK_SCOPE.set(new java.lang.ref.WeakReference<>(state.active));
                         else CHECK_SCOPE.remove();
                         if (scoped) state.moduleChecks.remove(code); else state.moduleChecks.add(code);
-                        state.checkStarts.put(key, System.nanoTime());
-                        Global.tempLog("bsl-incremental", "editor.check.enter code=" + code + " scoped=" + (scoped && state.active.partial()));
                     }
                     else
                     {
                         CHECK_SCOPE.remove();
-                        Long started = state.checkStarts.remove(key);
-                        Global.tempLog("bsl-incremental", "editor.check.return code=" + code + " elapsedUs="
-                            + (started == null ? -1 : (System.nanoTime() - started) / 1000));
                     }
                 }
             });
@@ -423,8 +409,6 @@ public final class BslXtextDocumentHook implements IStartup
                         && afterDotOnNewLine(node.getRootNode().getText(), leaf.getOffset()))
                     {
                         end = leaf.getOffset();
-                        Global.tempLog("bsl-incremental", "editor.boundary.hot-member offset=" + end
-                            + " keyword=" + leaf.getText() + " method=" + method.getName());
                     }
                 }
             return end;
@@ -463,8 +447,6 @@ public final class BslXtextDocumentHook implements IStartup
                     if (removed == inserted.length() && (removed == 0 || root != null
                         && root.getText().regionMatches(offset, inserted, 0, removed)))
                     {
-                        Global.tempLog("bsl-incremental", "editor.update.unchanged offset=" + offset + " length=" + removed
-                            + " pending=" + state.edits + " shift=" + state.changeShift + " resource=" + resource.getURI());
                         return;
                     }
                     String previousHeader = state.header;
@@ -475,12 +457,10 @@ public final class BslXtextDocumentHook implements IStartup
                         state.originalMethodCount = module.allMethods().size();
                     state.header = null;
                     state.range = null;
-                    state.editReason = "baseline-or-previous-unsafe-edit";
                     state.changePosition = state.changePosition < 0 ? offset : Math.min(state.changePosition, offset);
                     state.changeShift += inserted.length() - removed;
                     if (!state.baseline || resource.getParseResult() == null || state.edits > 1 && previousHeader == null)
                         return;
-                    state.editReason = "comment-or-missing-leaf";
                     var leaf = NodeModelUtils.findLeafNodeAtOffset(root, offset);
                     if (leaf == null || leaf.getText().stripLeading().startsWith("//"))
                         return;
@@ -490,7 +470,6 @@ public final class BslXtextDocumentHook implements IStartup
                     if (method == null)
                         for (INode owner = leaf.getParent(); owner != null; owner = owner.getParent())
                             if (owner.getSemanticElement() instanceof Method value) { method = value; break; }
-                    state.editReason = "method-node";
                     if (method == null)
                         return;
                     ICompositeNode methodNode = NodeModelUtils.findActualNodeFor(method);
@@ -506,21 +485,14 @@ public final class BslXtextDocumentHook implements IStartup
                     }
                     boolean verified = range != null && range.matches(methodNode, signature, currentHeader, root.getText());
                     int end = range == null ? -1 : range.end();
-                    state.editReason = "method-body-range";
-                    Global.tempLog("bsl-incremental", "editor.edit.range offset=" + offset + " removed=" + removed
-                        + " signatureEnd=" + (signature == null ? -1 : signature.getEndOffset()) + " bodyEnd=" + end
-                        + " parsedEnd=" + parsedEnd + " tracked=" + (parsedEnd < 0) + " verified=" + verified
-                        + " method=" + method.getName() + " resource=" + resource.getURI());
                     if (!verified || end < 0 || offset < range.signatureEnd() || offset + removed > end)
                         return;
                     String deleted = root.getText().substring(offset, offset + removed);
-                    state.editReason = "directive-text";
                     if (directives(inserted) || directives(deleted))
                         return;
                     int methodStart = methodNode.getOffset();
                     if (state.edits > 1 && (!java.util.Objects.equals(previousHeader, currentHeader) || state.methodStart != methodStart))
                     {
-                        state.editReason = "different-methods";
                         return;
                     }
                     state.methodStart = methodStart;
@@ -530,14 +502,12 @@ public final class BslXtextDocumentHook implements IStartup
                     state.affectedNames.add(methodKey(method));
                     state.header = currentHeader;
                     state.range = range.shifted(inserted.length() - removed);
-                    state.editReason = "body";
                 }
                 catch (RuntimeException error)
                 {
                     state.baseline = false;
                     state.header = null;
                     state.range = null;
-                    Global.tempLog("bsl-incremental", "editor.before.failed resource=" + resource.getURI() + " error=" + error);
                 }
             }
         }
@@ -591,19 +561,11 @@ public final class BslXtextDocumentHook implements IStartup
                     Session session = new Session(resource, resource.getParseResult(), state.edits, partial, methods,
                         unchanged ? 0 : Math.max(0, state.changePosition), unchanged ? 0 : state.changeShift);
                     state.active = session;
-                    state.checkStarts.clear();
                     holder.getContext().put(SESSION, session);
-                    Global.tempLog("bsl-incremental", "editor.scope mode=" + (session.partial() ? "partial" : "full")
-                        + " reason=" + reason + " editReason=" + state.editReason + " methods=" + methods.size()
-                        + " edits=" + state.edits + " stamp=" + stamp
-                        + " position=" + session.position() + " shift=" + session.shift()
-                        + " syntaxErrors=" + resource.getParseResult().hasSyntaxErrors()
-                        + " method=" + (method == null ? null : method.getName()) + " resource=" + resource.getURI());
                 }
                 catch (RuntimeException error)
                 {
                     state.active = null;
-                    Global.tempLog("bsl-incremental", "editor.scope.failed resource=" + resource.getURI() + " error=" + error);
                 }
             }
         }
@@ -640,8 +602,6 @@ public final class BslXtextDocumentHook implements IStartup
                 state.prepared = complete ? session : null;
                 if (!complete)
                     state.baseline = false;
-                Global.tempLog("bsl-incremental", "editor.finish complete=" + complete + " partial=" + session.partial()
-                    + " resource=" + resource.getURI());
             }
         }
 
@@ -690,8 +650,6 @@ public final class BslXtextDocumentHook implements IStartup
                     state.changeShift = 0;
                     state.originalMethodCount = -1;
                 }
-                Global.tempLog("bsl-incremental", "editor.issues complete=" + complete + " partial=" + session.partial()
-                    + " resource=" + session.resource().getURI());
             }
         }
 
@@ -713,7 +671,6 @@ public final class BslXtextDocumentHook implements IStartup
             }
             catch (org.eclipse.jface.text.BadLocationException error)
             {
-                Global.tempLog("bsl-incremental", "editor.position.failed offset=" + issue.getOffset() + " error=" + error);
             }
         }
     }

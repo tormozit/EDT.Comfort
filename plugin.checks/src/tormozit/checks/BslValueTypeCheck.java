@@ -65,7 +65,6 @@ import tormozit.BslMethodParameterTypes;
 import tormozit.BslDocCommentTypeMerge;
 import tormozit.ComfortCheckIds;
 import tormozit.FormItemTypes;
-import tormozit.Global;
 import tormozit.PlatformTemplateTypes;
 import tormozit.TypeDescriptionPresentationHook;
 
@@ -303,10 +302,7 @@ public final class BslValueTypeCheck extends BasicCheck<Object>
             catch (RuntimeException error)
             {
                 // Контекст модели недоступен: вызов остаётся непроверенным, как и раньше.
-                Global.tempLogException("value-type-source-method", "resolve uri=" + uri, error); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            Global.tempLog("value-type-source-method", "uri=" + uri //$NON-NLS-1$ //$NON-NLS-2$
-                + " method=" + (method == null ? "null" : method.getName())); //$NON-NLS-1$ //$NON-NLS-2$
             sourceMethods.put(uri, method);
             return method;
         }

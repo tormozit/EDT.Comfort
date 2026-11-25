@@ -41,7 +41,6 @@ public final class Activator
     public void start(BundleContext context)
     {
         IncidentDiagnostics.install(context);
-        IncrementalValidationDiagnostics.install(context);
         IncrementalEditorValidationWeaving.install(context);
         ModuleContextDiagnostics.install(context);
         DocCommentLinkWeaving.install(context);
@@ -243,7 +242,6 @@ public final class Activator
                 if (!supported.equals(version))
                 {
                     System.getProperties().put(PREFIX + "patch." + target, false);
-                    IncrementalValidationDiagnostics.log("editor.patch.unsupported target=" + target + " bundle=" + version);
                     return;
                 }
                 ClassReader reader = new ClassReader(woven.getBytes());
@@ -433,285 +431,11 @@ public final class Activator
                 System.getProperties().put(PREFIX + "patch." + target, complete);
                 if (complete)
                     woven.setBytes(writer.toByteArray());
-                IncrementalValidationDiagnostics.log("editor.patch target=" + target + " complete=" + complete
-                    + " sites=" + java.util.Arrays.toString(sites) + " bundle=" + woven.getBundleWiring().getBundle().getVersion());
             }
             catch (Throwable error)
             {
                 System.getProperties().put(PREFIX + "patch." + target, false);
-                IncrementalValidationDiagnostics.log("editor.patch.failed target=" + target + " error=" + error);
             }
-        }
-    }
-
-    /** Временные исследовательские зонды EDT 28.0.1.v202605050943; не запускают расчёты модели. */
-    private static final class IncrementalValidationDiagnostics implements WeavingHook
-    {
-        private static final String PREFIX = "tormozit.incrementalValidation.";
-        private static final String RESOURCE = "com._1c.g5.v8.dt.bsl.resource.BslResource";
-        private static final String DIAGNOSTICIAN = "com._1c.g5.v8.dt.bsl.validation.BslCancelableDiagnostician";
-        private static final String TREE_TYPES = "com._1c.g5.v8.dt.bsl.typesystem.BslTreeTypeSystem";
-        private static final Map<String, Set<String>> TARGETS = Map.of(
-            RESOURCE, Set.of("update", "reparse"),
-            DIAGNOSTICIAN, Set.of("doValidateContents"),
-            "com._1c.g5.v8.dt.bsl.validation.BslNotifyingResourceValidator", Set.of("validate"),
-            TREE_TYPES, Set.of("computeProcessingObjects"));
-        private static final java.util.concurrent.atomic.AtomicLong IDS = new java.util.concurrent.atomic.AtomicLong();
-        private record Call(long id, String phase, long start, Object receiver, String resource) { }
-        private static final ThreadLocal<java.util.Deque<Call>> CALLS =
-            ThreadLocal.withInitial(java.util.ArrayDeque::new);
-        private static final ClassValue<Map<String, java.util.Optional<java.lang.reflect.Method>>> GETTERS = new ClassValue<>()
-        {
-            @Override protected Map<String, java.util.Optional<java.lang.reflect.Method>> computeValue(Class<?> type)
-            {
-                return new java.util.concurrent.ConcurrentHashMap<>();
-            }
-        };
-
-        static void install(BundleContext context)
-        {
-            System.getProperties().put(PREFIX + "event", (Consumer<Object[]>) IncrementalValidationDiagnostics::capture);
-            System.getProperties().put(PREFIX + "blocks", (Consumer<Object>) IncrementalValidationDiagnostics::blocks);
-            context.registerService(WeavingHook.class, new IncrementalValidationDiagnostics(), null);
-            log("observer.installed targets=" + TARGETS.keySet());
-        }
-
-        private static void log(String text)
-        {
-            try
-            {
-                if (System.getProperties().get(PREFIX + "sink") instanceof Consumer<?> sink)
-                {
-                    @SuppressWarnings("unchecked") Consumer<String> typed = (Consumer<String>)sink;
-                    typed.accept("thread=" + Thread.currentThread().getName() + " " + text);
-                }
-                else
-                    IncidentDiagnostics.instance.record("bsl-incremental", text);
-            }
-            catch (Throwable error)
-            {
-                IncidentDiagnostics.instance.record("bsl-incremental", "sink.failed " + error);
-            }
-        }
-
-        /** Только публичные готовые свойства; ни getContents(), ни вычисления типов/зависимостей. */
-        private static Object read(Object target, String name)
-        {
-            if (target == null)
-                return null;
-            try
-            {
-                var getter = GETTERS.get(target.getClass()).computeIfAbsent(name, key ->
-                {
-                    try { return java.util.Optional.of(target.getClass().getMethod(key)); }
-                    catch (NoSuchMethodException absent) { return java.util.Optional.empty(); }
-                });
-                return getter.isEmpty() ? null : getter.get().invoke(target);
-            }
-            catch (Throwable error) { log("read.failed type=" + target.getClass().getName() + " getter=" + name + " error=" + error); return null; }
-        }
-
-        private static String identity(Object value)
-        {
-            return value == null ? "null" : value.getClass().getSimpleName() + "@"
-                + Integer.toHexString(System.identityHashCode(value));
-        }
-
-        private static String shortPhase(String phase)
-        {
-            int method = phase.lastIndexOf('.');
-            return phase.substring(phase.lastIndexOf('.', method - 1) + 1);
-        }
-
-        private static String resource(Object receiver, Object argument)
-        {
-            Object value = read(argument, "eResource");
-            if (value == null && read(argument, "getURI") != null)
-                value = argument;
-            if (value == null && read(receiver, "getURI") != null)
-                value = receiver;
-            if (value == null)
-                return "";
-            Object parsed = read(value, "getParseResult");
-            return " resource=" + read(value, "getURI") + " resourceId=" + identity(value)
-                + " parse=" + identity(parsed) + " partial=" + read(value, "isOnlyMethodReparse")
-                + " method=" + read(read(value, "getReparseMethod"), "getName")
-                + " context=" + identity(read(value, "getContextHolder"))
-                + " deep=" + read(value, "isDeepAnalysing")
-                + " offset=" + read(value, "getLastUpdatePosition")
-                + " shift=" + read(value, "getLastUpdateContentShift");
-        }
-
-        private static void capture(Object[] event)
-        {
-            long now = System.nanoTime();
-            try
-            {
-                String phase = (String)event[0];
-                String edge = (String)event[1];
-                Object receiver = event[2];
-                Object argument = event[3];
-                var calls = CALLS.get();
-                String state = resource(receiver, argument);
-                if (state.isEmpty() && !calls.isEmpty())
-                    state = calls.peek().resource();
-
-                if ("enter".equals(edge))
-                {
-                    // Исключение из вызванного метода может обойти RETURN/ATHROW вызывающего.
-                    // Такие незакрытые входы видны в логе; ограничиваем только служебную память зонда.
-                    if (calls.size() >= 1024)
-                    {
-                        log("unclosed.reset count=" + calls.size());
-                        calls.clear();
-                    }
-                    long parent = calls.isEmpty() ? 0 : calls.peek().id();
-                    Call call = new Call(IDS.incrementAndGet(), phase, now, receiver, state);
-                    calls.push(call);
-                    log("enter id=" + call.id() + " parent=" + parent + " phase=" + shortPhase(phase)
-                        + " receiver=" + identity(receiver) + " argument=" + identity(argument)
-                        + " name=" + read(argument, "getName") + state);
-                }
-                else if ("return".equals(edge))
-                {
-                    Call found = null;
-                    for (Call call : calls)
-                        if (call.phase().equals(phase) && call.receiver() == receiver)
-                        {
-                            found = call;
-                            break;
-                        }
-                    if (found == null)
-                        log("return.unmatched phase=" + shortPhase(phase) + state);
-                    else
-                    {
-                        while (calls.peek() != found)
-                            log("unclosed id=" + calls.pop().id());
-                        calls.pop();
-                        log("return id=" + found.id() + " phase=" + shortPhase(phase) + " elapsedUs="
-                            + (now - found.start()) / 1000 + state);
-                    }
-                    if (calls.isEmpty())
-                        CALLS.remove();
-                }
-                else
-                    // ATHROW может быть пойман внутри того же метода: это наблюдение, не выход.
-                    log("athrow phase=" + shortPhase(phase) + " current=" + (calls.isEmpty() ? 0 : calls.peek().id()) + state);
-            }
-            catch (Throwable error) { log("capture.failed " + error); }
-        }
-
-        private static void blocks(Object value)
-        {
-            try
-            {
-                var calls = CALLS.get();
-                StringBuilder text = new StringBuilder("selected.blocks current=")
-                    .append(calls.isEmpty() ? 0 : calls.peek().id())
-                    .append(" phase=").append(calls.isEmpty() ? "none" : shortPhase(calls.peek().phase()));
-                if (value instanceof Collection<?> collection)
-                {
-                    text.append(" count=").append(collection.size());
-                }
-                if (!calls.isEmpty())
-                    text.append(calls.peek().resource());
-                log(text.toString());
-            }
-            catch (Throwable error) { log("blocks.failed " + error); }
-        }
-
-        @Override
-        public void weave(WovenClass woven)
-        {
-            Set<String> methods = TARGETS.get(woven.getClassName());
-            if (woven.getState() != WovenClass.TRANSFORMING || methods == null)
-                return;
-            try
-            {
-                ClassReader reader = new ClassReader(woven.getBytes());
-                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-                int[] touched = {0};
-                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-                {
-                    @Override
-                    public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions)
-                    {
-                        MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-                        if (mv == null || !methods.contains(name) || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0)
-                            return mv;
-                        touched[0]++;
-                        String phase = woven.getClassName() + "." + name;
-                        var arguments = org.objectweb.asm.Type.getArgumentTypes(desc);
-                        boolean reference = arguments.length > 0 && (arguments[0].getSort() == org.objectweb.asm.Type.OBJECT
-                            || arguments[0].getSort() == org.objectweb.asm.Type.ARRAY);
-                        // doValidateContents рекурсивен для каждого узла AST: снимаем только готовый список блоков.
-                        boolean selectionOnly = DIAGNOSTICIAN.equals(woven.getClassName());
-                        return new MethodVisitor(Opcodes.ASM9, mv)
-                        {
-                            private void emit(String edge)
-                            {
-                                callback(this, PREFIX + "event");
-                                visitInsn(Opcodes.ICONST_4);
-                                visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
-                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_0); visitLdcInsn(phase); visitInsn(Opcodes.AASTORE);
-                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_1); visitLdcInsn(edge); visitInsn(Opcodes.AASTORE);
-                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_2); visitVarInsn(Opcodes.ALOAD, 0); visitInsn(Opcodes.AASTORE);
-                                visitInsn(Opcodes.DUP); visitInsn(Opcodes.ICONST_3);
-                                if (reference) visitVarInsn(Opcodes.ALOAD, 1); else visitInsn(Opcodes.ACONST_NULL);
-                                visitInsn(Opcodes.AASTORE);
-                                visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
-                            }
-
-                            @Override public void visitCode() { super.visitCode(); if (!selectionOnly) emit("enter"); }
-
-                            @Override public void visitInsn(int opcode)
-                            {
-                                if (!selectionOnly && opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
-                                {
-                                    if (TREE_TYPES.equals(woven.getClassName()) && "computeProcessingObjects".equals(name)
-                                        && opcode == Opcodes.ARETURN)
-                                    {
-                                        super.visitInsn(Opcodes.DUP);
-                                        callback(this, PREFIX + "blocks");
-                                        super.visitInsn(Opcodes.SWAP);
-                                        super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
-                                    }
-                                    emit("return");
-                                }
-                                else if (!selectionOnly && opcode == Opcodes.ATHROW)
-                                    emit("athrow");
-                                super.visitInsn(opcode);
-                            }
-
-                            @Override public void visitMethodInsn(int opcode, String owner, String method, String descriptor, boolean itf)
-                            {
-                                if (DIAGNOSTICIAN.equals(woven.getClassName()) && "java/util/List".equals(owner)
-                                    && "iterator".equals(method) && "()Ljava/util/Iterator;".equals(descriptor))
-                                {
-                                    super.visitInsn(Opcodes.DUP);
-                                    callback(this, PREFIX + "blocks");
-                                    super.visitInsn(Opcodes.SWAP);
-                                    super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", "(Ljava/lang/Object;)V", true);
-                                }
-                                super.visitMethodInsn(opcode, owner, method, descriptor, itf);
-                            }
-                        };
-                    }
-                }, 0);
-                woven.setBytes(writer.toByteArray());
-                String status = "woven methods=" + touched[0] + " bundle=" + woven.getBundleWiring().getBundle().getVersion();
-                System.setProperty(PREFIX + woven.getClassName(), status);
-                log("patch target=" + woven.getClassName() + " " + status);
-            }
-            catch (Throwable error) { log("weave.failed target=" + woven.getClassName() + " error=" + error); }
-        }
-
-        private static void callback(MethodVisitor mv, String key)
-        {
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false);
-            mv.visitLdcInsn(key);
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
-            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer");
         }
     }
 
@@ -7519,6 +7243,8 @@ public final class Activator
         private static final String SERVICE_PENDING = "tormozit.naparnik.servicePending"; //$NON-NLS-1$
         private static final String STATUS_CONTROL = "com.e1c.edt.ai.ui.BaseStatusBarControl"; //$NON-NLS-1$
         private static final String STATUS_MENU = "tormozit.naparnik.statusMenu"; //$NON-NLS-1$
+        private static final String ENTITY_FACTORY = "com.e1c.edt.ai.context.EntityFactory";
+        private static final String AREAS = "tormozit.naparnik.areas";
 
 
         NaparnikWeaving()
@@ -7649,13 +7375,18 @@ public final class Activator
                 : PAINTER.equals(name) ? "HintPainter" : TOKEN_CHECK.equals(name) ? "TokenCheck" //$NON-NLS-1$ //$NON-NLS-2$
                 : SESSION_CALL.equals(name) ? "SessionCall" : TOKEN_EDITOR.equals(name) ? "TokenEditor" //$NON-NLS-1$ //$NON-NLS-2$
                 : CHAT.equals(name) ? "Chat" : HTTP_LOG.equals(name) ? "HttpLog"
-                : SERVICE.equals(name) ? "ServiceStatus" : STATUS_CONTROL.equals(name) ? "StatusControl" : null; //$NON-NLS-1$ //$NON-NLS-2$
+                : SERVICE.equals(name) ? "ServiceStatus" : STATUS_CONTROL.equals(name) ? "StatusControl"
+                : ENTITY_FACTORY.equals(name) ? "ContextAreas" : null; //$NON-NLS-1$ //$NON-NLS-2$
             if (label == null)
                 return;
             String result;
             try
             {
+                if (ENTITY_FACTORY.equals(name)
+                    && !"1.1.0.v202611201536".equals(woven.getBundleWiring().getBundle().getVersion().toString()))
+                    return;
                 byte[] transformed = STATUS_CONTROL.equals(name) ? transformStatusMenu(woven.getBytes())
+                    : ENTITY_FACTORY.equals(name) ? transformContextAreas(woven.getBytes())
                     : SERVICE.equals(name) ? transformServiceStatus(woven.getBytes())
                     : HTTP_LOG.equals(name) ? transformAccessResponse(woven.getBytes())
                     : TOKEN_EDITOR.equals(name) || CHAT.equals(name)
@@ -7678,6 +7409,72 @@ public final class Activator
                 String previous = System.getProperty(STATUS);
                 System.setProperty(STATUS, (previous == null ? "" : previous + " ") + label + "=" + result); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
+        }
+
+        /**
+         * ai.context 1.1.0.v202611201536, EntityFactory.getAreas: тот же список областей
+         * через цепочку containment. При отсутствии основного бандла остаётся исходный метод.
+         */
+        private static byte[] transformContextAreas(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = writer(reader);
+            int[] sites = new int[3];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"getAreas".equals(name) || !"(Lorg/eclipse/emf/ecore/EObject;Lcom/e1c/edt/ai/ICancellationToken;)Ljava/util/Optional;".equals(descriptor))
+                        return mv;
+                    sites[0]++;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false);
+                            super.visitLdcInsn(AREAS);
+                            super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+                            super.visitInsn(Opcodes.DUP);
+                            super.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/BiFunction");
+                            Label original = new Label();
+                            super.visitJumpInsn(Opcodes.IFEQ, original);
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction");
+                            super.visitVarInsn(Opcodes.ALOAD, 1);
+                            super.visitVarInsn(Opcodes.ALOAD, 2);
+                            // Supplier<Boolean> связывается со штатным токеном без зависимости бандлов и рефлексии.
+                            super.visitInvokeDynamicInsn("get", "(Lcom/e1c/edt/ai/ICancellationToken;)Ljava/util/function/Supplier;",
+                                new Handle(Opcodes.H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
+                                    "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;", false),
+                                org.objectweb.asm.Type.getMethodType("()Ljava/lang/Object;"),
+                                new Handle(Opcodes.H_INVOKEINTERFACE, "com/e1c/edt/ai/ICancellationToken", "isCanceled", "()Ljava/lang/Boolean;", true),
+                                org.objectweb.asm.Type.getMethodType("()Ljava/lang/Boolean;"));
+                            super.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true);
+                            super.visitInsn(Opcodes.DUP);
+                            super.visitJumpInsn(Opcodes.IFNULL, original);
+                            super.visitTypeInsn(Opcodes.CHECKCAST, "java/util/Optional");
+                            super.visitInsn(Opcodes.ARETURN);
+                            super.visitLabel(original);
+                            super.visitInsn(Opcodes.POP);
+                        }
+
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean itf)
+                        {
+                            if ("com/_1c/g5/v8/dt/bsl/model/RegionPreprocessor".equals(owner) && "eAllContents".equals(name))
+                                sites[1]++;
+                            if ("com/e1c/edt/ai/ICancellationToken".equals(owner) && "isCanceled".equals(name))
+                                sites[2]++;
+                            super.visitMethodInsn(opcode, owner, name, descriptor, itf);
+                        }
+                    };
+                }
+            }, ClassReader.EXPAND_FRAMES);
+            return sites[0] == 1 && sites[1] == 1 && sites[2] == 2 ? writer.toByteArray() : null;
         }
 
         /** Отмечаем штатное контекстное меню индикатора, не меню выбора режима. */

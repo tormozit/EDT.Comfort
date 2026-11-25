@@ -81,19 +81,15 @@ public final class PlatformTemplateTypes
         String name = McoreUtil.getTypeName(template);
         if (name == null)
             return false;
-        List<String> bases = new ArrayList<>();
         boolean matches = false;
         for (Type base : set.getBaseTypes())
         {
             if (EcoreUtil.resolve(base, context) instanceof Type resolved && !resolved.eIsProxy())
             {
                 String baseName = McoreUtil.getTypeName(resolved);
-                bases.add(baseName);
                 matches |= name.equals(baseName);
             }
         }
-        Global.tempLog("value-type-template", "template=" + name + " set=" + McoreUtil.getTypeName(set) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " bases=" + bases + " compatible=" + matches); //$NON-NLS-1$ //$NON-NLS-2$
         return matches;
     }
 

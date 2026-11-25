@@ -148,6 +148,7 @@ public final class NaparnikManualModeHook implements IStartup
     {
         if (!booted.compareAndSet(false, true))
             return;
+        ContextAreas.install();
         ServiceRecovery.start();
         System.getProperties().put(PROP_REPLACE,
             (Predicate<Object>) NaparnikManualModeHook::allowReplace);
@@ -158,6 +159,37 @@ public final class NaparnikManualModeHook implements IStartup
     {
         NaparnikAssistRow.stopRequestPolicy();
         ServiceRecovery.stop();
+    }
+
+    /** Напарник 1.1.0.v202611201536: области текущего объекта без повторного обхода их AST. */
+    private static final class ContextAreas
+    {
+        static void install()
+        {
+            System.getProperties().put("tormozit.naparnik.areas",
+                (java.util.function.BiFunction<Object, Object, Object>) ContextAreas::lookup);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static Object lookup(Object target, Object cancellation)
+        {
+            if (!(target instanceof org.eclipse.emf.ecore.EObject object)
+                || !(cancellation instanceof java.util.function.Supplier<?>))
+                return null;
+            var token = (java.util.function.Supplier<Boolean>) cancellation;
+            var names = new ArrayList<String>();
+            org.eclipse.emf.ecore.EObject child = null;
+            for (var current = object; current != null; child = current, current = current.eContainer())
+            {
+                if (token.get())
+                    return java.util.Optional.empty();
+                // itemAfter принадлежит тексту ПОСЛЕ #КонецОбласти. Учитываем только ветвь item.
+                if (current instanceof com._1c.g5.v8.dt.bsl.model.RegionPreprocessor region
+                    && child != null && child == region.getItem())
+                    names.add(0, region.getName());
+            }
+            return token.get() || names.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(names);
+        }
     }
 
     @Override
