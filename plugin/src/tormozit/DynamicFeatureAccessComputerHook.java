@@ -3,6 +3,8 @@ package tormozit;
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
@@ -18,6 +20,8 @@ import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.validation.RangeBasedDiagnostic;
 import org.eclipse.xtext.validation.ValidationMessageAcceptor;
+import org.eclipse.xtext.util.Triple;
+import org.eclipse.xtext.util.Tuples;
 import com.e1c.g5.v8.dt.check.BslDirectLocationIssue;
 import com.e1c.g5.v8.dt.check.DirectLocation;
 import com.e1c.g5.v8.dt.check.ICheckResultAcceptor;
@@ -44,6 +48,7 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.typesystem.NamingCollectionServiceProvider;
+import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
@@ -547,9 +552,9 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
     /**
      * Члены абстрактного типа «ОбъектМетаданных» ({@code MetadataObject}) — свойства и методы всех его
      * типов-наследников. Подмена в результате {@code ContextDefImpl.allProperties/allMethods}: тот же набор
-     * видят автодополнение, проверки, подсказки и значения литералов. Штатные {@code allProperties} и
-     * {@code allMethods} берут у родителей только {@code getProperties()/getMethods()}, поэтому члены
-     * наследников не попадают в соседние типы и вложенного вызова нет. Типы-наследники ищутся среди типов
+     * видят автодополнение, проверки, подсказки и значения литералов. {@code BslUtil} вызывает
+     * {@code allProperties/allMethods} у ссылочных контекстов. Для конкретного получателя из ответа такого
+     * вызова исключаются члены посторонних наследников. Типы-наследники ищутся среди типов
      * платформы той же версии (имена начинаются с имени предка, принадлежность подтверждает цепочка
      * {@code getParentType()}).
      */
@@ -817,10 +822,16 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
                 boolean changed = false;
                 for (Object raw : triples)
                 {
-                    if (!(raw instanceof org.eclipse.xtext.util.Triple<?, ?, ?> triple)
-                        || !(triple.getThird() instanceof Type owner) || !ABSTRACT_TYPE.equals(owner.getName()))
+                    if (!(raw instanceof Triple<?, ?, ?> triple) || !(triple.getThird() instanceof Type owner))
                     {
                         output.add(raw);
+                        continue;
+                    }
+                    if (!ABSTRACT_TYPE.equals(owner.getName()))
+                    {
+                        Triple<?, ?, ?> filtered = withoutForeignMembers(triple, owner);
+                        output.add(filtered);
+                        changed |= filtered != triple;
                         continue;
                     }
                     java.util.List<Type> children = children(owner);
@@ -878,6 +889,40 @@ public final class DynamicFeatureAccessComputerHook implements IStartup
             {
                 return result;
             }
+        }
+
+        /** У конкретного получателя сохраняются собственный и штатные ссылочные контексты EDT. */
+        private static Triple<?, ?, ?> withoutForeignMembers(Triple<?, ?, ?> triple, Type owner)
+        {
+            ContextDef context = owner.getContextDef();
+            if (context == null || !(triple.getFirst() instanceof Collection<?> methods)
+                || !(triple.getSecond() instanceof Collection<?> properties))
+                return triple;
+
+            var references = context.allRefContextDefs();
+            for (ContextDef reference : references)
+            {
+                if (!(reference.eContainer() instanceof Type base) || !ABSTRACT_TYPE.equals(base.getName()))
+                    continue;
+
+                Set<ContextDef> foreignContexts = new HashSet<>();
+                for (Type child : children(base))
+                    foreignContexts.add(child.getContextDef());
+                foreignContexts.remove(null);
+                foreignContexts.remove(context);
+                foreignContexts.removeAll(references);
+
+                var keptMethods = methods.stream().filter(member -> belongsToReceiver(member, foreignContexts)).toList();
+                var keptProperties = properties.stream().filter(member -> belongsToReceiver(member, foreignContexts)).toList();
+                return methods.size() == keptMethods.size() && properties.size() == keptProperties.size() ? triple
+                    : Tuples.create(keptMethods, keptProperties, owner);
+            }
+            return triple;
+        }
+
+        private static boolean belongsToReceiver(Object member, Set<ContextDef> foreignContexts)
+        {
+            return !(member instanceof EObject object) || !foreignContexts.contains(object.eContainer());
         }
 
         private static Type containerType(EObject member)
