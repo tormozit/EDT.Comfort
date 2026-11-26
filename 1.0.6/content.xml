@@ -1,0 +1,733 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?metadataRepository version='1.2.0'?>
+<repository name='Update Site' type='org.eclipse.equinox.internal.p2.metadata.repository.LocalMetadataRepository' version='1.0.0'>
+  <properties size='2'>
+    <property name='p2.timestamp' value='1793054665577'/>
+    <property name='p2.compressed' value='true'/>
+  </properties>
+<units size='12'>
+    <unit id='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007' generation='2'>
+      <update id='org.eclipse.mylyn.wikitext.markdown.ui' range='[0.0.0,3.0.48.202308291007)' severity='0'/>
+      <properties size='5'>
+        <property name='df_LT.Bundle-Vendor.0' value='Eclipse Mylyn'/>
+        <property name='df_LT.Bundle-Name.0' value='Mylyn WikiText Markdown UI'/>
+        <property name='org.eclipse.equinox.p2.name' value='%Bundle-Name.0'/>
+        <property name='org.eclipse.equinox.p2.provider' value='%Bundle-Vendor.0'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='5'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.identity' name='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+        <provided namespace='org.eclipse.equinox.p2.localization' name='df_LT' version='1.0.0'/>
+      </provides>
+      <requires size='4'>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext' range='3.0.48'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.markdown' range='3.0.48'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.ui' range='3.0.48'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext.markdown.ui
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.markdown.ui' version='3.0.48.202308291007'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.eclipse.mylyn.wikitext.markdown.ui;singleton:=true&#xA;Bundle-Version: 3.0.48.202308291007
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.6.202610270144' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.6.202610270144)' severity='0'/>
+      <properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='5'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.6.202610270144'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.6.202610270144'/>
+        <provided namespace='java.package' name='tormozit' version='0.0.0'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.6.202610270144'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='134'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.filesystem' range='[1.7.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.databinding.observable' range='[1.13.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.databinding' range='[1.13.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.databinding.property' range='[1.10.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.databinding' range='[1.15.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore.xmi' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.modeling.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.modeling.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.databinding' range='[1.7.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.editors' range='[3.16.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.ui' range='[3.18.0,4.0.0)' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ltk.core.refactoring' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ltk.ui.refactoring' range='[3.12.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.refactoring.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.lcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.lcore.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.filebuffers' range='[3.6.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.common' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.comment' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.objectweb.asm' range='[9.0.0,10.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.rights.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.doc' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.nebula.widgets.grid' range='[1.0.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.nebula.widgets.tablecombo' range='[1.2.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench.renderers.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.css.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.egit.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.egit.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ql.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ql' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ql.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui.shared' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.aef2' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.aef2.standard' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.aef2.standard.definitions' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.v8.dt.check.suppress.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.aef2.bm' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.stacktraces' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.profiling.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.antlr.runtime' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.search' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.validation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.qw.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.v8.dt.check' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.derived' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui.validation' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.e1c.edt.ai' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='com.e1c.edt.ai.context' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='com.e1c.edt.ai.ui' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='com.e1c.edt.ai.ui.common' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.ui' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.markdown' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.pictures' range='[0.0.0,100.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework.hooks.weaving' range='[1.1.0,2.0.0)'/>
+        <required namespace='java.package' name='com.google.inject' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.inject' range='0.0.0' optional='true' greedy='false'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.6.202610270144'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.6.202610270144
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.early' version='1.0.1.202610270144' generation='2'>
+      <update id='tormozit.comfort.early' range='[0.0.0,1.0.1.202610270144)' severity='0'/>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort Early Start Hooks'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+      </properties>
+      <provides size='5'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.early' version='1.0.1.202610270144'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort.early' version='1.0.1.202610270144'/>
+        <provided namespace='java.package' name='tormozit.early' version='0.0.0'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort.early' version='1.0.1.202610270144'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='4'>
+        <required namespace='osgi.bundle' name='org.eclipse.osgi' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.objectweb.asm' range='[9.0.0,10.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort.early
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort.early' version='1.0.1.202610270144'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='3'>
+          <instruction key='unconfigure'>
+            setStartLevel(startLevel:-1);markStarted(started:false);
+          </instruction>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort.early;singleton:=true&#xA;Bundle-Version: 1.0.1.202610270144
+          </instruction>
+          <instruction key='configure'>
+            setStartLevel(startLevel:4);markStarted(started:true);
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007' singleton='false' generation='2'>
+      <update id='org.eclipse.mylyn.wikitext.markdown' range='[0.0.0,3.0.48.202308291007)' severity='0'/>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='Mylyn WikiText Markdown'/>
+        <property name='org.eclipse.equinox.p2.description' value='Mylyn WikiText provides an extensible framework and tools for parsing, editing and presenting lightweight markup. WikiText has parsers for AsciiDoc, CommonMark, Markdown, MediaWiki, Textile, Confluence, Creole, HTML, TracWiki and TWiki markup, and        can be extended to support other languages. WikiText provides Ant tasks for converting lightweight markup to HTML, Eclipse Help, DocBook, DITA and XSL-FO. WikiText also provides an editor for editing such markup within Eclipse, and integrates with        the Mylyn task editor causing it to be markup-aware. WikiText provides API for integrating wiki markup capabilities into Eclipse, RCP, stand-alone and server-side applications.'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Eclipse Mylyn'/>
+        <property name='org.eclipse.equinox.p2.doc.url' value='https://projects.eclipse.org/projects/mylyn.docs'/>
+      </properties>
+      <provides size='11'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.block' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.phrase' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.token' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.util' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.validation' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown' version='3.0.48'/>
+        <provided namespace='osgi.identity' name='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='16'>
+        <required namespace='java.package' name='com.google.common.base' range='[31.1.0,33.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.block' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.phrase' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.token' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.markdown.internal.util' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.builder' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.phrase' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.token' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.util' range='[3.0.0,4.0.0)'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.validation' range='[3.0.0,4.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext.markdown
+          </description>
+        </requiredProperties>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext.markdown
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.markdown' version='3.0.48.202308291007'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.eclipse.mylyn.wikitext.markdown&#xA;Bundle-Version: 3.0.48.202308291007
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007' singleton='false' generation='2'>
+      <update id='org.eclipse.mylyn.wikitext.osgi' range='[0.0.0,3.0.48.202308291007)' severity='0'/>
+      <properties size='5'>
+        <property name='df_LT.Bundle-Name' value='Mylyn WikiText OSGi Plug-in'/>
+        <property name='df_LT.Bundle-Vendor' value='Eclipse Mylyn'/>
+        <property name='org.eclipse.equinox.p2.name' value='%Bundle-Name'/>
+        <property name='org.eclipse.equinox.p2.provider' value='%Bundle-Vendor'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='META-INF/l10n/bundle'/>
+      </properties>
+      <provides size='6'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.core.osgi' version='0.0.0'/>
+        <provided namespace='osgi.identity' name='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+        <provided namespace='org.eclipse.equinox.p2.localization' name='df_LT' version='1.0.0'/>
+      </provides>
+      <requires size='4'>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext' range='3.0.48'/>
+        <required namespace='java.package' name='org.osgi.framework' range='1.5.0'/>
+        <required namespace='java.package' name='com.google.common.base' range='[31.0.0,33.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext.osgi
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.osgi' version='3.0.48.202308291007'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.eclipse.mylyn.wikitext.osgi&#xA;Bundle-Version: 3.0.48.202308291007
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007' singleton='false' generation='2'>
+      <update id='org.eclipse.mylyn.wikitext' range='[0.0.0,3.0.48.202308291007)' severity='0'/>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='Mylyn WikiText'/>
+        <property name='org.eclipse.equinox.p2.description' value='Mylyn WikiText provides an extensible framework and tools for parsing, editing and presenting lightweight markup. WikiText has parsers for AsciiDoc, CommonMark, Markdown, MediaWiki, Textile, Confluence, Creole, HTML, TracWiki and TWiki markup, and        can be extended to support other languages. WikiText provides Ant tasks for converting lightweight markup to HTML, Eclipse Help, DocBook, DITA and XSL-FO. WikiText also provides an editor for editing such markup within Eclipse, and integrates with        the Mylyn task editor causing it to be markup-aware. WikiText provides API for integrating wiki markup capabilities into Eclipse, RCP, stand-alone and server-side applications.'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Eclipse Mylyn'/>
+        <property name='org.eclipse.equinox.p2.doc.url' value='https://projects.eclipse.org/projects/mylyn.docs'/>
+      </properties>
+      <provides size='19'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.internal.parser.html' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.internal.util' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.builder' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.builder.event' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.css' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.block' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.phrase' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.token' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.outline' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.util' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.splitter' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.util' version='3.0.48'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.validation' version='3.0.48'/>
+        <provided namespace='osgi.identity' name='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='29'>
+        <required namespace='java.package' name='com.google.common.base' range='[31.1.0,33.0.0)'/>
+        <required namespace='java.package' name='com.google.common.collect' range='[31.1.0,33.0.0)'/>
+        <required namespace='java.package' name='com.google.common.escape' range='[31.1.0,33.0.0)'/>
+        <required namespace='java.package' name='com.google.common.xml' range='[31.1.0,33.0.0)'/>
+        <required namespace='java.package' name='javax.lang.model' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.namespace' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.parsers' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.stream' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.internal.parser.html' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.internal.util' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.builder' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.builder.event' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.css' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.block' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.markup.token' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.outline' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.parser.util' range='0.0.0'/>
+        <required namespace='java.package' name='org.eclipse.mylyn.wikitext.util' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup' range='[1.16.0,2.0.0)'/>
+        <required namespace='java.package' name='org.jsoup.internal' range='[1.16.0,2.0.0)'/>
+        <required namespace='java.package' name='org.jsoup.nodes' range='[1.16.0,2.0.0)'/>
+        <required namespace='java.package' name='org.jsoup.select' range='[1.16.0,2.0.0)'/>
+        <required namespace='java.package' name='org.w3c.dom' range='0.0.0'/>
+        <required namespace='java.package' name='org.xml.sax' range='0.0.0'/>
+        <required namespace='java.package' name='org.xml.sax.helpers' range='0.0.0'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext
+          </description>
+        </requiredProperties>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext' version='3.0.48.202308291007'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.eclipse.mylyn.wikitext&#xA;Bundle-Version: 3.0.48.202308291007
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.6.202610270144'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.6.202610270144'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.6.202610270144'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.6.202610270144'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.checks' version='1.0.23' generation='2'>
+      <update id='tormozit.comfort.checks' range='[0.0.0,1.0.23)' severity='0'/>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort Checks'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.checks' version='1.0.23'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort.checks' version='1.0.23'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort.checks' version='1.0.23'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='23'>
+        <required namespace='osgi.bundle' name='tormozit.comfort' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='tormozit.comfort.early' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.derived' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.metadata' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.rights.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.validation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.v8.dt.check' range='[0.0.0,100.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort.checks
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort.checks' version='1.0.23'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort.checks;singleton:=true&#xA;Bundle-Version: 1.0.23
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.6.202610270144' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.6.202610270144)' severity='0' description='EDT Comfort update'/>
+      <properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.6.202610270144'/>
+      </provides>
+      <requires size='10'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.early' range='[1.0.1.202610270144,1.0.1.202610270144]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.6.202610270144,1.0.6.202610270144]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.ui' range='[3.0.42,4.0.0)'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.jsoup' range='[1.14.0,2.0.0)'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext' range='[3.0.42,4.0.0)'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.markdown' range='[3.0.42,4.0.0)'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.6.202610270144,1.0.6.202610270144]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.checks' range='[1.0.23,1.0.23]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.osgi' range='[3.0.42,4.0.0)'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.markdown.ui' range='[3.0.42,4.0.0)'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2-7AcvewvE7737E537G35AA'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2-7AcvewvE7737E537G35AA'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.6.202610270144,1.0.6.202610270144]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='org.jsoup' version='1.16.1' singleton='false' generation='2'>
+      <update id='org.jsoup' range='[0.0.0,1.16.1)' severity='0'/>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='jsoup Java HTML Parser'/>
+        <property name='org.eclipse.equinox.p2.description' value='jsoup is a Java library for working with real-world HTML. It provides a very convenient API for fetching URLs and extracting and manipulating data, using the best of HTML5 DOM methods and CSS selectors. jsoup implements the WHATWG HTML5 specification, and parses HTML to the same DOM as modern browsers do.'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Jonathan Hedley'/>
+        <property name='org.eclipse.equinox.p2.doc.url' value='https://jsoup.org/'/>
+      </properties>
+      <provides size='12'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.jsoup' version='1.16.1'/>
+        <provided namespace='osgi.bundle' name='org.jsoup' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.examples' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.helper' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.internal' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.nodes' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.parser' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.safety' version='1.16.1'/>
+        <provided namespace='java.package' name='org.jsoup.select' version='1.16.1'/>
+        <provided namespace='osgi.identity' name='org.jsoup' version='1.16.1'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='18'>
+        <required namespace='java.package' name='javax.annotation' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.annotation.meta' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.net.ssl' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.namespace' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.parsers' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.transform' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.transform.dom' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.transform.stream' range='0.0.0'/>
+        <required namespace='java.package' name='javax.xml.xpath' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.helper' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.internal' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.nodes' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.parser' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.safety' range='0.0.0'/>
+        <required namespace='java.package' name='org.jsoup.select' range='0.0.0'/>
+        <required namespace='java.package' name='org.w3c.dom' range='0.0.0'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=1.8))'>
+          <description>
+            org.jsoup
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.jsoup' version='1.16.1'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.jsoup&#xA;Bundle-Version: 1.16.1
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007' generation='2'>
+      <update id='org.eclipse.mylyn.wikitext.ui' range='[0.0.0,3.0.48.202308291007)' severity='0'/>
+      <properties size='5'>
+        <property name='df_LT.Bundle-Vendor.0' value='Eclipse Mylyn'/>
+        <property name='df_LT.Bundle-Name.0' value='Mylyn WikiText UI'/>
+        <property name='org.eclipse.equinox.p2.name' value='%Bundle-Name.0'/>
+        <property name='org.eclipse.equinox.p2.provider' value='%Bundle-Vendor.0'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='32'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007'/>
+        <provided namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.commands' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.actions' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.assist' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.commands' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.dnd' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.help' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.operations' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.outline' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.preferences' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.reconciler' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.syntax' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.editor.validation' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.properties' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.registry' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.util' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.util.css.editor' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.util.resources' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.validation' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.viewer' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.internal.wikitext.ui.viewer.annotation' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.ui' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.ui.annotation' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.ui.commands' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.ui.editor' version='0.0.0'/>
+        <provided namespace='java.package' name='org.eclipse.mylyn.wikitext.ui.viewer' version='0.0.0'/>
+        <provided namespace='osgi.identity' name='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+        <provided namespace='org.eclipse.equinox.p2.localization' name='df_LT' version='1.0.0'/>
+      </provides>
+      <requires size='16'>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext' range='3.0.48'/>
+        <required namespace='osgi.bundle' name='org.eclipse.mylyn.wikitext.osgi' range='3.0.48'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='3.6.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.editors' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.views' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.help' range='0.0.0'/>
+        <required namespace='java.package' name='com.google.common.base' range='[30.1.0,33.0.0)'/>
+        <required namespace='java.package' name='com.google.common.collect' range='[30.1.0,33.0.0)'/>
+        <required namespace='java.package' name='com.google.common.io' range='[30.1.0,33.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=11))'>
+          <description>
+            org.eclipse.mylyn.wikitext.ui
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='org.eclipse.mylyn.wikitext.ui' version='3.0.48.202308291007'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: org.eclipse.mylyn.wikitext.ui;singleton:=true&#xA;Bundle-Version: 3.0.48.202308291007
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+  </units>
+</repository>
