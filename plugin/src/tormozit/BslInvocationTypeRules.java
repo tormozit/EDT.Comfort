@@ -18,6 +18,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import org.eclipse.emf.common.notify.impl.AdapterImpl;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
@@ -358,6 +359,32 @@ public class BslInvocationTypeRules
             computing.remove(invocation);
             if (computing.isEmpty())
                 COMPUTING.remove();
+        }
+    }
+
+    /** Ключи и типы значений соответствия, полученного при разборе JSON. */
+    static Map<String, List<TypeItem>> jsonMapEntries(TypeItem type)
+    {
+        for (var adapter : type.eAdapters())
+            if (adapter instanceof JsonMapEntries json)
+                return json.entries;
+        return Map.of();
+    }
+
+    static void copyJsonMapEntries(TypeItem source, TypeItem target)
+    {
+        Map<String, List<TypeItem>> entries = jsonMapEntries(source);
+        if (!entries.isEmpty())
+            target.eAdapters().add(new JsonMapEntries(entries));
+    }
+
+    private static final class JsonMapEntries extends AdapterImpl
+    {
+        final Map<String, List<TypeItem>> entries;
+
+        JsonMapEntries(Map<String, List<TypeItem>> entries)
+        {
+            this.entries = entries;
         }
     }
 
@@ -977,22 +1004,28 @@ public class BslInvocationTypeRules
             return type == null ? null : List.of(type);
         }
 
-        /**
-         * {@code ВычислитьПрочитатьJSON}: по второму параметру — {@code Массив, Структура} (нет, Ложь),
-         * {@code Массив, Соответствие} (Истина), иначе все три.
-         */
+        /** {@code ВычислитьПрочитатьJSON}: тип из текста JSON с учётом параметра «ПрочитатьВСоответствие». */
         List<TypeItem> readJson()
         {
-            Expression second = param(1);
-            String flag = second == null ? "" : text(second); //$NON-NLS-1$
+            String flag = text(param(1));
+            boolean structures = flag.isEmpty() || flag.equalsIgnoreCase("Ложь") || flag.equalsIgnoreCase("False"); //$NON-NLS-1$ //$NON-NLS-2$
+            boolean maps = flag.equalsIgnoreCase("Истина") || flag.equalsIgnoreCase("True"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("read-json-types", "offset=" + offsetOf(invocation) + " arguments=" + params.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " structures=" + structures + " maps=" + maps); //$NON-NLS-1$ //$NON-NLS-2$
+            List<TypeItem> types = params.size() <= 2 && (structures || maps) ? readJsonText(structures) : List.of();
+            Global.tempLog("read-json-types", "offset=" + offsetOf(invocation) + " inferred=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + types.stream().map(Call::typeName).toList());
+            if (!types.isEmpty())
+                return types;
+
             List<String> names;
-            if (flag.isEmpty() || flag.equalsIgnoreCase("Ложь") || flag.equalsIgnoreCase("False")) //$NON-NLS-1$ //$NON-NLS-2$
+            if (structures)
                 names = List.of("Array", "Structure"); //$NON-NLS-1$ //$NON-NLS-2$
-            else if (flag.equalsIgnoreCase("Истина") || flag.equalsIgnoreCase("True")) //$NON-NLS-1$ //$NON-NLS-2$
+            else if (maps)
                 names = List.of("Array", "Map"); //$NON-NLS-1$ //$NON-NLS-2$
             else
                 names = List.of("Array", "Structure", "Map"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            List<TypeItem> types = new ArrayList<>();
+            types = new ArrayList<>();
             for (String typeName : names)
             {
                 Type type = platformType(typeName);
@@ -1000,6 +1033,23 @@ public class BslInvocationTypeRules
                     types.add(type);
             }
             return types.isEmpty() ? null : types;
+        }
+
+        List<TypeItem> readJsonText(boolean structures)
+        {
+            List<TypeItem> types = new ArrayList<>();
+            for (Expression origin : origins(param(0)))
+            {
+                String json = stringValue(origin);
+                Object data = json == null ? null : Json.parse(json);
+                if (data == null || structures && !Json.allKeysAreNames(data))
+                    return List.of();
+                TypeItem type = jsonType(data, structures);
+                if (type == null)
+                    return List.of();
+                types.add(type);
+            }
+            return types;
         }
 
         /**
@@ -1225,10 +1275,15 @@ public class BslInvocationTypeRules
             if (!structures)
             {
                 List<TypeItem> values = new ArrayList<>();
-                for (Object value : object.values())
-                    addDistinct(values, jsonType(value, false));
+                Map<String, List<TypeItem>> entries = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> field : object.entrySet())
+                {
+                    TypeItem value = jsonType(field.getValue(), false);
+                    addDistinct(values, value);
+                    entries.put((String)field.getKey(), value == null ? List.of() : List.of(value));
+                }
                 Type string = platformType("String"); //$NON-NLS-1$
-                return mapType(string == null ? List.of() : List.of(string), values);
+                return mapType(string == null ? List.of() : List.of(string), values, entries);
             }
             Map<String, Collection<TypeItem>> fields = new LinkedHashMap<>();
             for (Map.Entry<?, ?> field : object.entrySet())
@@ -1245,7 +1300,7 @@ public class BslInvocationTypeRules
             if (type == null)
                 return;
             if (!(type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedType)
-                && !(type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType))
+                && !(type instanceof com._1c.g5.v8.dt.bsl.model.ExtendedCollectionType) && jsonMapEntries(type).isEmpty())
                 for (TypeItem existing : types)
                     if (typeName(existing).equals(typeName(type)))
                         return;
@@ -1602,11 +1657,18 @@ public class BslInvocationTypeRules
         /** Соответствие с типами ключа и значения (как ssl-support {@code TypesComputerHelper.createCustomMapType}). */
         Type mapType(List<TypeItem> keys, List<TypeItem> values)
         {
+            return mapType(keys, values, Map.of());
+        }
+
+        Type mapType(List<TypeItem> keys, List<TypeItem> values, Map<String, List<TypeItem>> entries)
+        {
             Type map = platformType("Map"); //$NON-NLS-1$
             Type keyAndValue = platformType("KeyAndValue"); //$NON-NLS-1$
             if (map == null || keyAndValue == null)
                 return map;
             Type result = EcoreUtil2.cloneWithProxies(map);
+            if (!entries.isEmpty())
+                result.eAdapters().add(new JsonMapEntries(Collections.unmodifiableMap(entries)));
             Type element = EcoreUtil2.cloneWithProxies(keyAndValue);
             TypeContainerDef elements = McoreFactory.eINSTANCE.createTypeContainerDef();
             elements.getTypes().add(element);

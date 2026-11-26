@@ -877,6 +877,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         final Set<String> produced = new HashSet<>();
         /** Значения полного набора из Analysis.full, приведённые к ключу dedupeKey. */
         final Set<String> fullValues = new HashSet<>();
+        /** Тексты вставки ключей JSON, для которых регистр и пробелы значимы. */
+        final Set<String> jsonMapReplacements = new HashSet<>();
         /** Описание строки провайдера по тексту вставки: свойство с типом значения. */
         final Map<String, Object> infos = new HashMap<>();
         final Set<ICompletionProposal> added = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -923,7 +925,8 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         if (request == null || !request.fullValues.isEmpty())
             return false;
         return SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable
-            && request.produced.contains(configurable.getReplacementString());
+            && request.produced.contains(configurable.getReplacementString())
+            && !request.jsonMapReplacements.contains(configurable.getReplacementString());
     }
 
     /**
@@ -1131,6 +1134,21 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         }
         Global.tempLog("literal-auto-open", "provider.result typed=[" + typed + "] branches="
             + analysis.branches + " full=" + analysis.full + " values=" + analysis.values.values());
+        if (!analysis.jsonMapKeys.isEmpty())
+        {
+            List<Triple<String, String, IBslStringLiteralProposalImageProvider>> proposals = new ArrayList<>();
+            for (var entry : analysis.jsonMapKeys.entrySet())
+            {
+                String key = entry.getKey();
+                String replacement = "\"" + key.replace("\"", "\"\"").replaceAll("\r\n|\r|\n", "$0|"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                String label = key.isEmpty() ? "\"\"" : key.replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+                request.jsonMapReplacements.add(replacement);
+                request.produced.add(replacement);
+                request.infos.put(replacement, valueDescription(label, entry.getValue()));
+                proposals.add(Tuples.create(replacement, label, IBslStringLiteralProposalImageProvider.NULL_IMAGE_PROVIDER));
+            }
+            return proposals;
+        }
         Segment segment = Segment.of(typed);
         request.rememberFull(analysis, typed.substring(0, segment.start));
         String before = "\"" + typed.substring(0, segment.start); //$NON-NLS-1$
@@ -1354,6 +1372,18 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             if (info == null)
                 continue;
             describeProposal(configurable, info, viewer, resource, hover);
+        }
+        if (!request.jsonMapReplacements.isEmpty())
+        {
+            Set<String> remaining = new HashSet<>(request.jsonMapReplacements);
+            List<ICompletionProposal> keys = new ArrayList<>();
+            for (ICompletionProposal proposal : result)
+                if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable
+                    && remaining.remove(configurable.getReplacementString()))
+                    keys.add(proposal);
+            Global.tempLog("json-map-keys", "offset=" + offset + " expected=" + request.jsonMapReplacements.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " proposals=" + keys.size()); //$NON-NLS-1$
+            return keys.isEmpty() ? result.toArray(ICompletionProposal[]::new) : keys.toArray(ICompletionProposal[]::new);
         }
         if (quote >= 0 && !request.fullValues.isEmpty())
             result.removeIf(proposal -> !request.fullValues.contains(dedupeKey(proposal, doc, quote)));
@@ -1725,6 +1755,7 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
         /** Типы значений по имени в нижнем регистре; запоминаются и для имён, ещё не попавших в список. */
         final Map<String, List<TypeItem>> valueTypes = new HashMap<>();
         final Map<String, Property> valueProperties = new HashMap<>();
+        Map<String, List<TypeItem>> jsonMapKeys = Map.of();
         /** Значение — имя метода модуля: боковая подсказка показывает обычное описание метода. */
         final Map<String, Method> valueMethods = new HashMap<>();
 
@@ -2073,10 +2104,26 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
             full = !values.isEmpty();
         }
 
-        /** {@code [""]} у структуры: её ключи ({@code ЗначенияТекстовогоПеречисленияИзСтруктуры}). */
+        /** Ключи структуры или соответствия в строковом индексе ({@code ЗначенияТекстовогоПеречисленияИзСтруктуры}). */
         void indexAccess(IndexAccess access)
         {
             List<TypeItem> types = typesOf(access.getSource());
+            if (!validation)
+            {
+                Map<String, List<TypeItem>> keys = new LinkedHashMap<>();
+                for (TypeItem item : types)
+                {
+                    Type type = resolve(item);
+                    if (type == null)
+                        continue;
+                    for (TypeItem alternative : BslDocCommentTypeMerge.alternatives(type))
+                        BslInvocationTypeRules.jsonMapEntries(alternative).forEach((key, value) ->
+                            keys.computeIfAbsent(key, name -> new ArrayList<>()).addAll(value));
+                }
+                jsonMapKeys = keys;
+                Global.tempLog("json-map-keys", "offset=" + offsetOf(access) + " ownerTypes=" + typeNames(types) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " keys=" + keys.size()); //$NON-NLS-1$
+            }
             if (hasType(types, "Structure", "FixedStructure", "Map", "FixedMap")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             {
                 branch("index"); //$NON-NLS-1$

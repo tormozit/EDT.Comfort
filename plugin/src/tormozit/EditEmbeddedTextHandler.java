@@ -160,113 +160,7 @@ public final class EditEmbeddedTextHandler
      */
     static boolean isCaretInStringLiteral(IXtextDocument doc, int offset)
     {
-        return extractStringLiteral(doc, offset) != null;
-    }
-
-    /**
-     * Возвращает содержимое строкового литерала BSL, в котором находится
-     * позиция {@code offset}, без кавычек и символов продолжения {@code |}.
-     *
-     * <p>Поддерживает однострочные и многострочные (через {@code |}) литералы.
-     * Возвращает {@code null}, если курсор не находится внутри литерала.
-     */
-    static String extractStringLiteral(IXtextDocument doc, int offset)
-    {
-        try
-        {
-//            QueryTextInfo literal = BslQueryWizardUtils.getCurrentStringLiteral(doc.module, doc.getLineOfOffset(offset), 0, 0);
-            int cursorLine = doc.getLineOfOffset(offset);
-
-            // ── Шаг 1: найти строку с открывающей кавычкой ─────────────────
-            // Курсор может быть на строке продолжения (начинается с |),
-            // поэтому идём назад до строки, которая НЕ является продолжением.
-
-            int openingLineNum = cursorLine;
-            for (int ln = cursorLine; ln >= 0; ln--)
-            {
-                IRegion li   = doc.getLineInformation(ln);
-                String  text = doc.get(li.getOffset(), li.getLength());
-
-                if (ln == cursorLine)
-                {
-                    if (!text.stripLeading().startsWith("|")) //$NON-NLS-1$
-                    {
-                        openingLineNum = ln; // курсор уже на строке с "
-                        break;
-                    }
-                    // иначе — строка продолжения, идём выше
-                }
-                else
-                {
-                    // Строки выше курсора
-                    if (!text.stripLeading().startsWith("|")) //$NON-NLS-1$
-                    {
-                        openingLineNum = ln;
-                        break;
-                    }
-                }
-            }
-
-            // ── Шаг 2: найти открывающую кавычку на openingLineNum ──────────
-            IRegion openLineInfo = doc.getLineInformation(openingLineNum);
-            String  openLineText = doc.get(openLineInfo.getOffset(), openLineInfo.getLength());
-
-            // Лимит поиска по X: если курсор на той же строке — до курсора;
-            // если курсор на строке продолжения — весь текст строки.
-            int scanLimit = (openingLineNum == cursorLine)
-                ? offset - openLineInfo.getOffset()
-                : openLineText.length();
-            scanLimit = Math.min(scanLimit, openLineText.length());
-            if (scanLimit < 0)
-                return null;
-
-            // Ищем последнюю незакрытую кавычку (при нечётном счётчике)
-            int openQuoteIdx = -1;
-            int quoteCount   = 0;
-            for (int i = 0; i < scanLimit; i++)
-            {
-                if (openLineText.charAt(i) == '"')
-                {
-                    quoteCount++;
-                    if (quoteCount % 2 == 1)
-                        openQuoteIdx = i; // потенциальная открывающая
-                    else
-                        openQuoteIdx = -1; // закрылась
-                }
-            }
-
-            if (openQuoteIdx < 0)
-                return null; // курсор вне строки
-            String afterOpenQuote = openLineText.substring(openQuoteIdx + 1);
-            int closeIdx = afterOpenQuote.indexOf('"');
-            if (closeIdx >= 0)
-                return afterOpenQuote.substring(0, closeIdx);
-
-            // Многострочный: собираем строки продолжения (начинаются с |)
-            StringBuilder sb = new StringBuilder(afterOpenQuote);
-            for (int ln = openingLineNum + 1; ln < doc.getNumberOfLines(); ln++)
-            {
-                IRegion li       = doc.getLineInformation(ln);
-                String  lineText = doc.get(li.getOffset(), li.getLength());
-                String  trimmed  = lineText.stripLeading();
-                if (!trimmed.startsWith("|")) //$NON-NLS-1$
-                    break; // не продолжение — литерал не закрыт корректно
-                String lineContent = trimmed.substring(1); // убираем |
-                int closeQuote = lineContent.indexOf('"');
-                if (closeQuote >= 0)
-                {
-                    // Нашли закрывающую кавычку
-                    sb.append('\n').append(lineContent, 0, closeQuote);
-                    return sb.toString();
-                }
-                sb.append('\n').append(lineContent);
-            }
-            return null; // закрывающая кавычка не найдена
-        }
-        catch (BadLocationException e)
-        {
-            return null;
-        }
+        return BslStringLiteral.at(doc, offset) != null;
     }
 
     /**
@@ -340,6 +234,8 @@ public final class EditEmbeddedTextHandler
                         char c = text.charAt(i);
                         if (current == null)
                         {
+                            if (base + i >= offset)
+                                return null;
                             if (c == '/' && i + 1 < text.length() && text.charAt(i + 1) == '/')
                                 break; // комментарий до конца строки
                             if (c == '"')
@@ -355,13 +251,12 @@ public final class EditEmbeddedTextHandler
                                 i += 2;
                                 continue;
                             }
-                            BslStringLiteral literal = current.finish(base + i);
+                            int closeQuote = base + i;
+                            boolean inside = current.start < offset && offset <= closeQuote;
+                            if (inside)
+                                return current.finish(closeQuote);
                             current = null;
                             i++;
-                            if (literal.start < offset && offset < literal.end)
-                                return literal;
-                            if (literal.start >= offset)
-                                return null;
                             continue;
                         }
                         current.add(c, base + i);

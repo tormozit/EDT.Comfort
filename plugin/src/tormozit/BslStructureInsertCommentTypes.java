@@ -2883,7 +2883,8 @@ public final class BslStructureInsertCommentTypes
         // Контекст ссылается на другие контексты, поэтому собственных свойств у него может не быть.
         if (item instanceof Type && EcoreUtil2.getContainerOfType(item, Form.class) != null)
             return new IdentityKey(item);
-        if (name == null || item instanceof Type type && type.getContextDef() != null
+        if (name == null || !BslInvocationTypeRules.jsonMapEntries(item).isEmpty()
+            || item instanceof Type type && type.getContextDef() != null
             && type.getContextDef().getProperties().stream().anyMatch(DerivedProperty.class::isInstance))
             return new IdentityKey(item);
         return name;
@@ -5343,6 +5344,7 @@ public final class BslStructureInsertCommentTypes
             if (element == null)
                 return source;
             result.setCollectionElementTypes(elements);
+            BslInvocationTypeRules.copyJsonMapEntries(source, result);
             for (com._1c.g5.v8.dt.mcore.Method method : result.getContextDef().getMethods())
             {
                 if (map && "Get".equals(method.getName()) && !values.isEmpty()) //$NON-NLS-1$
