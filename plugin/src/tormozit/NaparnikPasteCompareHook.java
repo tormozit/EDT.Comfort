@@ -1,10 +1,7 @@
 package tormozit;
 
-import java.lang.instrument.ClassFileTransformer;
-import java.security.ProtectionDomain;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.jface.text.source.ISourceViewer;
@@ -31,11 +28,6 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.texteditor.ITextEditor;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
 
 /**
  * Кнопка «Вставить в редактор» в чате 1С:Напарник: если в редакторе есть выделение,
@@ -44,7 +36,7 @@ import org.objectweb.asm.Opcodes;
  *
  * <p>JS вызывает {@code window.ideApi.paste_code}. Java-{@code setMember} нашего
  * объекта LiveConnect не удерживается ({@code getMember} после него {@code null}),
- * ASM {@code IdeApiHandler} при старте часто ещё без Instrumentation. Основной путь:
+ * вставка в {@code IdeApiHandler} перехватывается бандлом раннего старта. Запасной путь для WebView:
  * JS-обёртка {@code window.ideApi} в WebView (текст в {@code __comfortLastPaste})
  * и перехват штатного {@code MessageDialog} — сразу сравнение, без Yes/No.
  *
@@ -53,10 +45,7 @@ import org.objectweb.asm.Opcodes;
 public final class NaparnikPasteCompareHook implements IStartup
 {
     static final String PROP_PASTE_CODE = "tormozit.naparnik.pasteCode"; //$NON-NLS-1$
-    private static final String TAG = "NaparnikPasteCompare"; //$NON-NLS-1$
-    private static final String TARGET = "com.e1c.edt.ai.ui.IdeApiHandler"; //$NON-NLS-1$
-    private static final String TARGET_INTERNAL = "com/e1c/edt/ai/ui/IdeApiHandler"; //$NON-NLS-1$
-    private static final String PASTE_DESC = "(Ljava/lang/String;)V"; //$NON-NLS-1$
+    private static final String TEMP_LOG = "naparnik-paste"; //$NON-NLS-1$
     private static final String CHAT_VIEW_ID = "com.e1c.edt.ai.ui.views.ChatView"; //$NON-NLS-1$
     private static final String CHAT_VIEW_CLASS = "com.e1c.edt.ai.ui.ChatView"; //$NON-NLS-1$
     private static final String NATIVE_QUESTION_RU = "Заменить выделенный код?"; //$NON-NLS-1$
@@ -108,32 +97,14 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static volatile Object lastHandler;
     private static volatile Object lastWebView;
-    private static volatile boolean asmRegistered;
 
     @Override
     public void earlyStartup()
     {
         System.getProperties().put(PROP_PASTE_CODE,
-            (BiFunction<Object, Object, Object>) NaparnikPasteCompareHook::handlePasteCode);
-        registerAsm();
+            (BiPredicate<Object, Object>) NaparnikPasteCompareHook::handlePasteCode);
         Display display = Display.getDefault();
-        display.asyncExec(() ->
-        {
-            installUi(display);
-            display.timerExec(2000, NaparnikPasteCompareHook::registerAsm);
-        });
-    }
-
-    private static void registerAsm()
-    {
-        if (asmRegistered)
-            return;
-        boolean ok = BslDocCommentDescriptionFix.registerExtraTransformer(
-            new PasteCodeTransformer(), TARGET);
-        if (ok)
-            asmRegistered = true;
-        else
-            Global.logError(TAG, "ASM transformer for paste_code() not registered", null); //$NON-NLS-1$
+        display.asyncExec(() -> installUi(display));
     }
 
     private static void installUi(Display display)
@@ -297,28 +268,31 @@ public final class NaparnikPasteCompareHook implements IStartup
     }
 
     /**
-     * Вызов из инструментированного {@code paste_code}:
-     * {@code (handler, text) → Boolean}. {@code true} — штатную вставку не выполнять.
+     * Вызов из инструментированного метода вставки:
+     * {@code (handler, text) → boolean}. {@code true} — штатную вставку не выполнять.
      */
-    public static Object handlePasteCode(Object handler, Object textObj)
+    public static boolean handlePasteCode(Object handler, Object textObj)
     {
+        String text = textObj instanceof String s ? s : null;
+        Global.tempLog(TEMP_LOG, "request thread=" + Thread.currentThread().getName() //$NON-NLS-1$
+            + " textLength=" + (text == null ? -1 : text.length())); //$NON-NLS-1$
         try
         {
-            String text = textObj instanceof String s ? s : null;
             if (handler == null || text == null)
-                return Boolean.FALSE;
+                return false;
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
-                return Boolean.FALSE;
+                return false;
             if (display.getThread() == Thread.currentThread())
-                return Boolean.valueOf(handleOnUi(handler, text));
+                return handleOnUi(handler, text);
             boolean[] handled = { false };
             display.syncExec(() -> handled[0] = handleOnUi(handler, text));
-            return Boolean.valueOf(handled[0]);
+            return handled[0];
         }
-        catch (Throwable ignored)
+        catch (Throwable error)
         {
-            return Boolean.FALSE;
+            Global.tempLogException(TEMP_LOG, "request failed", error); //$NON-NLS-1$
+            return false;
         }
     }
 
@@ -328,14 +302,19 @@ public final class NaparnikPasteCompareHook implements IStartup
         {
             Object ui = Global.getField(handler, "ui"); //$NON-NLS-1$
             ISourceViewer viewer = lastSourceViewer(ui);
+            Global.tempLog(TEMP_LOG, "target ui=" + (ui != null) //$NON-NLS-1$
+                + " viewer=" + (viewer == null ? "none" : viewer.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             if (viewer == null)
                 return false;
             Point range = viewer.getSelectedRange();
             int selLen = range == null ? -1 : range.y;
+            Global.tempLog(TEMP_LOG, "selectionLength=" + selLen); //$NON-NLS-1$
             if (selLen <= 0)
                 return false;
 
             TextEditor.Context ctx = contextFromViewer(ui, viewer);
+            Global.tempLog(TEMP_LOG, "context=" + (ctx != null) //$NON-NLS-1$
+                + " editable=" + (ctx != null && ctx.editable)); //$NON-NLS-1$
             if (ctx == null)
                 return false;
             if (!ctx.editable)
@@ -347,13 +326,16 @@ public final class NaparnikPasteCompareHook implements IStartup
 
             Shell shell = resolveShell(ui);
             String processed = preprocess(handler, text);
-            if (PasteWithCompareActions.runWithNewText(shell, ctx, processed))
+            boolean compared = PasteWithCompareActions.runWithNewText(shell, ctx, processed);
+            Global.tempLog(TEMP_LOG, "comparisonHandled=" + compared); //$NON-NLS-1$
+            if (compared)
                 return true;
             TextEditor.replaceSelectionAndSelect(ctx, processed);
             return true;
         }
-        catch (Throwable ignored)
+        catch (Throwable error)
         {
+            Global.tempLogException(TEMP_LOG, "editor handling failed", error); //$NON-NLS-1$
             return false;
         }
     }
@@ -368,11 +350,13 @@ public final class NaparnikPasteCompareHook implements IStartup
         if (!NATIVE_QUESTION_RU.equals(message) && !NATIVE_QUESTION_EN.equals(message))
             return;
         shell.setData(WRAPPED_KEY, Boolean.TRUE);
-        if (!shell.isDisposed())
-            shell.setVisible(false);
 
         Object webView = lastWebView;
         Object handler = lastHandler;
+        Global.tempLog(TEMP_LOG, "native question browser=" //$NON-NLS-1$
+            + (webView == null ? "none" : webView.getClass().getName())); //$NON-NLS-1$
+        if (webView == null || handler == null)
+            return;
         runOnFx(() ->
         {
             String pasted = readLastPaste(webView);
@@ -382,22 +366,24 @@ public final class NaparnikPasteCompareHook implements IStartup
 
     private static void finishNativeQuestion(Shell shell, Object handler, String pasted)
     {
+        Global.tempLog(TEMP_LOG, "native question textLength=" + (pasted == null ? -1 : pasted.length())); //$NON-NLS-1$
+        if (shell.isDisposed() || pasted == null || pasted.isEmpty())
+            return;
+        shell.setVisible(false);
         try
         {
-            if (pasted == null || pasted.isEmpty() || handler == null)
+            if (handleOnUi(handler, pasted))
             {
-                if (shell != null && !shell.isDisposed())
-                    shell.setVisible(true);
+                cancelQuestionDialog(shell);
                 return;
             }
-            cancelQuestionDialog(shell);
-            handleOnUi(handler, pasted);
         }
-        catch (Throwable ignored)
+        catch (Throwable error)
         {
-            if (shell != null && !shell.isDisposed())
-                shell.setVisible(true);
+            Global.tempLogException(TEMP_LOG, "native question interception failed", error); //$NON-NLS-1$
         }
+        if (!shell.isDisposed())
+            shell.setVisible(true);
     }
 
     private static String readLastPaste(Object webView)
@@ -564,123 +550,5 @@ public final class NaparnikPasteCompareHook implements IStartup
         if (value instanceof Optional<?> optional)
             return optional.orElse(null);
         return value;
-    }
-
-    private static final class PasteCodeTransformer implements ClassFileTransformer
-    {
-        @Override
-        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-            ProtectionDomain protectionDomain, byte[] classfileBuffer)
-        {
-            if (!TARGET_INTERNAL.equals(className))
-                return null;
-            try
-            {
-                return transformPasteCode(classfileBuffer);
-            }
-            catch (Throwable ignored)
-            {
-                return null;
-            }
-        }
-    }
-
-    static byte[] transformPasteCode(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        if (!hasPasteCode(reader))
-            return null;
-        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
-        {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2)
-            {
-                return "java/lang/Object"; //$NON-NLS-1$
-            }
-        };
-        AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (!"paste_code".equals(name) || !PASTE_DESC.equals(descriptor)) //$NON-NLS-1$
-                    return mv;
-                return new MethodVisitor(Opcodes.ASM9, mv)
-                {
-                    @Override
-                    public void visitCode()
-                    {
-                        emitPasteGuard(this);
-                        touched.set(true);
-                        super.visitCode();
-                    }
-                };
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    /**
-     * В начале {@code paste_code}: {@code BiFunction} из {@link #PROP_PASTE_CODE}
-     * вызывается один раз; {@code true} — выход без штатной вставки.
-     * Результат в local 4/5, чтобы стек в точке {@code original} был пуст.
-     */
-    private static void emitPasteGuard(MethodVisitor mv)
-    {
-        org.objectweb.asm.Label original = new org.objectweb.asm.Label();
-
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
-            "()Ljava/util/Properties;", false); //$NON-NLS-1$
-        mv.visitLdcInsn(PROP_PASTE_CODE);
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
-        mv.visitVarInsn(Opcodes.ASTORE, 4);
-
-        mv.visitVarInsn(Opcodes.ALOAD, 4);
-        mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/BiFunction"); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, original);
-
-        mv.visitVarInsn(Opcodes.ALOAD, 4);
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/BiFunction"); //$NON-NLS-1$
-        mv.visitVarInsn(Opcodes.ALOAD, 0);
-        mv.visitVarInsn(Opcodes.ALOAD, 1);
-        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
-        mv.visitVarInsn(Opcodes.ASTORE, 5);
-
-        mv.visitVarInsn(Opcodes.ALOAD, 5);
-        mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/lang/Boolean"); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, original);
-
-        mv.visitVarInsn(Opcodes.ALOAD, 5);
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", //$NON-NLS-1$ //$NON-NLS-2$
-            "()Z", false); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, original);
-        mv.visitInsn(Opcodes.RETURN);
-
-        mv.visitLabel(original);
-    }
-
-    private static boolean hasPasteCode(ClassReader reader)
-    {
-        AtomicBoolean found = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                if ("paste_code".equals(name) && PASTE_DESC.equals(descriptor)) //$NON-NLS-1$
-                    found.set(true);
-                return null;
-            }
-        }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-        return found.get();
     }
 }

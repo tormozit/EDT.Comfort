@@ -75,13 +75,14 @@ import java.util.WeakHashMap;
  *   двух ревизий локальной истории — как сравнение без рабочей копии.</li>
  * </ul>
  * и в запасном сравнении из тултипа маркера Quick Diff
- * ({@code QuickDiffHook.ReferenceCompareInput} — текущий документ с референсом last saved).
+ * ({@code QuickDiffHook.ReferenceCompareInput} — текущий документ с референсом last saved),
+ * а также в предпросмотре изменений «Напарника» ({@code DiffCompareEditorInput}).
  *
  * <p>Это не наш редактор — встраиваем панель в уже существующее дерево виджетов после
  * открытия, а не через переопределение {@code createContents} (как в
  * {@link PasteWithCompareActions}). Классы входов лежат во внутренних пакетах
- * {@code org.eclipse.egit.ui} и {@code org.eclipse.team.internal.ui} — детектируем по имени
- * класса, без компилируемой зависимости.
+ * бандлов EGit, Eclipse Team и «Напарника» — детектируем по имени класса, без компилируемой
+ * зависимости.
  *
  * <p>Внутри — стандартный {@link TextMergeViewer} (те же {@code fLeft}/{@code fRight}, что
  * и в «Вставить со сравнением»), поэтому синхронизация — тот же {@link TwoSideCurrentLinesSync}.
@@ -96,6 +97,7 @@ public final class CompareEditorCurrentLinesHook
      * у EGit-класса перед этим именем идёт {@code Git}, поэтому проверки не пересекаются.
      */
     private static final String INPUT_LOCAL_HISTORY_SUFFIX = ".CompareFileRevisionEditorInput"; //$NON-NLS-1$
+    private static final String INPUT_NAPARNIK_PREVIEW = "com.e1c.edt.ai.ui.DiffCompareEditorInput"; //$NON-NLS-1$
 
     private static final String PANEL_ATTACHED_KEY = "tormozit.compareEditorCurrentLinesAttached"; //$NON-NLS-1$
 
@@ -217,7 +219,7 @@ public final class CompareEditorCurrentLinesHook
         Object input = editor.getEditorInput();
         if (!(input instanceof CompareEditorInput editorInput))
             return;
-        if (!isSupportedGitCompareInput(input))
+        if (!isSupportedCompareInput(editorInput))
             return;
         if (!scheduledEditorInputs.add(editorInput))
             return; // уже запланировано другим вызовом (partOpened/partActivated/начальный обход)
@@ -226,14 +228,17 @@ public final class CompareEditorCurrentLinesHook
             scheduleAttach(editorInput, editor, 0, false);
     }
 
-    private static boolean isSupportedGitCompareInput(Object input)
+    private static boolean isSupportedCompareInput(CompareEditorInput input)
     {
-        if (input == null)
-            return false;
         String name = input.getClass().getName();
         return name.contains(INPUT_FILE_REVISION) || name.endsWith(INPUT_GIT_COMPARE_SUFFIX)
             || name.endsWith(INPUT_LOCAL_HISTORY_SUFFIX)
-            || name.endsWith("$ReferenceCompareInput"); //$NON-NLS-1$
+            || name.endsWith("$ReferenceCompareInput") || isNaparnikPreview(input); //$NON-NLS-1$
+    }
+
+    private static boolean isNaparnikPreview(CompareEditorInput input)
+    {
+        return INPUT_NAPARNIK_PREVIEW.equals(input.getClass().getName());
     }
 
     /** Раннее вплетение уже переставило стороны: подписи «основной/предыдущий» выставлены им. */
@@ -692,7 +697,7 @@ public final class CompareEditorCurrentLinesHook
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
-        if (!restoreSavedPosition(pane, viewer))
+        if (!restoreSavedPosition(pane, viewer) && !isNaparnikPreview(editorInput))
             applyPendingLineRevealIfAny(leftText, rightText, config != null && config.isMirrored());
         trackPosition(pane, MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), leftText, rightText); //$NON-NLS-1$
         registerModuleLineRefSides(editorInput, leftText, rightText);

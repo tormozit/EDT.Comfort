@@ -55,6 +55,7 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.xtext.naming.IQualifiedNameConverter;
+import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
@@ -69,6 +70,10 @@ import org.eclipse.xtext.ui.editor.hyperlinking.XtextHyperlink;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart;
+import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
+import com._1c.g5.v8.dt.bsl.model.Method;
+import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Statement;
@@ -561,6 +566,71 @@ public final class BslEditorHyperlinkHook implements IStartup
             link = query == null ? null : new HistoryHyperlink(query, editor, page);
         }
         return link;
+    }
+
+    /** Ссылка из закомментированного вызова досчитывается в фоне вместе с остальными ссылками. */
+    private static IHyperlink commentedCallLink(ITextViewer viewer, int offset)
+    {
+        if (Display.getCurrent() != null || !(viewer.getDocument() instanceof IXtextDocument document))
+            return null;
+        try
+        {
+            return ContentAssistSessionReloader.readOnlyPeekAst(document, resource -> BslNodeLookup.read(parsed ->
+            {
+                if (parsed == null || parsed.getParseResult() == null)
+                    return null;
+                ILeafNode leaf = commentLeaf(parsed, offset);
+                if (leaf == null && offset > 0)
+                    leaf = commentLeaf(parsed, offset - 1);
+                if (leaf == null)
+                    return null;
+                var call = CallHierarchyViewHook.commentCallAt(document, parsed.getParser(), offset,
+                    leaf.getOffset(), leaf.getText());
+                URI target = call != null ? commentedCallTarget(NodeModelUtils.findActualSemanticObjectFor(leaf), call.name())
+                    : null;
+                IResourceServiceProvider services = parsed.getResourceServiceProvider();
+                XtextHyperlink link = target != null && services != null ? services.get(XtextHyperlink.class) : null;
+                if (link != null)
+                {
+                    link.setURI(target);
+                    link.setHyperlinkRegion(call.nameRegion());
+                    link.setHyperlinkText(call.name());
+                }
+                return link;
+            }, resource));
+        }
+        catch (OperationCanceledException canceled)
+        {
+            throw canceled;
+        }
+        catch (RuntimeException | LinkageError ignored)
+        {
+            return null;
+        }
+    }
+
+    private static URI commentedCallTarget(EObject context, String name)
+    {
+        if (context == null)
+            return null;
+        if (name.indexOf('.') < 0)
+        {
+            Module module = EcoreUtil2.getContainerOfType(context, Module.class);
+            if (module == null)
+                return null;
+            for (Method method : module.allMethods())
+            {
+                if (name.equalsIgnoreCase(method.getName()))
+                    return EcoreUtil.getURI(method);
+            }
+            return null;
+        }
+        // Для квалифицированного имени используем то же разрешение экспортных методов, что для «См.».
+        EObject target = ParamHintHtmlModifier.ParameterSeeLinks.resolveTarget(new LinkPart(null, 0, 0, name, name),
+            context);
+        if (target instanceof Method method)
+            return EcoreUtil.getURI(method);
+        return target instanceof BslContextDefMethod exported ? exported.getSourceUri() : null;
     }
 
     /**
@@ -2109,7 +2179,9 @@ public final class BslEditorHyperlinkHook implements IStartup
                 ? parameterDescriptionLink(source, page, viewer, region.getOffset()) : null;
             if (links == null || links.length == 0)
             {
-                IHyperlink type = region == null ? null : textLink(source, page, viewer, region.getOffset());
+                IHyperlink type = region == null ? null : commentedCallLink(viewer, region.getOffset());
+                if (type == null && region != null)
+                    type = textLink(source, page, viewer, region.getOffset());
                 if (type == null)
                     return description == null ? links : new IHyperlink[] { description };
                 links = new IHyperlink[] { type };

@@ -6370,24 +6370,24 @@ public final class ParamHintHtmlModifier
             return resolveTarget(link, documentedMethod(ctx));
         }
 
-        static EObject resolveTarget(LinkPart link, com._1c.g5.v8.dt.bsl.model.Method method)
+        static EObject resolveTarget(LinkPart link, EObject source)
         {
-            if (method == null || method.eResource() == null)
+            if (source == null || source.eResource() == null)
                 return null;
             var services = IResourceServiceProvider.Registry.INSTANCE
-                .getResourceServiceProvider(method.eResource().getURI());
+                .getResourceServiceProvider(source.eResource().getURI());
             if (services == null)
                 return null;
             var scope = services.get(IScopeProvider.class);
             var projects = (IV8ProjectManager)Global.getServiceByClass(IV8ProjectManager.class);
             var models = (IBmModelManager)Global.getServiceByClass(IBmModelManager.class);
             var naming = services.get(INamingService.class);
-            var model = models != null ? models.getModel(method.eResource().getURI()) : null;
+            var model = models != null ? models.getModel(source.eResource().getURI()) : null;
             if (scope == null || projects == null || naming == null || model == null)
                 return null;
             if (Global.invoke(model.getEngine(), "getCurrentTransaction") //$NON-NLS-1$
                 instanceof IBmTransaction current)
-                return resolve(link, scope, method, projects,
+                return resolve(link, scope, source, projects,
                     new BmOperationContext(naming, models, current));
             return model.executeReadonlyTask(
                 new AbstractBmTask<EObject>("comfort.paramSeeLink") //$NON-NLS-1$
@@ -6396,16 +6396,16 @@ public final class ParamHintHtmlModifier
                     public EObject execute(IBmTransaction transaction,
                         IProgressMonitor monitor)
                     {
-                        return resolve(link, scope, method, projects,
+                        return resolve(link, scope, source, projects,
                             new BmOperationContext(naming, models, transaction));
                     }
                 }, true);
         }
 
-        private static EObject resolve(LinkPart link, IScopeProvider scope, EObject method,
+        private static EObject resolve(LinkPart link, IScopeProvider scope, EObject contextObject,
             IV8ProjectManager projects, BmOperationContext context)
         {
-            EObject resolved = BslCommentUtils.getObjectByLinkPart(link, scope, method, projects, context);
+            EObject resolved = BslCommentUtils.getObjectByLinkPart(link, scope, contextObject, projects, context);
             var source = sourceMethod(resolved);
             return source != null ? source : resolved;
         }

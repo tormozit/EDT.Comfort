@@ -115,8 +115,14 @@ public final class FindReplaceDialogHook implements IStartup
         if (shell == null || shell.isDisposed())
             return;
         Object existing = shell.getData(SESSION_KEY);
-        if (existing instanceof Session session && button == session.findNextButton)
-            session.onFindBeforeSelection();
+        if (existing instanceof Session session)
+        {
+            if (button == session.findNextButton || button == session.replaceFindButton
+                || button == session.replaceAllButton || button == session.selectAllButton)
+                session.rememberSearchTarget();
+            if (button == session.findNextButton)
+                session.onFindBeforeSelection();
+        }
     }
 
     /**
@@ -156,6 +162,7 @@ public final class FindReplaceDialogHook implements IStartup
         private Button selectAllButton;
         private Button caseCheckBox;
         private Button wholeWordCheckBox;
+        private Button incrementalCheckBox;
         private Button regExCheckBox;
         private Button findNextButton;
         private Button replaceFindButton;
@@ -185,6 +192,7 @@ public final class FindReplaceDialogHook implements IStartup
             selectAllButton = (Button)Global.getField(dialog, "fSelectAllButton"); //$NON-NLS-1$
             caseCheckBox = (Button)Global.getField(dialog, "fCaseCheckBox"); //$NON-NLS-1$
             wholeWordCheckBox = (Button)Global.getField(dialog, "fWholeWordCheckBox"); //$NON-NLS-1$
+            incrementalCheckBox = (Button)Global.getField(dialog, "fIncrementalCheckBox"); //$NON-NLS-1$
             regExCheckBox = (Button)Global.getField(dialog, "fIsRegExCheckBox"); //$NON-NLS-1$
             findNextButton = (Button)Global.getField(dialog, "fFindNextButton"); //$NON-NLS-1$
             replaceFindButton = (Button)Global.getField(dialog, "fReplaceFindButton"); //$NON-NLS-1$
@@ -206,14 +214,19 @@ public final class FindReplaceDialogHook implements IStartup
 
             resolveViewer();
 
-            findField.addModifyListener(e -> onModify());
+            findField.addModifyListener(e -> {
+                if (findField.isFocusControl() && incrementalCheckBox != null && !incrementalCheckBox.isDisposed()
+                    && incrementalCheckBox.isEnabled() && incrementalCheckBox.getSelection())
+                    rememberSearchTarget();
+                onModify();
+            });
             addSettingsListener(caseCheckBox);
             addSettingsListener(wholeWordCheckBox);
             addSettingsListener(regExCheckBox);
             addIncrementalResearchListener(caseCheckBox);
             addIncrementalResearchListener(wholeWordCheckBox);
             addIncrementalResearchListener(regExCheckBox);
-            addIncrementalResearchListener((Button)Global.getField(dialog, "fIncrementalCheckBox")); //$NON-NLS-1$
+            addIncrementalResearchListener(incrementalCheckBox);
             shell.addDisposeListener(e -> cancelJob());
 
             /*
@@ -254,6 +267,11 @@ public final class FindReplaceDialogHook implements IStartup
                 return;
             button.addSelectionListener(
                 SelectionListener.widgetSelectedAdapter(e -> applyWholeWordAlwaysEnabled()));
+        }
+
+        private void rememberSearchTarget()
+        {
+            TextEditorFastSearchHandler.rememberSearchTarget(findField.getText());
         }
 
         /**

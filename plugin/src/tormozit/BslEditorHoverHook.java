@@ -84,7 +84,6 @@ public final class BslEditorHoverHook implements IStartup
     public void earlyStartup()
     {
         ContentAssistDebug.logLiteralAssistBuildStamp();
-        BslDocCommentDescriptionFix.install();
         BslDocCommentTypeMerge.install();
         Display.getDefault().asyncExec(() ->
         {

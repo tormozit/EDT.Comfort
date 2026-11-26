@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.ref.WeakReference;
 import java.net.http.HttpResponse;
@@ -802,11 +803,15 @@ public final class NaparnikManualModeHook implements IStartup
             boolean naparnik = stackHasNaparnik();
             if (pasteActive.get() > 0 || (naparnik && inserted.length() > 1))
                 scheduleSuppress(event.getDocument());
-            // Правка модуля агентом Напарника (EditMcpTool) — явное действие чата, не встроенное
-            // автодополнение: откатывать её нельзя (issue 956).
+            // Вставка по кнопке и правка через EditMcpTool — явные действия чата.
+            boolean explicitEdit = naparnik && stackHasExplicitNaparnikEdit();
             boolean revert = PATCH_ENABLED
                 && isRestrictedPolicy() && naparnik && applyLeftMs() == 0 && pasteActive.get() == 0
-                && !stackHasNaparnikTool();
+                && !explicitEdit;
+            if (naparnik)
+                Global.tempLog("naparnik-paste", "documentChange offset=" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " replacedLength=" + event.getLength() + " insertedLength=" + inserted.length() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " explicit=" + explicitEdit + " revert=" + revert); //$NON-NLS-1$ //$NON-NLS-2$
             if (!revert)
                 return;
             IDocument document = event.getDocument();
@@ -955,19 +960,17 @@ public final class NaparnikManualModeHook implements IStartup
         return null;
     }
 
-    /**
-     * Есть ли в текущем стеке кадр Напарника.
-     *
-     * <p>Вызывается на каждое изменение документа, поэтому {@code Thread.getStackTrace()} здесь
-     * не годится: он материализует весь стек целиком, а в Xtext-редакторе стеки глубокие.
-     * {@link StackWalker} обходит кадры лениво и останавливается на первом подходящем.
-     */
-    private static boolean stackHasNaparnikTool()
+    /** Штатные пути явной правки из чата в Напарнике до 1.1.0 и в 1.1.0. */
+    private static boolean stackHasExplicitNaparnikEdit()
     {
-        return STACK_WALKER.walk(
-            frames -> frames.anyMatch(frame -> frame.getClassName().startsWith(NAPARNIK_TOOLS_PACKAGE)));
+        return STACK_WALKER.walk(frames -> frames.anyMatch(frame ->
+            frame.getClassName().startsWith(NAPARNIK_TOOLS_PACKAGE)
+                || ("com.e1c.edt.ai.ui.IdeApiHandler".equals(frame.getClassName()) //$NON-NLS-1$
+                    && ("paste_code".equals(frame.getMethodName()) //$NON-NLS-1$
+                        || "pasteCodeOnUiThread".equals(frame.getMethodName()))))); //$NON-NLS-1$
     }
 
+    /** StackWalker останавливается на первом подходящем кадре, не собирая весь стек на каждой правке. */
     private static boolean stackHasNaparnik()
     {
         return STACK_WALKER.walk(
@@ -1424,6 +1427,7 @@ public final class NaparnikManualModeHook implements IStartup
                 }
                 catch (Exception failure)
                 {
+                    logAccessCheckFailure("Получение службы состояния", failure);
                     ToastNotification.show("Проверка ключа 1С:Напарника", "Не удалось запустить проверку ключа доступа.", 10_000);
                 }
             });
@@ -1437,29 +1441,45 @@ public final class NaparnikManualModeHook implements IStartup
                 || !checkingAccess.compareAndSet(false, true))
                 return;
             Display display = Display.getDefault();
-            Object settings = Global.getField(service, "settings"); //$NON-NLS-1$
-            Object checker = Global.getField(service, "tokenCheck"); //$NON-NLS-1$
-            Object token = Global.invoke(settings, "getClientToken"); //$NON-NLS-1$
             try
             {
-                if (!(token instanceof String key) || key.isBlank() || checker == null)
-                    throw new IllegalStateException("Не задан ключ доступа или недоступна служба проверки.");
+                Object settings = Global.getField(service, "settings"); //$NON-NLS-1$
+                Object token = Global.invoke(settings, "getClientToken"); //$NON-NLS-1$
                 Bundle common = Platform.getBundle("com.e1c.edt.ai.ui.common"); //$NON-NLS-1$
+                Global.tempLog("naparnik-access-check", "Запуск проверки: версия бандла="
+                    + (common == null ? "нет" : common.getVersion()) + ", настройки доступны=" + (settings != null)
+                    + ", ключ задан=" + (token instanceof String key && !key.isBlank()));
+                if (!(token instanceof String key) || key.isBlank())
+                    throw new IllegalStateException("Не задан ключ доступа или недоступны настройки.");
                 Class<?> activator = common.loadClass("com.e1c.edt.ai.ui.BaseActivator"); //$NON-NLS-1$
+                Method getInstance = activator.getMethod("getInstance", Class.class); //$NON-NLS-1$
+                Class<?> checkerType = common.loadClass("com.e1c.edt.ai.assistent.ITokenCheck"); //$NON-NLS-1$
+                Object checker = getInstance.invoke(null, checkerType);
+                Method checkToken = checkerType.getMethod("checkTokenAsync", String.class); //$NON-NLS-1$
+                Global.tempLog("naparnik-access-check", "Контейнер EDT предоставил службу проверки=" + (checker != null));
                 Class<?> stateType = common.loadClass("com.e1c.edt.ai.IStateService"); //$NON-NLS-1$
                 Class<?> stateEnum = common.loadClass("com.e1c.edt.ai.ServiceState"); //$NON-NLS-1$
-                Object stateService = activator.getMethod("getInstance", Class.class).invoke(null, stateType); //$NON-NLS-1$
+                Object stateService = getInstance.invoke(null, stateType);
                 stateType.getMethod("setState", stateEnum).invoke(stateService,
                     stateEnum.getField("SETTINGS_CHANGED").get(null)); //$NON-NLS-1$ //$NON-NLS-2$
                 CompletableFuture.supplyAsync(() ->
                 {
-                    Object result = Global.invoke(checker, "checkTokenAsync", key); //$NON-NLS-1$
-                    if (!(result instanceof CompletableFuture<?> future))
-                        throw new IllegalStateException("Служба проверки не вернула результат.");
-                    return future;
+                    try
+                    {
+                        Object result = checkToken.invoke(checker, key);
+                        if (!(result instanceof CompletableFuture<?> future))
+                            throw new IllegalStateException("Служба проверки не вернула результат.");
+                        return future;
+                    }
+                    catch (ReflectiveOperationException failure)
+                    {
+                        throw new java.util.concurrent.CompletionException(failure);
+                    }
                 }).thenCompose(future -> future).whenComplete((valid, failure) ->
                 {
                     checkingAccess.set(false);
+                    Global.tempLog("naparnik-access-check", "Завершение проверки: ключ принят=" + Boolean.TRUE.equals(valid)
+                        + ", ошибка=" + (failure == null ? "нет" : accessCheckCause(failure).getClass().getName()));
                     if (!display.isDisposed())
                         display.asyncExec(() ->
                         {
@@ -1469,10 +1489,7 @@ public final class NaparnikManualModeHook implements IStartup
                             String reason = Boolean.TRUE.equals(valid) ? "Ключ доступа в порядке." : failureText(key);
                             if (failure != null)
                             {
-                                Throwable cause = failure;
-                                while (cause.getCause() != null && (cause instanceof java.util.concurrent.CompletionException
-                                    || cause instanceof java.util.concurrent.ExecutionException))
-                                    cause = cause.getCause();
+                                Throwable cause = accessCheckCause(failure);
                                 reason = "Не удалось проверить ключ доступа: " + cause.getClass().getSimpleName() + ".";
                             }
                             ToastNotification.show("Проверка ключа 1С:Напарника",
@@ -1483,8 +1500,23 @@ public final class NaparnikManualModeHook implements IStartup
             catch (Exception failure)
             {
                 checkingAccess.set(false);
+                logAccessCheckFailure("Запуск проверки", failure);
                 ToastNotification.show("Проверка ключа 1С:Напарника", "Не удалось запустить проверку ключа доступа.", 10_000);
             }
+        }
+
+        private static void logAccessCheckFailure(String phase, Throwable failure)
+        {
+            Global.tempLog("naparnik-access-check", phase + ": " + accessCheckCause(failure).getClass().getName());
+        }
+
+        private static Throwable accessCheckCause(Throwable failure)
+        {
+            while (failure.getCause() != null && (failure instanceof java.util.concurrent.CompletionException
+                || failure instanceof java.util.concurrent.ExecutionException
+                || failure instanceof java.lang.reflect.InvocationTargetException))
+                failure = failure.getCause();
+            return failure;
         }
     }
 }

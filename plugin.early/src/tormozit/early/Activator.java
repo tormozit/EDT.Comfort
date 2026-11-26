@@ -21,6 +21,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.osgi.framework.BundleActivator;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.hooks.weaving.WeavingHook;
@@ -64,6 +65,7 @@ public final class Activator
         ApplicationRestorationWeaving.install(context);
         QueryNullCastWeaving.install(context);
         FormDataWeaving.install(context);
+        BslDocCommentWeaving.install(context);
         TypeComputationWeaving.install(context);
         ArrayElementTypesWeaving.install(context);
         ArrayTypeReferenceWeaving.install(context);
@@ -77,6 +79,7 @@ public final class Activator
         PreprocessorPartRangeWeaving.install(context);
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
+        FindNextWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
         context.registerService(WeavingHook.class, new NaparnikWeaving(), null);
         TextSearchInvocationWeaving.install(context);
@@ -6501,6 +6504,183 @@ public final class Activator
         }
     }
 
+    private static final class BslDocCommentWeaving implements WeavingHook
+    {
+        private static final String PROP_AFTER_PARSE = "tormozit.bslDocComment.afterParse"; //$NON-NLS-1$
+        private static final String TARGET_COMMENT =
+            "com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment"; //$NON-NLS-1$
+        private static final String TARGET_COMMENT_INTERNAL =
+            "com/_1c/g5/v8/dt/bsl/documentation/comment/BslDocumentationComment"; //$NON-NLS-1$
+        private static final String TARGET_UTILS =
+            "com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils"; //$NON-NLS-1$
+        private static final String TARGET_UTILS_INTERNAL =
+            "com/_1c/g5/v8/dt/bsl/documentation/comment/BslCommentUtils"; //$NON-NLS-1$
+        private static final String PARSE_VOID_DESC = "(Ljava/util/List;Ljava/util/List;)V"; //$NON-NLS-1$
+        private static final String COMMENT_RETURN =
+            "Lcom/_1c/g5/v8/dt/bsl/documentation/comment/BslDocumentationComment;"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            context.registerService(WeavingHook.class, new BslDocCommentWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            String name = woven.getClassName();
+            if (woven.getState() != WovenClass.TRANSFORMING
+                || (!TARGET_COMMENT.equals(name) && !TARGET_UTILS.equals(name)))
+                return;
+            String status = PROP_AFTER_PARSE + ".weaving." + name; //$NON-NLS-1$
+            try
+            {
+                byte[] bytes = transformClass(name.replace('.', '/'), woven.getBytes());
+                if (bytes != null)
+                    woven.setBytes(bytes);
+                System.setProperty(status, bytes != null ? "woven (stack map frames preserved)" : "no matching methods"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                System.setProperty(status, failure.toString());
+            }
+        }
+
+        private static byte[] transformClass(String internalName, byte[] classfileBuffer)
+        {
+            if (TARGET_COMMENT_INTERNAL.equals(internalName))
+                return transformCommentClass(classfileBuffer);
+            if (TARGET_UTILS_INTERNAL.equals(internalName))
+                return transformUtilsClass(classfileBuffer);
+            return null;
+        }
+
+        private static byte[] transformCommentClass(byte[] classfileBuffer)
+        {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            final AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null)
+                        return null;
+                    if (("parse".equals(name) || "parseOldFormat".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                        && PARSE_VOID_DESC.equals(descriptor))
+                    {
+                        return new MethodVisitor(Opcodes.ASM9, mv)
+                        {
+                            @Override
+                            public void visitInsn(int opcode)
+                            {
+                                if (opcode == Opcodes.RETURN)
+                                {
+                                    super.visitVarInsn(Opcodes.ALOAD, 0);
+                                    emitCallback(this, TARGET_COMMENT_INTERNAL);
+                                    touched.set(true);
+                                }
+                                super.visitInsn(opcode);
+                            }
+                        };
+                    }
+                    return mv;
+                }
+                @Override
+                public void visitEnd()
+                {
+                    if (touched.get())
+                        emitCallbackMethod(cv);
+                    super.visitEnd();
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
+        private static byte[] transformUtilsClass(byte[] classfileBuffer)
+        {
+            ClassReader reader = new ClassReader(classfileBuffer);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            final AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (mv == null)
+                        return null;
+                    if (!"parseTemplateComment".equals(name) && !"parse".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                        return mv;
+                    Type returnType = Type.getReturnType(descriptor);
+                    if (!COMMENT_RETURN.equals(returnType.getDescriptor()))
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitInsn(int opcode)
+                        {
+                            if (opcode == Opcodes.ARETURN)
+                            {
+                                super.visitInsn(Opcodes.DUP);
+                                emitCallback(this, TARGET_UTILS_INTERNAL);
+                                touched.set(true);
+                            }
+                            super.visitInsn(opcode);
+                        }
+                    };
+                }
+                @Override
+                public void visitEnd()
+                {
+                    if (touched.get())
+                        emitCallbackMethod(cv);
+                    super.visitEnd();
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
+        private static final String CALLBACK_METHOD = "comfort$bslDocCommentAfterParse"; //$NON-NLS-1$
+        private static final String CALLBACK_DESCRIPTOR = "(Ljava/lang/Object;)V"; //$NON-NLS-1$
+
+        private static void emitCallback(MethodVisitor mv, String owner)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, owner, CALLBACK_METHOD, CALLBACK_DESCRIPTOR, false);
+        }
+
+        // Ветвление находится в новом методе, кадры стека методов EDT сохраняются.
+        private static void emitCallbackMethod(ClassVisitor visitor)
+        {
+            MethodVisitor mv = visitor.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                CALLBACK_METHOD, CALLBACK_DESCRIPTOR, null, null);
+            mv.visitCode();
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
+                "()Ljava/util/Properties;", false); //$NON-NLS-1$
+            mv.visitLdcInsn(PROP_AFTER_PARSE);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
+                "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP);
+            Label skip = new Label();
+            mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Consumer"); //$NON-NLS-1$
+            mv.visitJumpInsn(Opcodes.IFEQ, skip);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                CALLBACK_DESCRIPTOR, true);
+            mv.visitInsn(Opcodes.RETURN);
+            mv.visitLabel(skip);
+            mv.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { "java/lang/Object" }); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.POP);
+            mv.visitInsn(Opcodes.RETURN);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
+        }
+    }
+
     /** Классы комментариев и формы могут загрузиться до основного бандла. */
     private static final class FormDataWeaving implements WeavingHook
     {
@@ -7114,6 +7294,71 @@ public final class Activator
 
     }
 
+    /** Подставляет общую строку в штатный F3/Shift+F3 перед началом поиска. */
+    private static final class FindNextWeaving implements WeavingHook
+    {
+        private static final String TARGET = "org.eclipse.ui.texteditor.FindNextAction"; //$NON-NLS-1$
+        private static final String CALLBACK = "tormozit.fastSearch.findNextTarget"; //$NON-NLS-1$
+        private static final String FUNCTION = "java/util/function/Function"; //$NON-NLS-1$
+        private static final String FIND_STRING = "()Ljava/lang/String;"; //$NON-NLS-1$
+
+        static void install(BundleContext context)
+        {
+            System.getProperties().putIfAbsent(CALLBACK, Function.identity());
+            context.registerService(WeavingHook.class, new FindNextWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+                int[] patched = { 0 };
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (method == null || !"run".equals(name) || !"()V".equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$
+                            return method;
+                        return new MethodVisitor(Opcodes.ASM9, method)
+                        {
+                            @Override
+                            public void visitMethodInsn(int opcode, String owner, String name,
+                                String descriptor, boolean isInterface)
+                            {
+                                super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                                if (!reader.getClassName().equals(owner) || !"getFindString".equals(name) //$NON-NLS-1$
+                                    || !FIND_STRING.equals(descriptor))
+                                    return;
+                                EarlyWeaving.emitGetProperty(mv, CALLBACK, FUNCTION);
+                                mv.visitInsn(Opcodes.SWAP);
+                                mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION, "apply", //$NON-NLS-1$
+                                    "(Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String"); //$NON-NLS-1$
+                                patched[0]++;
+                            }
+                        };
+                    }
+                }, 0);
+                if (patched[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                else
+                    WeavingFailures.unmatched(woven, getClass());
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                WeavingFailures.failed(woven, getClass(), error);
+            }
+        }
+    }
+
     /** Контекст операторных слов в строках: класс задания загружается до основного бандла. */
     private static final class OccurrenceLiteralWeaving implements WeavingHook
     {
@@ -7501,8 +7746,13 @@ public final class Activator
         private static final String AREAS = "tormozit.naparnik.areas";
 
 
+        private static final String IDE_API = "com.e1c.edt.ai.ui.IdeApiHandler"; //$NON-NLS-1$
+        private static final String PASTE_CODE = "tormozit.naparnik.pasteCode"; //$NON-NLS-1$
+
         NaparnikWeaving()
         {
+            System.getProperties().putIfAbsent(PASTE_CODE,
+                (java.util.function.BiPredicate<Object, Object>) (handler, text) -> false);
             System.getProperties().put(TOKEN_RESPONSE, (Function<Object[], Object>) NaparnikWeaving::tokenResponse);
             System.getProperties().put(SERVICE_EVENT, (Consumer<Object[]>) NaparnikWeaving::serviceEvent);
         }
@@ -7633,13 +7883,13 @@ public final class Activator
                 : SESSION_CALL.equals(name) ? "SessionCall" : TOKEN_EDITOR.equals(name) ? "TokenEditor" //$NON-NLS-1$ //$NON-NLS-2$
                 : CHAT.equals(name) ? "Chat" : HTTP_LOG.equals(name) ? "HttpLog"
                 : SERVICE.equals(name) ? "ServiceStatus" : STATUS_CONTROL.equals(name) ? "StatusControl"
-                : ENTITY_FACTORY.equals(name) ? "ContextAreas" : null; //$NON-NLS-1$ //$NON-NLS-2$
+                : ENTITY_FACTORY.equals(name) ? "ContextAreas" : IDE_API.equals(name) ? "PasteCode" : null; //$NON-NLS-1$ //$NON-NLS-2$
             if (label == null)
                 return;
             String result;
             try
             {
-                String version = SERVICE.equals(name) || ENTITY_FACTORY.equals(name)
+                String version = SERVICE.equals(name) || ENTITY_FACTORY.equals(name) || IDE_API.equals(name)
                     ? woven.getBundleWiring().getBundle().getVersion().toString() : null;
                 if (ENTITY_FACTORY.equals(name)
                     && !"1.0.7.v202609241153".equals(version) && !"1.1.0.v202611201536".equals(version))
@@ -7648,7 +7898,8 @@ public final class Activator
                     WeavingFailures.record(woven, getClass(), "Ожидается версия 1.0.7.v202609241153 или 1.1.0.v202611201536");
                     return;
                 }
-                byte[] transformed = STATUS_CONTROL.equals(name) ? transformStatusMenu(woven.getBytes())
+                byte[] transformed = IDE_API.equals(name) ? transformPasteCode(woven.getBytes(), version)
+                    : STATUS_CONTROL.equals(name) ? transformStatusMenu(woven.getBytes())
                     : ENTITY_FACTORY.equals(name) ? transformContextAreas(woven.getBytes(), version)
                     : SERVICE.equals(name) ? transformServiceStatus(woven.getBytes(), version)
                     : HTTP_LOG.equals(name) ? transformAccessResponse(woven.getBytes())
@@ -7670,6 +7921,8 @@ public final class Activator
                 WeavingFailures.failed(woven, getClass(), error);
                 result = "error(" + error + ")"; //$NON-NLS-1$ //$NON-NLS-2$
             }
+            if (IDE_API.equals(name))
+                IncidentDiagnostics.instance.record("naparnik-paste-weaving", result);
             synchronized (NaparnikWeaving.class)
             {
                 String previous = System.getProperty(STATUS);
@@ -8106,7 +8359,51 @@ public final class Activator
             return touched[0] ? writer.toByteArray() : null;
         }
 
-        /** Ранний {@code return}, если функция {@code prop} вернула {@code false} на аргумент {@code textLocal}. */
+        /** В 1.1.0 чат Chromium вызывает paste_code из браузерного моста, а вставку выполняет в SWT. */
+        private static byte[] transformPasteCode(byte[] bytes, String version)
+        {
+            String targetMethod = "1.1.0.v202611201536".equals(version) //$NON-NLS-1$
+                ? "pasteCodeOnUiThread" : "paste_code"; //$NON-NLS-1$ //$NON-NLS-2$
+            IncidentDiagnostics.instance.record("naparnik-paste-weaving", //$NON-NLS-1$
+                "version=" + version + " method=" + targetMethod); //$NON-NLS-1$ //$NON-NLS-2$
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            AtomicBoolean touched = new AtomicBoolean();
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor,
+                    String signature, String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!targetMethod.equals(name) || !"(Ljava/lang/String;)V".equals(descriptor) //$NON-NLS-1$
+                        || (access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0)
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitCode()
+                        {
+                            super.visitCode();
+                            String predicate = "java/util/function/BiPredicate"; //$NON-NLS-1$
+                            EarlyWeaving.emitGetProperty(mv, PASTE_CODE, predicate);
+                            mv.visitVarInsn(Opcodes.ALOAD, 0);
+                            mv.visitVarInsn(Opcodes.ALOAD, 1);
+                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, predicate, "test", //$NON-NLS-1$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)Z", true); //$NON-NLS-1$
+                            Label original = new Label();
+                            mv.visitJumpInsn(Opcodes.IFEQ, original);
+                            mv.visitInsn(Opcodes.RETURN);
+                            mv.visitLabel(original);
+                            mv.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                            touched.set(true);
+                        }
+                    };
+                }
+            }, 0);
+            return touched.get() ? writer.toByteArray() : null;
+        }
+
         private static byte[] transformPredicate(byte[] bytes, String method, String methodDesc, String prop,
             int textLocal)
         {

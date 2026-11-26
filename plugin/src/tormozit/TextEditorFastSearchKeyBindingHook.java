@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
 import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.core.commands.Command;
@@ -92,6 +93,8 @@ public final class TextEditorFastSearchKeyBindingHook implements IStartup
 
     private static void ensureBindings()
     {
+        System.getProperties().put("tormozit.fastSearch.findNextTarget", //$NON-NLS-1$
+            (Function<String, String>)TextEditorFastSearchHandler::resolveFindNextTarget);
         try
         {
             IBindingService bindingService = PlatformUI.getWorkbench().getAdapter(IBindingService.class);

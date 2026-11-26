@@ -5,10 +5,10 @@ import java.io.IOException;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -22,18 +22,7 @@ import java.util.jar.Manifest;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
 import org.osgi.framework.Bundle;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.FrameworkUtil;
-import org.osgi.framework.hooks.weaving.WeavingHook;
-import org.osgi.framework.hooks.weaving.WovenClass;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 
 /**
@@ -49,15 +38,8 @@ public final class BslDocCommentDescriptionFix
     static final String PROP_AFTER_PARSE = "tormozit.bslDocComment.afterParse"; //$NON-NLS-1$
     private static final String TARGET_COMMENT =
         "com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment"; //$NON-NLS-1$
-    private static final String TARGET_COMMENT_INTERNAL =
-        "com/_1c/g5/v8/dt/bsl/documentation/comment/BslDocumentationComment"; //$NON-NLS-1$
     private static final String TARGET_UTILS =
         "com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils"; //$NON-NLS-1$
-    private static final String TARGET_UTILS_INTERNAL =
-        "com/_1c/g5/v8/dt/bsl/documentation/comment/BslCommentUtils"; //$NON-NLS-1$
-    private static final String PARSE_VOID_DESC = "(Ljava/util/List;Ljava/util/List;)V"; //$NON-NLS-1$
-    private static final String COMMENT_RETURN =
-        "Lcom/_1c/g5/v8/dt/bsl/documentation/comment/BslDocumentationComment;"; //$NON-NLS-1$
     private static final String TEXT_PART =
         "com._1c.g5.v8.dt.bsl.documentation.comment.TextPart"; //$NON-NLS-1$
     private static final String LINK_PART =
@@ -68,7 +50,6 @@ public final class BslDocCommentDescriptionFix
     private static final String AXIOM_JAVAC =
         "C:\\Program Files\\1C\\1CE\\components\\axiom-jdk-full-17.0.16+12-x86_64\\bin\\javac.exe"; //$NON-NLS-1$
 
-    private static final AtomicBoolean installed = new AtomicBoolean();
     private static final AtomicBoolean weavingHookInstalled = new AtomicBoolean();
     private static volatile Instrumentation instrumentation;
     /**
@@ -80,66 +61,21 @@ public final class BslDocCommentDescriptionFix
      * {@code null}: подмена работает через {@code WeavingHook}, агент ей не нужен.
      */
     private static volatile boolean instrumentationUnavailable;
-    private static volatile boolean transformerRegistered;
 
     private BslDocCommentDescriptionFix() {}
 
-    /**
-     * Обработчик разбора и {@link WeavingHook} — отдельно от остального и как можно раньше.
-     * <p>
-     * Хук видит только классы, загруженные после его регистрации, а бандл активируется
-     * лениво: {@code BslDocumentationComment} успевал загрузиться до {@code Activator.start},
-     * и тогда подмена не применялась вовсе. Зовётся из {@link ComfortEarlyStart} (DS,
-     * {@code immediate="true"}) и из {@link #install()}.
-     */
+    /** Регистрирует обработчик для вплетения из бандла раннего старта. */
     public static void installWeavingHook()
     {
         if (!weavingHookInstalled.compareAndSet(false, true))
-        {
             return;
-        }
 
         System.getProperties().put(PROP_AFTER_PARSE,
             (Consumer<Object>) BslDocCommentDescriptionFix::afterParse);
-
-        Bundle bundle = FrameworkUtil.getBundle(BslDocCommentDescriptionFix.class);
-        BundleContext context = bundle != null ? bundle.getBundleContext() : null;
-        if (context != null)
+        for (String target : List.of(TARGET_COMMENT, TARGET_UTILS))
         {
-            context.registerService(WeavingHook.class, new ParseWeavingHook(), null);
-        }
-    }
-
-    public static void install()
-    {
-        if (!installed.compareAndSet(false, true))
-        {
-            return;
-        }
-
-        installWeavingHook();
-
-        try
-        {
-            Instrumentation inst = ensureInstrumentation();
-            if (inst == null)
-            {
-                Global.logError("BslDocComment", "install: Instrumentation is null", null); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            registerPermanentTransformer(inst);
-
-            for (Class<?> c : inst.getAllLoadedClasses())
-            {
-                String name = c.getName();
-                if (!TARGET_COMMENT.equals(name) && !TARGET_UTILS.equals(name))
-                    continue;
-                retransform(inst, c);
-            }
-        }
-        catch (Throwable t)
-        {
-            Global.logError("BslDocComment", "install Instrumentation", t); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("bsl-doc-comment-weaving", target + " при старте основного бандла: "
+                + System.getProperty(PROP_AFTER_PARSE + ".weaving." + target, "ещё не обработан"));
         }
     }
 
@@ -656,7 +592,7 @@ public final class BslDocCommentDescriptionFix
 
     /**
      * Доп. transformer (param-hint doc pages и т.п.).
-     * При отсутствии Instrumentation поднимает agent (как {@link #install()}).
+     * При отсутствии Instrumentation поднимает agent.
      *
      * @return {@code true}, если transformer зарегистрирован
      */
@@ -681,8 +617,6 @@ public final class BslDocCommentDescriptionFix
         }
         if (instrumentation == null)
         {
-            Global.logError("BslDocComment", "registerExtraTransformer: Instrumentation is null", //$NON-NLS-1$ //$NON-NLS-2$
-                null);
             return false;
         }
         try
@@ -771,14 +705,6 @@ public final class BslDocCommentDescriptionFix
         return value instanceof String s ? s : null;
     }
 
-    private static void registerPermanentTransformer(Instrumentation inst)
-    {
-        if (transformerRegistered)
-            return;
-        inst.addTransformer(new ParseClassFileTransformer(), true);
-        transformerRegistered = true;
-    }
-
     private static boolean retransform(Instrumentation inst, Class<?> target)
     {
         try
@@ -812,7 +738,23 @@ public final class BslDocCommentDescriptionFix
             Path agentJar = writeAgentJar();
             String pid = Long.toString(ProcessHandle.current().pid());
             Class<?> vmClass = Class.forName("com.sun.tools.attach.VirtualMachine"); //$NON-NLS-1$
-            Object vm = vmClass.getMethod("attach", String.class).invoke(null, pid); //$NON-NLS-1$
+            Object vm;
+            try
+            {
+                vm = vmClass.getMethod("attach", String.class).invoke(null, pid); //$NON-NLS-1$
+            }
+            catch (InvocationTargetException e)
+            {
+                // HotSpot throws this IOException when self-attach is disabled.
+                if (e.getCause() instanceof IOException cause
+                    && "Can not attach to current VM".equals(cause.getMessage())) //$NON-NLS-1$
+                {
+                    instrumentationUnavailable = true;
+                    Global.tempLog("bsl-doc-comment-attach", "JVM запретила подключение агента к своему процессу");
+                    return null;
+                }
+                throw e;
+            }
             try
             {
                 vmClass.getMethod("loadAgent", String.class).invoke(vm, //$NON-NLS-1$
@@ -826,6 +768,8 @@ public final class BslDocCommentDescriptionFix
             long deadline = System.nanoTime() + 5_000_000_000L;
             while (instrumentation == null && System.nanoTime() < deadline)
                 Thread.sleep(20);
+            if (instrumentation == null)
+                throw new IOException("Agent did not provide Instrumentation"); //$NON-NLS-1$
         }
         catch (Throwable t)
         {
@@ -834,8 +778,6 @@ public final class BslDocCommentDescriptionFix
                 throw e;
             throw new IllegalStateException(t);
         }
-        if (instrumentation == null)
-            instrumentationUnavailable = true;
         return instrumentation;
     }
 
@@ -917,186 +859,8 @@ public final class BslDocCommentDescriptionFix
         throw new IOException("javac not found"); //$NON-NLS-1$
     }
 
-    static byte[] transformClass(String internalName, byte[] classfileBuffer)
-    {
-        if (TARGET_COMMENT_INTERNAL.equals(internalName))
-            return transformCommentClass(classfileBuffer);
-        if (TARGET_UTILS_INTERNAL.equals(internalName))
-            return transformUtilsClass(classfileBuffer);
-        return null;
-    }
-
     private static int intValue(Object value)
     {
         return value instanceof Number number ? number.intValue() : 0;
-    }
-
-    private static byte[] transformCommentClass(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
-        {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2)
-            {
-                return "java/lang/Object"; //$NON-NLS-1$
-            }
-        };
-        final AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (("parse".equals(name) || "parseOldFormat".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
-                    && PARSE_VOID_DESC.equals(descriptor))
-                {
-                    return new MethodVisitor(Opcodes.ASM9, mv)
-                    {
-                        @Override
-                        public void visitInsn(int opcode)
-                        {
-                            if (opcode == Opcodes.RETURN)
-                            {
-                                emitHookFromThis(this);
-                                touched.set(true);
-                            }
-                            super.visitInsn(opcode);
-                        }
-                    };
-                }
-                return mv;
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    private static byte[] transformUtilsClass(byte[] classfileBuffer)
-    {
-        ClassReader reader = new ClassReader(classfileBuffer);
-        ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
-        {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2)
-            {
-                return "java/lang/Object"; //$NON-NLS-1$
-            }
-        };
-        final AtomicBoolean touched = new AtomicBoolean();
-        reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
-        {
-            @Override
-            public MethodVisitor visitMethod(int access, String name, String descriptor,
-                String signature, String[] exceptions)
-            {
-                MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (mv == null)
-                    return null;
-                if (!"parseTemplateComment".equals(name) && !"parse".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
-                    return mv;
-                Type returnType = Type.getReturnType(descriptor);
-                if (!COMMENT_RETURN.equals(returnType.getDescriptor()))
-                    return mv;
-                return new MethodVisitor(Opcodes.ASM9, mv)
-                {
-                    @Override
-                    public void visitInsn(int opcode)
-                    {
-                        if (opcode == Opcodes.ARETURN)
-                        {
-                            emitHookFromStack(this);
-                            touched.set(true);
-                        }
-                        super.visitInsn(opcode);
-                    }
-                };
-            }
-        }, ClassReader.EXPAND_FRAMES);
-        return touched.get() ? writer.toByteArray() : null;
-    }
-
-    private static void emitHookFromThis(MethodVisitor mv)
-    {
-        mv.visitVarInsn(Opcodes.ALOAD, 0);
-        emitConsumerAccept(mv);
-    }
-
-    private static void emitHookFromStack(MethodVisitor mv)
-    {
-        mv.visitInsn(Opcodes.DUP);
-        emitConsumerAccept(mv);
-    }
-
-    /** Стек: …, comment → после вызова comment остаётся (accept съедает копию). */
-    private static void emitConsumerAccept(MethodVisitor mv)
-    {
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", //$NON-NLS-1$ //$NON-NLS-2$
-            "()Ljava/util/Properties;", false); //$NON-NLS-1$
-        mv.visitLdcInsn(PROP_AFTER_PARSE);
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$
-        mv.visitInsn(Opcodes.DUP);
-        Label skip = new Label();
-        mv.visitTypeInsn(Opcodes.INSTANCEOF, "java/util/function/Consumer"); //$NON-NLS-1$
-        mv.visitJumpInsn(Opcodes.IFEQ, skip);
-        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/util/function/Consumer"); //$NON-NLS-1$
-        mv.visitInsn(Opcodes.SWAP);
-        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Consumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
-            "(Ljava/lang/Object;)V", true); //$NON-NLS-1$
-        Label end = new Label();
-        mv.visitJumpInsn(Opcodes.GOTO, end);
-        mv.visitLabel(skip);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitInsn(Opcodes.POP);
-        mv.visitLabel(end);
-    }
-
-    private static final class ParseWeavingHook implements WeavingHook
-    {
-        @Override
-        public void weave(WovenClass wovenClass)
-        {
-            String name = wovenClass.getClassName();
-            if (!TARGET_COMMENT.equals(name) && !TARGET_UTILS.equals(name))
-                return;
-            if (wovenClass.getState() != WovenClass.TRANSFORMING)
-                return;
-            try
-            {
-                String internal = name.replace('.', '/');
-                byte[] transformed = transformClass(internal, wovenClass.getBytes());
-                if (transformed != null)
-                {
-                    wovenClass.setBytes(transformed);
-                }
-            }
-            catch (Throwable t)
-            {
-            }
-        }
-    }
-
-    private static final class ParseClassFileTransformer implements ClassFileTransformer
-    {
-        @Override
-        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-            ProtectionDomain protectionDomain, byte[] classfileBuffer)
-        {
-            if (!TARGET_COMMENT_INTERNAL.equals(className)
-                && !TARGET_UTILS_INTERNAL.equals(className))
-                return null;
-            try
-            {
-                return transformClass(className, classfileBuffer);
-            }
-            catch (Throwable t)
-            {
-                return null;
-            }
-        }
     }
 }

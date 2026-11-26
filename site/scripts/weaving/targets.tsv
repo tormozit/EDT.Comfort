@@ -1,4 +1,5 @@
 # stage	bundle	class (alternatives separated by |)	hook
+early	org.eclipse.ui.workbench.texteditor	org.eclipse.ui.texteditor.FindNextAction	tormozit.early.Activator$FindNextWeaving
 early	com._1c.g5.v8.bm.core	com._1c.g5.v8.bm.core.internal.lifecycle.CriticalErrorHandler	tormozit.early.Activator$ApplicationResetDiagnostics
 early	com._1c.g5.v8.derived	com._1c.g5.v8.derived.context.PartBasedObjectContext	tormozit.early.Activator$CommonAttributeLossDiagnostics
 early	com._1c.g5.v8.derived	com._1c.g5.v8.internal.derived.DerivedDataProgressReporter	tormozit.early.Activator$DerivedCheckCancellation
@@ -27,6 +28,8 @@ early	com._1c.g5.v8.dt.bsl	com._1c.g5.v8.dt.bsl.validation.BslSuppressionProvide
 early	com._1c.g5.v8.dt.bsl	com._1c.g5.v8.dt.internal.bsl.resource.BslContextDefUpdater	tormozit.early.Activator$ModuleContextDiagnostics
 early	com._1c.g5.v8.dt.bsl.bm.ui	com._1c.g5.v8.dt.bsl.bm.ui.refactoring.BslTextSearchSupplier	tormozit.early.Activator$TextSearchInvocationWeaving
 early	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment	tormozit.early.Activator$FormDataWeaving
+early	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils	tormozit.early.Activator$BslDocCommentWeaving
+early	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment	tormozit.early.Activator$BslDocCommentWeaving
 early	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.LinkPart	tormozit.early.Activator$DocCommentLinkWeaving
 early	com._1c.g5.v8.dt.bsl.ui	com._1c.g5.v8.dt.bsl.ui.contentassist.antlr.BslParserBasedContentAssistContextFactory$StatefulFactory$CustomLeafNodeFinder	tormozit.early.Activator$AssistLeafLookupWeaving
 early	com._1c.g5.v8.dt.bsl.ui	com._1c.g5.v8.dt.bsl.ui.contentassist.BslProposalProvider	tormozit.early.Activator$ArrayElementTypesWeaving
@@ -94,6 +97,7 @@ early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.Chat	tormozit.early.Activator$N
 early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.CodeCompletionContext	tormozit.early.Activator$NaparnikWeaving
 early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.CodeCompletionViewModel	tormozit.early.Activator$NaparnikWeaving
 early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.HintPainter	tormozit.early.Activator$NaparnikWeaving
+early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.IdeApiHandler	tormozit.early.Activator$NaparnikWeaving
 early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.PluginStatusService	tormozit.early.Activator$NaparnikWeaving
 early	com.e1c.edt.ai.ui.common	com.e1c.edt.ai.ui.preferences.TokenFieldEditor	tormozit.early.Activator$NaparnikWeaving
 early	com.e1c.g5.dt.applications	com.e1c.g5.dt.internal.applications.ApplicationManager	tormozit.early.Activator$ApplicationResetDiagnostics
@@ -132,8 +136,6 @@ main	com._1c.g5.v8.dt.bsl	com._1c.g5.v8.dt.bsl.typesystem.GetTemplateInvocationT
 main	com._1c.g5.v8.dt.bsl	com._1c.g5.v8.dt.bsl.typesystem.util.CreatorTreeState	tormozit.BslDocCommentComputedTypes$ParseWeavingHook
 main	com._1c.g5.v8.dt.bsl	com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil	tormozit.BslFormTypeContextEnrichment$FormTypesWeavingHook
 main	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils	tormozit.BslDocCommentComputedTypes$ParseWeavingHook
-main	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslCommentUtils	tormozit.BslDocCommentDescriptionFix$ParseWeavingHook
-main	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment	tormozit.BslDocCommentDescriptionFix$ParseWeavingHook
 main	com._1c.g5.v8.dt.bsl.comment	com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment	tormozit.BslDocCommentTypeMerge$ComputeTypesWeavingHook
 main	com._1c.g5.v8.dt.bsl.ui	com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider	tormozit.BslFormDataTypes$PresentationWeavingHook
 main	com._1c.g5.v8.dt.bsl.ui	com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.PageUtil	tormozit.BslFormDataTypes$PresentationWeavingHook

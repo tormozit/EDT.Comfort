@@ -251,8 +251,11 @@ public final class WeavingAudit {
                 failure("НЕ СРАБОТАЛО", label, "байткод не изменился");
                 return;
             }
+            var before = readNode(original);
             var after = readNode(woven.bytes);
-            var methods = changedMethods(readNode(original), after);
+            if (hook.getClass().getName().equals("tormozit.early.Activator$BslDocCommentWeaving"))
+                verifyPreservedFrames(before, after);
+            var methods = changedMethods(before, after);
             if (methods.isEmpty()) {
                 woven.bytes = original;
                 failure("НЕ СРАБОТАЛО", label, "байткод методов не изменился");
@@ -288,6 +291,22 @@ public final class WeavingAudit {
         }
         changed.addAll(originals.keySet());
         return changed;
+    }
+
+    private static void verifyPreservedFrames(ClassNode before, ClassNode after) {
+        // The hook adds straight-line calls to existing methods and puts its branch in a new method.
+        for (MethodNode original : before.methods) {
+            MethodNode transformed = after.methods.stream()
+                .filter(method -> method.name.equals(original.name) && method.desc.equals(original.desc))
+                .findFirst().orElseThrow();
+            if (!stackMapFrames(original).equals(stackMapFrames(transformed)))
+                throw new IllegalStateException("изменились кадры стека " + original.name + original.desc);
+        }
+    }
+
+    private static List<String> stackMapFrames(MethodNode method) {
+        return methodText(method).stream().map(Object::toString).map(String::stripLeading)
+            .filter(line -> line.startsWith("FRAME ")).toList();
     }
 
     private static List<Object> methodText(MethodNode method) {

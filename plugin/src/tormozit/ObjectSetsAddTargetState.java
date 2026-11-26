@@ -22,38 +22,49 @@ public final class ObjectSetsAddTargetState
         return INSTANCE;
     }
 
+    // Общий монитор защищает список наборов и привязки активных наборов к проектам.
+    private final ObjectSets objectSets = ObjectSets.getInstance();
     private ScopedPreferenceStore prefs;
     private final Map<String, String> addTargetByProject = new HashMap<>();
     private final List<Runnable> listeners = new CopyOnWriteArrayList<>();
     private ObjectSetsAddTargetState() {}
 
-    public synchronized void init(String pluginId)
+    public void init(String pluginId)
     {
-
-        if (prefs != null)
-            return;
-        prefs = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
-        load();
-        migrateFromLegacyFilterState();
+        synchronized (objectSets)
+        {
+            if (prefs != null)
+                return;
+            prefs = new ScopedPreferenceStore(InstanceScope.INSTANCE, pluginId);
+            load();
+            migrateFromLegacyFilterState();
+        }
     }
 
-    public synchronized void addListener(Runnable listener)
+    public void addListener(Runnable listener)
     {
-
-        if (listener != null)
-            listeners.add(listener);
+        synchronized (objectSets)
+        {
+            if (listener != null)
+                listeners.add(listener);
+        }
     }
 
-    public synchronized void removeListener(Runnable listener)
+    public void removeListener(Runnable listener)
     {
-
-        listeners.remove(listener);
+        synchronized (objectSets)
+        {
+            listeners.remove(listener);
+        }
     }
 
     /** Имена проектов, у которых задан активный (add-target) набор. */
-    public synchronized List<String> projectsWithAddTarget()
+    public List<String> projectsWithAddTarget()
     {
-        return new java.util.ArrayList<>(addTargetByProject.keySet());
+        synchronized (objectSets)
+        {
+            return new java.util.ArrayList<>(addTargetByProject.keySet());
+        }
     }
 
     /**
@@ -61,19 +72,22 @@ public final class ObjectSetsAddTargetState
      * на проект, отсортировано по имени проекта. Проекты с активным набором «&lt;Основной&gt;»
      * пропускаются. Пусто, если таких наборов нет.
      */
-    public synchronized String activeSetsPerProjectText()
+    public String activeSetsPerProjectText()
     {
-        List<String> lines = new java.util.ArrayList<>();
-        for (Map.Entry<String, String> e : addTargetByProject.entrySet())
+        synchronized (objectSets)
         {
-            if (e.getKey() == null || !ObjectSets.isProjectOpen(e.getKey()))
-                continue;
-            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(e.getValue());
-            if (set != null && !set.isDefaultSet())
-                lines.add(e.getKey() + ": " + set.name); //$NON-NLS-1$
+            List<String> lines = new java.util.ArrayList<>();
+            for (Map.Entry<String, String> e : addTargetByProject.entrySet())
+            {
+                if (e.getKey() == null || !ObjectSets.isProjectOpen(e.getKey()))
+                    continue;
+                ObjectSets.SetDef set = objectSets.getSetById(e.getValue());
+                if (set != null && !set.isDefaultSet())
+                    lines.add(e.getKey() + ": " + set.name); //$NON-NLS-1$
+            }
+            lines.sort(String.CASE_INSENSITIVE_ORDER);
+            return String.join("\n", lines); //$NON-NLS-1$
         }
-        lines.sort(String.CASE_INSENSITIVE_ORDER);
-        return String.join("\n", lines); //$NON-NLS-1$
     }
 
     /**
@@ -89,141 +103,160 @@ public final class ObjectSetsAddTargetState
             + (list.isEmpty() ? " отсутствуют" : "\n" + list); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    public synchronized ObjectSets.SetDef getAddTargetSet(String projectName)
+    public ObjectSets.SetDef getAddTargetSet(String projectName)
     {
-
-        if (projectName == null || projectName.isBlank())
-            return null;
-        String setId = addTargetByProject.get(projectName);
-        if (setId == null || setId.isBlank())
-            return null;
-        return ObjectSets.getInstance().getSetById(setId);
+        synchronized (objectSets)
+        {
+            if (projectName == null || projectName.isBlank())
+                return null;
+            String setId = addTargetByProject.get(projectName);
+            if (setId == null || setId.isBlank())
+                return null;
+            return objectSets.getSetById(setId);
+        }
     }
 
     /** Все активные (●) наборы по проектам пусты. Системный набор считается «непустым» (фильтр по нему значим). */
-    public synchronized boolean areAllAddTargetSetsEmpty()
+    public boolean areAllAddTargetSetsEmpty()
     {
-        for (String setId : addTargetByProject.values())
+        synchronized (objectSets)
         {
-            if (setId == null || setId.isBlank())
-                continue;
-            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-            if (set != null && ((set.system && ObjectSets.isApplicable(set)) || !set.items.isEmpty()))
-                return false;
+            for (String setId : addTargetByProject.values())
+            {
+                if (setId == null || setId.isBlank())
+                    continue;
+                ObjectSets.SetDef set = objectSets.getSetById(setId);
+                if (set != null && ((set.system && ObjectSets.isApplicable(set)) || !set.items.isEmpty()))
+                    return false;
+            }
+            return true;
         }
-        return true;
     }
 
     /** Есть ли среди активных (●) наборов динамический (например, «<Измененные Git>»). */
-    public synchronized boolean isAnyAddTargetSystemSet()
+    public boolean isAnyAddTargetSystemSet()
     {
-        for (String setId : addTargetByProject.values())
+        synchronized (objectSets)
+        {
+            for (String setId : addTargetByProject.values())
+            {
+                if (setId == null || setId.isBlank())
+                    continue;
+                ObjectSets.SetDef set = objectSets.getSetById(setId);
+                if (set != null && set.system && ObjectSets.isApplicable(set))
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    public boolean isAddTarget(String setId)
+    {
+        synchronized (objectSets)
         {
             if (setId == null || setId.isBlank())
-                continue;
-            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-            if (set != null && set.system && ObjectSets.isApplicable(set))
-                return true;
+                return false;
+            ObjectSets.SetDef set = objectSets.getSetById(setId);
+            if (set == null)
+                return false;
+            return setId.equals(addTargetByProject.get(set.projectName));
         }
-        return false;
     }
 
-    public synchronized boolean isAddTarget(String setId)
+    public void setAddTarget(String setId)
     {
-
-        if (setId == null || setId.isBlank())
-            return false;
-        ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-        if (set == null)
-            return false;
-        return setId.equals(addTargetByProject.get(set.projectName));
-    }
-
-    public synchronized void setAddTarget(String setId)
-    {
-
-        ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-        if (set == null)
-            return;
-        if (setId.equals(addTargetByProject.get(set.projectName)))
-            return;
-        addTargetByProject.put(set.projectName, setId);
-        save();
-        notifyChanged();
-    }
-
-    public synchronized void ensureForProject(String projectName)
-    {
-
-        if (projectName == null || projectName.isBlank())
-            return;
-        if (addTargetByProject.containsKey(projectName))
+        synchronized (objectSets)
         {
-
-            String setId = addTargetByProject.get(projectName);
-            if (ObjectSets.getInstance().getSetById(setId) != null)
+            ObjectSets.SetDef set = objectSets.getSetById(setId);
+            if (set == null)
                 return;
-        }
-
-        ObjectSets.SetDef pick = pickDefaultSet(projectName);
-        if (pick != null)
-        {
-
-            addTargetByProject.put(projectName, pick.id);
+            if (setId.equals(addTargetByProject.get(set.projectName)))
+                return;
+            addTargetByProject.put(set.projectName, setId);
             save();
             notifyChanged();
         }
+    }
 
+    public void ensureForProject(String projectName)
+    {
+        synchronized (objectSets)
+        {
+            if (projectName == null || projectName.isBlank())
+                return;
+            if (addTargetByProject.containsKey(projectName))
+            {
+
+                String setId = addTargetByProject.get(projectName);
+                if (objectSets.getSetById(setId) != null)
+                    return;
+            }
+
+            ObjectSets.SetDef pick = pickDefaultSet(projectName);
+            if (pick != null)
+            {
+
+                addTargetByProject.put(projectName, pick.id);
+                save();
+                notifyChanged();
+            }
+        }
     }
 
     /**
      * Удалить add-target проект целиком (например, проект удалён из workspace).
      */
-    public synchronized void removeProjectMapping(String projectName)
+    public void removeProjectMapping(String projectName)
     {
-        if (projectName == null || projectName.isBlank())
-            return;
-        if (addTargetByProject.remove(projectName) == null)
-            return;
-        save();
-        notifyChanged();
+        synchronized (objectSets)
+        {
+            if (projectName == null || projectName.isBlank())
+                return;
+            if (addTargetByProject.remove(projectName) == null)
+                return;
+            save();
+            notifyChanged();
+        }
     }
 
-    public synchronized void onSetDeleted(String setId, String projectName)
+    public void onSetDeleted(String setId, String projectName)
     {
-        if (setId == null)
-            return;
-        boolean changed = false;
-        for (Map.Entry<String, String> e : addTargetByProject.entrySet())
+        synchronized (objectSets)
         {
-            if (setId.equals(e.getValue()))
+            if (setId == null)
+                return;
+            boolean changed = false;
+            for (Map.Entry<String, String> e : addTargetByProject.entrySet())
             {
-                changed = true;
-                break;
+                if (setId.equals(e.getValue()))
+                {
+                    changed = true;
+                    break;
+                }
             }
-        }
-        if (!changed)
-            return;
-        if (projectName == null || projectName.isBlank())
-        {
-            addTargetByProject.entrySet().removeIf(e -> setId.equals(e.getValue()));
-        }
-        else
-        {
-            ObjectSets.SetDef pick = pickDefaultSet(projectName);
-            if (pick != null)
-                addTargetByProject.put(projectName, pick.id);
+            if (!changed)
+                return;
+            if (projectName == null || projectName.isBlank())
+            {
+                addTargetByProject.entrySet().removeIf(e -> setId.equals(e.getValue()));
+            }
             else
-                addTargetByProject.remove(projectName);
+            {
+                ObjectSets.SetDef pick = pickDefaultSet(projectName);
+                if (pick != null)
+                    addTargetByProject.put(projectName, pick.id);
+                else
+                    addTargetByProject.remove(projectName);
+            }
+            save();
+            notifyChanged();
         }
-        save();
-        notifyChanged();
     }
 
     private ObjectSets.SetDef pickDefaultSet(String projectName)
     {
 
-        List<ObjectSets.SetDef> sets = ObjectSets.getInstance().getSetsForProject(projectName);
+        List<ObjectSets.SetDef> sets = objectSets.getSetsForProject(projectName);
         if (sets.isEmpty())
             return null;
         ObjectSets.SetDef fallback = null;
@@ -263,7 +296,7 @@ public final class ObjectSetsAddTargetState
             {
 
                 String setId = unescape(parts[i]);
-                if (!setId.isBlank() && ObjectSets.getInstance().getSetById(setId) != null)
+                if (!setId.isBlank() && objectSets.getSetById(setId) != null)
                 {
 
                     addTargetByProject.putIfAbsent(projectName, setId);

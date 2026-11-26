@@ -3,8 +3,10 @@ package tormozit;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.jface.preference.BooleanFieldEditor;
@@ -32,6 +34,7 @@ public final class NaparnikChatViewHook implements IStartup
     private static final String VIEW_ID = "com.e1c.edt.ai.ui.views.ChatView"; //$NON-NLS-1$
     private static final String EVENT = "comfort-reply-state"; //$NON-NLS-1$
     private static final String MARKER = "tormozit.naparnik.replyNotification"; //$NON-NLS-1$
+    private static final String CHROMIUM = "com.e1c.edt.ai.chromium.ChromiumBrowser"; //$NON-NLS-1$
     private static final Set<Shell> dialogs = Collections.newSetFromMap(new WeakHashMap<>());
     private static final java.util.Map<IViewPart, ChatPanel> panels = new IdentityHashMap<>();
 
@@ -99,6 +102,27 @@ public final class NaparnikChatViewHook implements IStartup
         })()
         """;
 
+    private static final String POLL_CHROMIUM = """
+        (function(){
+          if(!window.__comfortReplyEvents){
+            var events=window.__comfortReplyEvents=[];
+            document.addEventListener('comfort-reply-state',function(){
+              var root=document.documentElement;
+              events.push(['id','title','active','complete','waiting'].map(function(key){
+                return root.getAttribute('data-comfort-'+key);
+              }));
+            });
+          }
+          %s;
+          return [document.hasFocus(),window.__comfortReplyEvents.splice(0)];
+        })()
+        """.formatted(OBSERVE);
+
+    private static boolean isChromium(Object webView)
+    {
+        return webView != null && CHROMIUM.equals(webView.getClass().getName());
+    }
+
     @Override
     public void earlyStartup()
     {
@@ -161,11 +185,16 @@ public final class NaparnikChatViewHook implements IStartup
             this.view = view;
         }
 
-        boolean contains(Control control)
+        private Object browserHost()
         {
-            Object canvas = Global.getField(view, "canvas"); //$NON-NLS-1$
+            Object host = Global.getField(view, "browserHost"); //$NON-NLS-1$
+            return host != null ? host : Global.getField(view, "canvas"); //$NON-NLS-1$
+        }
+
+        private boolean contains(Control control, Object host)
+        {
             for (Control current = control; current != null && !current.isDisposed(); current = current.getParent())
-                if (current == canvas)
+                if (current == host)
                     return true;
             return false;
         }
@@ -176,6 +205,11 @@ public final class NaparnikChatViewHook implements IStartup
             Object webView = Global.getField(chat, "webView"); //$NON-NLS-1$
             if (webView == null || !pending.compareAndSet(false, true))
                 return;
+            if (isChromium(webView))
+            {
+                observeChromium(webView, display);
+                return;
+            }
             runOnFx(() ->
             {
                 try
@@ -207,14 +241,59 @@ public final class NaparnikChatViewHook implements IStartup
             });
         }
 
+        private void observeChromium(Object webView, Display display)
+        {
+            try
+            {
+                Object result = Global.invoke(webView, "evaluateAsync", POLL_CHROMIUM); //$NON-NLS-1$
+                if (result instanceof CompletableFuture<?> future)
+                {
+                    future.whenComplete((value, error) ->
+                    {
+                        try
+                        {
+                            if (value instanceof List<?> poll && poll.size() == 2
+                                && poll.get(1) instanceof List<?> events)
+                            {
+                                for (Object event : events)
+                                    if (event instanceof List<?> state && state.size() == 5)
+                                    {
+                                        onState(display, String.valueOf(state.get(0)), String.valueOf(state.get(1)),
+                                            flag(state.get(2)), flag(state.get(3)), flag(state.get(4)),
+                                            Boolean.TRUE.equals(poll.get(0)));
+                                    }
+                            }
+                        }
+                        finally
+                        {
+                            pending.set(false);
+                        }
+                    });
+                    return;
+                }
+            }
+            catch (RuntimeException error)
+            {
+            }
+            pending.set(false);
+        }
+
+        private static boolean flag(Object value)
+        {
+            return "true".equals(value); //$NON-NLS-1$
+        }
+
         private void onState(Document dom, Display display)
         {
             Element root = dom.getDocumentElement();
-            String id = root.getAttribute("data-comfort-id"); //$NON-NLS-1$
-            String title = root.getAttribute("data-comfort-title"); //$NON-NLS-1$
-            boolean active = "true".equals(root.getAttribute("data-comfort-active")); //$NON-NLS-1$ //$NON-NLS-2$
-            boolean complete = "true".equals(root.getAttribute("data-comfort-complete")); //$NON-NLS-1$ //$NON-NLS-2$
-            boolean waiting = "true".equals(root.getAttribute("data-comfort-waiting")); //$NON-NLS-1$ //$NON-NLS-2$
+            onState(display, root.getAttribute("data-comfort-id"), root.getAttribute("data-comfort-title"), //$NON-NLS-1$ //$NON-NLS-2$
+                flag(root.getAttribute("data-comfort-active")), flag(root.getAttribute("data-comfort-complete")), //$NON-NLS-1$ //$NON-NLS-2$
+                flag(root.getAttribute("data-comfort-waiting")), false); //$NON-NLS-1$
+        }
+
+        private void onState(Display display, String id, String title, boolean active, boolean complete,
+            boolean waiting, boolean documentFocus)
+        {
             if (display.isDisposed())
                 return;
             display.asyncExec(() ->
@@ -222,9 +301,10 @@ public final class NaparnikChatViewHook implements IStartup
                 // SWT может помнить активный контрол, когда EDT свёрнута или за другим приложением.
                 // Все виджеты и окно переднего плана проверяем непосредственно перед решением.
                 Control focus = display.getFocusControl();
-                boolean panelFocus = contains(focus);
-                Object canvas = Global.getField(view, "canvas"); //$NON-NLS-1$
-                Shell shell = canvas instanceof Control control && !control.isDisposed()
+                Object host = browserHost();
+                boolean panelFocus = contains(focus, host) || (documentFocus
+                    && host instanceof Control control && !control.isDisposed() && control.isVisible());
+                Shell shell = host instanceof Control control && !control.isDisposed()
                     ? control.getShell() : null;
                 boolean visible = shell != null && !shell.isDisposed() && shell.isVisible();
                 boolean minimized = shell != null && !shell.isDisposed() && shell.getMinimized();
@@ -242,7 +322,6 @@ public final class NaparnikChatViewHook implements IStartup
                         }
                         catch (RuntimeException | LinkageError error)
                         {
-                            Global.tempLog("naparnik-reply-focus", "foreground check failed: " + error); //$NON-NLS-1$ //$NON-NLS-2$
                         }
                     }
                     else
@@ -251,10 +330,6 @@ public final class NaparnikChatViewHook implements IStartup
                 boolean inFocus = active && panelFocus && foreground;
                 boolean enabled = ComfortSettings.getInstance().getPreferenceStore()
                     .getBoolean(ComfortSettings.PREF_NAPARNIK_REPLY_NOTIFICATION);
-                Global.tempLog("naparnik-reply-focus", "chat=" + id + " complete=" + complete //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " active=" + active + " panelFocus=" + panelFocus + " visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " minimized=" + minimized + " foreground=" + foreground + " inFocus=" + inFocus //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " enabled=" + enabled); //$NON-NLS-1$
                 if (!complete || inFocus)
                     return;
                 if (enabled)
@@ -278,11 +353,16 @@ public final class NaparnikChatViewHook implements IStartup
                 Object chat = Global.getField(current, "chatDialog"); //$NON-NLS-1$
                 Object webView = Global.getField(chat, "webView"); //$NON-NLS-1$
                 String route = "/chat-page/" + java.net.URLEncoder.encode(id, java.nio.charset.StandardCharsets.UTF_8); //$NON-NLS-1$
+                String script = "window.chatApi.router.load('" + route + "'); true"; //$NON-NLS-1$ //$NON-NLS-2$
+                if (isChromium(webView))
+                {
+                    Global.invoke(webView, "evaluateAsync", script); //$NON-NLS-1$
+                    return;
+                }
                 runOnFx(() ->
                 {
                     Object engine = Global.invoke(webView, "getEngine"); //$NON-NLS-1$
-                    Global.invoke(engine, "executeScript", //$NON-NLS-1$
-                        "window.chatApi.router.load('" + route + "')"); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.invoke(engine, "executeScript", script); //$NON-NLS-1$
                 });
             }
             catch (org.eclipse.ui.PartInitException | RuntimeException error)

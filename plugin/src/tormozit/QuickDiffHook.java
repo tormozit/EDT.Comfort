@@ -118,9 +118,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * исходный; фон текста не красится; в начале строки — ячейка цветом маркера
  * Quick Diff, удаление ослабляется), {@code canHandleMouseCursor}, кнопки в нижней
  * панели ({@link DefaultInformationControl} с {@link ToolBarManager}).
- * «Сравнить» открывает двухпанельное сравнение: в Git — как двойной клик
- * в панели «Индексирование Git» (рабочая копия с индексом), иначе локальная
- * история / референс Quick Diff. «Откатить» — {@link ILineDiffer#revertBlock}.
+ * «Сравнить» в Git открывает текущий текст и исходный текст Quick Diff.
+ * Запасные источники — индекс Git, локальная история и референс Quick Diff.
+ * «Откатить» — {@link ILineDiffer#revertBlock}.
  * В режиме «Отображать информацию о ревизии» штатный тултип ревизии
  * ({@code RevisionPainter}) не подменяется: обёртка срабатывает только на
  * изменённых строках, где ревизионной подсказки нет.
@@ -1600,17 +1600,42 @@ public final class QuickDiffHook implements IStartup
                     IWorkbenchPage page = editor != null && editor.getSite() != null
                         ? editor.getSite().getPage()
                         : PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
+                    String current = currentText();
+                    String reference = referenceText();
+                    Global.tempLog("quick-diff-compare", "click line=" + (line + 1) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " dirty=" + (editor != null && editor.isDirty()) //$NON-NLS-1$
+                        + " file=" + (file != null ? file.getFullPath() : null) //$NON-NLS-1$
+                        + " currentLength=" + (current != null ? current.length() : -1) //$NON-NLS-1$
+                        + " referenceLength=" + (reference != null ? reference.length() : -1) //$NON-NLS-1$
+                        + " referenceEqualsCurrent=" + (reference != null && reference.equals(current))); //$NON-NLS-1$
+                    if (reference != null && !reference.equals(current) && hasGitMapping(file)
+                        && openReferenceCompare(file, line, current, reference))
+                    {
+                        Global.tempLog("quick-diff-compare", "route=git-quick-diff-reference"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return;
+                    }
                     if (openGitCompare(file, page, line))
+                    {
+                        Global.tempLog("quick-diff-compare", "route=git-index requested"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
+                    }
                     if (openLocalHistoryCompare(file, page, line))
+                    {
+                        Global.tempLog("quick-diff-compare", "route=local-history"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
-                    if (openReferenceCompare(file, line))
+                    }
+                    if (openReferenceCompare(file, line, current, reference))
+                    {
+                        Global.tempLog("quick-diff-compare", "route=quick-diff-reference"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
+                    }
+                    Global.tempLog("quick-diff-compare", "route=none"); //$NON-NLS-1$ //$NON-NLS-2$
                     ToastNotification.show("Сравнить",
                         "Нет исходной версии для сравнения", 4000); //$NON-NLS-1$
                 }
                 catch (Exception e)
                 {
+                    Global.tempLogException("quick-diff-compare", "click failed", e); //$NON-NLS-1$ //$NON-NLS-2$
                     Global.log("QuickDiffHover.compare: " + e); //$NON-NLS-1$
                     ToastNotification.show("Сравнить",
                         "Не удалось открыть сравнение: " + e.getMessage(), 5000); //$NON-NLS-1$
@@ -1662,14 +1687,12 @@ public final class QuickDiffHook implements IStartup
             }
         }
 
-        private boolean openReferenceCompare(IFile file, int line)
+        private boolean openReferenceCompare(IFile file, int line, String current, String reference)
         {
-            String current = currentText();
-            String reference = referenceText();
             if (current == null || reference == null)
                 return false;
             String name = file != null ? file.getName() : "module.bsl"; //$NON-NLS-1$
-            CompareEditorCurrentLinesHook.setPendingLineReveal(line, true);
+            CompareEditorCurrentLinesHook.setPendingLineReveal(line, false);
             CompareUI.openCompareEditor(
                 new ReferenceCompareInput(current, reference, name));
             return true;
@@ -1801,6 +1824,7 @@ public final class QuickDiffHook implements IStartup
         }
         catch (Exception e)
         {
+            Global.tempLogException("quick-diff-compare", "git-index request failed", e); //$NON-NLS-1$ //$NON-NLS-2$
             Global.log("QuickDiffHover.openGitCompare: " + e); //$NON-NLS-1$
             return false;
         }
@@ -1853,7 +1877,7 @@ public final class QuickDiffHook implements IStartup
     }
 
     /**
-     * Запасное сравнение текущего документа с референсом Quick Diff
+     * Сравнение текущего документа с референсом Quick Diff
      * (last saved / содержимое {@code IQuickDiffReferenceProvider}).
      */
     private static final class ReferenceCompareInput extends CompareEditorInput

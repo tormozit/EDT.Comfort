@@ -52,6 +52,7 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
     private static final String KEY_FIND_HISTORY = "findhistory"; //$NON-NLS-1$
     /** Размер истории поиска — как {@code FindReplaceDialog.HISTORY_SIZE}. */
     private static final int FIND_HISTORY_SIZE = 15;
+    private static String lastSearchTarget;
 
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
@@ -371,12 +372,11 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
 
     private static String readFindBufferNeedle()
     {
+        if (lastSearchTarget != null)
+            return lastSearchTarget;
         IDialogSettings section = findReplaceSection();
         if (section == null)
             return null;
-        String selection = section.get(KEY_SELECTION);
-        if (selection != null && !selection.isEmpty())
-            return selection;
         String[] history = section.getArray(KEY_FIND_HISTORY);
         if (history != null)
         {
@@ -389,6 +389,22 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         return null;
     }
 
+    /** Вызывается из штатной команды до поиска и записи её настроек. */
+    static String resolveFindNextTarget(String stockTarget)
+    {
+        String sharedTarget = readFindBufferNeedle();
+        String target = sharedTarget != null ? sharedTarget : stockTarget;
+        rememberSearchTarget(target);
+        return target;
+    }
+
+    /** Общая цель на время сеанса. Диалог EDT отдельно сохраняет собственную историю. */
+    static void rememberSearchTarget(String searchString)
+    {
+        if (searchString != null && !searchString.isEmpty())
+            lastSearchTarget = searchString;
+    }
+
     /**
      * Делает строку быстрого поиска общей целью поиска: пишет её в настройки диалога
      * «Найти/Заменить» (оттуда её берут {@code FindNextAction} — F3/Shift+F3 — и сам диалог
@@ -396,6 +412,7 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
      */
     static void publishSearchTarget(String searchString)
     {
+        rememberSearchTarget(searchString);
         if (searchString == null || searchString.isEmpty())
             return;
 

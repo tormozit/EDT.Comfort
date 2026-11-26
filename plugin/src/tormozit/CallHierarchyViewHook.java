@@ -1,19 +1,25 @@
 package tormozit;
 
+import java.io.StringReader;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
@@ -21,6 +27,7 @@ import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IAction;
@@ -28,16 +35,25 @@ import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.Document;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextSelection;
+import org.eclipse.jface.text.Region;
+import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.IContentProvider;
+import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.IStructuredContentProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -73,12 +89,19 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.ide.IDE;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.TerminalRule;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
+import org.eclipse.xtext.parser.IParser;
 import org.eclipse.xtext.resource.IReferenceDescription;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.eclipse.xtext.ui.editor.findrefs.IReferenceFinder;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.IAcceptor;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
@@ -96,8 +119,13 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
 import com._1c.g5.v8.dt.bsl.ui.editor.findref.IFullTextSearchResultReferenceFinder;
+import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.search.core.SearchUtils;
+import com._1c.g5.v8.dt.search.core.refs.ITextSearchReferenceResult;
+import com._1c.g5.v8.dt.search.core.refs.TextSearchReferenceResult;
 
 /**
  * Доработки штатной панели «Иерархия вызовов»:
@@ -163,7 +191,8 @@ public final class CallHierarchyViewHook implements IStartup
     private static final int STOCK_COLUMN_SHIFT = 1;
     private static final int LINE_COLUMN = 0;
     private static final int INFO_COLUMN = 1;
-    private static final int BASE_COLUMN_COUNT = 2;
+    private static final int CATEGORY_COLUMN = 2;
+    private static final int BASE_COLUMN_COUNT = 3;
     private static final int DEFAULT_LINE_WIDTH = 60;
     private static final int DEFAULT_INFO_WIDTH = 300;
     private static final int DEFAULT_PARAM_WIDTH = 80;
@@ -208,6 +237,7 @@ public final class CallHierarchyViewHook implements IStartup
         private static boolean installed;
         private final IReferenceFinder delegate;
         private List<URI> globalTargets;
+        private final List<CommentReference> commentReferences = new ArrayList<>();
 
         private LocalMethodReferenceFinder(IReferenceFinder delegate)
         {
@@ -250,19 +280,46 @@ public final class CallHierarchyViewHook implements IStartup
         {
             // Пересчитываем при каждом запуске: метод мог получить/потерять Экспорт после первого поиска.
             globalTargets = new ArrayList<>();
+            commentReferences.clear();
+            Map<IFile, IXtextDocument> dirtyModules = dirtyModules();
             Map<URI, List<URI>> localTargets = new LinkedHashMap<>();
             for (URI targetUri : targetUris)
             {
                 if (monitor.isCanceled())
                     throw new OperationCanceledException();
                 boolean local = false;
+                URI moduleUri = targetUri.trimFragment();
                 try
                 {
-                    local = Boolean.TRUE.equals(localResourceAccess.readOnly(targetUri.trimFragment(), resourceSet ->
+                    IFile targetFile = ForeignModuleModel.fileOf(moduleUri);
+                    CommentTarget target = localResourceAccess.readOnly(moduleUri, resourceSet ->
                     {
-                        EObject target = resourceSet.getEObject(targetUri, true);
-                        return target instanceof Method method && !method.isExport();
-                    }));
+                        EObject object = resourceSet.getEObject(targetUri, true);
+                        if (!(object instanceof Method method))
+                            return null;
+                        String qualifier = externalQualifier(method);
+                        if (targetFile != null && !dirtyModules.containsKey(targetFile))
+                        {
+                            try
+                            {
+                                collectComments(method.eResource(), targetFile, targetUri, method.getName(),
+                                    qualifier, true, monitor);
+                            }
+                            catch (OperationCanceledException canceled)
+                            {
+                                throw canceled;
+                            }
+                            catch (RuntimeException ignored)
+                            {
+                            }
+                        }
+                        return new CommentTarget(method.getName(), !method.isExport(), qualifier);
+                    });
+                    if (target != null)
+                    {
+                        local = target.local();
+                        collectDirtyComments(dirtyModules, targetFile, targetUri, target, monitor);
+                    }
                 }
                 catch (OperationCanceledException canceled)
                 {
@@ -300,9 +357,204 @@ public final class CallHierarchyViewHook implements IStartup
         {
             Global.tempLog("callHierarchy-scope", "fullText globalTargets=" //$NON-NLS-1$ //$NON-NLS-2$
                 + (globalTargets == null ? "unclassified" : globalTargets.size())); //$NON-NLS-1$
-            if (delegate instanceof IFullTextSearchResultReferenceFinder fullTextFinder
-                && (globalTargets == null || !globalTargets.isEmpty()))
-                fullTextFinder.findReferences(globalTargets == null ? targetUris : globalTargets, acceptor, monitor);
+            try
+            {
+                if (delegate instanceof IFullTextSearchResultReferenceFinder fullTextFinder
+                    && (globalTargets == null || !globalTargets.isEmpty()))
+                {
+                    Map<Object, CommentReference> comments = new LinkedHashMap<>();
+                    for (CommentReference comment : commentReferences)
+                        comments.put(Session.occurrenceKey(comment), comment);
+                    fullTextFinder.findReferences(globalTargets == null ? targetUris : globalTargets, reference ->
+                    {
+                        CommentReference comment = comments.get(Session.occurrenceKey(reference));
+                        acceptor.accept(comment != null ? comment : reference);
+                    }, monitor);
+                }
+                addCommentReferences(acceptor, monitor);
+            }
+            finally
+            {
+                commentReferences.clear();
+            }
+        }
+
+        private record CommentTarget(String name, boolean local, String qualifier) {}
+
+        private static Map<IFile, IXtextDocument> dirtyModules()
+        {
+            Map<IFile, IXtextDocument> documents = new LinkedHashMap<>();
+            Display display = PlatformUI.getWorkbench().getDisplay();
+            if (display.isDisposed())
+                return documents;
+            display.syncExec(() ->
+            {
+                for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+                {
+                    for (IWorkbenchPage page : window.getPages())
+                    {
+                        for (IEditorPart part : page.getDirtyEditors())
+                        {
+                            XtextEditor editor = GetRef.getActiveBslEditor(part);
+                            if (editor == null)
+                                editor = BslHandlerUtil.extractXtextEditor(part);
+                            if (editor == null || editor.getEditorInput() == null || !editor.isDirty())
+                                continue;
+                            IFile file = editor.getEditorInput().getAdapter(IFile.class);
+                            if (BslModuleMethodResolver.isBslModule(file) && editor.getDocument() != null)
+                                documents.putIfAbsent(file, editor.getDocument());
+                        }
+                    }
+                }
+            });
+            return documents;
+        }
+
+        private void collectDirtyComments(Map<IFile, IXtextDocument> documents, IFile targetFile, URI targetUri,
+            CommentTarget target, IProgressMonitor monitor)
+        {
+            if (documents.isEmpty() || targetFile == null)
+                return;
+            IProject project = targetFile.getProject();
+            Set<IProject> projects = new HashSet<>();
+            projects.add(project);
+            IV8ProjectManager manager = Global.getOsgiService(IV8ProjectManager.class);
+            if (target.qualifier() != null && manager != null)
+                projects.addAll(SearchUtils.getLinkedProjects(project, manager));
+            for (var entry : documents.entrySet())
+            {
+                IFile file = entry.getKey();
+                boolean ownModule = targetFile.equals(file);
+                if (!ownModule && (target.qualifier() == null || !projects.contains(file.getProject())))
+                    continue;
+                IXtextDocument document = entry.getValue();
+                try
+                {
+                    document.readOnly(resource ->
+                    {
+                        collectComments(resource, file, targetUri, target.name(), target.qualifier(), ownModule, monitor);
+                        return null;
+                    });
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    throw canceled;
+                }
+                catch (RuntimeException ignored)
+                {
+                }
+            }
+        }
+
+        /** Та же квалификация комментариев, что у BslTextSearchSupplier.filterLinkToMethodInComment. */
+        private static String externalQualifier(Method method)
+        {
+            if (!method.isExport() || method.eResource() == null)
+                return null;
+            Module module = EcoreUtil2.getContainerOfType(method, Module.class);
+            if (module == null)
+                return null;
+            URI uri = method.eResource().getURI();
+            ModuleType type = module.getModuleType();
+            try
+            {
+                IResourceServiceProvider services = IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
+                IQualifiedNameFilePathConverter paths = services != null ? services.get(IQualifiedNameFilePathConverter.class) : null;
+                if (paths != null)
+                    type = com._1c.g5.v8.dt.bsl.util.BslUtil.computeModuleType(module, paths);
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+            return (type == ModuleType.COMMON_MODULE || type == ModuleType.MANAGER_MODULE) && uri.segmentCount() > 1
+                ? uri.segment(uri.segmentCount() - 2) : null;
+        }
+
+        private void collectComments(Resource resource, IFile file, URI target, String name, String qualifier,
+            boolean ownModule, IProgressMonitor monitor)
+        {
+            if (!(resource instanceof XtextResource xtext) || xtext.getParseResult() == null
+                || name == null || name.isEmpty())
+                return;
+            ICompositeNode root = xtext.getParseResult().getRootNode();
+            IParser parser = xtext.getParser();
+            Pattern names = Pattern.compile("\\b" + Pattern.quote(name) + "\\b", //$NON-NLS-1$ //$NON-NLS-2$
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.UNICODE_CHARACTER_CLASS);
+            IDocument snapshot = null;
+            if (parser != null)
+            {
+                for (var leaf : root.getLeafNodes())
+                {
+                    if (monitor.isCanceled())
+                        throw new OperationCanceledException();
+                    if (!(leaf.getGrammarElement() instanceof TerminalRule rule) || !"SL_COMMENT".equals(rule.getName())) //$NON-NLS-1$
+                        continue;
+                    Matcher match = names.matcher(leaf.getText());
+                    while (match.find())
+                    {
+                        if (snapshot == null)
+                            snapshot = new Document(root.getText());
+                        TextSelection selection = new TextSelection(leaf.getOffset() + match.start(), name.length());
+                        try
+                        {
+                            TextOccurrence occurrence = TextOccurrence.read(file, snapshot, selection, () -> parser);
+                            EObject owner = NodeModelUtils.findActualSemanticObjectFor(leaf);
+                            String receiver = occurrence.qualifier();
+                            boolean matchesTarget = ownModule && "".equals(receiver) //$NON-NLS-1$
+                                || qualifier != null && qualifier.equalsIgnoreCase(receiver);
+                            if (matchesTarget && owner != null)
+                            {
+                                Method caller = EcoreUtil2.getContainerOfType(owner, Method.class);
+                                URI source = caller != null ? EcoreUtil.getURI(caller) : EcoreUtil.getURI(owner);
+                                // В дереве EDT совпадающие URI вызывающего и цели обозначают объявление.
+                                if (source.equals(target))
+                                    source = EcoreUtil.getURI(owner);
+                                commentReferences.add(new CommentReference(source, target, resource.getURI(), selection,
+                                    occurrence, Session.extractModuleMethod(owner)));
+                            }
+                        }
+                        catch (BadLocationException ignored)
+                        {
+                        }
+                    }
+                }
+            }
+        }
+
+        private void addCommentReferences(IAcceptor<IReferenceDescription> acceptor, IProgressMonitor monitor)
+        {
+            if (commentReferences.isEmpty() || monitor.isCanceled())
+                return;
+            Set<Object> accepted = new HashSet<>();
+            for (IReferenceDescription existing : Session.copyDescriptions(Global.invoke(acceptor, "getMatchingReferences"))) //$NON-NLS-1$
+                accepted.add(Session.occurrenceKey(existing));
+            // CallHierarchyQuery передаёт сюда CallHierarchyResult. Его Set используется только для
+            // add в accept и clear при reset. Разные текстовые места могут иметь один и тот же URI.
+            Object rawSources = Global.getField(acceptor, "sourcesUri"); //$NON-NLS-1$
+            for (CommentReference reference : commentReferences)
+            {
+                if (monitor.isCanceled())
+                    throw new OperationCanceledException();
+                if (!accepted.add(Session.occurrenceKey(reference)))
+                    continue;
+                if (rawSources instanceof Set<?> sources)
+                    sources.remove(reference.getSourceEObjectUri());
+                acceptor.accept(reference);
+            }
+        }
+    }
+
+    private static final class CommentReference extends TextSearchReferenceResult
+    {
+        final TextOccurrence occurrence;
+        final String[] caller;
+
+        CommentReference(URI source, URI target, URI moduleUri, ITextSelection selection, TextOccurrence occurrence,
+            String[] caller)
+        {
+            super(source, target, moduleUri, null, -1, selection);
+            this.occurrence = occurrence;
+            this.caller = caller;
         }
     }
 
@@ -377,12 +629,16 @@ public final class CallHierarchyViewHook implements IStartup
             IBaseLabelProvider current = locationViewer.getLabelProvider();
             if (current instanceof ITableLabelProvider tableLabels)
                 locationViewer.setLabelProvider(new LocationLabelProvider(tableLabels, session));
+            TableColumn category = BslOccurrenceContextResolver.addCategoryColumn(locationViewer, null,
+                session::categoryOf).getColumn();
             session.interaction = installTableInteraction(locationViewer);
+            BslOccurrenceContextResolver.applyColumnHeaderTooltips(session.interaction, null, null, category);
             session.installKeepInput();
             session.installFollowTreeAction();
             session.installTreeSort();
             session.installTreeServerPrefix();
-            session.installOpenActualArg();
+            session.installOpenOverride(locationViewer);
+            session.installOpenOverride(treeViewer);
             session.indexFreshness = installIndexAnalysis(view);
 
             // Штатный слушатель EDT на каждый клик в дереве пересобирает правую таблицу
@@ -488,6 +744,7 @@ public final class CallHierarchyViewHook implements IStartup
             int infoWidth = FormTableColumnState.readWidth(settings, KEY_COL_INFO_WIDTH, DEFAULT_INFO_WIDTH, 1);
             columnLayout.setColumnData(columns[LINE_COLUMN], new ColumnPixelData(lineWidth, true, true));
             columnLayout.setColumnData(columns[INFO_COLUMN], new ColumnPixelData(infoWidth, true, true));
+            FormTableInteraction.applyIconColumn(columns[CATEGORY_COLUMN], columnLayout);
             for (int i = BASE_COLUMN_COUNT; i < columns.length; i++)
                 columnLayout.setColumnData(columns[i], new ColumnPixelData(DEFAULT_PARAM_WIDTH, true, true));
         }
@@ -729,6 +986,8 @@ public final class CallHierarchyViewHook implements IStartup
         private final TreeViewer treeViewer;
         private final TableViewer locationViewer;
         private final Map<URI, String[]> argsBySource = new LinkedHashMap<>();
+        private final Map<IReferenceDescription, TextOccurrence> textOccurrences = new IdentityHashMap<>();
+        private final Map<IFile, IDocument> searchDocuments = new LinkedHashMap<>();
         private FormTableInteraction interaction;
         private IndexFreshness indexFreshness;
         private Object indexQuery;
@@ -891,6 +1150,8 @@ public final class CallHierarchyViewHook implements IStartup
             try
             {
                 resetGeneration++;
+                textOccurrences.clear();
+                searchDocuments.clear();
                 forceEmpty = true;
                 keptInput = Collections.emptyList();
                 lastFillAllowEmpty = false;
@@ -918,6 +1179,8 @@ public final class CallHierarchyViewHook implements IStartup
             detachResult();
             hookedResult = result;
             argsBySource.clear();
+            textOccurrences.clear();
+            searchDocuments.clear();
             lastParamMethodUri = null;
             treeSortByNode.clear();
             treePrefixByNode.clear();
@@ -1159,6 +1422,9 @@ public final class CallHierarchyViewHook implements IStartup
          */
         String serverKindOf(IReferenceDescription description)
         {
+            if (textSelection(description) != null
+                && !BslOccurrenceContextResolver.KIND_METHOD.equals(categoryOf(description)))
+                return ""; //$NON-NLS-1$
             URI uri = sourceUri(description);
             if (uri == null)
                 return ""; //$NON-NLS-1$
@@ -1299,37 +1565,64 @@ public final class CallHierarchyViewHook implements IStartup
             return !childModule.isEmpty() && compareCallerText(childModule, parentModule) == 0;
         }
 
-        void installOpenActualArg()
+        void installOpenOverride(StructuredViewer viewer)
         {
-            locationViewer.addOpenListener(event ->
+            IOpenListener stock = stockOpenListener(viewer);
+            if (stock != null)
+                viewer.removeOpenListener(stock);
+            viewer.addOpenListener(event ->
             {
-                Display display = locationViewer.getTable() != null
-                    ? locationViewer.getTable().getDisplay()
-                    : null;
-                if (display == null || display.isDisposed())
+                if (!(event.getSelection() instanceof IStructuredSelection selection))
                     return;
-                display.asyncExec(this::openActualArgFromActiveCell);
+                Object first = selection.getFirstElement();
+                IReferenceDescription description = viewer == locationViewer
+                    ? asDescription(first) : firstDescription(descriptionsOf(first));
+                int index = viewer == locationViewer ? activeParamIndex() : -1;
+                TextOccurrence occurrence = selection.size() == 1 && textSelection(description) != null
+                    ? textOccurrence(description) : null;
+                if (occurrence != null && BslOccurrenceContextResolver.KIND_COMMENT.equals(occurrence.category()))
+                {
+                    openTextOccurrence(occurrence, index);
+                    return;
+                }
+                if (stock != null)
+                    stock.open(event);
+                if (index >= 0 && !viewer.getControl().isDisposed())
+                    viewer.getControl().getDisplay().asyncExec(() -> openActualArg(description, index));
             });
         }
 
-        void openActualArgFromActiveCell()
+        static IOpenListener stockOpenListener(StructuredViewer viewer)
+        {
+            if (Global.getField(viewer, "openListeners") instanceof ListenerList<?> listeners) //$NON-NLS-1$
+            {
+                for (Object listener : listeners.getListeners())
+                {
+                    if (listener instanceof IOpenListener open
+                        && "org.eclipse.ui.OpenAndLinkWithEditorHelper$InternalListener".equals(listener.getClass().getName())) //$NON-NLS-1$
+                        return open;
+                }
+            }
+            return null;
+        }
+
+        int activeParamIndex()
         {
             Table table = locationViewer.getTable();
             if (table == null || table.isDisposed() || interaction == null)
-                return;
+                return -1;
             int column = interaction.activeColumn();
             if (column < 0 || column >= table.getColumnCount())
+                return -1;
+            Object index = table.getColumn(column).getData(PARAM_INDEX_KEY);
+            return index instanceof Integer paramIndex ? paramIndex.intValue() : -1;
+        }
+
+        void openActualArg(IReferenceDescription description, int index)
+        {
+            if (locationViewer.getTable().isDisposed())
                 return;
-            TableColumn widget = table.getColumn(column);
-            if (widget == null || widget.isDisposed())
-                return;
-            Object rawIndex = widget.getData(PARAM_INDEX_KEY);
-            if (!(rawIndex instanceof Integer paramIndex))
-                return;
-            IStructuredSelection selection = locationViewer.getStructuredSelection();
-            IReferenceDescription description = asDescription(
-                selection != null ? selection.getFirstElement() : null);
-            Expression arg = actualArg(description, paramIndex.intValue());
+            Expression arg = actualArg(description, index);
             if (arg == null)
                 return;
             try
@@ -1343,6 +1636,30 @@ public final class CallHierarchyViewHook implements IStartup
                     xtext.selectAndReveal(node.getOffset(), node.getLength());
             }
             catch (RuntimeException ignored)
+            {
+            }
+        }
+
+        void openTextOccurrence(TextOccurrence occurrence, int index)
+        {
+            try
+            {
+                IEditorPart editor = IDE.openEditor(view.getSite().getPage(), occurrence.file(), true);
+                XtextEditor xtext = BslHandlerUtil.extractXtextEditor(editor);
+                IDocument document = xtext != null ? xtext.getDocument() : null;
+                IRegion region = occurrence.match();
+                if (document == null || !occurrence.matchesLine(document))
+                    return;
+                if (index >= 0 && index < occurrence.arguments().size())
+                {
+                    IRegion argument = occurrence.arguments().get(index);
+                    if (argument != null && document.get(argument.getOffset(), argument.getLength()).equals(
+                        occurrence.source().get(argument.getOffset(), argument.getLength())))
+                        region = argument;
+                }
+                xtext.selectAndReveal(region.getOffset(), region.getLength());
+            }
+            catch (BadLocationException | PartInitException | RuntimeException ignored)
             {
             }
         }
@@ -1469,7 +1786,7 @@ public final class CallHierarchyViewHook implements IStartup
                 FormTableInteraction.revealSelection(table);
                 return;
             }
-            IReferenceDescription match = findBySource(shown, sourceUri(firstDescription(mine)));
+            IReferenceDescription match = findOccurrence(shown, firstDescription(mine));
             if (match == null)
                 match = firstDescription(shown);
             if (match != null)
@@ -1486,20 +1803,13 @@ public final class CallHierarchyViewHook implements IStartup
         {
             if (shown == null || shown.isEmpty() || mine == null || mine.isEmpty())
                 return Collections.emptyList();
-            Set<URI> sources = new java.util.HashSet<>();
+            Set<Object> sources = new HashSet<>();
             for (IReferenceDescription item : mine)
-            {
-                URI uri = sourceUri(item);
-                if (uri != null)
-                    sources.add(uri);
-            }
-            if (sources.isEmpty())
-                return Collections.emptyList();
+                sources.add(occurrenceKey(item));
             List<IReferenceDescription> matches = new ArrayList<>();
             for (IReferenceDescription item : shown)
             {
-                URI uri = sourceUri(item);
-                if (uri != null && sources.contains(uri))
+                if (sources.contains(occurrenceKey(item)))
                     matches.add(item);
             }
             return matches;
@@ -1960,9 +2270,8 @@ public final class CallHierarchyViewHook implements IStartup
             {
                 URI source = sourceUri(item);
                 URI target = item.getTargetEObjectUri();
-                if (source != null && source.equals(target))
-                    continue;
-                if (methodUri != null && methodUri.equals(source))
+                if (textSelection(item) == null
+                    && (source != null && source.equals(target) || methodUri != null && methodUri.equals(source)))
                     continue;
                 filtered.add(item);
             }
@@ -2013,12 +2322,8 @@ public final class CallHierarchyViewHook implements IStartup
                 return false;
             for (int i = 0; i < next.size(); i++)
             {
-                Object item = current.get(i);
-                URI currentUri = item instanceof IReferenceDescription description
-                    ? sourceUri(description)
-                    : null;
-                URI nextUri = sourceUri(next.get(i));
-                if (currentUri == null || !currentUri.equals(nextUri))
+                IReferenceDescription item = asDescription(current.get(i));
+                if (item == null || !Objects.equals(occurrenceKey(item), occurrenceKey(next.get(i))))
                     return false;
             }
             return true;
@@ -2036,13 +2341,14 @@ public final class CallHierarchyViewHook implements IStartup
             return list.get(0);
         }
 
-        static IReferenceDescription findBySource(List<IReferenceDescription> list, URI uri)
+        static IReferenceDescription findOccurrence(List<IReferenceDescription> list, IReferenceDescription expected)
         {
-            if (list == null || uri == null)
+            if (list == null || expected == null)
                 return null;
+            Object key = occurrenceKey(expected);
             for (IReferenceDescription item : list)
             {
-                if (uri.equals(sourceUri(item)))
+                if (Objects.equals(key, occurrenceKey(item)))
                     return item;
             }
             return null;
@@ -2267,6 +2573,12 @@ public final class CallHierarchyViewHook implements IStartup
             IReferenceDescription description = asDescription(element);
             if (description == null)
                 return null;
+            if (textSelection(description) != null)
+            {
+                TextOccurrence occurrence = textOccurrence(description);
+                if (occurrence != null && !BslOccurrenceContextResolver.KIND_METHOD.equals(occurrence.category()))
+                    return occurrence.argumentTexts();
+            }
             URI uri = sourceUri(description);
             if (uri == null)
                 return null;
@@ -2277,6 +2589,90 @@ public final class CallHierarchyViewHook implements IStartup
             argsBySource.put(uri, args);
             return args;
         }
+
+        String categoryOf(Object element)
+        {
+            IReferenceDescription description = asDescription(element);
+            if (description == null)
+                return ""; //$NON-NLS-1$
+            if (textSelection(description) == null)
+                return BslOccurrenceContextResolver.KIND_METHOD;
+            TextOccurrence occurrence = textOccurrence(description);
+            return occurrence != null ? occurrence.category() : ""; //$NON-NLS-1$
+        }
+
+        TextOccurrence textOccurrence(IReferenceDescription description)
+        {
+            if (unwrapDescription(description) instanceof CommentReference comment)
+                return comment.occurrence;
+            if (!textOccurrences.containsKey(description))
+                textOccurrences.put(description, readTextOccurrence(description));
+            return textOccurrences.get(description);
+        }
+
+        TextOccurrence readTextOccurrence(IReferenceDescription description)
+        {
+            ITextSelection selection = textSelection(description);
+            URI uri = sourceUri(description);
+            if (selection == null || uri == null)
+                return null;
+            try
+            {
+                IFile file = ForeignModuleModel.fileOf(uri.trimFragment());
+                if (BslModuleMethodResolver.isBslModule(file))
+                {
+                    IDocument document = searchDocuments.computeIfAbsent(file, key ->
+                    {
+                        String text = BslModuleMethodResolver.resourceText(key);
+                        return text != null ? new Document(text) : null;
+                    });
+                    if (document != null)
+                    {
+                        return TextOccurrence.read(file, document, selection, () ->
+                        {
+                            IResourceServiceProvider services = IResourceServiceProvider.Registry.INSTANCE
+                                .getResourceServiceProvider(uri.trimFragment());
+                            return services != null ? services.get(IParser.class) : null;
+                        });
+                    }
+                }
+            }
+            catch (BadLocationException | RuntimeException ignored)
+            {
+            }
+            return null;
+        }
+
+        static IReferenceDescription unwrapDescription(IReferenceDescription description)
+        {
+            // handleFocusOn EDT оборачивает результат в ColumnInfoReferenceDescription.
+            if (description != null && description.getClass().getSimpleName().equals("ColumnInfoReferenceDescription")) //$NON-NLS-1$
+                return asDescription(Global.getField(description, "delegate")); //$NON-NLS-1$
+            return description;
+        }
+
+        static ITextSelection textSelection(IReferenceDescription description)
+        {
+            if (unwrapDescription(description) instanceof ITextSearchReferenceResult result)
+            {
+                ITextSelection selection = result.getSelection();
+                if (selection != null && selection.getOffset() >= 0 && selection.getLength() > 0)
+                    return selection;
+            }
+            return null;
+        }
+
+        static Object occurrenceKey(IReferenceDescription description)
+        {
+            URI source = sourceUri(description);
+            ITextSelection selection = textSelection(description);
+            if (source == null || selection == null)
+                return source;
+            return new TextReferenceKey(source.trimFragment(), description.getTargetEObjectUri(),
+                selection.getOffset(), selection.getLength());
+        }
+
+        private record TextReferenceKey(URI module, URI target, int offset, int length) {}
 
         String callerModuleOf(Object element)
         {
@@ -2291,6 +2687,8 @@ public final class CallHierarchyViewHook implements IStartup
         String[] callerFields(Object element)
         {
             IReferenceDescription description = asDescription(element);
+            if (unwrapDescription(description) instanceof CommentReference comment)
+                return comment.caller;
             URI uri = sourceUri(description);
             if (uri == null)
                 return new String[] { "", "" }; //$NON-NLS-1$ //$NON-NLS-2$
@@ -2307,7 +2705,7 @@ public final class CallHierarchyViewHook implements IStartup
             return extractModuleMethod(resolveEObject(sourceUri(description)));
         }
 
-        String[] extractModuleMethod(EObject object)
+        static String[] extractModuleMethod(EObject object)
         {
             if (object == null)
                 return new String[] { "", "" }; //$NON-NLS-1$ //$NON-NLS-2$
@@ -2429,6 +2827,201 @@ public final class CallHierarchyViewHook implements IStartup
         }
     }
 
+    private static final Pattern COMMENT_CALL_NAME = Pattern.compile(
+        "[\\p{L}_][\\p{L}\\p{N}_]*(?:\\.[\\p{L}_][\\p{L}\\p{N}_]*)*"); //$NON-NLS-1$
+
+    record CommentCall(IRegion nameRegion, String name) {}
+
+    static CommentCall commentCallAt(IDocument document, IParser parser, int offset, int commentStart, String comment)
+        throws BadLocationException
+    {
+        int position = offset - commentStart;
+        if (position < 2 || position > comment.length() || parser == null)
+            return null;
+        int start = position;
+        while (start > 2 && Character.isUnicodeIdentifierPart(comment.charAt(start - 1)))
+            start--;
+        int end = position;
+        while (end < comment.length() && Character.isUnicodeIdentifierPart(comment.charAt(end)))
+            end++;
+        int afterName = end;
+        while (afterName < comment.length() && Character.isWhitespace(comment.charAt(afterName)))
+            afterName++;
+        if (start == end || afterName < comment.length() && comment.charAt(afterName) != '('
+            || !comment.equals(document.get(commentStart, comment.length())))
+            return null;
+        TextSelection selection = new TextSelection(commentStart + start, end - start);
+        TextOccurrence occurrence = TextOccurrence.read(null, document, selection, () -> parser);
+        if (occurrence.invocationName() == null)
+            return null;
+        String name = occurrence.invocationName().replaceAll("\\s+", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        return COMMENT_CALL_NAME.matcher(name).matches() ? new CommentCall(occurrence.match(), name) : null;
+    }
+
+    private record TextOccurrence(IFile file, IDocument source, IRegion match, int line,
+        String text, String category, String qualifier, String invocationName, List<IRegion> arguments, String[] argumentTexts)
+    {
+        boolean matchesLine(IDocument document) throws BadLocationException
+        {
+            IRegion expected = source.getLineInformation(line - 1);
+            IRegion actual = document.getLineInformationOfOffset(match.getOffset());
+            return expected.getOffset() == actual.getOffset() && expected.getLength() == actual.getLength()
+                && source.get(expected.getOffset(), expected.getLength())
+                .equals(document.get(actual.getOffset(), actual.getLength()));
+        }
+
+        static TextOccurrence read(IFile file, IDocument document, ITextSelection selection,
+            Supplier<IParser> commentParser)
+            throws BadLocationException
+        {
+            int offset = selection.getOffset();
+            int length = selection.getLength();
+            if (length > document.getLength() - offset)
+                throw new BadLocationException();
+            int line = document.getLineOfOffset(offset);
+            IRegion lineRegion = document.getLineInformation(line);
+            String lineText = document.get(lineRegion.getOffset(), lineRegion.getLength());
+            int marker = commentOffset(lineText);
+            String category = marker >= 0 && offset >= lineRegion.getOffset() + marker + 2
+                ? BslOccurrenceContextResolver.KIND_COMMENT
+                : BslOccurrenceContextResolver.syntaxKind(document.get(), offset, length);
+            IRegion match = new Region(offset, length);
+            TextOccurrence occurrence = new TextOccurrence(file, document, match, line + 1, lineText.strip(),
+                category, null, null, Collections.emptyList(), new String[0]);
+            if (BslOccurrenceContextResolver.KIND_COMMENT.equals(category) && marker >= 0)
+            {
+                try
+                {
+                    IParser parser = commentParser.get();
+                    if (parser != null)
+                        return occurrence.readCommentCall(parser, line, marker);
+                }
+                catch (RuntimeException ignored)
+                {
+                }
+            }
+            return occurrence;
+        }
+
+        TextOccurrence readCommentCall(IParser parser, int matchLine, int marker) throws BadLocationException
+        {
+            int end = matchLine;
+            while (end + 1 < source.getNumberOfLines() && standaloneComment(source, end + 1))
+                end++;
+            TextOccurrence call = parseCommentLines(parser, matchLine, matchLine, marker, end);
+            if (call != null)
+                return call;
+            if (standaloneComment(source, matchLine))
+            {
+                int start = matchLine;
+                while (start > 0 && standaloneComment(source, start - 1))
+                    start--;
+                if (start < matchLine)
+                    call = parseCommentLines(parser, start, matchLine, marker, end);
+            }
+            return call != null ? call : this;
+        }
+
+        TextOccurrence parseCommentLines(IParser parser, int start, int matchLine, int marker, int end)
+            throws BadLocationException
+        {
+            int base = source.getLineOffset(start);
+            IRegion last = source.getLineInformation(end);
+            StringBuilder code = new StringBuilder(source.get(base, last.getOffset() + last.getLength() - base));
+            for (int i = start; i <= end; i++)
+            {
+                int lineOffset = source.getLineOffset(i) - base;
+                int slash = i == matchLine ? lineOffset + marker : code.indexOf("//", lineOffset); //$NON-NLS-1$
+                // Пробелы вместо префикса сохраняют координаты аргументов в документе.
+                code.replace(lineOffset, slash + 2, " ".repeat(slash + 2 - lineOffset)); //$NON-NLS-1$
+            }
+            return parseCall(parser, code.toString(), base);
+        }
+
+        TextOccurrence parseCall(IParser parser, String code, int base)
+        {
+            EObject root = parser.parse(new StringReader(code)).getRootASTElement();
+            if (root == null)
+                return null;
+            int offset = match.getOffset() - base;
+            int end = offset + match.getLength();
+            for (var iterator = root.eAllContents(); iterator.hasNext();)
+            {
+                if (!(iterator.next() instanceof Invocation invocation))
+                    continue;
+                ICompositeNode access = NodeModelUtils.findActualNodeFor(invocation.getMethodAccess());
+                if (access == null || access.getOffset() > offset || !methodNameEndsAt(access, end))
+                    continue;
+                ICompositeNode call = NodeModelUtils.findActualNodeFor(invocation);
+                if (call == null || call.getLength() == 0 || code.charAt(call.getEndOffset() - 1) != ')')
+                    continue;
+                List<IRegion> arguments = new ArrayList<>(invocation.getParams().size());
+                String[] texts = new String[invocation.getParams().size()];
+                for (int i = 0; i < texts.length; i++)
+                {
+                    Expression argument = invocation.getParams().get(i);
+                    ICompositeNode node = argument != null ? NodeModelUtils.findActualNodeFor(argument) : null;
+                    arguments.add(node != null && node.getLength() > 0
+                        ? new Region(base + node.getOffset(), node.getLength()) : null);
+                    texts[i] = node != null ? NodeModelUtils.getTokenText(node) : ""; //$NON-NLS-1$
+                }
+                return new TextOccurrence(file, source, match, line,
+                    NodeModelUtils.getTokenText(call), category, qualifier(code, access.getOffset(), offset),
+                    code.substring(access.getOffset(), end), arguments, texts);
+            }
+            return null;
+        }
+
+        static String qualifier(String code, int accessStart, int nameStart)
+        {
+            if (accessStart == nameStart)
+                return ""; //$NON-NLS-1$
+            String prefix = code.substring(accessStart, nameStart).stripTrailing();
+            if (!prefix.endsWith(".")) //$NON-NLS-1$
+                return null;
+            String receiver = prefix.substring(0, prefix.length() - 1).stripTrailing();
+            int start = receiver.length();
+            while (start > 0 && Character.isUnicodeIdentifierPart(receiver.charAt(start - 1)))
+                start--;
+            return start < receiver.length() ? receiver.substring(start) : null;
+        }
+
+        static boolean methodNameEndsAt(ICompositeNode access, int end)
+        {
+            int previousEnd = -1;
+            for (var leaf : access.getLeafNodes())
+            {
+                if (leaf.isHidden())
+                    continue;
+                if (leaf.getOffset() >= end)
+                    return previousEnd == end && "(".equals(leaf.getText()) //$NON-NLS-1$
+                        && leaf.getEndOffset() == access.getEndOffset();
+                previousEnd = leaf.getEndOffset();
+            }
+            return false;
+        }
+
+        static boolean standaloneComment(IDocument document, int line) throws BadLocationException
+        {
+            IRegion region = document.getLineInformation(line);
+            return document.get(region.getOffset(), region.getLength()).stripLeading().startsWith("//"); //$NON-NLS-1$
+        }
+
+        static int commentOffset(String line)
+        {
+            boolean inString = line.stripLeading().startsWith("|"); //$NON-NLS-1$
+            for (int i = 0; i + 1 < line.length(); i++)
+            {
+                char ch = line.charAt(i);
+                if (ch == '"')
+                    inString = !inString;
+                else if (!inString && ch == '/' && line.charAt(i + 1) == '/')
+                    return i;
+            }
+            return -1;
+        }
+    }
+
     private static final class LocationLabelProvider extends LabelProvider implements ITableLabelProvider
     {
         private final ITableLabelProvider delegate;
@@ -2449,8 +3042,19 @@ public final class CallHierarchyViewHook implements IStartup
         @Override
         public String getColumnText(Object element, int columnIndex)
         {
-            if (columnIndex < BASE_COLUMN_COUNT)
+            if (columnIndex == CATEGORY_COLUMN)
+                return session.categoryOf(element);
+            if (columnIndex < CATEGORY_COLUMN)
+            {
+                IReferenceDescription description = Session.asDescription(element);
+                if (Session.textSelection(description) != null)
+                {
+                    TextOccurrence occurrence = session.textOccurrence(description);
+                    if (occurrence != null && BslOccurrenceContextResolver.KIND_COMMENT.equals(occurrence.category()))
+                        return columnIndex == LINE_COLUMN ? Integer.toString(occurrence.line()) : occurrence.text();
+                }
                 return delegate.getColumnText(element, columnIndex + STOCK_COLUMN_SHIFT);
+            }
             Object kind = session.callerColumnKind(columnIndex);
             if (CALLER_KIND_MODULE.equals(kind))
                 return session.callerModuleOf(element);

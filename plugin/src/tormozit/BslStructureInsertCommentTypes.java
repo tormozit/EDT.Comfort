@@ -89,6 +89,7 @@ import com._1c.g5.v8.dt.bsl.typesystem.ValueTreeDynamicContextDefProvider;
 import com._1c.g5.v8.dt.bsl.typesystem.util.TypeSystemUtil;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.mcore.ContextDef;
 import com._1c.g5.v8.dt.mcore.DerivedProperty;
 import com._1c.g5.v8.dt.mcore.Environmental;
@@ -1555,17 +1556,6 @@ public final class BslStructureInsertCommentTypes
         return comment == null ? null : comment.getReturnSection();
     }
 
-    /**
-     * Есть ли у присваивания боковой комментарий с типом возврата. Комментарий разбирается тем же
-     * путём, которым EDT получает типы комментария ({@code getCommentAfterObject} по узлу блока +
-     * {@code parseTemplateComment}), поэтому тип, записанный EDT в состояние переменной, и есть
-     * «голый» тип этого комментария.
-     */
-    private static boolean hasAssignmentCommentType(Expression value, Module module)
-    {
-        return !assignmentCommentTypeNames(value, module).isEmpty();
-    }
-
     /** Имена типов из секции возврата бокового комментария присваивания. */
     private static List<String> assignmentCommentTypeNames(Expression value, Module module)
     {
@@ -2888,6 +2878,10 @@ public final class BslStructureInsertCommentTypes
         String name = McoreUtil.getTypeName(item);
         // У коллекций метаданных одно имя типа, а путь определяет, какие имена добавит EDT.
         if (item instanceof PropertyType propertyType && !propertyType.getPropertyName().isEmpty())
+            return new IdentityKey(item);
+        // EDT хранит имена элементов и команд в контексте типа, вложенного в свойство формы.
+        // Контекст ссылается на другие контексты, поэтому собственных свойств у него может не быть.
+        if (item instanceof Type && EcoreUtil2.getContainerOfType(item, Form.class) != null)
             return new IdentityKey(item);
         if (name == null || item instanceof Type type && type.getContextDef() != null
             && type.getContextDef().getProperties().stream().anyMatch(DerivedProperty.class::isInstance))
@@ -4669,12 +4663,18 @@ public final class BslStructureInsertCommentTypes
                     Module module = EcoreUtil2.getContainerOfType(method, Module.class);
                     List<String> sideNames = assignment == null ? List.of()
                         : assignmentCommentTypeNames(assignment.value, module);
-                    boolean commentType = assignment != null && hasAssignmentCommentType(assignment.value, module);
-                    // Боковой комментарий накладывает маску на рассчитанные типы: из расчёта
-                    // берётся тип с тем же верхним именем, иначе — тип из комментария.
-                    List<TypeItem> basis = commentType
-                        ? filterTypesByCommentMask(inferred, nativeBasis)
-                        : merge(nativeBasis, inferred);
+                    // Ссылка «см.» задаёт контекст конкретной формы. Сопоставление по
+                    // имени платформенного типа теряет этот контекст при объединении.
+                    boolean keptFormType = assignment != null && assignment.value instanceof Invocation invocation
+                        && hasAssignmentSeeLink(invocation, method, module) && nativeBasis != null && nativeBasis.stream()
+                        .anyMatch(type -> BslFormTypePresentation.text(type) != null);
+                    List<TypeItem> basis;
+                    if (keptFormType)
+                        basis = nativeBasis;
+                    else if (!sideNames.isEmpty())
+                        basis = filterTypesByCommentMask(inferred, nativeBasis);
+                    else
+                        basis = merge(nativeBasis, inferred);
                     basis = annotatedProperties(basis, variable, offset, from, environments, plan);
                     result = localVariableTypes(basis, variable, offset, environments);
                 }
@@ -4689,6 +4689,21 @@ public final class BslStructureInsertCommentTypes
         }
 
         private final java.util.Map<ExpressionKey, List<TypeItem>> annotationTypes = new java.util.HashMap<>();
+
+        private static boolean hasAssignmentSeeLink(Invocation invocation, Method method, Module module)
+        {
+            try
+            {
+                List<PropertySeeLink> links = new ArrayList<>();
+                collectReturnSeeLinks(sideCommentReturnSection(invocation, module), method,
+                    new java.util.LinkedHashSet<>(), links);
+                return !links.isEmpty();
+            }
+            catch (RuntimeException ignored)
+            {
+                return false;
+            }
+        }
 
         /** Ссылки бокового комментария считаются только в текущем фоновом запросе редактора. */
         private List<TypeItem> annotatedProperties(List<TypeItem> types, Variable variable, int offset, int from,
