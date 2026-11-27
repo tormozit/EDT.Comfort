@@ -9,12 +9,22 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.eclipse.jface.dialogs.IDialogSettings;
-
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.expressions.EvaluationResult;
+import org.eclipse.core.expressions.Expression;
+import org.eclipse.core.expressions.ExpressionInfo;
+import org.eclipse.core.expressions.IEvaluationContext;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.core.runtime.ListenerList;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.util.OpenStrategy;
 import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.IOpenListener;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
@@ -27,8 +37,10 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.ISources;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -39,9 +51,18 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.OpenAndLinkWithEditorHelper;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.views.markers.MarkerField;
 import org.eclipse.ui.views.markers.MarkerItem;
+import org.eclipse.ui.views.markers.MarkerSupportView;
+import org.eclipse.xtext.ui.editor.XtextEditor;
+
+import com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
  * Панели маркеров «Закладки» ({@link IPageLayout#ID_BOOKMARKS}) и «Задачи»
@@ -89,7 +110,6 @@ public final class MarkersListViewsHook implements IStartup
         "org.eclipse.ui.views.markers.internal.MarkerSupportRegistry"; //$NON-NLS-1$
     private static final String BOOKMARKS_GENERATOR = "org.eclipse.ui.ide.bookmarksGenerator"; //$NON-NLS-1$
     private static final String TASKS_GENERATOR = "org.eclipse.ui.ide.tasksGenerator"; //$NON-NLS-1$
-
     private static volatile boolean windowsHooked;
 
     @Override
@@ -354,8 +374,6 @@ public final class MarkersListViewsHook implements IStartup
 
     private static void installOnView(IViewPart view)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return;
         String viewId = view.getViewSite() != null ? view.getViewSite().getId() : null;
         if (!isTargetViewId(viewId))
             return;
@@ -364,6 +382,10 @@ public final class MarkersListViewsHook implements IStartup
             return;
         Control control = viewer.getControl();
         if (!(control instanceof Tree tree) || tree.isDisposed())
+            return;
+        if (view instanceof MarkerSupportView markersView)
+            MarkerOpening.install(markersView, viewer, tree);
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         boolean columnsAdded = ensureComfortColumns(view, viewer, tree, viewId);
         if (Boolean.TRUE.equals(tree.getData(INSTALLED_KEY)))
@@ -388,6 +410,177 @@ public final class MarkersListViewsHook implements IStartup
     {
         Object viewer = Global.invoke(view, "getViewer"); //$NON-NLS-1$
         return viewer instanceof TreeViewer treeViewer ? treeViewer : null;
+    }
+
+    /** Переход из «Закладок» и «Задач» через редактор объекта EDT (#939). */
+    private static final class MarkerOpening extends OpenAndLinkWithEditorHelper
+    {
+        private static final String INSTALLED = "tormozit.markers.opening"; //$NON-NLS-1$
+        private static final String GOTO_RESOURCE = "org.eclipse.ui.navigate.goToResource"; //$NON-NLS-1$
+        private static final String STOCK_HELPER = "org.eclipse.ui.internal.views.markers.ExtendedMarkersView$4"; //$NON-NLS-1$
+
+        private final MarkerSupportView view;
+
+        private MarkerOpening(MarkerSupportView view, TreeViewer viewer)
+        {
+            super(viewer);
+            this.view = view;
+        }
+
+        static void install(MarkerSupportView view, TreeViewer viewer, Tree tree)
+        {
+            if (Boolean.TRUE.equals(tree.getData(INSTALLED)))
+                return;
+            OpenAndLinkWithEditorHelper stock = findStockHelper(viewer);
+            IHandlerService service = view.getSite().getService(IHandlerService.class);
+            if (stock == null || service == null)
+                return;
+
+            MarkerOpening opening = new MarkerOpening(view, viewer);
+            AbstractHandler command = new AbstractHandler()
+            {
+                @Override
+                public void setEnabled(Object evaluationContext)
+                {
+                    IMarker[] markers = opening.openableMarkers();
+                    setBaseEnabled(markers == null || markers.length != 0);
+                }
+
+                @Override
+                public Object execute(ExecutionEvent event)
+                {
+                    opening.openSelectedMarkers();
+                    return null;
+                }
+            };
+            command.setEnabled(null);
+            String viewId = view.getSite().getId();
+            // Штатный обработчик зависит от activePart. activePartId повышает приоритет,
+            // а сервис панели дополнительно ограничивает действие её активным экземпляром.
+            IHandlerActivation activation = service.activateHandler(GOTO_RESOURCE, command, new Expression()
+            {
+                @Override
+                public EvaluationResult evaluate(IEvaluationContext context)
+                {
+                    return EvaluationResult.valueOf(viewId.equals(context.getVariable(ISources.ACTIVE_PART_ID_NAME)));
+                }
+
+                @Override
+                public void collectExpressionInfo(ExpressionInfo info)
+                {
+                    info.addVariableNameAccess(ISources.ACTIVE_PART_ID_NAME);
+                }
+            });
+            viewer.addSelectionChangedListener(e -> command.setEnabled(null));
+            stock.dispose();
+            tree.setData(INSTALLED, Boolean.TRUE);
+            tree.addDisposeListener(e ->
+            {
+                opening.dispose();
+                service.deactivateHandler(activation);
+                command.dispose();
+            });
+        }
+
+        private static OpenAndLinkWithEditorHelper findStockHelper(TreeViewer viewer)
+        {
+            if (Global.getField(viewer, "openListeners") instanceof ListenerList<?> listeners) //$NON-NLS-1$
+            {
+                for (Object listener : listeners.getListeners())
+                {
+                    if (listener instanceof IOpenListener
+                        && "org.eclipse.ui.OpenAndLinkWithEditorHelper$InternalListener".equals(listener.getClass().getName()) //$NON-NLS-1$
+                        && Global.getField(listener, "this$0") instanceof OpenAndLinkWithEditorHelper helper //$NON-NLS-1$
+                        && STOCK_HELPER.equals(helper.getClass().getName()))
+                        return helper;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        protected void open(ISelection selection, boolean activate)
+        {
+            openSelectedMarkers();
+        }
+
+        @Override
+        protected void activate(ISelection selection)
+        {
+            int openMethod = OpenStrategy.getOpenMethod();
+            try
+            {
+                OpenStrategy.setOpenMethod(OpenStrategy.DOUBLE_CLICK);
+                openSelectedMarkers();
+            }
+            finally
+            {
+                OpenStrategy.setOpenMethod(openMethod);
+            }
+        }
+
+        private IMarker[] openableMarkers()
+        {
+            Object markers = Global.invoke(view, "getOpenableMarkers"); //$NON-NLS-1$
+            return markers instanceof IMarker[] selected ? selected : null;
+        }
+
+        private void openSelectedMarkers()
+        {
+            IWorkbenchPage page = view.getSite().getPage();
+            IMarker[] markers = openableMarkers();
+            if (markers == null)
+            {
+                Global.invoke(view, "openSelectedMarkers"); //$NON-NLS-1$
+                return;
+            }
+            for (IMarker marker : markers)
+            {
+                if (!openModule(marker, page))
+                    MarkerSupportView.openMarkerInEditor(marker, page);
+            }
+        }
+
+        private static boolean openModule(IMarker marker, IWorkbenchPage page)
+        {
+            if (marker == null || !(marker.getResource() instanceof IFile file)
+                || !"bsl".equalsIgnoreCase(file.getFileExtension()) || !file.exists()) //$NON-NLS-1$
+                return false;
+
+            IWorkbenchPart previousPart = OpenStrategy.activateOnOpen() ? null : page.getActivePart();
+            XtextEditor editor;
+            try
+            {
+                IV8ProjectManager projects = Global.getOsgiService(IV8ProjectManager.class);
+                if (projects == null || projects.getProject(file.getProject()) == null)
+                    return false;
+                URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                    .appendFragment("/0"); //$NON-NLS-1$
+                IEditorPart opened = new OpenHelper(page).openEditor(moduleUri, null);
+                editor = opened != null ? BslHandlerUtil.extractXtextEditor(opened) : null;
+            }
+            catch (RuntimeException ignored)
+            {
+                return false;
+            }
+            if (editor == null)
+                return false;
+
+            try
+            {
+                editor.gotoMarker(marker);
+            }
+            catch (RuntimeException ignored)
+            {
+                // Редактор уже открыт, повторно открывать модуль не нужно.
+            }
+            finally
+            {
+                if (previousPart != null && previousPart != page.getActivePart())
+                    page.activate(previousPart);
+            }
+            return true;
+        }
     }
 
     /**

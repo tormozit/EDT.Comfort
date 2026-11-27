@@ -1010,11 +1010,7 @@ public class BslInvocationTypeRules
             String flag = text(param(1));
             boolean structures = flag.isEmpty() || flag.equalsIgnoreCase("Ложь") || flag.equalsIgnoreCase("False"); //$NON-NLS-1$ //$NON-NLS-2$
             boolean maps = flag.equalsIgnoreCase("Истина") || flag.equalsIgnoreCase("True"); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("read-json-types", "offset=" + offsetOf(invocation) + " arguments=" + params.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " structures=" + structures + " maps=" + maps); //$NON-NLS-1$ //$NON-NLS-2$
             List<TypeItem> types = params.size() <= 2 && (structures || maps) ? readJsonText(structures) : List.of();
-            Global.tempLog("read-json-types", "offset=" + offsetOf(invocation) + " inferred=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + types.stream().map(Call::typeName).toList());
             if (!types.isEmpty())
                 return types;
 

@@ -1381,8 +1381,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                 if (SmartContentAssistProcessor.unwrapProposal(proposal) instanceof ConfigurableCompletionProposal configurable
                     && remaining.remove(configurable.getReplacementString()))
                     keys.add(proposal);
-            Global.tempLog("json-map-keys", "offset=" + offset + " expected=" + request.jsonMapReplacements.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " proposals=" + keys.size()); //$NON-NLS-1$
             return keys.isEmpty() ? result.toArray(ICompletionProposal[]::new) : keys.toArray(ICompletionProposal[]::new);
         }
         if (quote >= 0 && !request.fullValues.isEmpty())
@@ -2121,8 +2119,6 @@ public final class BslLiteralValues extends AbstractStringLiteralProposalProvide
                             keys.computeIfAbsent(key, name -> new ArrayList<>()).addAll(value));
                 }
                 jsonMapKeys = keys;
-                Global.tempLog("json-map-keys", "offset=" + offsetOf(access) + " ownerTypes=" + typeNames(types) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " keys=" + keys.size()); //$NON-NLS-1$
             }
             if (hasType(types, "Structure", "FixedStructure", "Map", "FixedMap")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             {
