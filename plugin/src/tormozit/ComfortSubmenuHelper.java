@@ -35,6 +35,7 @@ final class ComfortSubmenuHelper
     static final String FIRST_ITEM_MARKER = "tormozit.comfortFirstItem"; //$NON-NLS-1$
     private static final String ROOT_COMMANDS_MARKER = "tormozit.comfortRootCommands"; //$NON-NLS-1$
     private static final String TOOLTIP_POSITION_MARKER = "tormozit.menuTooltipPosition"; //$NON-NLS-1$
+    private static final String MENU_SORT_TEXT = "tormozit.comfort.menuSortText"; //$NON-NLS-1$
 
     /** Ключ данных подменю: выделение внешнего меню (см. {@link #fillExternalMenu}). */
     private static final String EXTERNAL_SELECTION_KEY = "tormozit.comfortSubmenu.selection"; //$NON-NLS-1$
@@ -515,9 +516,17 @@ final class ComfortSubmenuHelper
      */
     static MenuItem createSortedMenuItem(Menu menu, int style, String text)
     {
-        int index = findSortedInsertIndex(menu, text);
+        return createSortedMenuItem(menu, style, text, text);
+    }
+
+    /** Помещает связанную команду после основной с тем же ключом сортировки. */
+    static MenuItem createSortedMenuItem(Menu menu, int style, String text, String sortText)
+    {
+        int index = findSortedInsertIndex(menu, sortText);
         MenuItem item = index >= 0 ? new MenuItem(menu, style, index) : new MenuItem(menu, style);
         item.setText(text);
+        if (!text.equals(sortText))
+            item.setData(MENU_SORT_TEXT, sortText);
         return item;
     }
 
@@ -606,7 +615,9 @@ final class ComfortSubmenuHelper
             if (items[i].isDisposed() || (items[i].getStyle() & SWT.SEPARATOR) != 0
                 || Boolean.TRUE.equals(items[i].getData(FIRST_ITEM_MARKER)))
                 continue;
-            if (RU_COLLATOR.compare(key, sortKey(items[i].getText())) < 0)
+            Object sortText = items[i].getData(MENU_SORT_TEXT);
+            String itemText = sortText instanceof String override ? override : items[i].getText();
+            if (RU_COLLATOR.compare(key, sortKey(itemText)) < 0)
                 return i;
         }
         return items.length;

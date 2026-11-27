@@ -1,13 +1,25 @@
 package tormozit;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.core.resources.IContainer;
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.util.EcoreUtil;
@@ -36,6 +48,14 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.derived.context.IContextCollectingSession;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
  * Добавляет «Запустить проверки» в подменю «Комфорт» навигатора EDT — точечно пересчитывает проверки
@@ -192,7 +212,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
 
         MenuAdapter subListener = new MenuAdapter()
         {
-            private final List<MenuItem> added = new ArrayList<>(1);
+            private final List<MenuItem> added = new ArrayList<>();
 
             @Override
             public void menuShown(MenuEvent e)
@@ -220,6 +240,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                     }
                 });
                 added.add(item);
+                added.add(RebuildDerivedData.createMenuItem(comfortSub, viewer));
                 if (viewer != null)
                 {
                     added.add(createReferencesItem(comfortSub, viewer, true));
@@ -594,6 +615,227 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
             display.asyncExec(() -> ToastNotification.show(ITEM_TEXT, message, 5_000));
+    }
+
+    private static final class RebuildDerivedData
+    {
+        private static final String TITLE = "Очистить кэши"; //$NON-NLS-1$
+        private static final String LOG = "navigator-rebuild-derived-data"; //$NON-NLS-1$
+
+        private static MenuItem createMenuItem(Menu menu, CommonViewer viewer)
+        {
+            MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, TITLE, ITEM_TEXT);
+            ComfortSubmenuHelper.setMenuItemTooltip(item,
+                "Пересчитать производные данные выбранного объекта и всего его поддерева"); //$NON-NLS-1$
+            item.addListener(SWT.Selection, event ->
+            {
+                try
+                {
+                    if (ComfortSubmenuHelper.menuSelection(menu, viewer) instanceof IStructuredSelection selection)
+                        schedule(selection, viewer);
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLogException(LOG, "resolve selection", e); //$NON-NLS-1$
+                    ComfortCheckRecompute.toast(TITLE, "Не удалось определить объекты для пересчёта."); //$NON-NLS-1$
+                }
+            });
+            return item;
+        }
+
+        private static void schedule(IStructuredSelection selection, CommonViewer viewer)
+        {
+            Map<IProject, Set<Long>> roots = new LinkedHashMap<>();
+            Set<IProject> projects = new LinkedHashSet<>();
+            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (Object element : selection.toList())
+                collectRoots(element, viewer, visited, roots, projects);
+            projects.forEach(roots::remove);
+            if (roots.isEmpty() && projects.isEmpty())
+            {
+                ComfortCheckRecompute.toast(TITLE, "Не удалось определить объекты для пересчёта."); //$NON-NLS-1$
+                return;
+            }
+
+            Job.create(TITLE, monitor ->
+            {
+                IDerivedDataManagerProvider provider = Global.getOsgiService(IDerivedDataManagerProvider.class);
+                Set<IProject> targets = new LinkedHashSet<>(projects);
+                targets.addAll(roots.keySet());
+                for (IProject project : targets)
+                {
+                    if (monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    try
+                    {
+                        rebuild(provider, project, roots.get(project));
+                    }
+                    catch (ReflectiveOperationException | RuntimeException | LinkageError e)
+                    {
+                        Global.tempLogException(LOG, "project=" + project.getName(), e); //$NON-NLS-1$
+                        ComfortCheckRecompute.toast(TITLE,
+                            "Не удалось запустить пересчёт в проекте «" + project.getName() + "»."); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+                return Status.OK_STATUS;
+            }).schedule();
+        }
+
+        private static void collectRoots(Object element, CommonViewer viewer, Set<Object> visited,
+            Map<IProject, Set<Long>> roots, Set<IProject> projects)
+        {
+            if (!visited.add(element))
+                return;
+            if (viewer != null && (NavigatorTreeElementLabels.isGroupNode(element)
+                || NavigatorTreeElementLabels.isInsideObjectCollectionFolder(element))
+                && viewer.getContentProvider() instanceof ITreeContentProvider tree)
+            {
+                Object[] children = tree.getChildren(element);
+                Global.tempLog(LOG, "group=" + element.getClass().getName() //$NON-NLS-1$
+                    + " children=" + (children == null ? 0 : children.length)); //$NON-NLS-1$
+                if (children != null)
+                    for (Object child : children)
+                        collectRoots(child, viewer, visited, roots, projects);
+                return;
+            }
+
+            EObject model = NavigatorElementModels.resolveEObject(element);
+            IResource resource = NavigatorResourceResolver.resolve(element);
+            IProject project = element instanceof IProject selected ? selected
+                : resource != null ? resource.getProject() : null;
+            long id = model instanceof IBmObject bm && !model.eIsProxy() ? bm.bmGetId() : IBmObject.BM_NULL_ID;
+            Global.tempLog(LOG, "selection project=" + project + " resource=" + resource //$NON-NLS-1$ //$NON-NLS-2$
+                + " type=" + (model == null ? null : model.eClass().getName()) + " id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+            if (project != null && (element instanceof IProject || model instanceof Configuration))
+                projects.add(project);
+            else if (project != null && id != IBmObject.BM_NULL_ID)
+                roots.computeIfAbsent(project, key -> new LinkedHashSet<>()).add(id);
+        }
+
+        private static void rebuild(IDerivedDataManagerProvider provider, IProject project, Set<Long> roots)
+            throws ReflectiveOperationException
+        {
+            var manager = provider == null ? null : provider.get(project);
+            Global.tempLog(LOG, "rebuild project=" + project.getName() + " roots=" + roots //$NON-NLS-1$ //$NON-NLS-2$
+                + " manager=" + (manager == null ? null : manager.getClass().getName())); //$NON-NLS-1$
+            if (manager == null)
+                throw new IllegalStateException("Derived data manager unavailable"); //$NON-NLS-1$
+            if (roots == null)
+            {
+                manager.recomputeAll();
+                ComfortCheckRecompute.toast(TITLE, "Запрошен пересчёт производных данных проекта."); //$NON-NLS-1$
+                return;
+            }
+
+            // EDT собирает контексты полного пересчёта по одному ключу в читающей BM-транзакции.
+            Method collect = manager.getClass().getDeclaredMethod("collectRebuildScope", //$NON-NLS-1$
+                Object.class, IContextCollectingSession.class, IBmTransaction.class);
+            collect.setAccessible(true);
+            boolean[] collected = { false };
+            boolean accepted = manager.updateDerivedData((session, model) ->
+            {
+                model.executeReadonlyTask(new AbstractBmTask<Void>("comfort.rebuildDerivedData") //$NON-NLS-1$
+                {
+                    @Override
+                    public Void execute(IBmTransaction transaction, IProgressMonitor monitor)
+                    {
+                        Set<Object> keys = new LinkedHashSet<>();
+                        for (long root : roots)
+                        {
+                            IBmObject object = transaction.getObjectById(root);
+                            Global.tempLog(LOG, "root id=" + root + " resolved=" + (object != null)); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (object != null)
+                            {
+                                collectModelKeys(object, keys);
+                                var children = EcoreUtil.<EObject>getAllContents(object, false);
+                                while (children.hasNext())
+                                    collectModelKeys(children.next(), keys);
+                                collectModuleKeys(object, keys);
+                            }
+                        }
+                        for (Object key : keys)
+                            collectContext(collect, manager, key, session, transaction);
+                        return null;
+                    }
+                });
+                collected[0] = !session.isEmpty();
+                Object contexts = Global.getField(session, "attachedContexts"); //$NON-NLS-1$
+                Global.tempLog(LOG, "project=" + project.getName() + " collected=" + collected[0] //$NON-NLS-1$ //$NON-NLS-2$
+                    + " segments=" + (contexts instanceof Map<?, ?> map ? map.keySet() : "unavailable")); //$NON-NLS-1$ //$NON-NLS-2$
+            }, 0L, "«" + TITLE + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog(LOG, "project=" + project.getName() + " accepted=" + accepted); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!accepted)
+                throw new IllegalStateException("Derived data manager rejected the update"); //$NON-NLS-1$
+            ComfortCheckRecompute.toast(TITLE, collected[0]
+                ? "Запрошен пересчёт производных данных поддерева." //$NON-NLS-1$
+                : "Нет данных поддерева для пересчёта."); //$NON-NLS-1$
+        }
+
+        private static void collectModelKeys(EObject object, Set<Object> keys)
+        {
+            addModelKey(object, keys);
+            if (object instanceof BasicForm form)
+                addModelKey(form.getForm(), keys);
+            else if (object instanceof BasicTemplate template)
+                addModelKey(template.getTemplate(), keys);
+        }
+
+        private static void addModelKey(EObject object, Set<Object> keys)
+        {
+            if (object instanceof IBmObject bm && !object.eIsProxy() && bm.bmGetId() != IBmObject.BM_NULL_ID)
+                keys.add(bm.bmGetId());
+        }
+
+        private static void collectModuleKeys(EObject object, Set<Object> keys)
+        {
+            IResource resource = NavigatorResourceResolver.resolve(object);
+            IContainer folder = null;
+            if (object instanceof BasicForm && object instanceof MdObject form && resource instanceof IContainer parent
+                && parent.getName().equals(form.getName()) && parent.getParent() != null
+                && ("Forms".equals(parent.getParent().getName()) //$NON-NLS-1$
+                    || "CommonForms".equals(parent.getParent().getName()))) //$NON-NLS-1$
+                folder = parent;
+            else if (object instanceof MdObject && object instanceof IBmObject bm && bm.bmIsTop()
+                && resource instanceof IFile file && "mdo".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                folder = file.getParent();
+            Global.tempLog(LOG, "module scope resource=" + resource + " folder=" + folder); //$NON-NLS-1$ //$NON-NLS-2$
+            if (resource instanceof IFile file && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                keys.add(URI.createPlatformResourceURI(file.getFullPath().toString(), true).toPlatformString(false));
+            if (folder == null)
+                return;
+            try
+            {
+                folder.accept(member ->
+                {
+                    if (member instanceof IFile file && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                        keys.add(URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                            .toPlatformString(false));
+                    return true;
+                });
+            }
+            catch (CoreException e)
+            {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private static void collectContext(Method collect, Object manager, Object key,
+            IContextCollectingSession session, IBmTransaction transaction)
+        {
+            Global.tempLog(LOG, "collect key=" + key); //$NON-NLS-1$
+            try
+            {
+                collect.invoke(manager, key, session, transaction);
+            }
+            catch (InvocationTargetException e)
+            {
+                throw new IllegalStateException("Cannot collect derived data for " + key, e.getCause()); //$NON-NLS-1$
+            }
+            catch (IllegalAccessException e)
+            {
+                throw new IllegalStateException(e);
+            }
+        }
     }
 
     private static CommonViewer getCommonViewer(IViewPart navigator)
