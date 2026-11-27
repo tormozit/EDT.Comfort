@@ -389,6 +389,10 @@ EDT 2026.1 (бандлы `23.0.1`, API местами несовместим): J
 
 Не путать с другими исключениями: Ctrl+Space — UI (пользователь ждал список); список **членов после «.»** считается в фоне.
 
+## Поиск токена в дереве BSL
+
+Под блокировкой документа в редакторе используй `BslNodeLookup.leafAt(node, offset)`. Передавай корень метода, если позиция заведомо внутри него. Прямой `NodeModelUtils.findLeafNodeAtOffset` может повторно обходить дерево от корня и задерживать автодополнение. Эталон: `BslXtextDocumentHook.IncrementalEditorValidation.beforeUpdate`.
+
 ## OpenHelper.openEditor(EObject, EStructuralFeature) — feature не «активировать свойство»
 
 `feature` в `OpenHelper.openEditor(...)` — не «какое свойство выделить в Свойствах» и не `eContainingFeature()`. Декомпиляция `getFile()`: `feature` используется только как резерв для поиска BSL-модуля — `object.eGet(feature)`, и если результат `instanceof Module`, открывается его файл (для команд/общих модулей). Иначе — `IllegalArgumentException: The feature 'X' is not a valid feature`.

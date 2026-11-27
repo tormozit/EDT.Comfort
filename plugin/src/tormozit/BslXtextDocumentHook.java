@@ -478,7 +478,7 @@ public final class BslXtextDocumentHook implements IStartup
                     state.changeShift += inserted.length() - removed;
                     if (!state.baseline || resource.getParseResult() == null || state.edits > 1 && previousHeader == null)
                         return;
-                    var leaf = NodeModelUtils.findLeafNodeAtOffset(root, offset);
+                    var leaf = BslNodeLookup.leafAt(root, offset);
                     if (leaf == null || leaf.getText().stripLeading().startsWith("//"))
                         return;
                     Method method = EcoreUtil2.getContainerOfType(NodeModelUtils.findActualSemanticObjectFor(leaf), Method.class);
@@ -496,7 +496,7 @@ public final class BslXtextDocumentHook implements IStartup
                     BodyRange range = previousRange;
                     if (parsedEnd >= 0 && methodNode != null && signature != null)
                     {
-                        var closing = NodeModelUtils.findLeafNodeAtOffset(root, parsedEnd);
+                        var closing = BslNodeLookup.leafAt(methodNode, parsedEnd);
                         if (closing != null)
                             range = new BodyRange(methodNode.getOffset(), signature.getEndOffset(), parsedEnd, currentHeader, closing.getText());
                     }
