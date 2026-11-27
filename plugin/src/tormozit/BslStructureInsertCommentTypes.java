@@ -4683,7 +4683,8 @@ public final class BslStructureInsertCommentTypes
                     for (Loop loop : plan.loops)
                         if (loop.variable == variable && offset >= loop.start && offset <= loop.end)
                         {
-                            inferred = elements(expression(loop.collection, environments, null), variable);
+                            inferred = elements(expression(loop.collection, environments, null), loop.collection,
+                                environments);
                             break;
                         }
                 if (inferred.isEmpty() && variable instanceof com._1c.g5.v8.dt.bsl.model.FormalParam param)
@@ -5061,10 +5062,10 @@ public final class BslStructureInsertCommentTypes
                     : List.of();
             List<TypeItem> indexTypes = expression(index, environments, null);
             return indexTypes.stream().anyMatch(type -> "Number".equals(McoreUtil.getTypeName(type)))
-                ? elements(owners, access) : List.of();
+                ? elements(owners, access, null) : List.of();
         }
 
-        private List<TypeItem> elements(List<TypeItem> owners, EObject context)
+        private List<TypeItem> elements(List<TypeItem> owners, Expression context, Environments loopEnvironments)
         {
             List<TypeItem> result = new ArrayList<>();
             for (TypeItem owner : owners)
@@ -5072,7 +5073,16 @@ public final class BslStructureInsertCommentTypes
                 check();
                 EObject resolved = owner.eIsProxy() ? EcoreUtil.resolve(owner, context) : owner;
                 if (resolved instanceof Type type && type.getCollectionElementTypes() != null)
-                    add(result, type.getCollectionElementTypes().allTypes());
+                {
+                    List<TypeItem> refined = loopEnvironments != null && CollectionValueTypes.isStructure(type)
+                        ? CollectionValueTypes.structureElements(type, context, loopEnvironments,
+                            (value, envs) -> expression(value, envs, null))
+                        : List.of();
+                    if (refined.isEmpty())
+                        add(result, type.getCollectionElementTypes().allTypes());
+                    else
+                        add(result, refined);
+                }
             }
             return result;
         }
@@ -5253,6 +5263,12 @@ public final class BslStructureInsertCommentTypes
             return item instanceof Type && ("Map".equals(name) || "ValueList".equals(name)); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
+        private static boolean isStructure(TypeItem item)
+        {
+            String name = McoreUtil.getTypeName(item);
+            return "Structure".equals(name) || "FixedStructure".equals(name); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
         {
             Set<Variable> resolving = RESOLVING.get();
@@ -5290,7 +5306,7 @@ public final class BslStructureInsertCommentTypes
                     int count = 0;
                     for (Addition addition : plan.additions.getOrDefault(variable, List.of()))
                     {
-                        if (addition.start < from || addition.end > offset || addition.map != map
+                        if (addition.start < from || addition.end > offset || addition.keyed != map
                             || !addition.environments.containsAny(environments))
                             continue;
                         if (++count > 2)
@@ -5354,15 +5370,109 @@ public final class BslStructureInsertCommentTypes
                         .anyMatch(position -> position > collectionNode.getEndOffset() && position <= offset))
                     continue;
                 List<TypeItem> elements = new ArrayList<>();
+                List<TypeItem> otherElements = new ArrayList<>();
+                boolean refinedStructure = false;
                 for (TypeItem item : computer.computeTypes(loop.getCollection(), environments))
-                    if (item instanceof Type collection
-                        && ("Map".equals(McoreUtil.getTypeName(item)) || "ValueList".equals(McoreUtil.getTypeName(item))) //$NON-NLS-1$ //$NON-NLS-2$
-                        && collection.getCollectionElementTypes() != null)
+                {
+                    if (!(item instanceof Type collection) || collection.getCollectionElementTypes() == null)
+                        continue;
+                    List<TypeItem> refined = isStructure(collection)
+                        ? structureElements(collection, loop.getCollection(), environments, computer::computeTypes)
+                        : List.of();
+                    if (!refined.isEmpty())
+                    {
+                        elements.addAll(refined);
+                        refinedStructure = true;
+                    }
+                    else if (supports(collection))
                         elements.addAll(collection.getCollectionElementTypes().allTypes());
+                    else
+                        otherElements.addAll(collection.getCollectionElementTypes().allTypes());
+                }
+                if (refinedStructure)
+                    elements.addAll(otherElements);
                 if (!elements.isEmpty())
                     return elements;
             }
             return types;
+        }
+
+        /** ИР: СобратьСвойстваСтруктуры. Тип значения пары включает именованные и анонимные члены. */
+        private static List<TypeItem> structureElements(Type structure, Expression source, Environments environments,
+            java.util.function.BiFunction<Expression, Environments, List<TypeItem>> computer)
+        {
+            List<TypeItem> values = new ArrayList<>();
+            List<TypeItem> result = new ArrayList<>();
+            int writes = 0;
+            try
+            {
+                if (structure.getContextDef() != null)
+                    for (Property property : structure.getContextDef().allProperties())
+                        if (!property.isDependsOnMetadata() && property.environments().containsAny(environments))
+                            addStructureValues(values, property.getTypes());
+
+                Method method = EcoreUtil2.getContainerOfType(source, Method.class);
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(source);
+                Variable variable = source instanceof StaticFeatureAccess ? sourceVariable(source) : null;
+                if ("Structure".equals(McoreUtil.getTypeName(structure)) && variable != null //$NON-NLS-1$
+                    && method != null && node != null)
+                {
+                    Plan plan = Plan.of(method);
+                    int offset = node.getOffset();
+                    int from = plan.assignments.getOrDefault(variable, List.of()).stream()
+                        .filter(position -> position <= offset).mapToInt(Integer::intValue).max().orElse(0);
+                    for (Addition addition : plan.additions.getOrDefault(variable, List.of()))
+                    {
+                        if (addition.start < from || addition.end > offset || !addition.keyed
+                            || addition.value == null || !addition.environments.containsAny(environments))
+                            continue;
+                        writes++;
+                        addStructureValues(values, computer.apply(addition.value, environments));
+                    }
+                }
+
+                if (!values.isEmpty())
+                    for (TypeItem item : structure.getCollectionElementTypes().allTypes())
+                        if (EcoreUtil.resolve(item, source) instanceof Type pair
+                            && "KeyAndValue".equals(McoreUtil.getTypeName(pair))) //$NON-NLS-1$
+                        {
+                            Type copy = EcoreUtil2.cloneWithProxies(pair);
+                            for (Property property : copy.getContextDef().getProperties())
+                                if ("Value".equals(property.getName())) //$NON-NLS-1$
+                                {
+                                    List<TypeItem> combined = new ArrayList<>(values);
+                                    addStructureValues(combined, property.getTypes());
+                                    TypeContainerRef container = McoreFactory.eINSTANCE.createTypeContainerRef();
+                                    container.getTypes().addAll(combined);
+                                    property.setTypeContainer(container);
+                                    result.add(copy);
+                                }
+                        }
+            }
+            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                throw canceled;
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                Global.tempLog("structure-iteration-types", "failure=" + failure); //$NON-NLS-1$ //$NON-NLS-2$
+                result.clear();
+            }
+            finally
+            {
+                Global.tempLog("structure-iteration-types", "source=" + source.eResource().getURI() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " offset=" + InteractiveTypes.position(source) + " writes=" + writes //$NON-NLS-1$ //$NON-NLS-2$
+                    + " values=" + values.stream().map(McoreUtil::getTypeName).toList() //$NON-NLS-1$
+                    + " pairs=" + result.size()); //$NON-NLS-1$
+            }
+            return result;
+        }
+
+        private static void addStructureValues(List<TypeItem> values, List<TypeItem> inferred)
+        {
+            for (TypeItem value : inferred)
+                if (!"Arbitrary".equals(McoreUtil.getTypeName(value))) //$NON-NLS-1$
+                    ArrayElementTypes.addElement(values, value);
         }
 
         /** Копируем только экземпляр типа; платформенные свойства и методы не меняем. */
@@ -5419,7 +5529,7 @@ public final class BslStructureInsertCommentTypes
         }
 
         private static record Addition(int start, int end, Expression key, Expression value,
-            boolean map, Environments environments) {}
+            boolean keyed, Environments environments) {}
 
         private static final class Plan extends org.eclipse.emf.common.notify.impl.AdapterImpl
         {
@@ -5489,7 +5599,7 @@ public final class BslStructureInsertCommentTypes
                 }
             }
 
-            private void add(Expression source, Expression key, Expression value, boolean map, EObject expression)
+            private void add(Expression source, Expression key, Expression value, boolean keyed, EObject expression)
             {
                 // Изменение вложенной коллекции не является добавлением в корневую переменную.
                 if (!(source instanceof StaticFeatureAccess))
@@ -5499,7 +5609,7 @@ public final class BslStructureInsertCommentTypes
                 Environmental owner = EcoreUtil2.getContainerOfType(expression, Environmental.class);
                 if (variable != null && position != null && owner != null)
                     additions.computeIfAbsent(variable, ignored -> new ArrayList<>()).add(new Addition(
-                        position.getOffset(), position.getEndOffset(), key, value, map, owner.environments()));
+                        position.getOffset(), position.getEndOffset(), key, value, keyed, owner.environments()));
             }
 
             static Plan of(Method method)

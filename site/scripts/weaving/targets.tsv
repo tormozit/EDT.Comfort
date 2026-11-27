@@ -1,4 +1,5 @@
 # stage	bundle	class (alternatives separated by |)	hook
+early	org.eclipse.text	org.eclipse.jface.text.FindReplaceDocumentAdapter	tormozit.early.Activator$FindReplaceWordBoundaryWeaving
 early	org.eclipse.ui.workbench.texteditor	org.eclipse.ui.texteditor.FindNextAction	tormozit.early.Activator$FindNextWeaving
 early	com._1c.g5.v8.bm.core	com._1c.g5.v8.bm.core.internal.lifecycle.CriticalErrorHandler	tormozit.early.Activator$ApplicationResetDiagnostics
 early	com._1c.g5.v8.derived	com._1c.g5.v8.derived.context.PartBasedObjectContext	tormozit.early.Activator$CommonAttributeLossDiagnostics

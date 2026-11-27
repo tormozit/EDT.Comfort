@@ -80,6 +80,7 @@ public final class Activator
         CheckRecomputeNotifications.install(context);
         EarlyWeaving.install(context);
         FindNextWeaving.install(context);
+        FindReplaceWordBoundaryWeaving.install(context);
         context.registerService(WeavingHook.class, new OccurrenceLiteralWeaving(), null);
         context.registerService(WeavingHook.class, new NaparnikWeaving(), null);
         TextSearchInvocationWeaving.install(context);
@@ -7355,6 +7356,93 @@ public final class Activator
             catch (RuntimeException | LinkageError error)
             {
                 WeavingFailures.failed(woven, getClass(), error);
+            }
+        }
+    }
+
+    /** Eclipse обрамляет целое слово через \b, который с Java 19 по умолчанию видит только ASCII. */
+    private static final class FindReplaceWordBoundaryWeaving implements WeavingHook
+    {
+        private static final String TARGET = "org.eclipse.jface.text.FindReplaceDocumentAdapter";
+        private static final String FIND_REPLACE =
+            "(Lorg/eclipse/jface/text/FindReplaceDocumentAdapter$FindReplaceOperationCode;"
+                + "ILjava/lang/String;Ljava/lang/String;ZZZZ)Lorg/eclipse/jface/text/IRegion;";
+        private static final String RECIPE = "\\b\u0001\\b";
+        private static final String UNICODE_RECIPE = "(?U:\\b)\u0001(?U:\\b)";
+
+        static void install(BundleContext context)
+        {
+            int javaVersion = Runtime.version().feature();
+            log("java=" + javaVersion + ", register=" + (javaVersion >= 19));
+            if (javaVersion >= 19)
+                context.registerService(WeavingHook.class, new FindReplaceWordBoundaryWeaving(), null);
+        }
+
+        @Override
+        public void weave(WovenClass woven)
+        {
+            if (woven.getState() != WovenClass.TRANSFORMING || !TARGET.equals(woven.getClassName()))
+                return;
+            try
+            {
+                ClassReader reader = new ClassReader(woven.getBytes());
+                ClassWriter writer = new ClassWriter(reader, 0);
+                int[] matches = {0};
+                reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+                {
+                    @Override
+                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                        String signature, String[] exceptions)
+                    {
+                        MethodVisitor method = super.visitMethod(access, name, descriptor, signature, exceptions);
+                        if (!"findReplace".equals(name) || !FIND_REPLACE.equals(descriptor))
+                            return method;
+                        return new MethodVisitor(Opcodes.ASM9, method)
+                        {
+                            @Override
+                            public void visitInvokeDynamicInsn(String name, String descriptor, Handle bootstrap,
+                                Object... arguments)
+                            {
+                                if ("makeConcatWithConstants".equals(name)
+                                    && "(Ljava/lang/String;)Ljava/lang/String;".equals(descriptor)
+                                    && "java/lang/invoke/StringConcatFactory".equals(bootstrap.getOwner())
+                                    && "makeConcatWithConstants".equals(bootstrap.getName())
+                                    && arguments.length == 1 && RECIPE.equals(arguments[0]))
+                                {
+                                    arguments = new Object[] {UNICODE_RECIPE};
+                                    matches[0]++;
+                                }
+                                super.visitInvokeDynamicInsn(name, descriptor, bootstrap, arguments);
+                            }
+                        };
+                    }
+                }, 0);
+                if (matches[0] == 1)
+                    woven.setBytes(writer.toByteArray());
+                else
+                    WeavingFailures.unmatched(woven, getClass());
+                log("org.eclipse.text=" + woven.getBundleWiring().getBundle().getVersion()
+                    + ", recipes=" + matches[0] + ", applied=" + (matches[0] == 1));
+            }
+            catch (RuntimeException | LinkageError failure)
+            {
+                WeavingFailures.failed(woven, getClass(), failure);
+                log("weave failed: " + failure);
+            }
+        }
+
+        private static void log(String text)
+        {
+            var file = diagnosticPath("issue-1109/word-boundaries.log");
+            try
+            {
+                java.nio.file.Files.createDirectories(file.getParent());
+                java.nio.file.Files.writeString(file, java.time.OffsetDateTime.now() + " " + text + "\r\n",
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (java.io.IOException | SecurityException failure)
+            {
+                System.setProperty("tormozit.findReplace.wordBoundary.logFailure", failure.toString());
             }
         }
     }
