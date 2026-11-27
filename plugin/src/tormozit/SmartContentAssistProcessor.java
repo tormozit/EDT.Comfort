@@ -2408,6 +2408,7 @@ return result;
         ICompletionProposal[] result = filterCachedProposalsForPopupImpl(viewer, caret, filter);
         IDocument popupDoc = viewer != null ? viewer.getDocument() : null;
         result = withLabelProposals(result, popupDoc, caret);
+        result = withMissingIteratorProposals(result, popupDoc, caret);
         if (result == null || result.length == 0)
         return result;
         return synthesizeBareConstructorProposals(result, popupDoc, caret);
@@ -2765,8 +2766,10 @@ return;
             viewer != null ? viewer.getDocument() : null, offset);
 
         result = queryParametersOnly(viewer, offset, result);
-        result = withLabelProposals(result, viewer != null ? viewer.getDocument() : null,
-            resolveInvocationCaret(viewer, offset));
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        int caret = resolveInvocationCaret(viewer, offset);
+        result = withLabelProposals(result, document, caret);
+        result = withMissingIteratorProposals(result, document, caret);
 
         // После схлопывания перегрузок и штатного расчёта могут остаться исходные EDT proposal.
         // Перевод типов в подписи нужен при любом режиме фильтра и порядка ИР.
@@ -4387,7 +4390,7 @@ if (RepeatedInvocationDetect.isActive())
         int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
         ICompletionProposal[] result = resolveProposalList(viewer, probeOffset, caret, filter,
             SmartAssistFilterState.isSmartFilterEnabled());
-        return withLabelProposals(result, doc, caret);
+        return withMissingIteratorProposals(withLabelProposals(result, doc, caret), doc, caret);
     }
 
     /** Popup/toggle в литерале+ИР: smart ON — по префиксу, OFF — полный merged. */
@@ -12696,6 +12699,13 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             return byScore != 0 ? byScore : left.getWord().compareToIgnoreCase(right.getWord());
         });
         return matched.isEmpty() ? EMPTY : matched.toArray(new ICompletionProposal[0]);
+    }
+
+    private ICompletionProposal[] withMissingIteratorProposals(ICompletionProposal[] result, IDocument document, int caret)
+    {
+        return result != null && result.length == 0 && ComfortSettings.isReplaceListFiltersEnabled()
+            && !irOnlyManualMode && !hasIrProposalsForCurrentContext()
+            ? BslExpectedTypePremiums.loopIteratorProposals(document, caret, result) : result;
     }
 
     /** Каретка сразу после {@code Перейти }/{@code Goto } (или после начатого имени метки). */

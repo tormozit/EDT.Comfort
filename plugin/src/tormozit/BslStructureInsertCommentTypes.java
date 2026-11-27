@@ -3509,6 +3509,20 @@ public final class BslStructureInsertCommentTypes
         return null;
     }
 
+    /** Метод, в котором читается переменная модуля. */
+    private static Method moduleVariableMethodAt(Variable variable, int offset)
+    {
+        Module module = EcoreUtil2.getContainerOfType(variable, Module.class);
+        if (module != null)
+            for (Method candidate : module.allMethods())
+            {
+                ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
+                if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
+                    return candidate;
+            }
+        return null;
+    }
+
     /** Тот же проверенный тип, когда обращение уже разрешено: строка «Родитель» списка автодополнения. */
     static List<TypeItem> narrowFor(List<TypeItem> types, Expression occurrence)
     {
@@ -4626,14 +4640,40 @@ public final class BslStructureInsertCommentTypes
                 return variableNative(variable, offset, environments, provided);
             try
             {
-                Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
-                if (method == null || !ready(variable))
+                if (!ready(variable))
+                    return variableNative(variable, offset, environments, provided);
+                Method declaringMethod = EcoreUtil2.getContainerOfType(variable, Method.class);
+                boolean moduleVariable = declaringMethod == null;
+                if (moduleVariable && !BslDocCommentComputedTypes.isExtendedTypesEnabled(variable))
+                    return variableNative(variable, offset, environments, provided);
+                Method method = moduleVariable ? moduleVariableMethodAt(variable, offset) : declaringMethod;
+                if (method == null)
                     return variableNative(variable, offset, environments, provided);
                 Plan plan = plans.computeIfAbsent(method, Plan::new);
                 Assignment assignment = null;
                 for (Assignment candidate : plan.assignments.getOrDefault(variable, List.of()))
                     if (candidate.end <= offset && (assignment == null || candidate.end > assignment.end))
                         assignment = candidate;
+                if (moduleVariable)
+                {
+                    List<TypeItem> nativeBasis = variableNative(variable, offset, environments, provided);
+                    // У переменной модуля расчёт EDT может читать состояние вне текущего метода.
+                    // Вставки связываем с присваиванием коллекции только внутри этого метода.
+                    if (assignment == null || !plan.changes.containsKey(variable))
+                        return nativeBasis;
+                    List<TypeItem> assigned = expression(assignment.value, environments, null).stream()
+                        .filter(CollectionValueTypes::supports).toList();
+                    List<TypeItem> result = assigned.isEmpty() ? nativeBasis
+                        : CollectionValueTypes.infer(merge(nativeBasis, assigned), variable, offset, environments);
+                    Global.tempLog("module-collection-values", "resource=" + variable.eResource().getURI()
+                        + " variable=" + variable.getName() + " offset=" + offset + " assignmentEnd=" + assignment.end
+                        + " native=" + nativeBasis.stream().map(McoreUtil::getTypeName).toList()
+                        + " assigned=" + assigned.stream().map(McoreUtil::getTypeName).toList()
+                        + " result=" + result.stream().map(McoreUtil::getTypeName).toList());
+                    result = List.copyOf(result);
+                    variables.put(key, result);
+                    return result;
+                }
                 List<TypeItem> inferred = List.of();
                 if (assignment != null)
                     inferred = expression(assignment.value, environments, null);
@@ -5207,6 +5247,12 @@ public final class BslStructureInsertCommentTypes
         private static final ThreadLocal<Set<Variable>> RESOLVING = ThreadLocal.withInitial(
             () -> java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
 
+        private static boolean supports(TypeItem item)
+        {
+            String name = McoreUtil.getTypeName(item);
+            return item instanceof Type && ("Map".equals(name) || "ValueList".equals(name)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         static List<TypeItem> infer(List<TypeItem> types, Variable variable, int offset, Environments environments)
         {
             Set<Variable> resolving = RESOLVING.get();
@@ -5217,23 +5263,13 @@ public final class BslStructureInsertCommentTypes
                 if (!(variable.eResource() instanceof XtextResource resource))
                     return types;
                 Method method = EcoreUtil2.getContainerOfType(variable, Method.class);
-                if (method == null && !resource.getContents().isEmpty()
-                    && resource.getContents().get(0) instanceof Module module)
-                    for (Method candidate : module.allMethods())
-                    {
-                        ICompositeNode node = NodeModelUtils.findActualNodeFor(candidate);
-                        if (node != null && offset >= node.getOffset() && offset <= node.getEndOffset())
-                        {
-                            method = candidate;
-                            break;
-                        }
-                    }
+                boolean moduleVariable = method == null;
+                if (moduleVariable)
+                    method = moduleVariableMethodAt(variable, offset);
                 if (method == null)
                     return types;
                 Plan plan = Plan.of(method);
-                if (!plan.loopsByVariable.containsKey(variable) && types.stream().noneMatch(item ->
-                    item instanceof Type && ("Map".equals(McoreUtil.getTypeName(item))
-                        || "ValueList".equals(McoreUtil.getTypeName(item)))))
+                if (!plan.loopsByVariable.containsKey(variable) && types.stream().noneMatch(CollectionValueTypes::supports))
                     return types;
                 TypesComputer computer = resource.getResourceServiceProvider().get(TypesComputer.class);
                 types = loopTypes(types, variable, offset, environments, plan, computer);
@@ -5263,15 +5299,35 @@ public final class BslStructureInsertCommentTypes
                             for (TypeItem key : computer.computeTypes(addition.key, environments))
                                 ArrayElementTypes.addElement(keys, key);
                         if (addition.value != null)
-                            for (TypeItem value : computer.computeTypes(addition.value, environments))
+                        {
+                            InteractiveTypes interactive = INTERACTIVE_TYPES.get();
+                            boolean expanded = interactive != null && interactive.nativeRead == 0;
+                            // Значение вставки — зависимость типа коллекции. Оно может быть
+                            // вне выражения, для которого открыт список членов.
+                            List<TypeItem> addedTypes = expanded
+                                ? interactive.expression(addition.value, environments, null)
+                                : computer.computeTypes(addition.value, environments);
+                            for (TypeItem value : addedTypes)
                                 ArrayElementTypes.addElement(values, value);
+                        }
                     }
+                    if (moduleVariable)
+                        Global.tempLog("module-collection-values", "resource=" + resource.getURI()
+                            + " variable=" + variable.getName() + " offset=" + offset + " from=" + from
+                            + " additions=" + count + " values=" + values.stream().map(value -> {
+                                String form = BslFormTypePresentation.text(value);
+                                return form != null ? form : McoreUtil.getTypeName(value);
+                            }).toList());
                     result.add(keys.isEmpty() && values.isEmpty() ? item
                         : specialize(collection, keys, values, variable, map));
                 }
                 return result;
             }
-            catch (RuntimeException | LinkageError failure)
+            catch (org.eclipse.core.runtime.OperationCanceledException canceled)
+            {
+                throw canceled;
+            }
+            catch (RuntimeException | LinkageError ignored)
             {
                 return types;
             }

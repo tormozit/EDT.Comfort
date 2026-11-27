@@ -9674,6 +9674,13 @@ public final class Activator
         private static final String PROP_FORM_ALLOWED = "tormozit.formPreview.allowed"; //$NON-NLS-1$
         private static final String PROP_FORM_EVENT = "tormozit.formPreview.event"; //$NON-NLS-1$
         private static final String PROP_FORM_PATCH = "tormozit.formPreview.patch."; //$NON-NLS-1$
+        private static final String PROP_FORM_SETTINGS_PATCH = "tormozit.formPreview.settingsPatch"; //$NON-NLS-1$
+        private static final String FORM_RENDER_CALLBACK = FORM_PRESENTATION + "$1"; //$NON-NLS-1$
+        private static final String FORM_PRESENTATION_INTERNAL = FORM_PRESENTATION.replace('.', '/');
+        private static final String FORM_RENDER_EVENT = "Lcom/_1c/g5/v8/dt/form/model/NativeRenderEvent;"; //$NON-NLS-1$
+        private static final String PROP_FORM_CLICK_REQUEST = "tormozit.formPreview.clickRequest"; //$NON-NLS-1$
+        private static final String PROP_FORM_CLICK_RENDER = "tormozit.formPreview.clickRender"; //$NON-NLS-1$
+        private static final String PROP_FORM_CLICK_PATCH = "tormozit.formPreview.clickPatch."; //$NON-NLS-1$
         private static final String SEARCH_TREE_LAYOUT =
             "com._1c.g5.v8.dt.internal.search.ui.provider.SearchResultTreeLayoutManager"; //$NON-NLS-1$
         private static final String PROP_COMMON_CHILDREN = "tormozit.commonNode.children"; //$NON-NLS-1$
@@ -9745,7 +9752,7 @@ public final class Activator
         private static final List<String> TARGETS = List.of(BSL_PARSER, CUSTOM_BSL_PARSER, HELPER,
             SUPPRESSION_PROVIDER, FOLDING_PROVIDER, FOLDING_STRUCTURE, FOLDING_PREFERENCES, TAB_FOLDER, PART_LIST_CONTROL, COMPARISON_EDITOR,
             MERGE_COMMIT_CALLBACK, EDITOR_MATCHING, GRANULAR_EDITOR, TREE_VIEWER, SEARCH_TREE_LAYOUT, NAVIGATOR_MAPPER,
-            FORM_PRESENTATION, FORM_PAGE, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
+            FORM_PRESENTATION, FORM_PAGE, FORM_RENDER_CALLBACK, PROPERTY_SHEET, PROPERTY_SHEET_MONITOR,
             MULTILANGUAGE_COMPONENT, SINGLE_LANGUAGE_COMPONENT,
             DCS_LOCAL_STRING_EDITOR, DCS_FIELD_EDITING, DCS_PARAMETER_EDITING, DOC_LOCKER, BSL_HIGHLIGHTING,
             XTEXT_DOCUMENT, BSL_XTEXT_DOCUMENT, ANNOTATION_ISSUE_PROCESSOR);
@@ -9784,6 +9791,10 @@ public final class Activator
                 (BiFunction<Object, Boolean, Boolean>) (representation, allowed) -> allowed);
             System.getProperties().putIfAbsent(PROP_FORM_EVENT,
                 (BiFunction<Object, String, Object>) (source, phase) -> null);
+            System.getProperties().putIfAbsent(PROP_FORM_CLICK_REQUEST,
+                (BiFunction<Object[], Boolean, Boolean>) (request, allowed) -> allowed);
+            System.getProperties().putIfAbsent(PROP_FORM_CLICK_RENDER,
+                (java.util.function.BiConsumer<Object[], String>) (request, phase) -> {});
             System.getProperties().putIfAbsent(PROP_PAGES_CREATED, (Consumer<Object>) editor -> {});
             System.getProperties().putIfAbsent(PROP_COMMON_CHILDREN,
                 (BiFunction<Object, Object, Object>) (parent, children) -> children);
@@ -9873,6 +9884,8 @@ public final class Activator
                     System.setProperty(PROP_PART_LIST_CONTROL, "error " + t); //$NON-NLS-1$
                 if (FORM_PRESENTATION.equals(name) || FORM_PAGE.equals(name))
                     System.setProperty(PROP_FORM_PATCH + name, "error " + t); //$NON-NLS-1$
+                if (FORM_PRESENTATION.equals(name) || FORM_RENDER_CALLBACK.equals(name))
+                    System.setProperty(PROP_FORM_CLICK_PATCH + name, "error " + t); //$NON-NLS-1$
                 if (DOC_LOCKER.equals(name))
                 {
                     System.setProperty(PROP_DOC_LOCKER_PATCH, "error " + t); //$NON-NLS-1$
@@ -10119,13 +10132,13 @@ public final class Activator
             return touched[0] == 1 && touched[1] == 1 ? writer.toByteArray() : null;
         }
 
-        /** Ворота пересчёта и замеры реальной работы, без новых ветвлений и кадров стека. */
+        /** Ворота пересчёта, замеры и окончание применения настроек макета. */
         private static byte[] transformFormPreview(String className, byte[] bytes)
         {
             boolean representation = FORM_PRESENTATION.equals(className);
             ClassReader reader = new ClassReader(bytes);
             ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-            int[] touched = new int[3];
+            int[] touched = new int[6];
             reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
             {
                 @Override
@@ -10133,6 +10146,8 @@ public final class Activator
                     String[] exceptions)
                 {
                     MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (representation && "rebuild".equals(name) && ("(" + FORM_RENDER_EVENT + "Z)V").equals(descriptor)) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        return formClickRequestVisitor(mv, touched);
                     boolean gate = representation && "isRebuildAllowed".equals(name) //$NON-NLS-1$
                         && "()Z".equals(descriptor); //$NON-NLS-1$
                     boolean timed = representation
@@ -10140,9 +10155,11 @@ public final class Activator
                             "(Lcom/_1c/g5/v8/dt/form/model/Form;Lcom/_1c/g5/v8/dt/form/mapping/model/CommandInterfaceMapping;Lcom/_1c/g5/v8/dt/form/model/NativeRenderEvent;Z)V") //$NON-NLS-1$
                         : "createPageControlsInternal".equals(name) //$NON-NLS-1$
                             && "(Lorg/eclipse/ui/forms/IManagedForm;)V".equals(descriptor); //$NON-NLS-1$
-                    if (!gate && !timed)
+                    boolean settings = !representation && "createGraphicalViewer".equals(name) //$NON-NLS-1$
+                        && "(Lorg/eclipse/swt/widgets/Composite;)V".equals(descriptor); //$NON-NLS-1$
+                    if (!gate && !timed && !settings)
                         return mv;
-                    touched[gate ? 0 : 1]++;
+                    touched[settings ? 3 : gate ? 0 : 1]++;
                     return new MethodVisitor(Opcodes.ASM9, mv)
                     {
                         private void callback(String phase)
@@ -10198,6 +10215,11 @@ public final class Activator
                                     : (opcode == Opcodes.RETURN ? "open.end" : "open.error")); //$NON-NLS-1$ //$NON-NLS-2$
                                 touched[2]++;
                             }
+                            if (settings && opcode == Opcodes.RETURN)
+                            {
+                                callback("settings.end"); //$NON-NLS-1$
+                                touched[4]++;
+                            }
                             super.visitInsn(opcode);
                         }
                     };
@@ -10205,8 +10227,113 @@ public final class Activator
             }, 0);
             boolean complete = touched[0] == (representation ? 1 : 0)
                 && touched[1] == 1 && touched[2] > 0;
+            if (representation)
+                System.setProperty(PROP_FORM_CLICK_PATCH + className, Boolean.toString(complete && touched[5] == 1));
+            else
+                System.setProperty(PROP_FORM_SETTINGS_PATCH, Boolean.toString(complete && touched[3] == 1 && touched[4] > 0));
             System.setProperty(PROP_FORM_PATCH + className, complete ? "ok" : "unsupported"); //$NON-NLS-1$ //$NON-NLS-2$
             return complete ? writer.toByteArray() : null;
+        }
+
+        private static MethodVisitor formClickRequestVisitor(MethodVisitor mv, int[] touched)
+        {
+            return new MethodVisitor(Opcodes.ASM9, mv)
+            {
+                @Override
+                public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean itf)
+                {
+                    super.visitMethodInsn(opcode, owner, name, descriptor, itf);
+                    if (!FORM_PRESENTATION_INTERNAL.equals(owner) || !"isRebuildAllowed".equals(name) //$NON-NLS-1$
+                        || !"()Z".equals(descriptor)) //$NON-NLS-1$
+                        return;
+                    touched[5]++;
+                    // Передаём исходное решение вместе с событием, сохраняя ветку выхода EDT.
+                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    loadFormClickCallback(mv, PROP_FORM_CLICK_REQUEST, "java/util/function/BiFunction"); //$NON-NLS-1$
+                    mv.visitInsn(Opcodes.SWAP);
+                    loadFormClickArguments(mv, false);
+                    mv.visitInsn(Opcodes.SWAP);
+                    mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiFunction", "apply", //$NON-NLS-1$ //$NON-NLS-2$
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true); //$NON-NLS-1$
+                    mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean"); //$NON-NLS-1$
+                    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                }
+            };
+        }
+
+        /** Начало отрисовки и оба выхода из штатного try/finally, уже после освобождения блокировки. */
+        private static byte[] transformFormClickRender(byte[] bytes)
+        {
+            ClassReader reader = new ClassReader(bytes);
+            ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+            int[] calls = new int[2];
+            reader.accept(new ClassVisitor(Opcodes.ASM9, writer)
+            {
+                @Override
+                public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
+                    String[] exceptions)
+                {
+                    MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+                    if (!"lambda$0".equals(name) || !("(ZLcom/_1c/g5/v8/dt/form/mapping/model/CommandInterfaceMapping;" //$NON-NLS-1$ //$NON-NLS-2$
+                        + FORM_RENDER_EVENT + ")V").equals(descriptor)) //$NON-NLS-1$
+                        return mv;
+                    return new MethodVisitor(Opcodes.ASM9, mv)
+                    {
+                        @Override
+                        public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean itf)
+                        {
+                            if (FORM_PRESENTATION_INTERNAL.equals(owner) && "rebuildInternal".equals(name)) //$NON-NLS-1$
+                            {
+                                calls[0]++;
+                                callback("begin"); //$NON-NLS-1$
+                            }
+                            super.visitMethodInsn(opcode, owner, name, descriptor, itf);
+                            if ("java/util/concurrent/locks/ReentrantLock".equals(owner) && "unlock".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                            {
+                                calls[1]++;
+                                callback(calls[1] == 1 ? "error" : "end"); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
+                        }
+
+                        private void callback(String phase)
+                        {
+                            loadFormClickCallback(mv, PROP_FORM_CLICK_RENDER, "java/util/function/BiConsumer"); //$NON-NLS-1$
+                            loadFormClickArguments(mv, true);
+                            mv.visitLdcInsn(phase);
+                            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/BiConsumer", "accept", //$NON-NLS-1$ //$NON-NLS-2$
+                                "(Ljava/lang/Object;Ljava/lang/Object;)V", true); //$NON-NLS-1$
+                        }
+                    };
+                }
+            }, 0);
+            boolean complete = calls[0] == 1 && calls[1] == 2;
+            System.setProperty(PROP_FORM_CLICK_PATCH + FORM_RENDER_CALLBACK, Boolean.toString(complete));
+            return complete ? writer.toByteArray() : null;
+        }
+
+        private static void loadFormClickCallback(MethodVisitor mv, String key, String callbackType)
+        {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitLdcInsn(key);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Properties", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            mv.visitTypeInsn(Opcodes.CHECKCAST, callbackType);
+        }
+
+        private static void loadFormClickArguments(MethodVisitor mv, boolean render)
+        {
+            mv.visitInsn(Opcodes.ICONST_2);
+            mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object"); //$NON-NLS-1$
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            if (render)
+                mv.visitFieldInsn(Opcodes.GETFIELD, FORM_PRESENTATION_INTERNAL + "$1", "this$0", //$NON-NLS-1$ //$NON-NLS-2$
+                    "L" + FORM_PRESENTATION_INTERNAL + ";"); //$NON-NLS-1$ //$NON-NLS-2$
+            mv.visitInsn(Opcodes.AASTORE);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitVarInsn(Opcodes.ALOAD, render ? 3 : 1);
+            mv.visitInsn(Opcodes.AASTORE);
         }
 
         /**
@@ -10517,6 +10644,8 @@ public final class Activator
                 return transformPropertySheetMonitor(bytes);
             if (FORM_PRESENTATION.equals(className) || FORM_PAGE.equals(className))
                 return transformFormPreview(className, bytes);
+            if (FORM_RENDER_CALLBACK.equals(className))
+                return transformFormClickRender(bytes);
             if (TREE_VIEWER.equals(className) || SEARCH_TREE_LAYOUT.equals(className)
                 || NAVIGATOR_MAPPER.equals(className))
                 return transformCommonTree(className, bytes);

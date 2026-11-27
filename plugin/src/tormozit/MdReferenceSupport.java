@@ -24,6 +24,7 @@ import org.eclipse.emf.ecore.EClassifier;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EPackage;
 import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.EcorePackage;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.search.ui.NewSearchUI;
@@ -34,9 +35,18 @@ import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.form.model.DataPath;
+import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormPackage;
+import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.metadata.mdclass.Constant;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.refactoring.core.IBmRefactoringOperation;
+import com._1c.g5.v8.dt.refactoring.core.IDeleteRefactoringContributor;
+import com._1c.g5.v8.dt.refactoring.core.RefactoringOperationDescriptor;
+import com._1c.g5.v8.dt.refactoring.core.RefactoringSettings;
+import com._1c.g5.v8.dt.refactoring.core.RefactoringStatus;
 import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.rights.model.RightsPackage;
 
@@ -327,6 +337,8 @@ public final class MdReferenceSupport
             result.add(reference);
             onReference.accept(reference);
         };
+        if (brokenOnly && owner instanceof FormAttribute attribute)
+            findBrokenConstantPaths(attribute, property, monitor, found);
         for (EReference feature : features(owner.eClass()))
         {
             if (property != null && !property.equals(feature.getName()))
@@ -371,6 +383,140 @@ public final class MdReferenceSupport
         return result;
     }
 
+    private static void findBrokenConstantPaths(FormAttribute attribute, String property,
+        IProgressMonitor monitor, java.util.function.Consumer<BrokenReference> found)
+    {
+        EReference feature = FormPackage.eINSTANCE.getFormAttribute_NotDefaultUseAlwaysAttributes();
+        if (property != null && !property.equals(feature.getName()))
+            return;
+        var paths = attribute.getNotDefaultUseAlwaysAttributes();
+        if (paths.isEmpty())
+            return;
+        boolean constantsSet = isConstantsSet(attribute);
+        Global.tempLog("broken-links-constant-path", "attribute=" + EcoreUtil.getURI(attribute)
+            + " paths=" + paths.size() + " constantsSet=" + constantsSet);
+        if (!constantsSet)
+            return;
+        for (int index = 0; index < paths.size(); index++)
+        {
+            if (monitor.isCanceled())
+                throw new OperationCanceledException();
+            if (!(paths.get(index) instanceof DataPath path))
+                continue;
+            String name = constantPathName(attribute, path);
+            var transaction = path.bmGetTransaction();
+            boolean candidate = transaction != null && name != null;
+            EObject constant = candidate ? transaction.getTopObjectByFqn("Constant." + name) : null;
+            boolean broken = candidate && (constant == null || constant.eIsProxy()
+                || detachedFromConfiguration(constant));
+            Global.tempLog("broken-links-constant-path", "attribute=" + EcoreUtil.getURI(attribute)
+                + " segments=" + path.getSegments() + " candidate=" + candidate
+                + " target=" + (constant != null ? EcoreUtil.getURI(constant) : null) + " broken=" + broken);
+            if (broken)
+                found.accept(new BrokenReference(attribute, feature, index, path));
+        }
+    }
+
+    private static boolean isConstantsSet(FormAttribute attribute)
+    {
+        var valueType = attribute.getValueType();
+        return valueType != null && valueType.getTypes().stream()
+            .map(type -> type.eIsProxy() ? EcoreUtil.resolve(type, attribute) : type)
+            .anyMatch(type -> type instanceof com._1c.g5.v8.dt.mcore.TypeItem item
+                && "ConstantsSet".equals(McoreUtil.getTypeCategory(item)));
+    }
+
+    private static String constantPathName(FormAttribute attribute, DataPath path)
+    {
+        String prefix = attribute.getName() + ".";
+        String value = String.join(".", path.getSegments());
+        if (!value.startsWith(prefix) || value.length() == prefix.length()
+            || value.indexOf('.', prefix.length()) >= 0)
+            return null;
+        return value.substring(prefix.length());
+    }
+
+    public static final class ConstantDeleteContributor implements IDeleteRefactoringContributor
+    {
+        @Override
+        public RefactoringOperationDescriptor createParticipatingOperation(EObject object,
+            RefactoringSettings settings, RefactoringStatus status)
+        {
+            if (!(object instanceof Constant constant))
+                return null;
+            return new RefactoringOperationDescriptor(new RemoveConstantPaths(constant.getName()));
+        }
+
+        @Override
+        public RefactoringOperationDescriptor createCleanReferenceOperation(IBmObject target, IBmObject owner,
+            EStructuralFeature feature, RefactoringSettings settings, RefactoringStatus status)
+        {
+            return null;
+        }
+
+        private static final class RemoveConstantPaths implements IBmRefactoringOperation
+        {
+            private final String name;
+            private IBmTransaction transaction;
+
+            RemoveConstantPaths(String name)
+            {
+                this.name = name;
+            }
+
+            @Override
+            public void setActiveTransaction(IBmTransaction transaction)
+            {
+                this.transaction = transaction;
+            }
+
+            @Override
+            public void perform()
+            {
+                Global.tempLog("constant-delete-paths", "start constant=" + name);
+                int scanned = 0;
+                int removed = 0;
+                try
+                {
+                    List<EObject> owners = new ArrayList<>();
+                    List<URI> unreadable = new ArrayList<>();
+                    collect(transaction.getTopObjectIterator(), new HashSet<>(), owners, unreadable,
+                        SubMonitor.convert(new NullProgressMonitor()));
+                    Global.tempLog("constant-delete-paths", "collected constant=" + name
+                        + " owners=" + owners.size() + " unreadable=" + unreadable);
+                    for (EObject owner : owners)
+                    {
+                        if (!(owner instanceof FormAttribute attribute))
+                            continue;
+                        scanned++;
+                        var paths = attribute.getNotDefaultUseAlwaysAttributes();
+                        for (int index = paths.size() - 1; index >= 0; index--)
+                        {
+                            if (!(paths.get(index) instanceof DataPath path)
+                                || !name.equals(constantPathName(attribute, path)))
+                                continue;
+                            boolean constantsSet = isConstantsSet(attribute);
+                            Global.tempLog("constant-delete-paths", "attribute=" + EcoreUtil.getURI(attribute)
+                                + " segments=" + path.getSegments() + " constantsSet=" + constantsSet);
+                            if (constantsSet)
+                            {
+                                paths.remove(index);
+                                removed++;
+                            }
+                        }
+                    }
+                }
+                catch (RuntimeException e)
+                {
+                    Global.tempLog("constant-delete-paths", "failed constant=" + name + " error=" + e);
+                    throw e;
+                }
+                Global.tempLog("constant-delete-paths", "finished constant=" + name
+                    + " scanned=" + scanned + " removed=" + removed);
+            }
+        }
+    }
+
     /** Встроенные типы и значения платформы не являются ссылками на метаданные. */
     private static boolean isMetadataSearchTarget(EObject target)
     {
@@ -385,11 +531,15 @@ public final class MdReferenceSupport
     /** Пустая цель — запись доступности по ролям, у которой роль не задана. */
     public static String targetLabel(BrokenReference reference)
     {
+        if (reference.target() instanceof DataPath path)
+            return String.join(".", path.getSegments());
         return reference.target() == null ? "Роль не задана" : localized(EcoreUtil.getURI(reference.target()));
     }
 
     private static String targetFullName(BrokenReference reference)
     {
+        if (reference.target() instanceof DataPath path)
+            return String.join(".", path.getSegments());
         return reference.target() == null ? "Роль не задана" : fullName(EcoreUtil.getURI(reference.target()));
     }
 
@@ -1173,6 +1323,9 @@ public final class MdReferenceSupport
             // Тело формы — внешний самостоятельный BM-объект, а не сохранённый containment.
             if (object instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm form && form.getForm() != null)
                 enqueueSavedChild(form.getForm(), pending, unreadable, include);
+            if (object instanceof FormAttribute attribute && !attribute.getNotDefaultUseAlwaysAttributes().isEmpty()
+                && features(object.eClass()).isEmpty())
+                owners.add(object);
             if (!ownerScopes.containsKey(object.eClass()))
                 continue;
             visited++;

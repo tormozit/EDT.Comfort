@@ -288,6 +288,7 @@ import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.ContentUtil;
 import com._1c.g5.v8.dt.ui.util.DtImageDataRenderer;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
+import com.sun.jna.platform.win32.Kernel32;
 
 /**
  * Объединяет поведения редактора форм EDT:
@@ -653,6 +654,18 @@ public class FormEditorHook implements IStartup
         private static final String REPRESENTATION =
             "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.FormWysiwygRepresentation"; //$NON-NLS-1$
         private static final long SLOW_MS = 3000;
+        private static final String REBUILD_LOG = "form-preview-rebuild"; //$NON-NLS-1$
+        private static final StackWalker REBUILD_STACK = StackWalker.getInstance();
+        private static final String SETTINGS_PATCH = "tormozit.formPreview.settingsPatch"; //$NON-NLS-1$
+        private static final String CLICK_PATCH = "tormozit.formPreview.clickPatch." + REPRESENTATION; //$NON-NLS-1$
+        private static final String CLICK_RENDER_PATCH = CLICK_PATCH + "$1"; //$NON-NLS-1$
+        private static final String NATIVE_HANDLER =
+            "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.WysiwygNativeHandler"; //$NON-NLS-1$
+        private static final String NATIVE_COMPOSITE =
+            "com._1c.g5.v8.dt.form.internal.presentation.wysiwyg.WysiwygNativeComposite"; //$NON-NLS-1$
+        private static final Set<String> SETTINGS_SETTERS = Set.of(
+            "setInterfaceFontVariant", "setMobileDevice", "setMobileScale", "setResolution", "setScale", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+            "setInterfaceMode", "setDisplayRotation", "setInterfaceTheme"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         private static final EditorMemoryStore STORE =
             new EditorMemoryStore("formPreview.entries", 2000); //$NON-NLS-1$
         private static final Map<Object, PreviewState> STATES = new WeakHashMap<>();
@@ -661,16 +674,38 @@ public class FormEditorHook implements IStartup
         {
             System.getProperties().put("tormozit.formPreview.allowed", //$NON-NLS-1$
                 (java.util.function.BiFunction<Object, Boolean, Boolean>) (representation, original) -> {
+                    boolean allowed = original;
+                    PreviewState state = null;
                     try
                     {
-                        PreviewState state = state(representation);
-                        boolean allowed = original && (state == null || state.visible);
-                        return allowed;
+                        state = state(representation);
+                        allowed = original && (state == null || state.visible);
                     }
                     catch (RuntimeException e)
                     {
-                        return original;
                     }
+                    boolean deferred = false;
+                    try
+                    {
+                        // Здесь ещё доступен инициатор запроса, до getMappingRootAsync и syncExec.
+                        List<StackWalker.StackFrame> frames = REBUILD_STACK.walk(stack -> stack.skip(1).limit(18).toList());
+                        if (allowed && state != null && Boolean.getBoolean(SETTINGS_PATCH) && isOpeningSettingsRequest(frames))
+                        {
+                            state.deferredSettingsRequests++;
+                            deferred = true;
+                        }
+                        String caller = frames.stream().map(StackWalker.StackFrame::toString)
+                            .collect(java.util.stream.Collectors.joining(" <- ")); //$NON-NLS-1$
+                        String clickPatches = frames.stream().anyMatch(Preview::isNativeMouseUp)
+                            ? " " + clickPatchStatus() : ""; //$NON-NLS-1$ //$NON-NLS-2$
+                        trace(representation, "rebuild.request original=" + original //$NON-NLS-1$
+                            + " allowed=" + (allowed && !deferred) + " deferred=" + deferred //$NON-NLS-1$ //$NON-NLS-2$
+                            + clickPatches + " caller=" + caller); //$NON-NLS-1$
+                    }
+                    catch (RuntimeException e)
+                    {
+                    }
+                    return allowed && !deferred;
                 });
             System.getProperties().put("tormozit.formPreview.event", //$NON-NLS-1$
                 (java.util.function.BiFunction<Object, String, Object>) (source, phase) -> {
@@ -682,6 +717,29 @@ public class FormEditorHook implements IStartup
                     {
                     }
                     return null;
+                });
+            System.getProperties().put("tormozit.formPreview.clickRequest", //$NON-NLS-1$
+                (java.util.function.BiFunction<Object[], Boolean, Boolean>) (request, allowed) -> {
+                    if (!allowed)
+                        return false;
+                    try
+                    {
+                        return allowClickRequest(request[0], request[1]);
+                    }
+                    catch (RuntimeException e)
+                    {
+                        return true;
+                    }
+                });
+            System.getProperties().put("tormozit.formPreview.clickRender", //$NON-NLS-1$
+                (java.util.function.BiConsumer<Object[], String>) (request, phase) -> {
+                    try
+                    {
+                        onClickRender(request[0], request[1], phase);
+                    }
+                    catch (RuntimeException e)
+                    {
+                    }
                 });
         }
 
@@ -711,9 +769,292 @@ public class FormEditorHook implements IStartup
             return state;
         }
 
+        private static void trace(Object representation, String detail)
+        {
+            Global.tempLog(REBUILD_LOG, "preview=" + Integer.toHexString(System.identityHashCode(representation)) //$NON-NLS-1$
+                + " thread=" + Thread.currentThread().getName() + " " + detail); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static boolean allowClickRequest(Object representation, Object event)
+        {
+            if (Display.getCurrent() == null || !Boolean.getBoolean(CLICK_PATCH) || !Boolean.getBoolean(CLICK_RENDER_PATCH))
+                return true;
+            PreviewState state = state(representation);
+            if (state == null)
+            {
+                if (fromNativeMouseUp())
+                    traceClick(representation, event, "pass reason=preview-state-unavailable"); //$NON-NLS-1$
+                return true;
+            }
+            Object type = Global.invoke(event, "getEventType"); //$NON-NLS-1$
+            if (type == null)
+                type = Global.invoke(event, "getType"); //$NON-NLS-1$
+            if (!(type instanceof Enum<?> eventType))
+            {
+                if (fromNativeMouseUp())
+                    traceClick(representation, event, "pass reason=unsupported-event-api type=" + type); //$NON-NLS-1$
+                return true;
+            }
+
+            switch (eventType.name())
+            {
+                case "LMB_CLICK": //$NON-NLS-1$
+                case "LEFT_MOUSE_BUTTON": //$NON-NLS-1$
+                    if (fromNativeMouseUp())
+                    {
+                        // В локальной EDT mouseUp дважды передаёт один объект LEFT_MOUSE_BUTTON.
+                        if ("LEFT_MOUSE_BUTTON".equals(eventType.name()) && state.clickAwaitingUpdate == event) //$NON-NLS-1$
+                        {
+                            state.clickAwaitingUpdate = null;
+                            state.clickUpdates.put(event, new ClickUpdate(null));
+                            state.clickPaints.put(event, new ClickPaint(event, "mouse")); //$NON-NLS-1$
+                            traceClick(representation, event, "update.deferred sameEvent=true"); //$NON-NLS-1$
+                            return false;
+                        }
+                        state.clickAwaitingUpdate = event;
+                        traceClick(representation, event, "request type=" + eventType.name()); //$NON-NLS-1$
+                    }
+                    break;
+                case "NONE": //$NON-NLS-1$
+                    Object click = state.clickAwaitingUpdate;
+                    if (click != null && fromNativeMouseUp())
+                    {
+                        state.clickAwaitingUpdate = null;
+                        state.clickUpdates.put(click, new ClickUpdate(event));
+                        state.clickPaints.put(click, new ClickPaint(click, "mouse")); //$NON-NLS-1$
+                        traceClick(representation, click, "update.deferred"); //$NON-NLS-1$
+                        return false;
+                    }
+                    if (click == null && fromNativeMouseUp())
+                        traceClick(representation, event, "pass reason=update-without-click"); //$NON-NLS-1$
+                    if (!state.clickPaints.isEmpty() && fromNativePaint() && deferClickPaint(representation, state, event))
+                        return false;
+                    break;
+                case "SELECT_BY_ID": //$NON-NLS-1$
+                    Object renderingClick = state.renderingClick;
+                    ClickUpdate update = state.clickUpdates.get(renderingClick);
+                    if (update != null && REBUILD_STACK.walk(frames -> frames.limit(16).anyMatch(frame ->
+                        REPRESENTATION.equals(frame.getClassName()) && "rebuildInternal".equals(frame.getMethodName())))) //$NON-NLS-1$
+                    {
+                        update.selectionRequested = true;
+                        state.clickPaints.put(event, new ClickPaint(renderingClick, "selection")); //$NON-NLS-1$
+                        traceClick(representation, renderingClick, "selection.request"); //$NON-NLS-1$
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return true;
+        }
+
+        /** Штатный вызов при отпускании мыши, включая обе строки с запросами в mouseUp. */
+        private static boolean fromNativeMouseUp()
+        {
+            return REBUILD_STACK.walk(frames -> frames.limit(16).anyMatch(Preview::isNativeMouseUp));
+        }
+
+        private static boolean isNativeMouseUp(StackWalker.StackFrame frame)
+        {
+            return NATIVE_HANDLER.equals(frame.getClassName()) && "mouseUp".equals(frame.getMethodName()); //$NON-NLS-1$
+        }
+
+        private static boolean fromNativePaint()
+        {
+            return REBUILD_STACK.walk(stack ->
+            {
+                List<StackWalker.StackFrame> frames = stack.limit(20).toList();
+                return frames.stream().anyMatch(frame -> NATIVE_COMPOSITE.equals(frame.getClassName())
+                    && "lambda$0".equals(frame.getMethodName())) //$NON-NLS-1$
+                    && frames.stream().anyMatch(frame -> Composite.class.getName().equals(frame.getClassName())
+                        && "WM_PAINT".equals(frame.getMethodName())); //$NON-NLS-1$
+            });
+        }
+
+        private static boolean deferClickPaint(Object representation, PreviewState state, Object paintEvent)
+        {
+            // Только ещё не начатый расчёт может покрыть новое событие WM_PAINT.
+            for (var entry : state.clickPaints.entrySet())
+            {
+                ClickPaint paint = entry.getValue();
+                if (paint.started)
+                    continue;
+                paint.deferredEvent = paintEvent;
+                traceClickPaint(representation, entry.getKey(), paint, "deferred"); //$NON-NLS-1$
+                return true;
+            }
+            trace(representation, "click.paint.pass reason=all-click-renders-started"); //$NON-NLS-1$
+            return false;
+        }
+
+        private static String clickPatchStatus()
+        {
+            return "clickRequestPatch=" + System.getProperty(CLICK_PATCH, "unset") //$NON-NLS-1$ //$NON-NLS-2$
+                + " clickRenderPatch=" + System.getProperty(CLICK_RENDER_PATCH, "unset"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static void onClickRender(Object representation, Object event, String phase)
+        {
+            PreviewState state = state(representation);
+            if (state == null)
+                return;
+            if ("begin".equals(phase)) //$NON-NLS-1$
+            {
+                ClickPaint paint = state.clickPaints.get(event);
+                if (paint != null)
+                    paint.started = true;
+                if (state.clickUpdates.containsKey(event))
+                {
+                    state.renderingClick = event;
+                    traceClick(representation, event, "render.begin"); //$NON-NLS-1$
+                }
+                return;
+            }
+            ClickPaint paint = state.clickPaints.remove(event);
+            ClickUpdate update = state.clickUpdates.remove(event);
+            boolean completed = "end".equals(phase); //$NON-NLS-1$
+            if (completed && paint != null && paint.deferredEvent != null)
+                traceClickPaint(representation, event, paint, "covered"); //$NON-NLS-1$
+            if (update == null)
+            {
+                if (!completed)
+                    replayClickPaint(representation, event, paint);
+                return;
+            }
+            state.renderingClick = null;
+            boolean sameEvent = update.event == null;
+            if (completed && update.selectionRequested)
+            {
+                traceClick(representation, event, "update.merged sameEvent=" + sameEvent); //$NON-NLS-1$
+                return;
+            }
+
+            // Повторяем исходный запрос mouseUp с updateOnly=true.
+            boolean invoked = false;
+            try
+            {
+                Object replayEvent = sameEvent ? event : update.event;
+                invoked = Global.invokeVoid(representation, "rebuild", replayEvent, true); //$NON-NLS-1$
+            }
+            finally
+            {
+                traceClick(representation, event, "update.replay after=" + phase + " invoked=" + invoked //$NON-NLS-1$ //$NON-NLS-2$
+                    + " sameEvent=" + sameEvent); //$NON-NLS-1$
+                if (!completed && paint != null && paint.deferredEvent != null)
+                {
+                    if (invoked)
+                        traceClickPaint(representation, event, paint, "replay-with-update"); //$NON-NLS-1$
+                    else
+                        replayClickPaint(representation, event, paint);
+                }
+            }
+        }
+
+        private static void replayClickPaint(Object representation, Object failedEvent, ClickPaint paint)
+        {
+            if (paint == null || paint.deferredEvent == null)
+                return;
+            boolean invoked = false;
+            try
+            {
+                invoked = Global.invokeVoid(representation, "rebuild", paint.deferredEvent, true); //$NON-NLS-1$
+            }
+            finally
+            {
+                traceClickPaint(representation, failedEvent, paint, "replay invoked=" + invoked); //$NON-NLS-1$
+            }
+        }
+
+        private static void traceClickPaint(Object representation, Object renderEvent, ClickPaint paint, String detail)
+        {
+            try
+            {
+                trace(representation, "click.paint." + detail + " clickId=" + Integer.toHexString(paint.clickId) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " renderEvent=" + Integer.toHexString(System.identityHashCode(renderEvent)) //$NON-NLS-1$
+                    + " target=" + paint.target); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                // Запись диагностики не влияет на обработку события.
+            }
+        }
+
+        private static final class ClickPaint
+        {
+            final int clickId;
+            final String target;
+            boolean started;
+            Object deferredEvent;
+
+            ClickPaint(Object click, String target)
+            {
+                this.clickId = System.identityHashCode(click);
+                this.target = target;
+            }
+        }
+
+        private static void traceClick(Object representation, Object click, String detail)
+        {
+            try
+            {
+                trace(representation, "click." + detail + " clickId=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + Integer.toHexString(System.identityHashCode(click)));
+            }
+            catch (RuntimeException e)
+            {
+                // Запись диагностики не влияет на обработку события.
+            }
+        }
+
+        private static final class ClickUpdate
+        {
+            // null означает, что для повтора нужен сам ключ из clickUpdates.
+            final Object event;
+            boolean selectionRequested;
+
+            ClickUpdate(Object event)
+            {
+                this.event = event;
+            }
+        }
+
+        private static boolean isOpeningSettingsRequest(List<StackWalker.StackFrame> frames)
+        {
+            if (frames.size() < 4)
+                return false;
+            StackWalker.StackFrame setter = frames.get(3);
+            return REPRESENTATION.equals(setter.getClassName()) && SETTINGS_SETTERS.contains(setter.getMethodName())
+                && frames.stream().anyMatch(frame -> FormEditorPage.class.getName().equals(frame.getClassName())
+                    && "createGraphicalViewer".equals(frame.getMethodName())); //$NON-NLS-1$
+        }
+
+        private static void flushSettingsRebuild(FormEditorPage page)
+        {
+            Object representation = wysiwygRepresentation(page);
+            PreviewState state = state(representation);
+            if (state == null || state.deferredSettingsRequests == 0)
+                return;
+            int requests = state.deferredSettingsRequests;
+            state.deferredSettingsRequests = 0;
+            boolean invoked = false;
+            try
+            {
+                // Все параметры уже записаны в представлении. Нужен один полный расчёт.
+                invoked = Global.invokeVoid(representation, "rebuild", false); //$NON-NLS-1$
+            }
+            finally
+            {
+                trace(representation, "settings.flush requests=" + requests + " invoked=" + invoked); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
         private static void event(Object source, String phase)
         {
             long now = System.nanoTime();
+            if ("settings.end".equals(phase) && source instanceof FormEditorPage page) //$NON-NLS-1$
+            {
+                flushSettingsRebuild(page);
+                return;
+            }
             if (phase.startsWith("open.")) //$NON-NLS-1$
             {
                 if ("open.end".equals(phase) && source instanceof FormEditorPage page) //$NON-NLS-1$
@@ -722,10 +1063,14 @@ public class FormEditorHook implements IStartup
             }
             PreviewState state = state(source);
             if (state == null)
+            {
+                trace(source, phase);
                 return;
+            }
             if ("render.begin".equals(phase)) //$NON-NLS-1$
             {
                 state.starts.push(now);
+                trace(source, phase);
                 return;
             }
             long ms = state.starts.isEmpty() ? -1 : (now - state.starts.pop()) / 1_000_000;
@@ -738,6 +1083,7 @@ public class FormEditorHook implements IStartup
                 if (page != null)
                     page.getPartControl().getDisplay().asyncExec(state::notifySlow);
             }
+            trace(source, phase + " ms=" + ms); //$NON-NLS-1$
         }
 
         private static void attach(FormEditorPage page)
@@ -752,6 +1098,19 @@ public class FormEditorHook implements IStartup
             if (state == null)
                 return;
             state.page = new java.lang.ref.WeakReference<>(page);
+            try
+            {
+                Bundle presentation = Platform.getBundle("com._1c.g5.v8.dt.form.presentation"); //$NON-NLS-1$
+                Bundle model = Platform.getBundle("com._1c.g5.v8.dt.form.model"); //$NON-NLS-1$
+                trace(representation, "preview.hooks presentation=" + (presentation == null ? "unknown" : presentation.getVersion()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " model=" + (model == null ? "unknown" : model.getVersion()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " settingsPatch=" + System.getProperty(SETTINGS_PATCH, "unset") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " " + clickPatchStatus()); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                // Временная диагностика не прерывает подключение переключателя макета.
+            }
             Action action = new Action("Скрыть макет формы", IAction.AS_CHECK_BOX) //$NON-NLS-1$
             {
                 @Override
@@ -790,6 +1149,11 @@ public class FormEditorHook implements IStartup
             final String key;
             final java.util.Deque<Long> starts = new java.util.ArrayDeque<>();
             volatile boolean visible;
+            int deferredSettingsRequests;
+            Object clickAwaitingUpdate;
+            Object renderingClick;
+            final Map<Object, ClickUpdate> clickUpdates = new WeakHashMap<>();
+            final Map<Object, ClickPaint> clickPaints = new WeakHashMap<>();
             boolean warnOnOpening;
             boolean rendered;
             boolean notified;
@@ -1714,6 +2078,45 @@ public class FormEditorHook implements IStartup
         private static void onMouseDown(Event e)
         {
             downPoint = e.button == 1 && isWysiwyg(e.widget) ? new Point(e.x, e.y) : null;
+            if (downPoint != null)
+                traceMouse(e, "mouse.down", true); //$NON-NLS-1$
+        }
+
+        private static void traceMouse(Event event, String phase, boolean matchedDown)
+        {
+            try
+            {
+                String timing = mouseClock(event);
+                Global.tempLog(Preview.REBUILD_LOG, phase + " x=" + event.x + " y=" + event.y //$NON-NLS-1$ //$NON-NLS-2$
+                    + " header=" + (event.y < HEADER_BAND_PX) //$NON-NLS-1$
+                    + " focused=" + ((Control)event.widget).isFocusControl() //$NON-NLS-1$
+                    + " matchedDown=" + matchedDown + " widget=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + Integer.toHexString(System.identityHashCode(event.widget)) + " " + timing); //$NON-NLS-1$
+            }
+            catch (RuntimeException e)
+            {
+                // Временная диагностика не должна прерывать обработку клика.
+            }
+        }
+
+        private static String mouseClock(Event event)
+        {
+            String timestamp = "swtEventTick=" + Integer.toUnsignedString(event.time); //$NON-NLS-1$
+            if (!Platform.OS_WIN32.equals(Platform.getOS()) || event.time == 0)
+                return timestamp + " queueMs=unavailable"; //$NON-NLS-1$
+            if (Preview.REBUILD_STACK.walk(frames -> frames.limit(18).anyMatch(frame ->
+                FormEditorHook.class.getName().equals(frame.getClassName()) && "simulateLeftClick".equals(frame.getMethodName())))) //$NON-NLS-1$
+                return timestamp + " queueMs=synthetic"; //$NON-NLS-1$
+            try
+            {
+                // SWT Win32 берёт Event.time из GetMessageTime. Вычитание int сохраняет разность при переполнении.
+                int now = Kernel32.INSTANCE.GetTickCount();
+                return timestamp + " handlerTick=" + Integer.toUnsignedString(now) + " queueMs=" + (now - event.time); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException | LinkageError error)
+            {
+                return timestamp + " queueMs=unavailable clockError=" + error.getClass().getSimpleName(); //$NON-NLS-1$
+            }
         }
 
         private static void onMouseUp(Event e)
@@ -1721,7 +2124,10 @@ public class FormEditorHook implements IStartup
             Point down = downPoint;
             downPoint = null;
 
-            if (e.button != 1 || down == null || !isWysiwyg(e.widget))
+            if (e.button != 1 || !isWysiwyg(e.widget))
+                return;
+            traceMouse(e, "mouse.up", down != null); //$NON-NLS-1$
+            if (down == null)
                 return;
             if (Math.abs(e.x - down.x) > DRAG_THRESHOLD_PX
                     || Math.abs(e.y - down.y) > DRAG_THRESHOLD_PX)
@@ -1762,9 +2168,8 @@ public class FormEditorHook implements IStartup
 
         /**
          * Ждёт, пока асинхронное перестроение эскиза завершится: {@code hippoSession} сменится и
-         * продержится без изменений {@value #STABLE_POLLS} опросов подряд. Клик по эскизу вызывает
-         * два перестроения (см. {@code WysiwygNativeHandler.mouseUp}), поэтому реакция на первое
-         * перестроение ненадёжна — второе перекроет выделение.
+         * продержится без изменений {@value #STABLE_POLLS} опросов подряд. После обработки
+         * клика EDT может запланировать ещё одно перестроение для подсветки выделения.
          */
         private static void awaitRebuild(FormEditorPage page, Object representation,
                 Object sessionBefore, Display display, int generation, int elapsedMs,

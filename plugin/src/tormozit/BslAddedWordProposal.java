@@ -148,6 +148,14 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
         return proposal.rankedWithStock();
     }
 
+    static BslAddedWordProposal loopIterator(String name, List<String> types)
+    {
+        BslAddedWordProposal proposal = new BslAddedWordProposal(name, Kind.PROPERTY, name, Absorb.WORD, -1, null,
+            null, false, true, false);
+        proposal.inferredTypes = List.copyOf(types);
+        return proposal;
+    }
+
     /** Описание синтетического слова, независимое от текста вставки. */
     BslAddedWordProposal withAdditionalInfo(String info)
     {
@@ -636,6 +644,8 @@ final class BslAddedWordProposal implements ICompletionProposal, ICompletionProp
             Global.tempLog("common-module-group-hint", "side word=" + word); //$NON-NLS-1$ //$NON-NLS-2$
             return additionalInfo;
         }
+        if (!inferredTypes.isEmpty())
+            return "Тип: <" + String.join(" | ", inferredTypes) + ">"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String text = closing != null && !closing.isEmpty() ? template + "\n" + CENTER + "\n" + closing : template; //$NON-NLS-1$ //$NON-NLS-2$
         return text.equals(word) ? null : text.replace(CARET, "|").replace(CENTER, "…"); //$NON-NLS-1$ //$NON-NLS-2$
     }

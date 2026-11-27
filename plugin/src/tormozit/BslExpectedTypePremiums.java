@@ -176,6 +176,11 @@ final class BslExpectedTypePremiums
     private static final Pattern IDENTIFIER = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]*"); //$NON-NLS-1$
     private static final Pattern LOOP_ITERATOR = Pattern.compile(
         "(?iu)Для\\s+Каждого\\s+([\\p{L}_][\\p{L}\\p{N}_]*)\\s+Из\\s+[^\\r\\n]+\\s+Цикл$"); //$NON-NLS-1$
+    private static final Pattern LOOP_ITERATOR_PREFIX = Pattern.compile(
+        "(?iu)(?:^|[;\\h\\r\\n])Для\\h+Каждого\\h+\\z"); //$NON-NLS-1$
+    private static final Pattern LOOP_ITERATOR_SUFFIX = Pattern.compile(
+        "(?iu)\\h+Из\\h+([\\p{L}_].*?)\\h+Цикл(?=\\h|;|$)"); //$NON-NLS-1$
+    private static final Pattern LOOP_COLLECTION_TOKEN = Pattern.compile(IDENTIFIER.pattern() + "|[()\\[\\]]"); //$NON-NLS-1$
     private static final Pattern TYPE_OF = Pattern.compile(
         "(?iu)(?:^|[^\\p{L}\\p{N}_.])ТипЗнч\\s*\\(\\s*(" + SIMPLE_EXPRESSION + ")\\s*\\)\\s*(?:=|<>)$"); //$NON-NLS-1$ //$NON-NLS-2$
     /** Сегмент имени типа в сравнении с ТипЗнч; группа 2 — уже пройденные уровни имени. */
@@ -222,13 +227,26 @@ final class BslExpectedTypePremiums
      * @param selected выделенный текст на начало сессии автодополнения ({@code ВыделенныйТекст} ИР)
      */
     private record Context(IDocument document, int start, int anchor, String parent, String preceding,
-        int precedingStart, int caret, String selected)
+        int precedingStart, int caret, String selected, LoopCollection loopCollection)
     {
         boolean sameAs(Context other)
         {
             return other != null && document == other.document && start == other.start
-                && parent.equals(other.parent) && preceding.equals(other.preceding) && selected.equals(other.selected);
+                && parent.equals(other.parent) && preceding.equals(other.preceding) && selected.equals(other.selected)
+                && java.util.Objects.equals(loopCollection, other.loopCollection);
         }
+
+        /** Для показа готовых имён, пока модель догоняет ввод перед выражением коллекции. */
+        boolean sameIteratorSite(Context other)
+        {
+            return loopCollection != null && other != null && other.loopCollection != null
+                && document == other.document && anchor == other.anchor && preceding.equals(other.preceding)
+                && loopCollection.text().equals(other.loopCollection.text());
+        }
+    }
+
+    private record LoopCollection(int offset, String text, String lastFragment)
+    {
     }
 
     /** Выделение в редакторе на начало сессии автодополнения. */
@@ -458,6 +476,7 @@ final class BslExpectedTypePremiums
      * @param tempTableColumns     родитель — {@code Колонки} временной таблицы менеджера ({@code М.Таблицы["Вт"]}): её
      *                             колонки (метаданные {@code ВременнаяТаблицаЗапроса} ИР); {@code null} — не определены
      * @param queryAllowed         контекст допускает создание запроса (условие флагов компиляции ИР)
+     * @param loopElementTypes     типы элемента коллекции в объявлении итератора
      */
     private record Facts(int bodyStartLine, List<String> parentTypes, boolean parentCollection, boolean parentIndexed,
         boolean parentSystemEnum, Set<String> constructorTypes, List<String> nestedTypes,
@@ -465,7 +484,7 @@ final class BslExpectedTypePremiums
         List<Local> receiverProperties, boolean selectionExpression, List<String> selectionTypes,
         List<String> queryTotals, boolean betweenMethods,
         ModuleType moduleType, Map<String, String> commonModuleGroups, List<String> methodParameters,
-        List<String> tempTableColumns, boolean queryAllowed)
+        List<String> tempTableColumns, boolean queryAllowed, List<String> loopElementTypes)
     {
     }
 
@@ -604,6 +623,37 @@ final class BslExpectedTypePremiums
         return result.toArray(new ICompletionProposal[result.size()]);
     }
 
+    /** В объявлении переменной EDT может не вернуть ни одного штатного слова. */
+    static ICompletionProposal[] loopIteratorProposals(IDocument document, int caret, ICompletionProposal[] empty)
+    {
+        if (!(document instanceof IXtextDocument xtext) || caret < 0)
+            return empty;
+        Context context = initialContextAt(document, caret);
+        if (context == null || context.loopCollection() == null)
+            return empty;
+        ensure(document, caret, empty);
+        Snapshot snapshot = active;
+        List<BslAddedWordProposal> proposals;
+        if (snapshot != null && context.sameIteratorSite(snapshot.context()))
+            proposals = snapshot.added();
+        else
+        {
+            Scene ready = ContentAssistSessionReloader.readOnlyPeekAst(xtext,
+                resource -> resource != null ? scene(resource, context, empty, false) : null);
+            if (ready == null)
+                return empty;
+            Map<String, BslAddedWordProposal> added = new LinkedHashMap<>();
+            premiums(context, ready, null, empty, Map.of(), added, false);
+            proposals = List.copyOf(added.values());
+        }
+        SmartCodeMatcher matcher = new SmartCodeMatcher(SmartContentAssistProcessor.computeIdentifierFilter(document, caret));
+        return proposals.stream()
+            .filter(word -> matcher.isEmpty || matcher.computeNamePremium(word.getWord()) > 0)
+            .sorted(Comparator.comparingInt((BslAddedWordProposal word) -> matcher.computeNamePremium(word.getWord()))
+                .reversed())
+            .toArray(ICompletionProposal[]::new);
+    }
+
     /**
      * Есть ли у места {@code caret} слово с премией, при которой ИР открывает список сам. Только
      * чтение готового снимка: без него — {@code false}.
@@ -674,7 +724,7 @@ final class BslExpectedTypePremiums
     {
         // EDT уже возвращает типы полей и предложений в одном представлении.
         List<String> queryTypes = expectedTypes;
-        Context context = new Context(document, anchor, anchor, parent, "", 0, anchor, ""); //$NON-NLS-1$ //$NON-NLS-2$
+        Context context = new Context(document, anchor, anchor, parent, "", 0, anchor, "", null); //$NON-NLS-1$ //$NON-NLS-2$
         Expectation expectation = new Expectation(queryTypes, receiver, "=", "", -1, false, null); //$NON-NLS-1$ //$NON-NLS-2$
         Premiums result = Premiums.empty();
         Map<String, Word> words = words(proposals, Map.of(), Map.of());
@@ -732,7 +782,7 @@ final class BslExpectedTypePremiums
             active = null;
             return;
         }
-        if (list.length == 0 && context.selected().isEmpty())
+        if (list.length == 0 && context.selected().isEmpty() && context.loopCollection() == null)
             return;
         requested = context;
         Snapshot snapshot = current;
@@ -754,7 +804,9 @@ final class BslExpectedTypePremiums
         }
         Snapshot initial = initialSnapshot;
         boolean initialReady = initial != null && initial.context().sameAs(context);
-        active = initialReady ? initial : null;
+        // Сдвиг коллекции влияет на чтение AST, но готовые имена вставляются по живой каретке.
+        boolean reuseIteratorNames = snapshot != null && context.sameIteratorSite(snapshot.context());
+        active = reuseIteratorNames ? snapshot : initialReady ? initial : null;
         IProject project = initialReady && initial.project() != null ? initial.project() : activeProject();
         if (deferred)
         {
@@ -968,7 +1020,8 @@ final class BslExpectedTypePremiums
             int precedingStart = Math.max(0, anchor - PRECEDING_TEXT_LENGTH);
             String preceding = quote >= 0 ? document.get(precedingStart, anchor - precedingStart) : ""; //$NON-NLS-1$
             boolean supported = TYPE_LITERAL.matcher(preceding).find();
-            return supported ? new Context(document, anchor, anchor, "", preceding, precedingStart, caret, "") : null; //$NON-NLS-1$ //$NON-NLS-2$
+            return supported ? new Context(document, anchor, anchor, "", preceding, precedingStart, caret, "", null) //$NON-NLS-1$ //$NON-NLS-2$
+                : null;
         }
         return contextAt(document, caret, selected);
     }
@@ -991,8 +1044,44 @@ final class BslExpectedTypePremiums
         }
         String parent = start < anchor ? document.get(start, anchor - 1 - start) : ""; //$NON-NLS-1$
         int precedingStart = Math.max(0, start - PRECEDING_TEXT_LENGTH);
-        return new Context(document, start, anchor, parent, document.get(precedingStart, start - precedingStart),
-            precedingStart, caret, selected);
+        String preceding = document.get(precedingStart, start - precedingStart);
+        LoopCollection loop = parent.isEmpty() && selected.isEmpty() && LOOP_ITERATOR_PREFIX.matcher(preceding).find()
+            && !SmartContentAssistProcessor.isCommentAssistContext(document, caret)
+            ? loopCollection(document, anchor) : null;
+        return new Context(document, start, anchor, parent, preceding, precedingStart, caret, selected, loop);
+    }
+
+    /** Коллекция справа от имени итератора, в том числе пока имя отсутствует и заголовок не разобран EDT. */
+    private static LoopCollection loopCollection(IDocument document, int anchor) throws BadLocationException
+    {
+        IRegion line = document.getLineInformationOfOffset(anchor);
+        int lineEnd = line.getOffset() + line.getLength();
+        int afterWord = anchor;
+        while (afterWord < lineEnd && SmartContentAssistProcessor.isFilterChar(document.getChar(afterWord)))
+            afterWord++;
+        String tail = document.get(afterWord, lineEnd - afterWord);
+        String code = withoutCommentsAndStrings(tail);
+        Matcher suffix = LOOP_ITERATOR_SUFFIX.matcher(code);
+        if (!suffix.lookingAt())
+            return null;
+        int start = suffix.start(1);
+        int end = suffix.end(1);
+        String expression = tail.substring(start, end);
+        Matcher tokens = LOOP_COLLECTION_TOKEN.matcher(code.substring(start, end));
+        String fragment = ""; //$NON-NLS-1$
+        int depth = 0;
+        while (tokens.find())
+        {
+            String token = tokens.group();
+            char first = token.charAt(0);
+            if (first == '(' || first == '[')
+                depth++;
+            else if (first == ')' || first == ']')
+                depth--;
+            else if (depth == 0)
+                fragment = token + (expression.substring(tokens.end()).stripLeading().startsWith("(") ? "(" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        return fragment.isEmpty() || depth != 0 ? null : new LoopCollection(afterWord + start, expression, fragment);
     }
 
     /** Подбор имени для штатного мастера; контекст берётся из его выделения, без кэша автодополнения. */
@@ -1288,6 +1377,10 @@ final class BslExpectedTypePremiums
                 String.join(", ", names), //$NON-NLS-1$
                 Collections.emptyMap(), null, aliases, List.of(), Map.of(), Map.of(), null, null);
         }
+        if (context.loopCollection() != null)
+            return new Scene(null, null, false, Map.of(), null, "", Map.of(), //$NON-NLS-1$
+                facts(resource, context, null, null, List.of(), detailed), List.of(), List.of(), Map.of(), Map.of(),
+                null, null);
         ParamHintHtmlModifier.CallSiteInfo site = contextCallSite(resource, context);
         Expectation expectation = expectation(resource, context, site, list);
         Expression parent = context.parent().isEmpty() ? null : findExpression(resource, context.start(), context.anchor() - 1);
@@ -2451,6 +2544,11 @@ final class BslExpectedTypePremiums
         EObject root = BslNodeLookup.rootAst(resource);
         Module module = root instanceof Module m ? m : null;
         com._1c.g5.v8.dt.bsl.model.Method method = methodAt(resource, context.start());
+        if (context.loopCollection() != null)
+            return new Facts(-1, List.of(), false, false, false, Set.of(), List.of(), Set.of(), false, false,
+                locals(resource, module, method, context.start(), false, false), List.of(), false, List.of(), null,
+                method == null, module != null ? module.getModuleType() : null, Map.of(), List.of(), null, false,
+                loopElementTypes(resource, context.loopCollection()));
         Environments environments = method != null ? method.environments() : module != null ? module.environments() : null;
         boolean queryAllowed = environments != null
             && (!environments.contains(Environment.MNG_CLIENT) || environments.contains(Environment.CLIENT));
@@ -2459,7 +2557,7 @@ final class BslExpectedTypePremiums
             return new Facts(-1, List.of(), false, false, false, Set.of(), List.of(), Set.of(), false, false,
                 locals(resource, module, method, context.start(), false), List.of(), selectionExpression != null,
                 List.of(), null, method == null,
-                module != null ? module.getModuleType() : null, Map.of(), List.of(), null, queryAllowed);
+                module != null ? module.getModuleType() : null, Map.of(), List.of(), null, queryAllowed, List.of());
         Type parentType = parentItems.isEmpty() ? null : resolveType(resource, parentItems.get(0));
         String parentName = parentType != null ? lower(typeName(parentType)) : ""; //$NON-NLS-1$
         TypeContainer elements = parentType != null ? parentType.getCollectionElementTypes() : null;
@@ -2538,7 +2636,24 @@ final class BslExpectedTypePremiums
             selectionExpression != null, selectionTypes, queryTotals, method == null,
             module != null ? module.getModuleType() : null,
             context.parent().isEmpty() ? CommonModuleAssistGroups.groupWords(resource, context.start()) : Map.of(),
-            methodParameters, tempTableColumns, queryAllowed);
+            methodParameters, tempTableColumns, queryAllowed, List.of());
+    }
+
+    /** ИР берёт тип элемента у первого найденного типа коллекции. */
+    private static List<String> loopElementTypes(XtextResource resource, LoopCollection loop)
+    {
+        if (loop == null)
+            return List.of();
+        int end = loop.offset() + loop.text().length();
+        boolean readyOnly = readyTypesOnly();
+        List<TypeItem> types = readyOnly ? readyExpressionTypes(findExpression(resource, loop.offset(), end))
+            : expressionTypeItems(resource, loop.offset(), end, loop.text());
+        Type collection = types.isEmpty() ? null
+            : readyOnly ? (types.get(0) instanceof Type type ? type : null) : resolveType(resource, types.get(0));
+        TypeContainer elements = collection == null ? null : collection.getCollectionElementTypes();
+        return elements == null ? List.of() : readyOnly
+            ? typeNames(elements.allTypes().stream().filter(item -> item != null && !item.eIsProxy()).toList())
+            : typeNames(elements.allTypes());
     }
 
     /** Выделение выражения, а не инструкции: границы без внешних пробелов должны совпасть с узлом AST. */
@@ -2587,6 +2702,12 @@ final class BslExpectedTypePremiums
     private static List<Local> locals(XtextResource resource, Module module, com._1c.g5.v8.dt.bsl.model.Method method,
         int offset, boolean withTypes)
     {
+        return locals(resource, module, method, offset, withTypes, true);
+    }
+
+    private static List<Local> locals(XtextResource resource, Module module, com._1c.g5.v8.dt.bsl.model.Method method,
+        int offset, boolean withTypes, boolean checkVisibility)
+    {
         List<Local> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         List<Variable> variables = new ArrayList<>();
@@ -2606,12 +2727,15 @@ final class BslExpectedTypePremiums
             }
             // Неявная переменная видна, если её первое обращение — до места
             Map<Variable, Integer> firstAccess = new java.util.IdentityHashMap<>();
-            for (StaticFeatureAccess access : EcoreUtil2.getAllContentsOfType(method, StaticFeatureAccess.class))
+            if (checkVisibility)
             {
-                ImplicitVariable variable = access.getImplicitVariable();
-                ICompositeNode node = variable != null ? NodeModelUtils.findActualNodeFor(access) : null;
-                if (node != null)
-                    firstAccess.merge(variable, Integer.valueOf(node.getOffset()), Math::min);
+                for (StaticFeatureAccess access : EcoreUtil2.getAllContentsOfType(method, StaticFeatureAccess.class))
+                {
+                    ImplicitVariable variable = access.getImplicitVariable();
+                    ICompositeNode node = variable != null ? NodeModelUtils.findActualNodeFor(access) : null;
+                    if (node != null)
+                        firstAccess.merge(variable, Integer.valueOf(node.getOffset()), Math::min);
+                }
             }
             for (ImplicitVariable variable : method.getImplicitVariables())
             {
@@ -3280,6 +3404,11 @@ final class BslExpectedTypePremiums
         }
         AddedWords adder = scene.facts() != null ? new AddedWords(result, words, added, context, scene, list)
             : null;
+        if (adder != null && context.loopCollection() != null)
+        {
+            adder.loopIteratorNames();
+            return result;
+        }
         // ИР: ИмяТипа с конструктором. Штатный список типов по-прежнему ранжирует EDT.
         if (endsWithWord(stripEnd(context.preceding()), "Новый")) //$NON-NLS-1$
         {
@@ -4743,14 +4872,15 @@ final class BslExpectedTypePremiums
             if (base.isEmpty() || fullArgument || IDENTIFIER.matcher(receiver).matches() && "=".equals(token)) //$NON-NLS-1$
             {
                 List<String> variants = new ArrayList<>();
+                Set<String> taken = takenNames();
                 if (fullArgument)
-                    nameVariantsFromTypes(variants, types);
+                    nameVariantsFromTypes(variants, types, taken);
                 if (variants.isEmpty())
-                    nameVariantsFromTypes(variants, facts.selectionTypes());
+                    nameVariantsFromTypes(variants, facts.selectionTypes(), taken);
                 // ПоследнийФрагментЛкс(…, , Ложь): без точки — пусто
                 String lastName = selected.indexOf('.') >= 0 ? selected.substring(selected.lastIndexOf('.') + 1) : ""; //$NON-NLS-1$
                 if (!containsAny(selected, "-+*/><=")) //$NON-NLS-1$
-                    nameVariantsFromWord(variants, lastName);
+                    nameVariantsFromWord(variants, lastName, "", taken); //$NON-NLS-1$
                 if (!variants.isEmpty() && PRIMITIVE_TYPES.contains(lower(variants.get(0))))
                     variants.remove(0);
                 if (!variants.isEmpty())
@@ -4783,11 +4913,35 @@ final class BslExpectedTypePremiums
                 && (after.startsWith(")") || after.startsWith(",")); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
+        private void loopIteratorNames()
+        {
+            List<String> variants = new ArrayList<>();
+            List<String> types = facts.loopElementTypes();
+            nameVariantsFromTypes(variants, types, Set.of());
+            nameVariantsFromWord(variants, context.loopCollection().lastFragment(), "Элемент", Set.of()); //$NON-NLS-1$
+            Set<String> taken = takenNames();
+            Set<String> bases = new HashSet<>();
+            for (String variant : variants)
+            {
+                // В ИР пробелы между частями имени склеиваются, первая буква всегда заглавная.
+                String base = variant.substring(0, 1).toUpperCase(Locale.ROOT)
+                    + variant.substring(1).replace("_", ""); //$NON-NLS-1$ //$NON-NLS-2$
+                if (!bases.add(lower(base)))
+                    continue;
+                String name = newVariableName(base, taken);
+                String key = lower(name);
+                taken.add(key);
+                words.put(key, new Word(key, name, types, false, true));
+                added.put(key, BslAddedWordProposal.loopIterator(name, types));
+                add(result, words, key, 3, false);
+            }
+        }
+
         /**
          * {@code ДобавитьВариантыИмениНовойПеременнойИзТипа}: варианты даёт единственный непримитивный тип,
          * в том числе платформенный ({@code ТаблицаЗначений} → {@code Таблица}).
          */
-        private void nameVariantsFromTypes(List<String> variants, List<String> types)
+        private void nameVariantsFromTypes(List<String> variants, List<String> types, Set<String> taken)
         {
             if (types.size() != 1 || PRIMITIVE_TYPES.contains(lower(types.get(0))))
                 return;
@@ -4796,11 +4950,11 @@ final class BslExpectedTypePremiums
                 first = "СтрокаТаблицы"; //$NON-NLS-1$
             else if (endsWithIgnoreCase(first, "Значений")) //$NON-NLS-1$
                 first = first.replace("Значений", ""); //$NON-NLS-1$ //$NON-NLS-2$
-            nameVariantsFromWord(variants, first);
+            nameVariantsFromWord(variants, first, "", taken); //$NON-NLS-1$
         }
 
         /** {@code ДобавитьВариантыИмениНовойПеременнойИзСлова}. */
-        private void nameVariantsFromWord(List<String> variants, String expression)
+        private void nameVariantsFromWord(List<String> variants, String expression, String postfix, Set<String> taken)
         {
             String clean = firstFragment(expression, '(');
             boolean method = !clean.equals(expression);
@@ -4811,7 +4965,6 @@ final class BslExpectedTypePremiums
             if (method && TypeNameFromVariableName.isVerb(parts.get(0))
                 || parts.size() > 1 && METADATA_TYPE_WORDS.contains(lower(parts.get(0))))
                 parts.remove(0);
-            Set<String> taken = takenNames();
             String variant = ""; //$NON-NLS-1$
             while (!parts.isEmpty())
             {
@@ -4821,7 +4974,7 @@ final class BslExpectedTypePremiums
                     break;
                 if (parts.size() < 4 && (parts.get(parts.size() - 1).length() > 2 || variant.isEmpty()))
                 {
-                    variant = Global.identifierFromRepresentation(String.join(" ", parts)); //$NON-NLS-1$
+                    variant = Global.identifierFromRepresentation(String.join(" ", parts)) + postfix; //$NON-NLS-1$
                     if (variant.length() > 2 && !taken.contains(lower(variant)) && !variants.contains(variant))
                         variants.add(variant);
                 }
@@ -4832,8 +4985,12 @@ final class BslExpectedTypePremiums
         /** {@code НовоеИмяПеременной}: {@code Имя}, {@code Имя1}, … — не занятое переменной. */
         private String newVariableName(String base)
         {
+            return newVariableName(base, takenNames());
+        }
+
+        private static String newVariableName(String base, Set<String> taken)
+        {
             String name = Global.identifierFromRepresentation(base == null || base.isBlank() ? "Переменная" : base); //$NON-NLS-1$
-            Set<String> taken = takenNames();
             for (int index = 0;; index++)
             {
                 String candidate = index == 0 ? name : name + index;
