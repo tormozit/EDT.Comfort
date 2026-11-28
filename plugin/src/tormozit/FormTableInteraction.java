@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 
 import org.eclipse.jface.bindings.TriggerSequence;
 import org.eclipse.jface.bindings.keys.KeySequence;
@@ -249,6 +250,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private int[] pendingResizeBaseline;
     /** Запланированный (и переоткладываемый на каждое новое событие) commit сужения после паузы в drag. */
     private Runnable pendingResizeCommit;
+    private BiConsumer<TableColumn, int[]> onColumnResizeCommitted;
     /** Ширина клиентской области таблицы на момент последнего реального auto-fill; -1 — ещё не запускался. */
     private int lastAutoFillClientWidth = -1;
     /** Умещались ли колонки в ширину таблицы на момент последнего известного состояния (без overflow). */
@@ -272,6 +274,27 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         this(table, cellAccess);
         setTableViewer(viewer);
+    }
+
+    /** Ресайз колонок штатной таблицы с собственными шапкой, выделением и копированием. */
+    static FormTableInteraction forColumnResize(Table table, BiConsumer<TableColumn, int[]> onCommit)
+    {
+        FormTableInteraction interaction = new FormTableInteraction(table, (FormTableCellAccess) null);
+        interaction.onColumnResizeCommitted = onCommit;
+        table.addDisposeListener(e -> interaction.cancelPendingResizeCommit());
+        return interaction;
+    }
+
+    boolean isColumnResizePending()
+    {
+        return pendingResizeColumn != null;
+    }
+
+    void finishColumnResize()
+    {
+        cancelPendingResizeCommit();
+        if (isColumnResizePending())
+            commitPendingResize();
     }
 
     void setTableViewer(TableViewer viewer)
@@ -2761,7 +2784,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * не отпустят мышь. Поэтому реальное сужение соседей применяется не на каждое событие, а одним
      * commit'ом после паузы в событиях ({@link #schedulePendingResizeCommit}) — вне активного native-loop.
      */
-    private void onUserColumnResize(TableColumn col)
+    void onUserColumnResize(TableColumn col)
     {
         if (selfAdjusting)
             return; // событие от нашего же commit — не переоткладывать накопление заново
@@ -2826,8 +2849,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         clampColumnMinWidth(col); // и при зажатом Ctrl тоже — native drag ничем не ограничен снизу
         boolean beforeValid = before != null && before.length == table.getColumnCount();
-        if (beforeValid && !ColumnWidthFit.isCtrlPressed())
-            applyProportionalShrink(col, before);
+        if (beforeValid)
+            applyProportionalShrink(col, before, !ColumnWidthFit.isCtrlPressed());
         // Ширины изменил пользователь — layout-данные обязаны догнать их в ЛЮБОМ случае, а не только
         // когда сработал пропорциональный пересчёт (он не срабатывает, если в таблице был запас
         // свободного места). Иначе ближайшая раскладка хоста — в том числе от изменения одной лишь
@@ -2843,6 +2866,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         rememberVisualWidths();
         updateFitState(); // для последующего сужения ТАБЛИЦЫ — знать, было ли переполнение уже до него
+        if (onColumnResizeCommitted != null)
+            onColumnResizeCommitted.accept(col, before);
     }
 
     /** Пересчитать {@link #columnsFitBefore} по текущему фактическому состоянию колонок и ширины таблицы. */
@@ -2909,7 +2934,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     }
 
     /** Запомнить текущие ширины колонок (визуальный порядок) — база до-драг снимка для следующей серии. */
-    private void rememberVisualWidths()
+    void rememberVisualWidths()
     {
         lastKnownVisualWidths = visualOrderWidths();
     }
@@ -3165,17 +3190,41 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * Собственная ширина {@code dragged} к моменту вызова уже подтянута к минимуму в
      * {@link #commitPendingResize} ({@link #clampColumnMinWidth}).
      */
-    private void applyProportionalShrink(TableColumn dragged, int[] before)
+    private void applyProportionalShrink(TableColumn dragged, int[] before, boolean redistribute)
     {
         if (table == null || table.isDisposed() || !columnAutoResizeEnabled)
             return;
         if (dragged == null || dragged.isDisposed())
             return;
+        boolean nativeLayout = onColumnResizeCommitted != null;
+        if (!redistribute && !nativeLayout)
+            return;
         selfAdjusting = true;
         try
         {
-            boolean applied = ColumnWidthFit.applyProportionalShrink(columnAccess(), table.indexOf(dragged),
-                before, minColumnWidth(), table.getClientArea().width);
+            ColumnWidthFit.Columns columns = columnAccess();
+            int index = table.indexOf(dragged);
+            boolean applied;
+            if (nativeLayout)
+                columns.beginBatch();
+            try
+            {
+                if (nativeLayout)
+                {
+                    // Штатный TableColumnLayout уже переразложил соседей внутри события Resize.
+                    int[] order = columns.visualOrder();
+                    for (int i = 0; i < order.length; i++)
+                        if (order[i] != index)
+                            columns.setWidth(order[i], before[i]);
+                }
+                applied = redistribute && ColumnWidthFit.applyProportionalShrink(columns, index,
+                    before, minColumnWidth(), table.getClientArea().width);
+            }
+            finally
+            {
+                if (nativeLayout)
+                    columns.endBatch();
+            }
             if (applied)
                 rebindColumnLayoutData();
         }

@@ -1,10 +1,17 @@
 package tormozit;
 
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
+import java.util.function.ToIntFunction;
 
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.layout.TreeColumnLayout;
+import org.eclipse.jface.viewers.ColumnLayoutData;
 import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.ColumnWeightData;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
@@ -34,6 +41,7 @@ import org.eclipse.swt.widgets.TreeColumn;
  */
 final class ColumnWidthFit
 {
+    private static final String REMEMBERED_WIDTHS_KEY = ColumnWidthFit.class.getName() + ".remembered"; //$NON-NLS-1$
     /** Абсолютный пол минимальной ширины колонки (px) — ниже не сужаем, даже если символ шрифта уже. */
     private static final int MIN_COLUMN_WIDTH_FLOOR_PX = 15;
     /** Минимальная ширина колонки в символах текущего шрифта контрола. */
@@ -54,6 +62,186 @@ final class ColumnWidthFit
 
     private ColumnWidthFit()
     {
+    }
+
+    /**
+     * Рассчитывает ширины по заголовкам и образцам текста ячеек, восстанавливает ручные ширины.
+     * Если образца нет, взвешенная колонка сохраняет свой вес и получает минимум по заголовку.
+     * Вызывать после создания колонок TableColumnLayout. Возвращает действие для повторного применения
+     * после того, как владелец таблицы сменил настройки ширин.
+     */
+    static Runnable rememberTableWidths(Table table, IDialogSettings settings,
+            ToIntFunction<TableColumn> columnId, IntFunction<String> sample)
+    {
+        RememberedTableWidths widths = new RememberedTableWidths(table, settings, columnId, sample);
+        table.setData(REMEMBERED_WIDTHS_KEY, widths);
+        widths.restore();
+        return widths::restore;
+    }
+
+    static void finishRememberedTableResize(Table table)
+    {
+        if (table.getData(REMEMBERED_WIDTHS_KEY) instanceof RememberedTableWidths widths)
+            widths.interaction.finishColumnResize();
+    }
+
+    private static final class RememberedTableWidths extends TableColumnLayout
+    {
+        private final Table table;
+        private final IDialogSettings settings;
+        private final ToIntFunction<TableColumn> columnId;
+        private final IntFunction<String> sample;
+        private final Map<TableColumn, ColumnLayoutData> observed = new IdentityHashMap<>();
+        private final FormTableInteraction interaction;
+        private boolean restorePending;
+        private boolean layoutReplaced;
+        private boolean restoreAfterDrag;
+
+        RememberedTableWidths(Table table, IDialogSettings settings, ToIntFunction<TableColumn> columnId,
+                IntFunction<String> sample)
+        {
+            this.table = table;
+            this.settings = settings;
+            this.columnId = columnId;
+            this.sample = sample;
+            interaction = FormTableInteraction.forColumnResize(table, this::saveWidthsAfterDrag);
+        }
+
+        private void observeColumn(TableColumn column, ColumnLayoutData data)
+        {
+            boolean registered = observed.containsKey(column);
+            observed.put(column, data);
+            if (registered)
+                return;
+            column.addListener(SWT.Dispose, e -> observed.remove(column));
+            // JFace заменяет объект настройки при ручном ресайзе. При layout меняется только ширина SWT.
+            column.addListener(SWT.Resize, e ->
+            {
+                int index = table.indexOf(column);
+                if (index < 0)
+                    return;
+                ColumnLayoutData current = getLayoutData(table, index);
+                boolean layoutChanged = current != observed.put(column, current);
+                if (layoutChanged && current instanceof ColumnWeightData)
+                    layoutReplaced = true;
+                if (layoutChanged && current instanceof ColumnPixelData pixels
+                        && column.getResizable() && pixels.resizable)
+                    interaction.onUserColumnResize(column);
+                else if (!restorePending)
+                {
+                    // JFace может изменить соседей до уведомления о ручном ресайзе.
+                    restorePending = true;
+                    table.getDisplay().asyncExec(() ->
+                    {
+                        restorePending = false;
+                        if (table.isDisposed())
+                            return;
+                        if (layoutReplaced)
+                            restore();
+                        else if (!interaction.isColumnResizePending())
+                            interaction.rememberVisualWidths();
+                    });
+                }
+            });
+        }
+
+        private void saveWidthsAfterDrag(TableColumn column, int[] before)
+        {
+            int[] order = table.getColumnOrder();
+            for (int position = 0; position < order.length; position++)
+            {
+                int index = order[position];
+                TableColumn current = table.getColumn(index);
+                observeColumn(current, getLayoutData(table, index));
+                int width = current.getWidth();
+                if (width > 0 && (before == null ? current == column
+                        : position < before.length && width != before[position]))
+                    settings.put(widthKey(columnId.applyAsInt(current)), width);
+            }
+            if (restoreAfterDrag)
+            {
+                restoreAfterDrag = false;
+                restore();
+            }
+        }
+
+        void restore()
+        {
+            layoutReplaced = false;
+            if (table.isDisposed() || !(table.getParent().getLayout() instanceof TableColumnLayout layout))
+                return;
+            if (interaction.isColumnResizePending())
+            {
+                restoreAfterDrag = true;
+                return;
+            }
+            boolean changed = false;
+            GC gc = new GC(table);
+            try
+            {
+                TableColumn[] columns = table.getColumns();
+                for (int i = 0; i < columns.length; i++)
+                {
+                    TableColumn column = columns[i];
+                    ColumnLayoutData data = getLayoutData(table, i);
+                    observeColumn(column, data);
+                    if (data == null || !data.resizable || !column.getResizable())
+                        continue;
+                    int id = columnId.applyAsInt(column);
+                    int saved = savedWidth(id);
+                    Image image = column.getImage();
+                    int heading = gc.textExtent(column.getText()).x + CELL_TEXT_INSET_PX
+                            + ICON_SIZE_PX + (image == null ? 0 : headerIconColumnWidth(image));
+                    String cell = sample.apply(id);
+                    int minimum = cell == null ? heading
+                            : Math.max(heading, gc.textExtent(cell).x + CELL_TEXT_INSET_PX);
+                    ColumnLayoutData desired;
+                    if (saved > 0 || cell != null)
+                    {
+                        int width = saved > 0 ? saved : minimum;
+                        if (data instanceof ColumnPixelData pixels && pixels.width == width && !pixels.addTrim)
+                            continue;
+                        desired = new ColumnPixelData(width);
+                    }
+                    else if (data instanceof ColumnWeightData weight && weight.minimumWidth < minimum)
+                        desired = new ColumnWeightData(weight.weight, minimum);
+                    else
+                        continue;
+                    observed.put(column, desired);
+                    layout.setColumnData(column, desired);
+                    changed = true;
+                }
+            }
+            finally
+            {
+                gc.dispose();
+            }
+            if (changed)
+                table.getParent().layout();
+            interaction.rememberVisualWidths();
+        }
+
+        private int savedWidth(int index)
+        {
+            String key = widthKey(index);
+            if (settings.get(key) != null)
+            {
+                try
+                {
+                    return settings.getInt(key);
+                }
+                catch (NumberFormatException ignored)
+                {
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
+        private static String widthKey(int index)
+        {
+            return "width." + index; //$NON-NLS-1$
+        }
     }
 
     /** Доступ к колонкам контрола — минимум, нужный расчёту ширин. */

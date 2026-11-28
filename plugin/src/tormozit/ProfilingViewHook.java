@@ -2,6 +2,7 @@ package tormozit;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -17,6 +18,7 @@ import java.util.regex.Pattern;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.HashMap;
@@ -24,6 +26,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.function.Consumer;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.resources.IFile;
@@ -40,9 +44,12 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ComboViewer;
 import org.eclipse.jface.viewers.ColumnWeightData;
 import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
@@ -52,6 +59,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
@@ -95,6 +103,9 @@ public final class ProfilingViewHook implements IStartup
             "com._1c.g5.v8.dt.internal.profiling.ui.view.ProfilingView"; //$NON-NLS-1$
     private static final String TITLE = "Замеры производительности"; //$NON-NLS-1$
     private static final String INSTALLED_KEY = "tormozit.comfort.profiling.installed"; //$NON-NLS-1$
+    private static final String COLUMN_SAMPLES_KEY = "profiling.columnSamples"; //$NON-NLS-1$
+    private static final String COLUMN_ID_KEY = "profiling.columnId"; //$NON-NLS-1$
+    private static final int COLUMN_COUNT = 13;
     private static volatile boolean installed;
 
     @Override
@@ -202,14 +213,19 @@ public final class ProfilingViewHook implements IStartup
             setColumn.invoke(comparator, 5);
             table.setSortColumn(table.getColumn(5));
             table.setSortDirection(SWT.DOWN);
-            addCalculatedColumns((org.eclipse.swt.widgets.Composite) tablePart, viewer, comparator);
-            installColumnWidths(view, (Composite) tablePart, viewer);
+            addCalculatedColumns((Composite) tablePart, viewer, comparator);
+            TargetColumns targetColumns = new TargetColumns(tablePart, viewer);
+            targetColumns.removeHidden();
+            updateColumnSamples(viewer);
+            Runnable restoreWidths = installColumnWidths(table);
+            installResultLabels(view);
             installMethodCalculation(view, tablePart, viewer);
-            installResultState(view, tablePart, viewer, comparator);
-            installSmartFilter(view, tablePart, viewer);
-            installSelectionFooter(view, tablePart, viewer);
+            installResultState(view, viewer, comparator, targetColumns);
+            installSmartFilter(view, tablePart, viewer, targetColumns);
+            installSelectionFooter(view, tablePart, viewer, targetColumns);
             installDoubleClickMessage(viewer);
             installCellCopy(table);
+            installResultColumnLayout(view, tablePart, viewer, targetColumns, restoreWidths);
             viewer.refresh();
             table.setData(INSTALLED_KEY, Boolean.TRUE);
         }
@@ -221,7 +237,7 @@ public final class ProfilingViewHook implements IStartup
 
     private static void installCellCopy(Table table)
     {
-        final int[] activeColumn = { 0 };
+        TableColumn[] activeColumn = { table.getColumn(0) };
         table.addListener(SWT.MouseDown, event ->
         {
             TableItem item = table.getItem(new Point(event.x, event.y));
@@ -230,7 +246,7 @@ public final class ProfilingViewHook implements IStartup
             for (int column = 0; column < table.getColumnCount(); column++)
                 if (item.getBounds(column).contains(event.x, event.y))
                 {
-                    activeColumn[0] = column;
+                    activeColumn[0] = table.getColumn(column);
                     return;
                 }
         });
@@ -238,7 +254,8 @@ public final class ProfilingViewHook implements IStartup
         {
             if (table.getSelectionCount() == 0)
                 return false;
-            String value = table.getSelection()[0].getText(activeColumn[0]);
+            int index = activeColumn[0].isDisposed() ? 0 : table.indexOf(activeColumn[0]);
+            String value = table.getSelection()[0].getText(index);
             if (value == null || value.isEmpty())
                 return false;
             Clipboard clipboard = new Clipboard(table.getDisplay());
@@ -255,10 +272,14 @@ public final class ProfilingViewHook implements IStartup
         });
     }
 
-    private static void addCalculatedColumns(org.eclipse.swt.widgets.Composite tablePart,
+    private static void addCalculatedColumns(Composite tablePart,
             TableViewer viewer, Object stockComparator) throws ReflectiveOperationException
     {
         TableColumnLayout layout = (TableColumnLayout) tablePart.getLayout();
+        Table table = viewer.getTable();
+        setColumnHeading(table.getColumn(3), "Кол-во", "Количество вызовов"); //$NON-NLS-1$ //$NON-NLS-2$
+        setColumnHeading(table.getColumn(4), "Полное (с)", "Полное время в секундах"); //$NON-NLS-1$ //$NON-NLS-2$
+        setColumnHeading(table.getColumn(5), "Чистое (с)", "Чистое время в секундах"); //$NON-NLS-1$ //$NON-NLS-2$
         TableViewerColumn method = new TableViewerColumn(viewer, SWT.NONE);
         TableColumn methodColumn = method.getColumn();
         methodColumn.setText("Метод"); //$NON-NLS-1$
@@ -278,10 +299,9 @@ public final class ProfilingViewHook implements IStartup
 
         TableViewerColumn average = new TableViewerColumn(viewer, SWT.RIGHT);
         TableColumn averageColumn = average.getColumn();
-        averageColumn.setText("Среднее время"); //$NON-NLS-1$
-        averageColumn.setToolTipText(TooltipText.wrap(tablePart,
-                "Чистое время строки, делённое на количество вызовов" //$NON-NLS-1$
-                        + Global.pluginSignForTooltip()));
+        setColumnHeading(averageColumn, "Среднее (с)", //$NON-NLS-1$
+                "Среднее время в секундах (чистое время строки, делённое на количество вызовов)" //$NON-NLS-1$
+                        + Global.pluginSignForTooltip());
         layout.setColumnData(averageColumn, new ColumnWeightData(55, 70, true));
         average.setLabelProvider(new ColumnLabelProvider()
         {
@@ -297,6 +317,7 @@ public final class ProfilingViewHook implements IStartup
         TableViewerColumn actuality = new TableViewerColumn(viewer, SWT.NONE);
         TableColumn actualityColumn = actuality.getColumn();
         actualityColumn.setText(""); //$NON-NLS-1$
+        actualityColumn.setResizable(false);
         actualityColumn.setToolTipText(TooltipText.wrap(tablePart,
                 "Актуальность текста строки модуля" + Global.pluginSignForTooltip())); //$NON-NLS-1$
         layout.setColumnData(actualityColumn, new ColumnPixelData(24, false, false));
@@ -319,10 +340,9 @@ public final class ProfilingViewHook implements IStartup
                         text + Global.pluginSignForTooltip());
             }
         });
-        Table table = viewer.getTable();
         table.addListener(SWT.PaintItem, event ->
         {
-            if (event.index != 12 || !(event.item instanceof TableItem item))
+            if (event.index != table.indexOf(actualityColumn) || !(event.item instanceof TableItem item))
                 return;
             Image icon = actualityImage(actuality(viewer, item.getData()));
             if (icon == null)
@@ -332,14 +352,7 @@ public final class ProfilingViewHook implements IStartup
                     event.y + Math.max(0, (event.height - bounds.height) / 2));
         });
         Global.tempLog("profiling-view", "Значки статуса рисуются только в своей колонке"); //$NON-NLS-1$ //$NON-NLS-2$
-        int[] moved = new int[table.getColumnCount()];
-        moved[0] = 12;
-        moved[1] = 0;
-        moved[2] = 10;
-        for (int i = 1; i < 10; i++)
-            moved[i + 2] = i;
-        moved[12] = 11;
-        table.setColumnOrder(moved);
+        table.setColumnOrder(TargetColumns.VISUAL_ORDER);
         Field sortField = fieldHandle(stockComparator, "propertyIndex"); //$NON-NLS-1$
         Field directionField = fieldHandle(stockComparator, "descending"); //$NON-NLS-1$
         ViewerComparator extended = new ViewerComparator()
@@ -396,6 +409,12 @@ public final class ProfilingViewHook implements IStartup
         tablePart.layout(true, true);
     }
 
+    private static void setColumnHeading(TableColumn column, String title, String tooltip)
+    {
+        column.setText(title);
+        column.setToolTipText(TooltipText.wrap(column.getParent(), tooltip));
+    }
+
     private static double averageNanos(ILineProfilingResult[] values)
     {
         long calls = 0;
@@ -417,92 +436,334 @@ public final class ProfilingViewHook implements IStartup
         return (bracket >= 0 ? signature.substring(0, bracket) : signature).trim();
     }
 
-    private static void installColumnWidths(IViewPart view, Composite tablePart, TableViewer viewer)
-            throws ReflectiveOperationException
+    private static Runnable installColumnWidths(Table table)
     {
-        Table table = viewer.getTable();
         IDialogSettings root = Activator.getDefault().getDialogSettings();
-        IDialogSettings settings = root.getSection("profiling-view-columns"); //$NON-NLS-1$
-        if (settings == null)
-            settings = root.addNewSection("profiling-view-columns"); //$NON-NLS-1$
-        IDialogSettings saved = settings;
-        int sixDigits;
-        int tenDigits;
-        GC measure = new GC(table);
-        try
+        // Прежняя секция содержала в том числе ширины, выставленные автоматической раскладкой.
+        String section = "profiling-view-manual-column-widths"; //$NON-NLS-1$
+        IDialogSettings existing = root.getSection(section);
+        String resetKey = "widths-reset-1112"; //$NON-NLS-1$
+        boolean reset = existing == null || !existing.getBoolean(resetKey);
+        IDialogSettings settings = reset ? root.addNewSection(section) : existing;
+        if (reset)
+            settings.put(resetKey, true);
+        return ColumnWidthFit.rememberTableWidths(table, settings, ProfilingViewHook::columnId, index ->
         {
-            measure.setFont(table.getFont());
-            sixDigits = measure.textExtent("888888").x + 16; //$NON-NLS-1$
-            tenDigits = measure.textExtent("8888888888").x + 16; //$NON-NLS-1$
-        }
-        finally
-        {
-            measure.dispose();
-        }
-        boolean[] ready = { false };
-        Runnable apply = () ->
-        {
-            if (table.isDisposed())
-                return;
-            ready[0] = false;
-            TableColumnLayout layout = (TableColumnLayout) tablePart.getLayout();
-            for (int i = 0; i < table.getColumnCount(); i++)
+            String[] samples = (String[]) table.getData(COLUMN_SAMPLES_KEY);
+            if (samples != null)
+                return samples[index];
+            return switch (index)
             {
-                // EDT скрывает колонки типов целей нулевой шириной для одиночной цели.
-                if (i == 12 || (i >= 6 && i <= 9 && table.getColumn(i).getWidth() == 0))
+                case 1, 3, 4, 5, 9, 11 -> ""; //$NON-NLS-1$
+                default -> null;
+            };
+        });
+    }
+
+    private static void installResultColumnLayout(IViewPart view, Object tablePart, TableViewer viewer,
+            TargetColumns targetColumns, Runnable restoreWidths) throws ReflectiveOperationException
+    {
+        ClassLoader loader = tablePart.getClass().getClassLoader();
+        Class<?> listenerType = Class.forName(
+                "com._1c.g5.v8.dt.internal.profiling.ui.IResultChangeListener", false, loader); //$NON-NLS-1$
+        Method add = view.getClass().getMethod("addResultChangeListener", listenerType); //$NON-NLS-1$
+        Method remove = view.getClass().getMethod("removeResultChangeListener", listenerType); //$NON-NLS-1$
+        Table table = viewer.getTable();
+        Object listener = Proxy.newProxyInstance(loader, new Class<?>[] { listenerType },
+                (proxy, method, arguments) ->
+                {
+                    if (method.getDeclaringClass() == Object.class)
+                    {
+                        return switch (method.getName())
+                        {
+                            case "hashCode" -> System.identityHashCode(proxy); //$NON-NLS-1$
+                            case "equals" -> proxy == arguments[0]; //$NON-NLS-1$
+                            case "toString" -> tablePart.toString(); //$NON-NLS-1$
+                            default -> throw new IllegalStateException(method.getName());
+                        };
+                    }
+                    if (table.isDisposed())
+                        return null;
+                    table.setRedraw(false);
+                    try
+                    {
+                        ColumnWidthFit.finishRememberedTableResize(table);
+                        if (arguments[0] != null)
+                            targetColumns.restoreForEdt();
+                        method.invoke(tablePart, arguments);
+                        targetColumns.removeHidden();
+                        updateColumnSamples(viewer);
+                        restoreWidths.run();
+                        return null;
+                    }
+                    catch (InvocationTargetException e)
+                    {
+                        throw e.getCause();
+                    }
+                    finally
+                    {
+                        if (!table.isDisposed())
+                            table.setRedraw(true);
+                    }
+                });
+        add.invoke(view, listener);
+        remove.invoke(view, tablePart);
+        table.addListener(SWT.Dispose, e ->
+        {
+            try
+            {
+                remove.invoke(view, listener);
+            }
+            catch (ReflectiveOperationException ignored)
+            {
+                // Подписка принадлежит закрываемому представлению.
+            }
+        });
+    }
+
+    private static int columnId(TableColumn column)
+    {
+        return (Integer) column.getData(COLUMN_ID_KEY);
+    }
+
+    private static TableColumn columnById(Table table, int id)
+    {
+        for (TableColumn column : table.getColumns())
+            if (columnId(column) == id)
+                return column;
+        return null;
+    }
+
+    /** EDT обращается к штатным колонкам по индексам во время загрузки результата. */
+    private static final class TargetColumns
+    {
+        private static final int FIRST = 6;
+        private static final int LAST = 9;
+        private static final int[] VISUAL_ORDER = { 12, 0, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 };
+
+        private final Object tablePart;
+        private final TableViewer viewer;
+        private final Table table;
+        private final Method selectionAdapter;
+        private final List<Consumer<TableColumn>> columnListeners = new ArrayList<>();
+        private final ColumnSpec[] specs = new ColumnSpec[LAST - FIRST + 1];
+
+        TargetColumns(Object tablePart, TableViewer viewer) throws ReflectiveOperationException
+        {
+            this.tablePart = tablePart;
+            this.viewer = viewer;
+            this.table = viewer.getTable();
+            selectionAdapter = tablePart.getClass().getDeclaredMethod("getSelectionAdapter", //$NON-NLS-1$
+                    TableColumn.class, int.class);
+            selectionAdapter.setAccessible(true);
+            for (int id = 0; id < table.getColumnCount(); id++)
+                table.getColumn(id).setData(COLUMN_ID_KEY, id);
+            for (int id = FIRST; id <= LAST; id++)
+            {
+                TableColumn column = table.getColumn(id);
+                Class<?> type = viewer.getLabelProvider(id).getClass();
+                Constructor<?> constructor = type.getEnclosingClass() == tablePart.getClass()
+                        ? type.getDeclaredConstructor(tablePart.getClass()) : type.getDeclaredConstructor();
+                constructor.setAccessible(true);
+                specs[id - FIRST] = new ColumnSpec(column.getText(), column.getToolTipText(),
+                        column.getAlignment(), constructor);
+            }
+        }
+
+        void addColumnListener(Consumer<TableColumn> install)
+        {
+            columnListeners.add(install);
+            for (TableColumn column : table.getColumns())
+                install.accept(column);
+        }
+
+        void restoreForEdt() throws ReflectiveOperationException
+        {
+            TableColumnLayout layout = (TableColumnLayout) table.getParent().getLayout();
+            for (int id = FIRST; id <= LAST; id++)
+            {
+                if (columnById(table, id) != null)
                     continue;
-                String value = saved.get("width." + i); //$NON-NLS-1$
-                if (value == null)
+                ColumnSpec spec = specs[id - FIRST];
+                Constructor<?> constructor = spec.constructor();
+                CellLabelProvider provider = (CellLabelProvider) (constructor.getParameterCount() == 0
+                        ? constructor.newInstance() : constructor.newInstance(tablePart));
+                TableViewerColumn viewerColumn = new TableViewerColumn(viewer, spec.alignment(), id);
+                TableColumn column = viewerColumn.getColumn();
+                column.setData(COLUMN_ID_KEY, id);
+                column.setText(spec.title());
+                column.setToolTipText(spec.tooltip());
+                layout.setColumnData(column, new ColumnWeightData(1, 1, true));
+                viewerColumn.setLabelProvider(provider);
+                column.addSelectionListener((SelectionAdapter) selectionAdapter.invoke(tablePart, column, id));
+                for (Consumer<TableColumn> install : columnListeners)
+                    install.accept(column);
+            }
+        }
+
+        void removeHidden()
+        {
+            for (TableColumn column : table.getColumns())
+            {
+                int id = columnId(column);
+                if (id >= FIRST && id <= LAST && column.getWidth() == 0)
                 {
-                    int width = i == 1 || i == 3 ? sixDigits
-                            : i == 4 || i == 11 ? tenDigits : 0;
-                    if (width > 0)
-                        layout.setColumnData(table.getColumn(i),
-                                new ColumnPixelData(width, true, false));
-                    continue;
-                }
-                try
-                {
-                    int width = Integer.parseInt(value);
-                    if (width > 0)
-                        layout.setColumnData(table.getColumn(i),
-                                new ColumnPixelData(width, true, false));
-                }
-                catch (NumberFormatException e)
-                {
-                    Global.tempLog("profiling-view", "Ширина колонки: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (table.getSortColumn() == column)
+                        table.setSortColumn(null);
+                    column.dispose();
                 }
             }
-            tablePart.layout(true, true);
-            ready[0] = true;
-        };
-        for (int i = 0; i < table.getColumnCount(); i++)
-        {
-            int index = i;
-            table.getColumn(i).addListener(SWT.Resize, e ->
-            {
-                if (ready[0] && !table.isDisposed() && index != 12)
-                {
-                    int width = table.getColumn(index).getWidth();
-                    if (width > 0)
-                        saved.put("width." + index, width); //$NON-NLS-1$
-                }
-            });
+            int[] order = Arrays.stream(VISUAL_ORDER).mapToObj(id -> columnById(table, id))
+                    .filter(java.util.Objects::nonNull).mapToInt(table::indexOf).toArray();
+            if (!Arrays.equals(table.getColumnOrder(), order))
+                table.setColumnOrder(order);
         }
-        apply.run();
-        table.setData("profiling.restoreWidths", apply); //$NON-NLS-1$
-        Object controls = view.getClass().getMethod("getControlsPanel").invoke(view); //$NON-NLS-1$
-        Object dateSelector = field(controls, "dateSelector"); //$NON-NLS-1$
-        if (dateSelector instanceof org.eclipse.jface.viewers.ComboViewer combo)
+
+        private record ColumnSpec(String title, String tooltip, int alignment, Constructor<?> constructor)
         {
-            org.eclipse.swt.widgets.Listener beforeSelection = e ->
+        }
+    }
+
+    private static void updateColumnSamples(TableViewer viewer)
+    {
+        Table table = viewer.getTable();
+        String[] samples = null;
+        if (viewer.getInput() instanceof Collection<?> rows)
+        {
+            int maxLineNo = 0;
+            long maxCalls = 0;
+            long maxFullNanos = 0;
+            long maxCleanNanos = 0;
+            double maxCleanPercent = 0;
+            double maxAverageSeconds = 0;
+            for (Object row : rows)
             {
-                if (e.widget == combo.getCombo())
-                    ready[0] = false;
+                ILineProfilingResult[] values = lines(row);
+                if (values.length == 0)
+                    continue;
+                long fullNanos = 0;
+                long cleanNanos = 0;
+                long calls = 0;
+                double cleanPercent = 0;
+                for (ILineProfilingResult line : values)
+                {
+                    DebugTargetType target = line.getDebugTargetType();
+                    fullNanos += line.getTimeForDebugTarget(target).toNanos();
+                    long pureNanos = line.getPureTimeForDebugTarget(target).toNanos();
+                    cleanNanos += pureNanos;
+                    long frequency = line.getFrequency();
+                    calls += frequency;
+                    cleanPercent += line.getPurePercentage();
+                    if (frequency > 0)
+                        maxAverageSeconds = Math.max(maxAverageSeconds, pureNanos / 1_000_000_000d / frequency);
+                }
+                maxLineNo = Math.max(maxLineNo, values[0].getLineNo());
+                maxCalls = Math.max(maxCalls, calls);
+                maxFullNanos = Math.max(maxFullNanos, fullNanos);
+                maxCleanNanos = Math.max(maxCleanNanos, cleanNanos);
+                if (Double.isFinite(cleanPercent))
+                    maxCleanPercent = Math.max(maxCleanPercent, cleanPercent);
+            }
+            DecimalFormat timeFormat = new DecimalFormat("0.000000"); //$NON-NLS-1$
+            DecimalFormat percentageFormat = new DecimalFormat("0.00"); //$NON-NLS-1$
+            samples = new String[COLUMN_COUNT];
+            samples[1] = Integer.toString(maxLineNo);
+            samples[3] = Long.toString(maxCalls);
+            samples[4] = timeFormat.format(maxFullNanos / 1_000_000_000d);
+            samples[5] = timeFormat.format(maxCleanNanos / 1_000_000_000d) + "  " //$NON-NLS-1$
+                    + percentageFormat.format(maxCleanPercent) + " %"; //$NON-NLS-1$
+            samples[9] = ""; //$NON-NLS-1$
+            samples[11] = timeFormat.format(maxAverageSeconds);
+        }
+        table.setData(COLUMN_SAMPLES_KEY, samples);
+    }
+
+    private static void installResultLabels(IViewPart view) throws ReflectiveOperationException
+    {
+        Object controls = view.getClass().getMethod("getControlsPanel").invoke(view); //$NON-NLS-1$
+        ComboViewer selector = (ComboViewer) field(controls, "dateSelector"); //$NON-NLS-1$
+        ILabelProvider original = (ILabelProvider) selector.getLabelProvider();
+        selector.setLabelProvider(new ProfilingResultLabelProvider(selector, original));
+    }
+
+    private static final class ProfilingResultLabelProvider extends LabelProvider
+    {
+        private final ComboViewer selector;
+        // Штатный DateSelectorLabelProvider вычисляет текст из самого замера и не владеет ресурсами.
+        private final ILabelProvider original;
+        private final Display display;
+        private final Map<IProfilingResult, String> times = new WeakHashMap<>();
+        private final List<IProfilingResult> queued = new ArrayList<>();
+
+        ProfilingResultLabelProvider(ComboViewer selector, ILabelProvider original)
+        {
+            this.selector = selector;
+            this.original = original;
+            this.display = selector.getControl().getDisplay();
+        }
+
+        @Override
+        public String getText(Object element)
+        {
+            String base = original.getText(element);
+            if (!(element instanceof IProfilingResult result))
+                return base;
+            String time = times.get(result);
+            if (time == null)
+            {
+                times.put(result, ""); //$NON-NLS-1$
+                if (queued.isEmpty())
+                    display.asyncExec(this::calculate);
+                queued.add(result);
+            }
+            return time == null || time.isEmpty() ? base : base + ", " + time + " с"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private void calculate()
+        {
+            if (selector.getControl().isDisposed())
+                return;
+            List<IProfilingResult> batch = List.copyOf(queued);
+            queued.clear();
+            Job calculation = new Job("Общее чистое время замера") //$NON-NLS-1$
+            {
+                @Override
+                protected org.eclipse.core.runtime.IStatus run(IProgressMonitor monitor)
+                {
+                    DecimalFormat format = new DecimalFormat("0.000", //$NON-NLS-1$
+                            DecimalFormatSymbols.getInstance(Locale.ROOT));
+                    Map<IProfilingResult, String> calculated = new IdentityHashMap<>();
+                    for (IProfilingResult result : batch)
+                    {
+                        try
+                        {
+                            long nanos = 0;
+                            List<ILineProfilingResult> lines = result.getProfilingResults();
+                            for (ILineProfilingResult line : lines)
+                            {
+                                if (monitor.isCanceled())
+                                    return org.eclipse.core.runtime.Status.CANCEL_STATUS;
+                                nanos += line.getPureTimeForDebugTarget(line.getDebugTargetType()).toNanos();
+                            }
+                            calculated.put(result, format.format(nanos / 1_000_000_000d));
+                        }
+                        catch (RuntimeException ignored)
+                        {
+                            // Представление этого замера сохранит штатную подпись.
+                        }
+                    }
+                    display.asyncExec(() ->
+                    {
+                        if (selector.getControl().isDisposed())
+                            return;
+                        times.putAll(calculated);
+                        selector.refresh();
+                    });
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                }
             };
-            table.getDisplay().addFilter(SWT.Selection, beforeSelection);
-            table.addListener(SWT.Dispose,
-                    e -> table.getDisplay().removeFilter(SWT.Selection, beforeSelection));
+            calculation.setSystem(true);
+            calculation.schedule();
         }
     }
 
@@ -1262,8 +1523,8 @@ public final class ProfilingViewHook implements IStartup
         }
     }
 
-    private static void installResultState(IViewPart view, Object tablePart, TableViewer viewer,
-            Object comparator) throws ReflectiveOperationException
+    private static void installResultState(IViewPart view, TableViewer viewer, Object comparator, TargetColumns columns)
+            throws ReflectiveOperationException
     {
         Table table = viewer.getTable();
         ResultState state = new ResultState();
@@ -1272,12 +1533,12 @@ public final class ProfilingViewHook implements IStartup
         if (state.currentId != null)
             state.byResult.put(state.currentId, RowState.defaults());
         table.addListener(SWT.Selection, e -> remember(view, viewer, state));
-        for (int i = 0; i < 12; i++)
+        columns.addColumnListener(column ->
         {
-            TableColumn column = table.getColumn(i);
-            column.addListener(SWT.Selection,
-                    e -> table.getDisplay().asyncExec(() -> remember(view, viewer, state)));
-        }
+            if (columnId(column) != 12)
+                column.addListener(SWT.Selection,
+                        e -> table.getDisplay().asyncExec(() -> remember(view, viewer, state)));
+        });
         Object[] observedInput = { viewer.getInput() };
         table.addListener(SWT.Paint, e ->
         {
@@ -1291,9 +1552,6 @@ public final class ProfilingViewHook implements IStartup
             {
                 if (table.isDisposed())
                     return;
-                Object restoreWidths = table.getData("profiling.restoreWidths"); //$NON-NLS-1$
-                if (restoreWidths instanceof Runnable widths)
-                    widths.run();
                 restoreResultState(view, viewer, comparator, state);
                 Object recalculate = table.getData("profiling.recalculate"); //$NON-NLS-1$
                 if (recalculate instanceof Runnable calculation)
@@ -1336,7 +1594,7 @@ public final class ProfilingViewHook implements IStartup
         RowState row = state.byResult.computeIfAbsent(state.currentId, id -> RowState.defaults());
         TableColumn sort = table.getSortColumn();
         if (sort != null)
-            row.sortIndex = table.indexOf(sort);
+            row.sortIndex = columnId(sort);
         row.descending = table.getSortDirection() == SWT.DOWN;
         if (viewer.getSelection() instanceof IStructuredSelection selection && !selection.isEmpty())
         {
@@ -1345,11 +1603,14 @@ public final class ProfilingViewHook implements IStartup
                     + (row.rowKey != null ? row.rowKey.hashCode() : 0));
             TableItem[] selectedItems = table.getSelection();
             if (selectedItems.length > 0)
+            {
+                TableColumn clean = columnById(table, 5);
+                TableColumn average = columnById(table, 11);
                 Global.tempLog("profiling-view", "Границы выбранной строки: чистое=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + selectedItems[0].getBounds(5) + ", среднее=" //$NON-NLS-1$
-                        + selectedItems[0].getBounds(11) + ", ширины=" //$NON-NLS-1$
-                        + table.getColumn(5).getWidth() + "/" //$NON-NLS-1$
-                        + table.getColumn(11).getWidth());
+                        + selectedItems[0].getBounds(table.indexOf(clean)) + ", среднее=" //$NON-NLS-1$
+                        + selectedItems[0].getBounds(table.indexOf(average)) + ", ширины=" //$NON-NLS-1$
+                        + clean.getWidth() + "/" + average.getWidth()); //$NON-NLS-1$
+            }
         }
     }
 
@@ -1375,10 +1636,13 @@ public final class ProfilingViewHook implements IStartup
         state.restoring = true;
         try
         {
-            int sortIndex = Math.max(0, Math.min(11, saved.sortIndex));
+            TableColumn sort = columnById(table, saved.sortIndex);
+            if (sort == null)
+                sort = columnById(table, 5);
+            int sortIndex = columnId(sort);
             setField(comparator, "propertyIndex", sortIndex); //$NON-NLS-1$
             setField(comparator, "descending", saved.descending); //$NON-NLS-1$
-            table.setSortColumn(table.getColumn(sortIndex));
+            table.setSortColumn(sort);
             table.setSortDirection(saved.descending ? SWT.DOWN : SWT.UP);
             applyModes(view, saved.modes);
             viewer.refresh();
@@ -1501,7 +1765,7 @@ public final class ProfilingViewHook implements IStartup
         }
     }
 
-    private static void installSmartFilter(IViewPart view, Object tablePart, TableViewer viewer)
+    private static void installSmartFilter(IViewPart view, Object tablePart, TableViewer viewer, TargetColumns columns)
             throws ReflectiveOperationException
     {
         Object controls = view.getClass().getMethod("getControlsPanel").invoke(view); //$NON-NLS-1$
@@ -1597,9 +1861,8 @@ public final class ProfilingViewHook implements IStartup
                         if (requested.matches(values[0].getLine()))
                         {
                             found.add(row);
-                            double seconds = cleanNanos / 1_000_000_000d;
                             if (calls > 0)
-                                averageTexts.put(row, averageFormat.format(seconds / calls));
+                                averageTexts.put(row, averageFormat.format(cleanNanos / 1_000_000_000d / calls));
                         }
                     }
                     if (comparator != null)
@@ -1696,13 +1959,13 @@ public final class ProfilingViewHook implements IStartup
                 checked.addPropertyChangeListener(e -> table.getDisplay().asyncExec(
                         () -> request.accept(input.getText())));
         }
-        for (TableColumn column : table.getColumns())
-            column.addListener(SWT.Selection, e -> table.getDisplay().asyncExec(
-                    () -> request.accept(input.getText())));
+        columns.addColumnListener(column -> column.addListener(SWT.Selection, e -> table.getDisplay().asyncExec(
+                () -> request.accept(input.getText()))));
         request.accept(input.getText());
     }
 
-    private static void installSelectionFooter(IViewPart view, Object tablePart, TableViewer viewer)
+    private static void installSelectionFooter(IViewPart view, Object tablePart, TableViewer viewer,
+            TargetColumns columns)
             throws ReflectiveOperationException
     {
         Table table = viewer.getTable();
@@ -1734,8 +1997,7 @@ public final class ProfilingViewHook implements IStartup
         table.addListener(SWT.Resize, e -> footer.redraw());
         if (table.getHorizontalBar() != null)
             table.getHorizontalBar().addListener(SWT.Selection, e -> footer.redraw());
-        for (TableColumn column : table.getColumns())
-            column.addListener(SWT.Resize, e -> footer.redraw());
+        columns.addColumnListener(column -> column.addListener(SWT.Resize, e -> footer.redraw()));
         table.addListener(SWT.Dispose, e ->
         {
             if (!footer.isDisposed())
@@ -1790,7 +2052,7 @@ public final class ProfilingViewHook implements IStartup
                 DecimalFormatSymbols.getInstance(Locale.getDefault()));
         DecimalFormat percentFormat = new DecimalFormat("0.00", //$NON-NLS-1$
                 DecimalFormatSymbols.getInstance(Locale.getDefault()));
-        String[] cells = new String[table.getColumnCount()];
+        String[] cells = new String[COLUMN_COUNT];
         cells[0] = "Σ " + table.getSelectionCount(); //$NON-NLS-1$
         cells[3] = Long.toString(calls);
         cells[4] = format.format(full / 1_000_000_000d);
@@ -1801,12 +2063,14 @@ public final class ProfilingViewHook implements IStartup
         int x = table.getHorizontalBar() != null ? -table.getHorizontalBar().getSelection() : 0;
         for (int index : table.getColumnOrder())
         {
-            int width = table.getColumn(index).getWidth();
-            String value = cells[index];
+            TableColumn column = table.getColumn(index);
+            int width = column.getWidth();
+            int id = columnId(column);
+            String value = cells[id];
             if (value != null && width > 6)
             {
                 int textWidth = gc.textExtent(value).x;
-                int offset = index == 0 ? 4 : Math.max(4, width - textWidth - 4);
+                int offset = id == 0 ? 4 : Math.max(4, width - textWidth - 4);
                 gc.setClipping(x + 2, 1, Math.max(0, width - 4), footer.getClientArea().height - 1);
                 gc.drawText(value, x + offset, 4, true);
             }
