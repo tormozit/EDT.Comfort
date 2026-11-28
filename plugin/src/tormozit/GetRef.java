@@ -269,6 +269,25 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         return ctx != null ? ctx.buildRef1(addLineText) : null;
     }
 
+    /** Строка модуля вне редактора. Номер строки начинается с 1. */
+    static ModuleLineLocation moduleLineLocation(IFile file, String moduleText, int line)
+    {
+        if (file == null || line < 1)
+            return null;
+        ModuleLineContext context = computeModuleLineContext(file, moduleText, line - 1, 0);
+        if (context == null)
+        {
+            ModuleRef module = pathToModuleRef(file.getProjectRelativePath().toString());
+            if (module == null)
+                return null;
+            context = new ModuleLineContext(module, line, 0, "", null); //$NON-NLS-1$
+        }
+        return new ModuleLineLocation(context.moduleRef.toRefPrefix(),
+            context.method != null ? context.method.name : "", line, context.buildRef1(false)); //$NON-NLS-1$
+    }
+
+    record ModuleLineLocation(String module, String method, int line, String reference) {}
+
     /** Расширенная ссылка на объявление метода по имени (Quick Outline и т.п.). */
     public static String buildExtendedRefForMethod(BslXtextEditor bslEditor, String methodName)
     {
@@ -1027,7 +1046,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     // Буфер обмена
     // =========================================================================
 
-    private static void setClipboardText(String text, Shell shell)
+    static void setClipboardText(String text, Shell shell)
     {
         Clipboard cb = new Clipboard(shell.getDisplay());
         try { cb.setContents(new Object[]{ text }, new Transfer[]{ TextTransfer.getInstance() }); }

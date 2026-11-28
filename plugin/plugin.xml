@@ -1658,6 +1658,14 @@
     <view
         allowMultiple="false"
         category="tormozit.views"
+        class="tormozit.DebugObjectSnapshotsView"
+        icon="icons/eview16/object_snapshots.png"
+        id="tormozit.DebugObjectSnapshotsView"
+        name="Снимки объектов"
+        restorable="true"/>
+    <view
+        allowMultiple="false"
+        category="tormozit.views"
         class="tormozit.ObjectSetsView"
         icon="icons/etool16/object_set_filter_star.png"
         id="tormozit.ObjectSetsView"

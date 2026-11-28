@@ -94,6 +94,11 @@ public final class EditEmbeddedTextHandler
 {
     private EditEmbeddedTextHandler() {}
 
+    static void showText(Shell parent, String title, String text)
+    {
+        new EmbeddedTextDialog(parent, title, null, null, text, 0, 0, false).open();
+    }
+
     // =========================================================================
     // Публичный API
     // =========================================================================
@@ -429,6 +434,7 @@ public final class EditEmbeddedTextHandler
         };
 
         private final String initialText;
+        private final String title;
 
         private final int initialStart;
 
@@ -478,10 +484,11 @@ public final class EditEmbeddedTextHandler
 
         private final BslStringLiteral literal;
 
-        private EmbeddedTextDialog(Shell parent, BslXtextEditor moduleEditor, BslStringLiteral literal, String text,
-            int start, int end, boolean editable)
+        private EmbeddedTextDialog(Shell parent, String title, BslXtextEditor moduleEditor, BslStringLiteral literal,
+            String text, int start, int end, boolean editable)
         {
             super(parent);
+            this.title = title;
             this.moduleEditor = moduleEditor;
             this.literal = literal;
             this.initialText = text;
@@ -510,8 +517,8 @@ public final class EditEmbeddedTextHandler
             int selStart = literal.toValueOffset(Math.max(contentStart, Math.min(selection.x, contentEnd)));
             int selEnd = literal.toValueOffset(Math.max(contentStart, Math.min(selection.x + selection.y, contentEnd)));
             boolean editable = editor.isEditorInputModifiable();
-            EmbeddedTextDialog dialog = new EmbeddedTextDialog(editor.getSite().getShell(), editor, literal,
-                literal.value, selStart, selEnd, editable);
+            EmbeddedTextDialog dialog = new EmbeddedTextDialog(editor.getSite().getShell(), "Вложенный текст", //$NON-NLS-1$
+                editor, literal, literal.value, selStart, selEnd, editable);
             if (dialog.open() != OK || !editable)
                 return;
             // Перевод строки в окне может быть «\r\n»: значение литерала и выделение — в LF.
@@ -545,7 +552,7 @@ public final class EditEmbeddedTextHandler
         protected void configureShell(Shell newShell)
         {
             super.configureShell(newShell);
-            newShell.setText(Global.withPluginWindowTitle("Вложенный текст")); //$NON-NLS-1$
+            newShell.setText(Global.withPluginWindowTitle(title));
         }
 
         @Override
@@ -615,7 +622,8 @@ public final class EditEmbeddedTextHandler
             rawTab.setControl(viewer.getControl());
             tabs.setSelection(rawTab);
             installDecorationSupport();
-            installQuickDiff();
+            if (moduleEditor != null)
+                installQuickDiff();
             installContextMenu();
             // Подсветка вхождений выделенного слова и найденного поиском — как на вкладке макета:
             // просмотрщик окна по цепочке виджетов не находится, регистрируем явно.
@@ -987,7 +995,8 @@ public final class EditEmbeddedTextHandler
             else
             {
                 Button close = createButton(parent, IDialogConstants.CANCEL_ID, "Закрыть", false); //$NON-NLS-1$
-                close.setToolTipText(TooltipText.wrap(close, "Модуль только для чтения: изменения не применяются")); //$NON-NLS-1$
+                if (moduleEditor != null)
+                    close.setToolTipText(TooltipText.wrap(close, "Модуль только для чтения: изменения не применяются")); //$NON-NLS-1$
             }
         }
 

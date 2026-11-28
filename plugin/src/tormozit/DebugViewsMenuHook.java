@@ -55,8 +55,7 @@ public final class DebugViewsMenuHook implements IStartup
         "com._1c.g5.v8.dt.debug.ui.variables.BslExpressionsView"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Отладить объект ИР"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-        "Текущее выражение передается в отладочный инструмент в окно приложения ИР или предмета отладки" //$NON-NLS-1$
-        + Global.pluginSignForTooltip();
+        "Текущее выражение передается в отладочный инструмент в окно приложения ИР или предмета отладки"; //$NON-NLS-1$
 
     private enum ViewKind
     {
@@ -107,7 +106,7 @@ public final class DebugViewsMenuHook implements IStartup
     {
         return new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(2);
+            private final List<MenuItem> addedItems = new ArrayList<>(3);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -116,14 +115,15 @@ public final class DebugViewsMenuHook implements IStartup
                 ISelection selection = selectionOf(view, kind, tree);
                 DebugViewsDebug.log("menuShown " + kind + " " + DebugViewsDebug.selectionBrief(selection)); //$NON-NLS-1$ //$NON-NLS-2$
 
-                boolean supported = selection instanceof IStructuredSelection structured
-                    && structured.size() == 1 && isSupportedSelection(kind, structured.getFirstElement());
+                Object element = selection instanceof IStructuredSelection structured && structured.size() == 1
+                    ? structured.getFirstElement() : null;
+                boolean supported = isSupportedSelection(kind, element);
                 Menu menu = (Menu) e.widget;
                 addChangeValueItem(menu, selection, tree, suspended, addedItems);
                 MenuItem item = new MenuItem(menu, SWT.PUSH);
                 item.setText(ITEM_TEXT);
                 item.setEnabled(supported && suspended);
-                item.setToolTipText(ITEM_TOOLTIP);
+                ComfortSubmenuHelper.setMenuItemTooltip(item, ITEM_TOOLTIP);
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -133,6 +133,20 @@ public final class DebugViewsMenuHook implements IStartup
                     }
                 });
                 addedItems.add(item);
+
+                if (DebugIRHandler.canOpenJsonConstructor(element))
+                {
+                    MenuItem jsonItem = new MenuItem(menu, SWT.PUSH);
+                    jsonItem.setText(DebugIRHandler.JSON_CONSTRUCTOR_TITLE);
+                    ComfortSubmenuHelper.setMenuItemTooltip(jsonItem,
+                        "Создать документирующую функцию-конструктор текущего объекта через его JSON снимок"); //$NON-NLS-1$
+                    jsonItem.addListener(SWT.Selection, event -> DebugIRHandler.openJsonConstructor(element, tree.getShell()));
+                    addedItems.add(jsonItem);
+                }
+
+                if (suspended && DebugObjectSnapshotsView.canCapture(element))
+                    addedItems.add(DebugObjectSnapshotsView.addSaveMenuItem(menu,
+                        () -> DebugObjectSnapshotsView.capture(element)));
             }
 
             @Override

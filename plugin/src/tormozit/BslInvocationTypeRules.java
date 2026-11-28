@@ -47,6 +47,8 @@ import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.Method;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.bsl.model.NumberLiteral;
+import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
+import com._1c.g5.v8.dt.bsl.model.ReturnStatement;
 import com._1c.g5.v8.dt.bsl.model.SimpleStatement;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.StringLiteral;
@@ -1004,7 +1006,7 @@ public class BslInvocationTypeRules
             return type == null ? null : List.of(type);
         }
 
-        /** {@code ВычислитьПрочитатьJSON}: тип из текста JSON с учётом параметра «ПрочитатьВСоответствие». */
+        /** {@code ВычислитьПрочитатьJSON}: тип из JSON с учётом параметра «ПрочитатьВСоответствие». */
         List<TypeItem> readJson()
         {
             String flag = text(param(1));
@@ -1033,11 +1035,16 @@ public class BslInvocationTypeRules
 
         List<TypeItem> readJsonText(boolean structures)
         {
+            Expression readerText = jsonReaderText(param(0));
+            List<Expression> texts = readerText == null ? origins(param(0)) : List.of(readerText);
             List<TypeItem> types = new ArrayList<>();
-            for (Expression origin : origins(param(0)))
+            for (Expression origin : texts)
             {
                 String json = stringValue(origin);
                 Object data = json == null ? null : Json.parse(json);
+                if (readerText != null)
+                    Global.tempLog("bsl-json-reader", "parse length=" + (json == null ? -1 : json.length()) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " parsed=" + (data != null) + " structures=" + structures); //$NON-NLS-1$ //$NON-NLS-2$
                 if (data == null || structures && !Json.allKeysAreNames(data))
                     return List.of();
                 TypeItem type = jsonType(data, structures);
@@ -1046,6 +1053,38 @@ public class BslInvocationTypeRules
                 types.add(type);
             }
             return types;
+        }
+
+        /** Чтение только что созданного ЧтениеJSON с известной строкой в том же блоке операторов. */
+        private Expression jsonReaderText(Expression argument)
+        {
+            if (!(argument instanceof StaticFeatureAccess reader) || reader.getName() == null)
+                return null;
+            EObject statement = invocation.eContainer();
+            if (!(statement instanceof ReturnStatement
+                || statement instanceof SimpleStatement assignment && assignment.getRight() == invocation)
+                || !statement.eContainingFeature().isMany()
+                || !(statement.eContainer().eGet(statement.eContainingFeature(), false) instanceof List<?> statements))
+                return null;
+
+            int index = statements.indexOf(statement);
+            if (index < 2 || !(statements.get(index - 1) instanceof SimpleStatement setter)
+                || setter.getRight() != null || !(setter.getLeft() instanceof Invocation call)
+                || !(call.getMethodAccess() instanceof DynamicFeatureAccess method)
+                || !(method.getSource() instanceof StaticFeatureAccess receiver)
+                || !reader.getName().equalsIgnoreCase(receiver.getName())
+                || !("УстановитьСтроку".equalsIgnoreCase(method.getName()) //$NON-NLS-1$
+                    || "SetString".equalsIgnoreCase(method.getName())) //$NON-NLS-1$
+                || call.getParams().size() != 1)
+                return null;
+
+            boolean initialized = statements.get(index - 2) instanceof SimpleStatement initializer
+                && initializer.getLeft() instanceof StaticFeatureAccess target
+                && reader.getName().equalsIgnoreCase(target.getName())
+                && initializer.getRight() instanceof OperatorStyleCreator creator
+                && "JSONReader".equals(McoreUtil.getTypeName(creator.getType())); //$NON-NLS-1$
+            Global.tempLog("bsl-json-reader", "setString matched initialized=" + initialized); //$NON-NLS-1$ //$NON-NLS-2$
+            return initialized ? call.getParams().get(0) : null;
         }
 
         /**

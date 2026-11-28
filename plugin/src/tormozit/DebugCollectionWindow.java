@@ -1786,7 +1786,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         Object menuTable = menu.getData("tormozit.collectionMenu.table"); //$NON-NLS-1$
         if (menuTable instanceof Table table)
+        {
+            int logicalRow = selectedLogicalRow(table);
+            if (logicalRow >= 0 && frame != null && frame.getThread().isSuspended())
+                DebugObjectSnapshotsView.addSaveMenuItem(menu,
+                    () -> DebugObjectSnapshotsView.captureRow(model, logicalRow, frame));
             OutputListCommand.appendMenuItem(menu, table);
+        }
 
         // Команды управления отбором из FormTableInteraction — только для data-таблицы (там данные;
         // fixed-панель «Индекс/Представление» отбора не поддерживает). «Копировать» и пункты отбора

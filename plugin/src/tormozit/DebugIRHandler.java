@@ -1,17 +1,19 @@
 package tormozit;
 
+import java.io.File;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IProject;
-import org.eclipse.debug.core.DebugException;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.debug.core.model.IExpression;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PlatformUI;
 
@@ -20,6 +22,7 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
+import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 import com.e1c.g5.dt.applications.IApplication;
 
 /**
@@ -28,6 +31,10 @@ import com.e1c.g5.dt.applications.IApplication;
  */
 public final class DebugIRHandler
 {
+    static final String JSON_CONSTRUCTOR_TITLE = "В json-конструктор ИР"; //$NON-NLS-1$
+    private static final String JSON_CONSTRUCTOR_LOG = "debug-json-constructor"; //$NON-NLS-1$
+    private static final String JSON_SNAPSHOT_END = "#"; //$NON-NLS-1$
+    private static final String JSON_SERIALIZER = "ирОбщий.ОбъектВТекстЖСОНЛкс"; //$NON-NLS-1$
     private static final String REQUIRE_DEFERRED_DEBUG = "Ложь"; //$NON-NLS-1$
     private static final String IR_CACHE_OS_PID_EXPR = "ирКэш.ИдентификаторПроцессаОСЛкс()"; //$NON-NLS-1$
     private static final String DEFAULT_DEBUG_CALL = "ирОбщий.От"; //$NON-NLS-1$
@@ -48,6 +55,137 @@ public final class DebugIRHandler
     {
         // Только проверка suspend — без getSession(), чтобы не запускать подключение ИР при открытии меню.
         return project != null && DebugSessionHelper.isDebugSuspended(project);
+    }
+
+    static boolean canOpenJsonConstructor(Object element)
+    {
+        return jsonConstructorValue(element) != null;
+    }
+
+    private static IBslValue jsonConstructorValue(Object element)
+    {
+        IBslValue value;
+        if (element instanceof IBslVariable variable)
+            value = variable.getValue();
+        else if (element instanceof IWatchExpression watch && watch.isEnabled() && !watch.isPending()
+            && !watch.hasErrors() && watch.getValue() instanceof IBslValue watchValue)
+            value = watchValue;
+        else
+            return null;
+        if (value == null || value.isPending() || value.isUnreadable())
+            return null;
+
+        String type = value.getValueTypeName();
+        IBslStackFrame frame = value.getStackFrame();
+        boolean suspended = frame != null && frame.isEnabled() && frame.getThread().isSuspended();
+        boolean supported = type != null && switch (type)
+        {
+            case "Массив", "Array", "Структура", "Structure", "Соответствие", "Map" -> true; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+            default -> false;
+        };
+        Global.tempLog(JSON_CONSTRUCTOR_LOG, "selection type=" + type + " framePresent=" + (frame != null) //$NON-NLS-1$ //$NON-NLS-2$
+            + " suspended=" + suspended + " supported=" + supported); //$NON-NLS-1$ //$NON-NLS-2$
+        return suspended && supported ? value : null;
+    }
+
+    /** Порт {@code ВычислитьСоздатьКонструкторОбъекта()} из RDT.os для значения EDT. */
+    static void openJsonConstructor(Object element, Shell parent)
+    {
+        IBslValue value = jsonConstructorValue(element);
+        if (value == null)
+            return;
+        IBslStackFrame frame = value.getStackFrame();
+        String expression = element instanceof IBslVariable variable
+            ? BslInspectSupport.resolveVariableInspectExpression(variable)
+            : BslInspectSupport.watchExpressionText((IWatchExpression) element);
+        Global.tempLog(JSON_CONSTRUCTOR_LOG, "run expressionLength=" + expression.length() //$NON-NLS-1$
+            + " frameLevel=" + frame.getLevel()); //$NON-NLS-1$
+        if (expression.isBlank())
+        {
+            toast(JSON_CONSTRUCTOR_TITLE, "Не удалось определить контекст отладки выбранного объекта"); //$NON-NLS-1$
+            return;
+        }
+
+        String type = value.getValueTypeName();
+        boolean readAsMap = "Соответствие".equals(type) || "Map".equals(type); //$NON-NLS-1$ //$NON-NLS-2$
+        Display display = parent.getDisplay();
+        Job.create("Создание JSON-конструктора", monitor -> //$NON-NLS-1$
+        {
+            if (!monitor.isCanceled())
+                createJsonConstructor(frame, expression, readAsMap, display, parent);
+        }).schedule();
+    }
+
+    private static void createJsonConstructor(IBslStackFrame frame, String expression, boolean readAsMap,
+        Display display, Shell parent)
+    {
+        try
+        {
+            String serializer = jsonSerializer(frame);
+            // Метка в конце позволяет отличить полный JSON от строки, усечённой отладчиком.
+            String evaluation = serializer + '(' + expression + ") + " + bslStringLiteral(JSON_SNAPSHOT_END); //$NON-NLS-1$
+            Global.tempLog(JSON_CONSTRUCTOR_LOG, "evaluate frameLevel=" + frame.getLevel() //$NON-NLS-1$
+                + " readAsMap=" + readAsMap + " portable=" + !JSON_SERIALIZER.equals(serializer)); //$NON-NLS-1$ //$NON-NLS-2$
+            DebugSessionHelper.EvalResult result =
+                DebugSessionHelper.evaluateRawStringExpression(frame, evaluation, EVAL_TIMEOUT_MS);
+            boolean complete = result.hasValue() && result.valueText.endsWith(JSON_SNAPSHOT_END);
+            Global.tempLog(JSON_CONSTRUCTOR_LOG, "snapshot type=" + result.typeText //$NON-NLS-1$
+                + " length=" + (result.valueText == null ? 0 : result.valueText.length()) //$NON-NLS-1$
+                + " complete=" + complete + " error=" + result.error); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!complete)
+            {
+                String message = result.hasValue() ? "Снимок JSON получен не полностью" //$NON-NLS-1$
+                    : "Не удалось получить снимок JSON"; //$NON-NLS-1$
+                if (result.error != null && !result.error.isBlank())
+                    message += "\n" + result.error; //$NON-NLS-1$
+                toast(JSON_CONSTRUCTOR_TITLE, message, 5_000);
+                return;
+            }
+
+            String snapshot = result.valueText.substring(0, result.valueText.length() - JSON_SNAPSHOT_END.length());
+            String literal = bslStringLiteral(snapshot);
+            String name = Global.identifierFromRepresentation(expression) + "Образец"; //$NON-NLS-1$
+            String constructor = "Функция " + name + "() Экспорт\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + "\tЧтение = Новый ЧтениеJSON;\n\tЧтение.УстановитьСтроку(" + literal + ");\n" //$NON-NLS-1$ //$NON-NLS-2$
+                + "\tВозврат ПрочитатьJSON(Чтение" //$NON-NLS-1$
+                + (readAsMap ? ", Истина" : "") + ");\nКонецФункции\n"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (!display.isDisposed())
+                display.asyncExec(() ->
+                {
+                    Global.tempLog(JSON_CONSTRUCTOR_LOG, "show embedded text parentDisposed=" + parent.isDisposed()); //$NON-NLS-1$
+                    if (!parent.isDisposed())
+                        EditEmbeddedTextHandler.showText(parent, "JSON-конструктор", constructor); //$NON-NLS-1$
+                });
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException(JSON_CONSTRUCTOR_LOG, "constructor failed", e); //$NON-NLS-1$
+            toast(JSON_CONSTRUCTOR_TITLE, "Не удалось создать JSON-конструктор\n" + e.getMessage(), 5_000); //$NON-NLS-1$
+        }
+    }
+
+    private static String jsonSerializer(IBslStackFrame frame)
+    {
+        File portable = Activator.getDefault().getStateLocation().append("ИР").append("ирПортативный.epf").toFile(); //$NON-NLS-1$ //$NON-NLS-2$
+        boolean portableAvailable = portable.isFile();
+        Global.tempLog(JSON_CONSTRUCTOR_LOG, "serializer portableFilePresent=" + portableAvailable); //$NON-NLS-1$
+        if (!portableAvailable)
+            return JSON_SERIALIZER;
+
+        // Проверяем общий модуль без повторного вычисления пользовательского выражения.
+        DebugSessionHelper.EvalResult probe = DebugSessionHelper.evaluateRawStringExpression(
+            frame, JSON_SERIALIZER + "(Новый Массив)", EVAL_TIMEOUT_MS); //$NON-NLS-1$
+        Global.tempLog(JSON_CONSTRUCTOR_LOG, "serializer commonModule=" + probe.hasValue() + " error=" + probe.error); //$NON-NLS-1$ //$NON-NLS-2$
+        if (probe.hasValue())
+            return JSON_SERIALIZER;
+
+        // Вызов портативного ИР из ВычисляемыйКонтекстОтладчика, с файлом из каталога состояния плагина.
+        return "ВнешниеОбработки.Создать(" + bslStringLiteral(portable.getPath()) + ", Ложь)." + JSON_SERIALIZER; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String bslStringLiteral(String text)
+    {
+        return '"' + Global.normalizeLineSeparators(text).replace("\"", "\"\"").replace("\n", "\n\t|") + '"'; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
     public static void debugObject(BslXtextEditor editor)

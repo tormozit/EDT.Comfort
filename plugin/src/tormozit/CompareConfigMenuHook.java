@@ -6798,6 +6798,22 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
+    static void openPlainTextComparison(String left, String right, String leftLabel, String rightLabel,
+        String title, String logTopic)
+    {
+        CompareUI.openCompareDialog(new ProjectSettingsFilesHandler.SettingsFileCompareInput(
+            left, right, leftLabel, rightLabel, title, "txt") //$NON-NLS-1$
+        {
+            @Override
+            public Control createContents(Composite parent)
+            {
+                Control contents = super.createContents(parent);
+                CompareDialogCurrentLinesHook.attachToDialog(this, contents.getShell(), logTopic);
+                return contents;
+            }
+        });
+    }
+
     /**
      * Двойной клик в дереве сравнения: то же, что клик по шестерёнке настроек
      * объединения ({@code CustomMergeSettingsStatus} ≠ {@code UNAVAILABLE});
@@ -8365,7 +8381,7 @@ public class CompareConfigMenuHook implements IStartup
             }
         }
 
-        private static final class SettingsFileCompareInput extends CompareEditorInput
+        private static class SettingsFileCompareInput extends CompareEditorInput
         {
             private final StringCompareElement leftElement;
             private final StringCompareElement rightElement;
@@ -8373,11 +8389,16 @@ public class CompareConfigMenuHook implements IStartup
             SettingsFileCompareInput(String leftText, String rightText, String leftLabel, String rightLabel,
                 String fileName)
             {
+                this(leftText, rightText, leftLabel, rightLabel, fileName, viewerType(fileName));
+            }
+
+            SettingsFileCompareInput(String leftText, String rightText, String leftLabel, String rightLabel,
+                String title, String type)
+            {
                 super(createConfiguration(leftLabel, rightLabel));
-                String type = viewerType(fileName);
-                leftElement = new StringCompareElement(fileName, leftText, type);
-                rightElement = new StringCompareElement(fileName, rightText, type);
-                setTitle(fileName);
+                leftElement = new StringCompareElement(title, leftText, type);
+                rightElement = new StringCompareElement(title, rightText, type);
+                setTitle(title);
             }
 
             private static CompareConfiguration createConfiguration(String leftLabel, String rightLabel)

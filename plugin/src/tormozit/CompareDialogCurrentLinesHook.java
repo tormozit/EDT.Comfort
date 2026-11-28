@@ -33,7 +33,7 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
  * Панель «Текущая строка» и кнопки ИР в попарном {@code CompareDialog} EDT
  * ({@code AbstractCompareHandler$NonModalDialog} — «Сравнение текста» из 3-way merge
  * с {@code DtCompareEditorInput}). Не трогает «Вставить со сравнением» и прочие
- * {@code CompareDialog} без этого input. Класс EDT детектируем по имени — без
+ * {@code CompareDialog} без этого input, кроме явно подключённых плагином. Класс EDT детектируем по имени — без
  * compile-зависимости на {@code SaveableCompareEditorInput} ({@code org.eclipse.team.ui}).
  *
  * <p>Если диалог открыт командой попарного сравнения из 3-way окна объединения модулей,
@@ -44,6 +44,7 @@ public final class CompareDialogCurrentLinesHook
 {
     private static final String SHELL_HANDLED_KEY = "tormozit.compareDialogCurrentLinesShellHandled"; //$NON-NLS-1$
     private static final String PANEL_ATTACHED_KEY = "tormozit.compareDialogCurrentLinesAttached"; //$NON-NLS-1$
+    private static final String ATTACH_LOG_TOPIC = "tormozit.compareDialogAttachLogTopic"; //$NON-NLS-1$
     /** Сохранённый результат ручного табличного объединения: окно сразу заменяется табличным. */
     private static final String SPREADSHEET_AUTO_KEY = "tormozit.compareDialogSpreadsheetAuto"; //$NON-NLS-1$
     private static final String SAVED_RESULT_SUFFIX = " — результат объединения"; //$NON-NLS-1$
@@ -97,6 +98,14 @@ public final class CompareDialogCurrentLinesHook
             }
         }
         // SWT.Show приходит до показа окна средствами ОС: обе панели попадут в первый кадр.
+        attachToDialog(editorInput, shell, null);
+    }
+
+    /** Подключение из createContents для диалога с входом плагина. */
+    static void attachToDialog(CompareEditorInput editorInput, Shell shell, String logTopic)
+    {
+        if (logTopic != null)
+            shell.setData(ATTACH_LOG_TOPIC, logTopic);
         if (tryAttach(editorInput, shell) == ATTACH_WAIT)
             scheduleAttach(editorInput, shell, 0, false);
     }
@@ -199,6 +208,16 @@ public final class CompareDialogCurrentLinesHook
     private static int tryAttach(CompareEditorInput editorInput, Shell shell)
     {
         Object paneObj = Global.getField(editorInput, "fContentInputPane"); //$NON-NLS-1$
+        String logTopic = (String) shell.getData(ATTACH_LOG_TOPIC);
+        if (logTopic != null)
+        {
+            Viewer currentViewer = paneObj instanceof CompareViewerSwitchingPane pane && !pane.isDisposed()
+                ? pane.getViewer() : null;
+            Control control = currentViewer != null ? currentViewer.getControl() : null;
+            Global.tempLog(logTopic, "compare attach pane=" + (paneObj != null) //$NON-NLS-1$
+                + " viewer=" + (currentViewer != null ? currentViewer.getClass().getName() : "-") //$NON-NLS-1$ //$NON-NLS-2$
+                + " directChild=" + (control != null && !control.isDisposed() && control.getParent() == paneObj)); //$NON-NLS-1$
+        }
         if (!(paneObj instanceof CompareViewerSwitchingPane pane) || pane.isDisposed())
             return ATTACH_WAIT;
 
@@ -218,6 +237,8 @@ public final class CompareDialogCurrentLinesHook
             return ATTACH_WAIT;
 
         attach(pane, viewerControl, editorInput, mergeViewer, shell);
+        if (logTopic != null)
+            Global.tempLog(logTopic, "compare attached toolbar=" + (CompareViewerPane.getToolBarManager(pane) != null)); //$NON-NLS-1$
         return ATTACH_DONE;
     }
 

@@ -98,6 +98,17 @@ public final class DebugSessionHelper
 
     public static EvalResult evaluateExpression(IBslStackFrame frame, String expression, long timeoutMs)
     {
+        return evaluateExpression(frame, expression, timeoutMs, false);
+    }
+
+    static EvalResult evaluateRawStringExpression(IBslStackFrame frame, String expression, long timeoutMs)
+    {
+        return evaluateExpression(frame, expression, timeoutMs, true);
+    }
+
+    private static EvalResult evaluateExpression(IBslStackFrame frame, String expression, long timeoutMs,
+        boolean rawString)
+    {
         if (frame == null || expression == null || expression.isBlank())
             return new EvalResult(null, null, "empty expression"); //$NON-NLS-1$
 
@@ -113,7 +124,7 @@ public final class DebugSessionHelper
         {
             try
             {
-                holder.set(extractResult(result));
+                holder.set(extractResult(result, rawString));
             }
             catch (DebugException e)
             {
@@ -249,7 +260,7 @@ public final class DebugSessionHelper
             && text.toLowerCase(Locale.ROOT).contains(THICK_CLIENT_MARKER.toLowerCase(Locale.ROOT));
     }
 
-    private static EvalResult extractResult(IEvaluationResult evalResult) throws DebugException
+    private static EvalResult extractResult(IEvaluationResult evalResult, boolean rawString) throws DebugException
     {
         if (evalResult == null)
             return new EvalResult(null, null, "empty evaluation result"); //$NON-NLS-1$
@@ -265,7 +276,7 @@ public final class DebugSessionHelper
         if (info == null)
             return new EvalResult(null, null, "no value info"); //$NON-NLS-1$
 
-        String value = bytesToPresentation(info.getPres());
+        String value = rawString ? null : bytesToPresentation(info.getPres());
         if (value == null || value.isBlank())
             value = bytesToPresentation(info.getValueString());
         String type = info.getTypeName();

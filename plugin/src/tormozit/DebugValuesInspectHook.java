@@ -317,6 +317,8 @@ public final class DebugValuesInspectHook implements IStartup
                 }
 
                 Menu menu = (Menu) e.widget;
+                addedItems.add(DebugObjectSnapshotsView.addSaveMenuItem(menu,
+                    () -> DebugObjectSnapshotsView.capture(variable)));
                 if (isMenuAugmentFlagSet(menu) && hasInspectMenuItem(menu))
                     return;
 
